@@ -54,7 +54,7 @@ func (m *Model) ExitSearch() {
 	m.searchMatches = nil
 	m.matchRows = nil
 	m.refreshView()
-	m.normalizeCursor(-1)
+	m.normalizeCursor()
 }
 
 func (m *Model) SearchActive() bool { return m != nil && m.searchActive }
@@ -130,7 +130,7 @@ func (m *Model) ClearSearch() {
 		return
 	}
 	m.query.SetValue("")
-	m.refreshSearch(false)
+	m.refreshSearch(true)
 }
 
 func (m *Model) MatchCount() int {
@@ -181,7 +181,7 @@ func (m *Model) refreshSearch(selectFirst bool) {
 		}
 		m.refreshView()
 		if selectFirst {
-			m.normalizeCursor(-1)
+			m.normalizeCursor()
 		}
 		return
 	}
@@ -207,16 +207,12 @@ func (m *Model) refreshSearch(selectFirst bool) {
 	}
 }
 
-// normalizeCursor places the cursor on a row the active query still shows. It
-// keeps the current row when it qualifies, otherwise it takes the best match,
-// then the nearest eligible row, and finally clears the cursor when nothing
-// qualifies.
-func (m *Model) normalizeCursor(best int) {
+// normalizeCursor places the cursor on a drawn row. It keeps the current row
+// when it qualifies; otherwise a query takes its first match, a fold hands the
+// cursor to the collapsed section, and anything else takes the nearest
+// eligible row. It clears the cursor when nothing qualifies.
+func (m *Model) normalizeCursor() {
 	if m == nil || m.eligible(m.selected) {
-		return
-	}
-	if best >= 0 {
-		m.selected = best
 		return
 	}
 	if m.searchRestricted() {

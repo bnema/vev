@@ -163,9 +163,10 @@ type row struct {
 	foldedContext string
 	// tree is the dimmed branch prefix drawn before the label ("├─ ", "│  └─ "…).
 	tree string
+	// sectionID names a section header locally: its label plus its occurrence
+	// among same-label sections, so two hosts sharing a label fold apart.
+	sectionID string
 }
-
-func (r row) key() string { return r.line.Key }
 
 func (r row) kind() protocol.PickerLineKind { return r.line.Kind }
 
@@ -183,10 +184,10 @@ func (r row) focusable() bool {
 }
 
 // id names the row for cursor restoration. A section has no source key, so
-// it is named by its label in a namespace no source key can use.
+// it is named by its sectionID, which no source key can collide with.
 func (r row) id() string {
 	if r.section() {
-		return "\x00section:" + r.line.Label
+		return r.sectionID
 	}
 	return r.line.Key
 }
@@ -252,7 +253,7 @@ func (m *Model) ReplaceLines(lines []protocol.PickerLine, cursor protocol.Picker
 		key, hadKey = cursor.Key, cursor.Key != ""
 	}
 	m.rebuild(key, hadKey, cursor.Index)
-	if hadKey {
+	if hadKey && !m.hasRow(key) {
 		if current, ok := m.cursorKey(); !ok || current != key {
 			// The selected row left the publication (for example it was
 			// killed): rest on the nearest surviving row above it instead of
@@ -262,11 +263,22 @@ func (m *Model) ReplaceLines(lines []protocol.PickerLine, cursor protocol.Picker
 	}
 }
 
-// keysAboveCursor lists the eligible row keys above the cursor, nearest first.
+// hasRow reports whether a row with this id is still published, drawn or not.
+func (m *Model) hasRow(id string) bool {
+	for _, r := range m.rows {
+		if r.id() == id {
+			return true
+		}
+	}
+	return false
+}
+
+// keysAboveCursor lists the row keys above the cursor, nearest first. Section
+// headers are left out: a removed row never hands the cursor to a header.
 func (m *Model) keysAboveCursor() []string {
 	var keys []string
 	for i := m.selected - 1; i >= 0; i-- {
-		if m.eligible(i) {
+		if m.target(i) {
 			keys = append(keys, m.rows[i].id())
 		}
 	}
@@ -318,10 +330,13 @@ func (m *Model) rebuild(key string, hadKey bool, fallbackIndex int) {
 		}
 		run = run[:0]
 	}
+	sections := make(map[string]int)
 	for _, line := range m.lines {
 		if line.Kind == protocol.PickerLineSection {
 			flush()
-			m.rows = append(m.rows, row{line: line, foldedLabel: strings.ToLower(line.Label)})
+			sectionID := fmt.Sprintf("\x00section:%d:%s", sections[line.Label], line.Label)
+			sections[line.Label]++
+			m.rows = append(m.rows, row{line: line, foldedLabel: strings.ToLower(line.Label), sectionID: sectionID})
 			continue
 		}
 		run = append(run, line)
@@ -383,7 +398,7 @@ func (m *Model) refreshView() {
 		folded := false
 		for i, r := range m.rows {
 			if r.section() {
-				folded = m.folded[r.line.Label]
+				folded = m.folded[r.sectionID]
 				continue
 			}
 			hidden[i] = folded
@@ -402,7 +417,7 @@ func (m *Model) refreshView() {
 // sectionFolded reports whether section row i is drawn collapsed. A query
 // shows matches regardless of folds, so it never draws a section collapsed.
 func (m *Model) sectionFolded(i int) bool {
-	return !m.searchRestricted() && m.rows[i].section() && m.folded[m.rows[i].line.Label]
+	return !m.searchRestricted() && m.rows[i].section() && m.folded[m.rows[i].sectionID]
 }
 
 // sectionOf reports the section header row i belongs to, or -1.
@@ -421,7 +436,7 @@ func (m *Model) setFold(fold bool) bool {
 	if m == nil || m.searchRestricted() || m.selected < 0 || m.selected >= len(m.rows) || !m.rows[m.selected].section() {
 		return false
 	}
-	label := m.rows[m.selected].line.Label
+	label := m.rows[m.selected].sectionID
 	if m.folded[label] == fold {
 		return false
 	}
@@ -450,7 +465,7 @@ func (m *Model) ToggleSection() bool {
 	if !m.CursorOnSection() {
 		return false
 	}
-	return m.setFold(!m.folded[m.rows[m.selected].line.Label])
+	return m.setFold(!m.folded[m.rows[m.selected].sectionID])
 }
 
 // Left collapses the section under the cursor, or moves the cursor from a row
@@ -589,6 +604,14 @@ func (m *Model) target(i int) bool {
 	return m.eligible(i) && !m.rows[i].section()
 }
 
+// restable is target, or eligible when section headers are allowed.
+func (m *Model) restable(i int, sections bool) bool {
+	if sections {
+		return m.eligible(i)
+	}
+	return m.target(i)
+}
+
 // committable reports whether row i may be committed: it admits an action and
 // the typed query, when there is one, does not exclude it.
 func (m *Model) committable(i int) bool {
@@ -646,15 +669,15 @@ func (m *Model) SelectNearestRow(idx int) {
 		return
 	}
 	idx = clamp(idx, 0, len(m.rows)-1)
-	for _, ok := range []func(int) bool{m.target, m.eligible} {
+	for _, sections := range [2]bool{false, true} {
 		for i := idx; i < len(m.rows); i++ {
-			if ok(i) {
+			if m.restable(i, sections) {
 				m.selected = i
 				return
 			}
 		}
 		for i := idx - 1; i >= 0; i-- {
-			if ok(i) {
+			if m.restable(i, sections) {
 				m.selected = i
 				return
 			}
@@ -716,9 +739,9 @@ func (m *Model) move(delta int) {
 // firstEligible reports the first row the cursor may rest on, preferring any
 // row over a section header.
 func (m *Model) firstEligible() int {
-	for _, ok := range []func(int) bool{m.target, m.eligible} {
+	for _, sections := range [2]bool{false, true} {
 		for i := range m.rows {
-			if ok(i) {
+			if m.restable(i, sections) {
 				return i
 			}
 		}
@@ -842,7 +865,7 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 				treeStyle.Attrs |= renderer.AttrDim
 			} else {
 				// Only the foreground comes from Tree: the row's fill and its
-				// dimming (a Dim line or a search miss) stay as they are.
+				// dimming (a Dim line) stay as they are.
 				treeStyle.Foreground = styles.Tree.Foreground
 				treeStyle.HasForegroundRGB = styles.Tree.HasForegroundRGB
 				treeStyle.ForegroundRGB = styles.Tree.ForegroundRGB
@@ -969,6 +992,10 @@ func (m *Model) renderStatus(frame renderer.Frame, rect domain.Rect, style rende
 	}
 	if m != nil && m.CursorOnSection() {
 		enter = "Enter/h/l fold"
+		if m.searchActive {
+			// h and l type into the query while searching.
+			enter = "Enter fold"
+		}
 	}
 	var groups []string
 	if m != nil && m.searchActive {

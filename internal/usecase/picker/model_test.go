@@ -600,31 +600,31 @@ func TestSectionFolding(t *testing.T) {
 			name:       "left from a tab climbs to its section",
 			keys:       func(m *Model) { m.Left() },
 			wantRows:   []string{"LOCAL", "├─ work", "│  ├─ shell", "│  └─ logs", "└─ scratch", "   └─ apply-migrations", "devbox", "└─ api", "   ├─ server", "   └─ db"},
-			wantCursor: "\x00section:LOCAL",
+			wantCursor: "\x00section:0:LOCAL",
 		},
 		{
 			name:       "left on a section collapses it",
 			keys:       func(m *Model) { m.Left(); m.Left() },
 			wantRows:   []string{"LOCAL", "devbox", "└─ api", "   ├─ server", "   └─ db"},
-			wantCursor: "\x00section:LOCAL",
+			wantCursor: "\x00section:0:LOCAL",
 		},
 		{
 			name:       "down from a collapsed section skips its rows",
 			keys:       func(m *Model) { m.Left(); m.Left(); m.Down() },
 			wantRows:   []string{"LOCAL", "devbox", "└─ api", "   ├─ server", "   └─ db"},
-			wantCursor: "\x00section:devbox",
+			wantCursor: "\x00section:0:devbox",
 		},
 		{
 			name:       "right expands it again",
 			keys:       func(m *Model) { m.Left(); m.Left(); m.Right() },
 			wantRows:   []string{"LOCAL", "├─ work", "│  ├─ shell", "│  └─ logs", "└─ scratch", "   └─ apply-migrations", "devbox", "└─ api", "   ├─ server", "   └─ db"},
-			wantCursor: "\x00section:LOCAL",
+			wantCursor: "\x00section:0:LOCAL",
 		},
 		{
 			name:       "toggle collapses and expands",
 			keys:       func(m *Model) { m.Left(); m.ToggleSection() },
 			wantRows:   []string{"LOCAL", "devbox", "└─ api", "   ├─ server", "   └─ db"},
-			wantCursor: "\x00section:LOCAL",
+			wantCursor: "\x00section:0:LOCAL",
 		},
 		{
 			name:       "right off a section does nothing",
@@ -652,7 +652,7 @@ func TestSectionFoldSurvivesRepublication(t *testing.T) {
 	m.ReplaceLines(foldFixture(), protocol.PickerCursor{Index: -1})
 	require.Equal(t, []string{"LOCAL", "devbox", "└─ api", "   ├─ server", "   └─ db"}, drawnRows(m))
 	key, _ := m.cursorKey()
-	require.Equal(t, "\x00section:LOCAL", key)
+	require.Equal(t, "\x00section:0:LOCAL", key)
 	_, ok := m.Selected()
 	require.False(t, ok, "a section header is never committable")
 
@@ -703,5 +703,76 @@ func TestExitSearchRestoresFolds(t *testing.T) {
 	m.ExitSearch()
 	require.Equal(t, []string{"LOCAL", "devbox", "└─ api", "   ├─ server", "   └─ db"}, drawnRows(m))
 	key, _ := m.cursorKey()
-	require.Equal(t, "\x00section:LOCAL", key, "a match a fold hides leaves the cursor on its section")
+	require.Equal(t, "\x00section:0:LOCAL", key, "a match a fold hides leaves the cursor on its section")
+}
+
+func TestRemovedRowNeverHandsTheCursorToASection(t *testing.T) {
+	tests := []struct {
+		name   string
+		cursor string
+		drop   string
+		want   string
+	}{
+		{name: "first tab under LOCAL", cursor: "w1", drop: "w1", want: "w2"},
+		{name: "first tab under a remote section", cursor: "a1", drop: "a1", want: "s1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := New(foldFixture(), Config{Intent: protocol.PickerIntentNavigation, Sort: SortGrouped, Cursor: protocol.PickerCursor{Key: tt.cursor, Index: -1}})
+			next := make([]protocol.PickerLine, 0)
+			for _, line := range foldFixture() {
+				if line.Key != tt.drop {
+					next = append(next, line)
+				}
+			}
+			m.ReplaceLines(next, protocol.PickerCursor{Index: -1})
+			require.Equal(t, tt.want, mustSelectedKey(t, m))
+		})
+	}
+}
+
+func TestSameLabelSectionsFoldApart(t *testing.T) {
+	m := New([]protocol.PickerLine{
+		section("remote"), navLine("a", "alpha"),
+		section("remote"), navLine("b", "beta"),
+	}, Config{Intent: protocol.PickerIntentNavigation, Sort: SortGrouped})
+	m.Left()
+	m.Left()
+	require.Equal(t, []string{"remote", "remote", "└─ beta"}, drawnRows(m))
+}
+
+func TestClearSearchKeepsTheCursorOnADrawnRow(t *testing.T) {
+	m := New(foldFixture(), Config{Intent: protocol.PickerIntentNavigation, Sort: SortGrouped})
+	m.Left()
+	m.Left()
+	m.EnterSearch()
+	m.InsertSearch('s') // first match: work/shell, inside the collapsed LOCAL
+	m.ClearSearch()
+	require.False(t, m.hidden[m.SelectedIndex()], "the cursor rests on a drawn row")
+}
+
+func TestSectionFooterHint(t *testing.T) {
+	tests := []struct {
+		name   string
+		search bool
+		want   string
+	}{
+		{name: "normal mode offers h/l", want: "Enter/h/l fold"},
+		{name: "search mode types h/l", search: true, want: "Enter fold"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := New(foldFixture(), Config{Intent: protocol.PickerIntentNavigation, Sort: SortGrouped})
+			m.Left()
+			if tt.search {
+				m.EnterSearch()
+			}
+			frame := m.Render(domain.Size{Cols: 80, Rows: 12}, Preview{})
+			status := rowText(frame.Row(11))
+			require.Contains(t, status, tt.want)
+			if tt.search {
+				require.NotContains(t, status, "h/l")
+			}
+		})
+	}
 }
