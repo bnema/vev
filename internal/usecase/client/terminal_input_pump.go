@@ -109,22 +109,22 @@ func (p *terminalInputPump) tryClaim() (uint64, bool) {
 	return consumer, ok
 }
 
-// claimWithBacklog claims the pump and reports, atomically with the claim, how
-// many deliveries were already waiting: the residual, then the pending read.
-// They were read for an earlier owner, not typed for this one.
-func (p *terminalInputPump) claimWithBacklog() (uint64, int, bool) {
+// claimBacklog describes deliveries already waiting at claim. They are taken
+// in this order: the residual first, then the pending read.
+type claimBacklog struct {
+	residual, pending bool
+}
+
+// claimWithBacklog claims the pump and reports, atomically with the claim,
+// which deliveries were already waiting. They were read for an earlier owner,
+// not typed for this one.
+func (p *terminalInputPump) claimWithBacklog() (uint64, claimBacklog, bool) {
 	p.mu.Lock()
 	if p.consumer != 0 {
 		p.mu.Unlock()
-		return 0, 0, false
+		return 0, claimBacklog{}, false
 	}
-	backlog := 0
-	if len(p.residual) != 0 {
-		backlog++
-	}
-	if p.pending != nil {
-		backlog++
-	}
+	backlog := claimBacklog{residual: len(p.residual) != 0, pending: p.pending != nil}
 	p.nextID++
 	p.consumer = p.nextID
 	consumer := p.consumer
