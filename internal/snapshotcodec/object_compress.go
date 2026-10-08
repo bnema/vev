@@ -66,6 +66,10 @@ func inflateObjectPayload(compressed []byte, size uint32) ([]byte, error) {
 		return nil, invalid(io.ErrUnexpectedEOF)
 	}
 	payload := out.Bytes()
+	if cap(payload) > len(payload)+len(payload)/4 {
+		// Restored payloads are retained; drop the growth slack.
+		payload = bytes.Clone(payload)
+	}
 	var extra [1]byte
 	if n, err := r.Read(extra[:]); n != 0 || err != io.EOF {
 		if err == nil || err == io.EOF {
