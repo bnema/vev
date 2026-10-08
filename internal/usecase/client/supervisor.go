@@ -590,7 +590,7 @@ func (s *Supervisor) Run(ctx context.Context) (retErr error) {
 	retire := func() {
 		s.retirePickerKill()
 		s.picker.preview.close(s.cfg.Picker)
-		s.nav.clearReady()
+		s.nav.readySub = nil
 		if sub != nil {
 			sub.Close()
 			sub = nil
@@ -659,7 +659,7 @@ func (s *Supervisor) Run(ctx context.Context) (retErr error) {
 		}
 
 		service, sub = result.service, result.sub
-		s.nav.setReady(sub)
+		s.nav.readySub = sub
 		if s.cfg.Picker != nil {
 			// Render the first committed publication immediately, before waiting
 			// for the next one; the picker never shows a stale empty catalogue

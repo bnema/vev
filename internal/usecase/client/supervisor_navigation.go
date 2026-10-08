@@ -12,22 +12,21 @@ import (
 type navigationState struct {
 	// readySub is the adopted connection's subscription while the ready phase
 	// runs, so the picker overlay over a live attachment keeps folding broker
-	// publications. It is only touched from the run goroutine.
+	// publications.
 	readySub ports.BrokerSubscription
 	// pendingSwap is the request the picker overlay or a daemon navigation
-	// committed to another target while an attachment was live. It is only
-	// touched from the run goroutine and consumed by settleAttachment.
+	// committed to another target while an attachment was live. Consumed by
+	// settleAttachment.
 	pendingSwap *pickerAttachmentTarget
 	// pendingInPlace is the choice the live attachment is switching to in
-	// place on its own daemon. A refusal turns it into pendingSwap. Only
-	// touched from the run goroutine; cleared when the attachment settles.
+	// place on its own daemon. A refusal turns it into pendingSwap. Cleared
+	// when the attachment settles.
 	pendingInPlace *pendingInPlace
 	// inPlaceSeq numbers in-place choices so a late outcome for an older one
 	// is never applied to a newer one.
 	inPlaceSeq uint64
 	// routes is the client route ledger published to the serving daemon;
-	// routesSent is the attachment that received its latest snapshot. Both are
-	// only touched from the run goroutine.
+	// routesSent is the attachment that received its latest snapshot.
 	routes     *routeLedger
 	routesSent AttachmentToken
 }
@@ -39,18 +38,6 @@ func (n *navigationState) brokerChanged() <-chan struct{} {
 	}
 	return n.readySub.Changed()
 }
-
-// setReady records the adopted connection's subscription.
-func (n *navigationState) setReady(sub ports.BrokerSubscription) { n.readySub = sub }
-
-// clearReady forgets the adopted connection's subscription.
-func (n *navigationState) clearReady() { n.readySub = nil }
-
-// setSwap commits the next attachment target.
-func (n *navigationState) setSwap(target *pickerAttachmentTarget) { n.pendingSwap = target }
-
-// hasSwap reports whether a swap target is already committed.
-func (n *navigationState) hasSwap() bool { return n.pendingSwap != nil }
 
 // takeSwap returns and clears the committed swap target.
 func (n *navigationState) takeSwap() *pickerAttachmentTarget {
@@ -101,12 +88,6 @@ func (n *navigationState) buildRoutes(snapshot ports.BrokerSnapshot, active rout
 	}
 	return n.routes.build(snapshot, active)
 }
-
-// routesSentTo reports whether token already received a route snapshot.
-func (n *navigationState) routesSentTo(token AttachmentToken) bool { return n.routesSent == token }
-
-// markRoutesSent records the attachment that received the latest snapshot.
-func (n *navigationState) markRoutesSent(token AttachmentToken) { n.routesSent = token }
 
 // resolveRoute resolves one route reference against the ledger.
 func (n *navigationState) resolveRoute(ref protocol.RouteRef) (routeLedgerTarget, bool) {

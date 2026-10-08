@@ -179,7 +179,7 @@ func (o *attachmentPickerOverlay) takeOp() {
 			o.release(false)
 			return
 		}
-		s.nav.setSwap(&target)
+		s.nav.pendingSwap = &target
 		o.swapping = true
 		s.picker.preview.close(o.picker())
 		s.attachments.requestDetach(o.run.token)
@@ -281,7 +281,7 @@ func (o *attachmentPickerOverlay) inPlaceSettled(result inPlaceResult) {
 	if o.active {
 		o.exit()
 	}
-	s.nav.setSwap(&pending.target)
+	s.nav.pendingSwap = &pending.target
 	o.swapping = true
 	s.attachments.requestDetach(o.run.token)
 }
