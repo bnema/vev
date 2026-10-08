@@ -126,7 +126,7 @@ func TestResumeWatch(t *testing.T) {
 			})
 			lifetime := &terminalInputLifetime{eof: make(chan error, 1), pump: pump}
 			clock := newSupervisorTestClock()
-			watch := lifetime.watchResume(clock)
+			watch := lifetime.watchResume(clock, nil)
 			for _, read := range tt.reads {
 				reader.chunks <- []byte(read)
 			}
@@ -187,7 +187,7 @@ func TestResumeWatchKeepsBacklogVerbatim(t *testing.T) {
 				}, 5*time.Second, time.Millisecond)
 			}
 			lifetime := &terminalInputLifetime{eof: make(chan error, 1), pump: pump}
-			watch := lifetime.watchResume(newSupervisorTestClock())
+			watch := lifetime.watchResume(newSupervisorTestClock(), nil)
 			require.Eventually(t, func() bool { return watch.heldLen() == len(tt.residual)+len(tt.pending) }, 5*time.Second, time.Millisecond)
 			if tt.typed != "" {
 				reader.chunks <- []byte(tt.typed)
@@ -234,7 +234,7 @@ func TestResumeWatchResolvesEscapeAtRelease(t *testing.T) {
 			})
 			lifetime := &terminalInputLifetime{eof: make(chan error, 1), pump: pump}
 			clock := newSupervisorTestClock()
-			watch := lifetime.watchResume(clock)
+			watch := lifetime.watchResume(clock, nil)
 			reader.chunks <- []byte("\x1b")
 			escape := clock.awaitTimer(t)
 			released := make(chan struct{})
@@ -268,11 +268,18 @@ func TestResumeWatchResolvesEscapeAtRelease(t *testing.T) {
 }
 
 func TestResumeWatchHeldOverflowIsSticky(t *testing.T) {
-	w := &resumeWatch{}
+	lifetime := &terminalInputLifetime{}
+	w := &resumeWatch{lifetime: lifetime}
 	w.hold(bytes.Repeat([]byte("a"), resumeHeldInputLimit-1))
 	w.hold([]byte("bb"))
 	w.hold([]byte("c"))
 	require.Equal(t, resumeHeldInputLimit-1, w.heldLen(), "keys after an overflow must be dropped too")
+
+	// The next resume phase of the same outage starts a new watch; it must
+	// keep dropping so the session never receives input with a gap.
+	next := &resumeWatch{lifetime: lifetime}
+	next.hold([]byte("d"))
+	require.Zero(t, next.heldLen(), "a later phase must not accept keys after an overflow")
 }
 
 // stallingSessionStream passes writes through until stall is set; stalled

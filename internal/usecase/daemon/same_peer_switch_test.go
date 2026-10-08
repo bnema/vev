@@ -131,11 +131,13 @@ func TestSamePeerSwitchClientInitiated(t *testing.T) {
 	tests := []struct {
 		name     string
 		offer    *protocol.ExactSessionTarget
+		purging  bool
 		switched bool
 	}{
 		{name: "no pending offer switches", switched: true},
 		{name: "matching offer switches", offer: &requestTarget, switched: true},
 		{name: "another pending offer refuses", offer: &otherOffer},
+		{name: "a running purge refuses", purging: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -155,6 +157,9 @@ func TestSamePeerSwitchClientInitiated(t *testing.T) {
 			if tt.offer != nil {
 				ac.offerSamePeerTarget(*tt.offer)
 			}
+			d.mu.Lock()
+			d.purgeAdmissionClosing = tt.purging
+			d.mu.Unlock()
 
 			token := source.captureAttachmentCapability(ac, ac.transport())
 			effect, admitted := ac.beginAttachmentEffect(token)
@@ -162,6 +167,10 @@ func TestSamePeerSwitchClientInitiated(t *testing.T) {
 			defer effect.End()
 			d.switchSamePeerForAttachment(effect, protocol.SamePeerSwitchRequest{RequestID: 1, Target: requestTarget})
 
+			d.mu.Lock()
+			require.Zero(t, d.purgeAdmissionActive, "the switch releases its purge admission")
+			d.purgeAdmissionClosing = false
+			d.mu.Unlock()
 			if tt.switched {
 				require.Same(t, target, ac.currentAttachmentSession())
 				identity := decodeServerMessage(t, awaitFrame(t, sends, "CommittedRouteIdentity")).(protocol.CommittedRouteIdentity)

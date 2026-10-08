@@ -2,7 +2,6 @@ package visualsearch
 
 import (
 	"strconv"
-	"strings"
 
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
@@ -14,10 +13,8 @@ type Model struct {
 	snapshot scopy.Snapshot
 	input    ui.TextInput
 	matches  []scopy.SearchMatch
-	// matchedQuery is the trimmed query matches was computed for.
-	matchedQuery string
-	selected     int
-	scroll       int
+	selected int
+	scroll   int
 }
 
 func New(snapshot scopy.Snapshot) *Model {
@@ -118,15 +115,7 @@ func (m *Model) Matches() []scopy.SearchMatch {
 }
 
 func (m *Model) refresh() {
-	doc := scopy.NewDocument(m.snapshot, "")
-	query := strings.TrimSpace(m.input.Value())
-	// Typing extends the query, so only rows that already matched can match.
-	if m.matchedQuery != "" && strings.HasPrefix(query, m.matchedQuery) {
-		m.matches = scopy.RefineMatches(doc, m.matches, query)
-	} else {
-		m.matches = scopy.FindMatches(doc, query)
-	}
-	m.matchedQuery = query
+	m.matches = scopy.FindMatches(scopy.NewDocument(m.snapshot, ""), m.input.Value())
 	m.clamp()
 	m.ensureVisible(defaultVisibleRows)
 }

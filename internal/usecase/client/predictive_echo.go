@@ -47,10 +47,9 @@ const (
 	echoGlitchRepairCount       = 10
 	echoGlitchRepairMinInterval = 150 * time.Millisecond
 
-	// echoServerDelay is the daemon's echo acknowledgement delay
-	// (usecase/daemon echoAckDelay). It is removed from each round-trip
-	// sample so the thresholds compare network time, as mosh's SRTT does.
-	echoServerDelay = 50 * time.Millisecond
+	// echoServerDelay is removed from each round-trip sample so the
+	// thresholds compare network time, as mosh's SRTT does.
+	echoServerDelay = protocol.EchoAckDelay
 
 	// maxEchoSent bounds the send-time history used for round-trip samples.
 	maxEchoSent = 256
@@ -123,17 +122,22 @@ type echoPredictor struct {
 	mode   domain.EchoPredictMode
 	screen *vt.Screen
 
-	sent       []echoSent
-	echo       uint64
-	srtt       time.Duration
-	srttKnown  bool
-	srttOn     bool
-	flagging   bool
-	glitch     int
-	lastQuick  time.Time
-	predEpoch  uint64
-	confEpoch  uint64
-	holdUntil  uint64
+	sent      []echoSent
+	echo      uint64
+	srtt      time.Duration
+	srttKnown bool
+	srttOn    bool
+	flagging  bool
+	glitch    int
+	lastQuick time.Time
+	predEpoch uint64
+	confEpoch uint64
+	holdUntil uint64
+	// held is set by the first daemon frame after an unknown key (Enter)
+	// that is not its acknowledgement: that frame may move the guessed row,
+	// so guesses stay hidden until the key is acknowledged. Before such a
+	// frame, drawn guesses stay put.
+	held       bool
 	row        int
 	cells      []echoCell
 	cursor     echoCursor
@@ -158,17 +162,19 @@ func (p *echoPredictor) applyOutput(output protocol.Output, now time.Time) {
 		p.forget()
 	}
 	if output.Full {
-		// A full frame repainted every drawn guess.
-		p.drawn = p.drawn[:0]
-		p.cursorMove = false
+		// A full frame repaints everything: guesses placed against the old
+		// frame would land on unrelated content.
+		p.forget()
 	}
-	if data := p.apc.strip(output.Data); len(data) > 0 {
+	data := p.apc.strip(output.Data)
+	if len(data) > 0 {
 		p.screen.Write(data)
 	}
 	if output.Echo > p.echo {
 		p.sample(output.Echo, now)
 		p.echo = output.Echo
 	}
+	p.held = p.echo < p.holdUntil && (p.held || len(data) > 0)
 	p.cull(now)
 }
 
@@ -608,6 +614,32 @@ func (p *echoPredictor) needsTick() bool {
 	return p.mode == domain.EchoPredictAdaptive && p.active() && !(p.glitch > 0 && p.flagging)
 }
 
+// undraw returns the bytes that repaint every drawn guess from the mirror, so
+// a daemon frame lands on the screen the daemon believes it has. A frame that
+// scrolls would otherwise move a guess where nothing ever repairs it. The
+// guesses stay pending and render draws them again after the frame.
+func (p *echoPredictor) undraw() []byte {
+	if len(p.drawn) == 0 {
+		return nil
+	}
+	var out bytes.Buffer
+	if p.drawnRow < p.screen.Rows() {
+		for _, col := range p.drawn {
+			if col < p.screen.Columns() {
+				p.restoreCell(&out, p.drawnRow, col)
+			}
+		}
+	}
+	p.drawn = p.drawn[:0]
+	if out.Len() > 0 || p.cursorMove {
+		// The daemon frame is relative to its own cursor, not the predicted one.
+		out.WriteString("\x1b[0m")
+		writeEchoCUP(&out, p.screen.CursorRow(), p.screen.CursorCol())
+		p.cursorMove = false
+	}
+	return out.Bytes()
+}
+
 // render returns the terminal bytes that bring the screen from the last
 // render to the current guesses: drawn cells that no longer show a guess are
 // repainted from the mirror, shown guesses are drawn again (a daemon frame
@@ -617,7 +649,9 @@ func (p *echoPredictor) render() []byte {
 	var out bytes.Buffer
 	show := p.displaying() && p.enabled()
 	var want []int
-	if show && p.cells != nil && p.row < p.screen.Rows() {
+	// Once a frame arrived while an unknown key (Enter) is unanswered, the
+	// guesses' row may have moved, so none is drawn until the answer.
+	if show && p.cells != nil && p.row < p.screen.Rows() && !(p.held && p.echo < p.holdUntil) {
 		for col := range p.cells {
 			cell := &p.cells[col]
 			if !cell.active || cell.unknown || cell.tentative(p.confEpoch) {

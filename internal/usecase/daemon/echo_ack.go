@@ -5,13 +5,11 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
-// echoAckDelay is how long sequenced input must have been applied before the
-// daemon acknowledges it in Output.Echo. Like mosh's ECHO_TIMEOUT, it gives the
-// PTY time to echo the input, so the screen published with the acknowledgement
-// already contains whatever echo the input produced.
-const echoAckDelay = 50 * time.Millisecond
+// echoAckDelay is the protocol's echo acknowledgement delay.
+const echoAckDelay = protocol.EchoAckDelay
 
 // maxPendingEchoes bounds the per-attachment input history. Acknowledgements
 // are cumulative, so dropping the oldest entry only delays its confirmation to

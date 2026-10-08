@@ -145,6 +145,13 @@ type pane struct {
 	// onExit is set before the reader starts and never changed. Floating panes
 	// use it to reap their independent slot without touching the layout tree.
 	onExit func()
+	// prestarted marks a floating spare whose reader runs before any owner is
+	// published, so terminal queries from a starting shell are answered.
+	// Set before the reader starts and never changed.
+	prestarted bool
+	// spareExited records that a prestarted spare's reader ended, so a claim
+	// racing that exit still reaps the slot it installed.
+	spareExited atomic.Bool
 }
 
 func closePaneProcess(p *pane) {

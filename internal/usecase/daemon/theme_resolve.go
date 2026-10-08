@@ -51,6 +51,12 @@ func (d *Daemon) applyHostThemeLocked(sess *session, ac *attachedClient, t theme
 			p.mu.Unlock()
 		}
 	}
+	// An unclaimed spare answers color queries too, so it follows the theme.
+	if spare := sess.floatingSparePane(); spare != nil {
+		spare.mu.Lock()
+		applyPaneThemeLocked(spare, t, clearUnknownScheme)
+		spare.mu.Unlock()
+	}
 	return true
 }
 

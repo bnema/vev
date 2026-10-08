@@ -395,21 +395,35 @@ func sessionFromGeneration(generation ports.SnapshotGeneration) (snapcodec.Sessi
 		return snapcodec.Session{}, fmt.Errorf("snapshot: generation identity mismatch")
 	}
 	result := snapcodec.Session{Name: manifest.Name, CreatedAt: manifest.CreatedAt, Active: manifest.Active, Tabs: make([]snapcodec.Tab, 0, len(manifest.Tabs))}
+	// Objects are compressed, so the on-disk read budget no longer bounds the
+	// inflated generation; budget its payloads as one uncompressed checkpoint.
+	budget := snapcodec.MaxGenerationPayloadBytes
+	object := func(ref snapcodec.ObjectRef, kind snapcodec.ObjectKind) ([]byte, error) {
+		data, err := generationObject(generation, ref, kind)
+		if err != nil {
+			return nil, err
+		}
+		if len(data) > budget {
+			return nil, fmt.Errorf("snapshot: generation payload too large")
+		}
+		budget -= len(data)
+		return data, nil
+	}
 	for _, tab := range manifest.Tabs {
 		outTab := snapcodec.Tab{StableID: tab.StableID, Cols: tab.Cols, Rows: tab.Rows, NextPaneID: tab.NextPaneID, Focus: tab.Focus, Tree: tab.Tree, Panes: make([]snapcodec.Pane, 0, len(tab.Panes))}
 		for _, pane := range tab.Panes {
 			outPane := snapcodec.Pane{ID: pane.ID, StableID: pane.StableID, Cwd: pane.Cwd, Process: pane.Process}
 			for _, ref := range pane.Sealed {
-				data, err := generationObject(generation, ref, snapcodec.HistoryChunk)
+				data, err := object(ref, snapcodec.HistoryChunk)
 				if err != nil {
 					return snapcodec.Session{}, err
 				}
 				outPane.SealedChunks = append(outPane.SealedChunks, data)
 			}
-			if outPane.Tail, err = generationObject(generation, pane.Tail, snapcodec.HistoryTail); err != nil {
+			if outPane.Tail, err = object(pane.Tail, snapcodec.HistoryTail); err != nil {
 				return snapcodec.Session{}, err
 			}
-			if outPane.Transcript, err = generationObject(generation, pane.Transcript, snapcodec.RecoveryTranscript); err != nil {
+			if outPane.Transcript, err = object(pane.Transcript, snapcodec.RecoveryTranscript); err != nil {
 				return snapcodec.Session{}, err
 			}
 			outTab.Panes = append(outTab.Panes, outPane)

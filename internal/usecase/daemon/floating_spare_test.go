@@ -7,10 +7,12 @@ import (
 	"testing"
 	"time"
 
+	renderer "github.com/bnema/vev-vt"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	themeui "github.com/bnema/vev/internal/usecase/theme"
 )
 
 // spareOpen records one PTY Open issued for a floating shell.
@@ -183,3 +185,88 @@ type pidPTY struct {
 }
 
 func (p *pidPTY) Pid() int { return p.pid }
+
+// queryPTY is a floating shell that sends one terminal query at startup and
+// records what the daemon writes back.
+type queryPTY struct {
+	sparePTY
+	query   string
+	sent    chan struct{}
+	replied chan []byte
+}
+
+func (p *queryPTY) Read(b []byte) (int, error) {
+	select {
+	case <-p.sent:
+		return p.sparePTY.Read(b)
+	default:
+		close(p.sent)
+		return copy(b, p.query), nil
+	}
+}
+
+func (p *queryPTY) Write(b []byte) (int, error) {
+	p.replied <- append([]byte(nil), b...)
+	return len(b), nil
+}
+
+type queryFactory struct{ pty *queryPTY }
+
+func (f *queryFactory) Open(ctx context.Context, _ string, _ []string, _ []string, _ string, _ domain.Geometry) (ports.PTY, error) {
+	f.pty.ctx = ctx
+	return f.pty, nil
+}
+
+func TestFloatingSpareAnswersStartupQueriesBeforeClaim(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		query string
+		want  string
+	}{
+		{name: "primary device attributes", query: "\x1b[c", want: "\x1b[?"},
+		{name: "background color from the session theme", query: "\x1b]11;?\x07", want: "\x1b]11;rgb:"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			pty := &queryPTY{sparePTY: sparePTY{closed: make(chan struct{})}, query: tt.query, sent: make(chan struct{}), replied: make(chan []byte, 4)}
+			d := newTestDaemon(t, &queryFactory{pty: pty}, stubClock{})
+			d.ApplyConfig(domain.Config{Floating: domain.FloatingConfig{Width: 80, Height: 80}})
+			tb := newTab(&pidPTY{pid: 1}, domain.Size{Cols: 80, Rows: 24})
+			tb.ctx, tb.cancel = context.WithCancel(t.Context())
+			ac := &attachedClient{}
+			ac.setClientTheme(themeui.Theme{Known: true, HasFG: true, HasBG: true,
+				Foreground: renderer.RGB{R: 0xee, G: 0xee, B: 0xee}, Background: renderer.RGB{R: 0x11, G: 0x11, B: 0x11}})
+			sess := &session{sessionCore: sessionCore{name: "work", attachments: map[*attachedClient]struct{}{ac: {}}}, tabs: []*tab{tb}, ctx: t.Context()}
+
+			d.ensureFloatingWarm(sess, tb)
+			select {
+			case reply := <-pty.replied:
+				require.Contains(t, string(reply), tt.want, "the unclaimed spare must answer its shell's startup query")
+			case <-time.After(5 * time.Second):
+				t.Fatal("the unclaimed spare never answered its shell's startup query")
+			}
+
+			sess.stopInMemoryLifecycle()
+			d.sessWg.Wait()
+		})
+	}
+}
+
+func TestFloatingSpareExitBeforeClaimDropsIt(t *testing.T) {
+	factory := &spareFactory{}
+	d := newTestDaemon(t, factory, stubClock{})
+	d.ApplyConfig(domain.Config{Floating: domain.FloatingConfig{Width: 80, Height: 80}})
+	tb := newTab(&pidPTY{pid: 1}, domain.Size{Cols: 80, Rows: 24})
+	tb.ctx, tb.cancel = context.WithCancel(t.Context())
+	sess := &session{sessionCore: sessionCore{name: "work"}, tabs: []*tab{tb}, ctx: t.Context()}
+
+	d.ensureFloatingWarm(sess, tb)
+	waitSpareReady(t, sess)
+	spare := sess.floatingSparePane()
+	require.NotNil(t, spare)
+	require.NoError(t, factory.snapshot()[0].pty.Close(), "the spare's shell exits")
+	require.Eventually(t, func() bool { return sess.floatingSparePane() == nil }, time.Second, time.Millisecond,
+		"an exited unclaimed spare must be dropped so the next claim launches a fresh shell")
+
+	sess.stopInMemoryLifecycle()
+	d.sessWg.Wait()
+}

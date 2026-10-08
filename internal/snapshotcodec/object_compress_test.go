@@ -46,6 +46,10 @@ func TestObjectCompressionRejectsMalformedPayloads(t *testing.T) {
 			binary.BigEndian.PutUint32(b[1:5], uint32(len(payload)+1))
 			return b
 		}, want: ErrInvalidData},
+		{name: "declared maximum on a small stream", mutate: func(b []byte) []byte {
+			binary.BigEndian.PutUint32(b[1:5], maxObjectPayloadSize)
+			return b
+		}, want: ErrInvalidData},
 		{name: "truncated stream", mutate: func(b []byte) []byte { return b[:len(b)-1] }, want: ErrInvalidData},
 		{name: "corrupt stream", mutate: func(b []byte) []byte { b[len(b)-6] ^= 0xff; return b }, want: ErrInvalidData},
 		{name: "trailing garbage", mutate: func(b []byte) []byte { return append(b, 0) }, want: ErrTrailingBytes},

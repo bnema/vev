@@ -90,6 +90,71 @@ func TestEchoPredictorDisplay(t *testing.T) {
 	}
 }
 
+// TestEchoPredictorNeverDrawsStaleGuesses covers daemon frames that arrive
+// before the echo acknowledgement and move or replace the guessed row.
+func TestEchoPredictorNeverDrawsStaleGuesses(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		input string
+		frame protocol.Output
+	}{
+		{
+			name:  "enter then a scrolled prompt before the ack",
+			input: "b\r",
+			frame: protocol.Output{Epoch: 1, New: 2, Size: domain.Size{Cols: 20, Rows: 3}, Data: []byte("b\r\nfoo\r\nbar\r\n$ ")},
+		},
+		{
+			name:  "full frame before the ack",
+			input: "b",
+			frame: protocol.Output{Epoch: 1, New: 2, Full: true, Size: domain.Size{Cols: 20, Rows: 3}, Data: []byte("\x1b[H\x1b[2Jother")},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			h := newEchoHarness(t, domain.EchoPredictAlways)
+			h.warm(100 * time.Millisecond)
+			h.confirm()
+			h.typed(tt.input)
+			h.p.undraw()
+			h.p.applyOutput(tt.frame, h.now)
+			if got := h.p.render(); bytes.Contains(got, []byte("b")) {
+				t.Fatalf("render = %q redraws a guess over the new frame", got)
+			}
+		})
+	}
+}
+
+func TestEchoPredictorEnterKeepsDrawnGuessesUntilAFrame(t *testing.T) {
+	t.Parallel()
+	h := newEchoHarness(t, domain.EchoPredictAlways)
+	h.warm(100 * time.Millisecond)
+	h.confirm()
+	if got := h.typed("b"); !bytes.Contains(got, []byte("b")) {
+		t.Fatalf("render = %q, want the guess drawn", got)
+	}
+	if got := h.typed("\r"); bytes.Contains(got, []byte(" ")) {
+		t.Fatalf("render after Enter = %q erases the typed guess before any frame", got)
+	}
+}
+
+func TestEchoPredictorUndrawRestoresMirror(t *testing.T) {
+	t.Parallel()
+	h := newEchoHarness(t, domain.EchoPredictAlways)
+	h.warm(100 * time.Millisecond)
+	h.confirm()
+	if got := h.typed("b"); !bytes.Contains(got, []byte("b")) {
+		t.Fatalf("render = %q, want the guess drawn", got)
+	}
+	if got, want := string(h.p.undraw()), "\x1b[1;4H\x1b[0m \x1b[0m\x1b[1;4H"; got != want {
+		t.Fatalf("undraw = %q, want %q", got, want)
+	}
+	if got := h.p.undraw(); len(got) != 0 {
+		t.Fatalf("second undraw = %q, want nothing", got)
+	}
+}
+
 func TestEchoPredictorConfirmationRepaintsFromMirror(t *testing.T) {
 	t.Parallel()
 	h := newEchoHarness(t, domain.EchoPredictAdaptive)

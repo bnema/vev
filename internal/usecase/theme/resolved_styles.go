@@ -95,7 +95,11 @@ func indexedStyles(styles Styles, slot uint8) Styles {
 	styles.BorderActive = indexedForeground(styles.BorderActive, slot)
 	styles.BorderWarn = indexedForeground(styles.BorderWarn, slot)
 	styles.TabInactiveTitle = indexedForeground(styles.TabInactiveTitle, slot)
-	styles.TabActiveTitle = indexedForeground(styles.TabActiveTitle, slot)
+	// On the full-strength neutral surface an indexed title color cannot be
+	// kept readable, so the active title keeps its RGB secondary text.
+	if !styles.TabActiveTitle.HasBackgroundRGB {
+		styles.TabActiveTitle = indexedForeground(styles.TabActiveTitle, slot)
+	}
 	styles.PickerDescription = indexedForeground(styles.PickerDescription, slot)
 	styles.PickerSeparator = indexedForeground(styles.PickerSeparator, slot)
 

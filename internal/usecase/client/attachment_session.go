@@ -542,6 +542,9 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 					}
 				}
 				w.noteCommitted(fg, state.context)
+				if err := echo.beforeOutput(typed); err != nil {
+					return w.settle(ctx, fg, stream, token, err)
+				}
 				if err := fg.Output(state.uiContext(ports.UIContext{Generation: attachmentActionableGeneration(fg, token)}, ports.UIStatusAttached), typed.Data); err != nil {
 					return AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: fmt.Errorf("publishing output: %w", err)}
 				}

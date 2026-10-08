@@ -744,7 +744,7 @@ func (s *Supervisor) attachResolved(ctx context.Context, input *terminalInputLif
 	var cancelOpen context.CancelFunc
 	var watchDone chan struct{}
 	if resuming {
-		keys = input.watchResume(s.cfg.Clock)
+		keys = input.watchResume(s.cfg.Clock, s.logger)
 		openCtx, cancelOpen = context.WithCancel(openCtx)
 		watchDone = make(chan struct{})
 		go func() {
@@ -813,6 +813,11 @@ func (s *Supervisor) attachResolved(ctx context.Context, input *terminalInputLif
 		}
 		s.transition(supervisorEvent{kind: supervisorAttachEnded})
 		return attachmentEndedOutcome()
+	}
+	if input != nil {
+		// The attachment owns input again: keys typed from now on reach the
+		// session, so the outage's overflow ends here, not at stream open.
+		input.resumeOverflowed.Store(false)
 	}
 	return s.settleAttachment(ctx, input, service, deadline, run, request, resuming)
 }
@@ -1043,7 +1048,7 @@ func (s *Supervisor) waitResume(ctx context.Context, input *terminalInputLifetim
 	delay := supervisorBackoffDelay(uint64(attempt), s.cfg.Jitter)
 	timer := s.cfg.Clock.NewTimer(delay)
 	defer stopSupervisorTimer(timer)
-	keys := input.watchResume(s.cfg.Clock)
+	keys := input.watchResume(s.cfg.Clock, s.logger)
 	defer keys.release()
 	for {
 		select {

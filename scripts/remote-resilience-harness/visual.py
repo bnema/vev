@@ -76,7 +76,7 @@ def main():
             if transport not in ("quic", "ssh"):
                 raise ValueError("VEV_RESILIENCE_TRANSPORT must be quic or ssh")
             relay_args = ["-degraded"] if os.environ.get("VEV_RESILIENCE_DEGRADED") == "1" else []
-            relay = subprocess.Popen(["docker", "exec", client, "/tmp/relay", "-remote", "upstream", "-control", "/home/demo/relay/control.sock", *relay_args])
+            relay = subprocess.Popen(["docker", "exec", client, "/tmp/relay", "-remote", "upstream", "-control", "/home/demo/relay/control.sock", "-tcp", ":2222", "-listen", "0.0.0.0", *relay_args])
             processes.append(relay)
             control_id = 0
             def control(op, **fields):

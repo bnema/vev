@@ -896,6 +896,10 @@ func (d *Daemon) startPaneGoroutines(sess *session, tb *tab, p *pane) {
 	name := sess.name
 	sess.mu.Unlock()
 	d.log.Info("pane created", "session", name, "pane", p.id)
+	if p.prestarted {
+		// A claimed spare keeps the reader it started with.
+		return
+	}
 	// Scheduler ownership was removed; this launch creates exactly one reader.
 	d.sessWg.Add(1)
 	go d.readPanePTY(p)
