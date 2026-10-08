@@ -434,10 +434,9 @@ type Supervisor struct {
 	cfg    SupervisorConfig
 	logger *slog.Logger
 
-	// pendingPickerKey retains a commit observed while connecting. It is
-	// revalidated against the adopted service just like a ready-phase commit.
-	pendingPickerKey string
-	preview          previewManager
+	// picker groups the picker's per-run state: the pending commit key, the
+	// preview subscription, and the off-goroutine kill runner.
+	picker pickerSession
 
 	mu    sync.Mutex
 	state State
@@ -471,8 +470,6 @@ type Supervisor struct {
 	// nav is the run goroutine's navigation bookkeeping: the ready-phase
 	// subscription, pending swap and in-place choices, and the route ledger.
 	nav navigationState
-	// kills runs the picker's `x` operations off the run goroutine.
-	kills pickerKills
 }
 
 // NewSupervisor validates the required dependencies and returns a supervisor
@@ -520,7 +517,7 @@ func NewSupervisor(cfg SupervisorConfig) (*Supervisor, error) {
 		state:      State{Presentation: PresentPicker, Connectivity: ConnectivityDisconnected},
 		clientID:   newClientID(),
 		navigation: cfg.InitialNavigation,
-		preview:    previewManager{clock: cfg.Clock},
+		picker:     pickerSession{preview: previewManager{clock: cfg.Clock}},
 	}
 	// The host is the supervisor's existing foreground grant. It owns no raw
 	// mode and starts no reader: the supervisor keeps its one terminal input
@@ -592,7 +589,7 @@ func (s *Supervisor) Run(ctx context.Context) (retErr error) {
 	)
 	retire := func() {
 		s.retirePickerKill()
-		s.preview.close(s.cfg.Picker)
+		s.picker.preview.close(s.cfg.Picker)
 		s.nav.clearReady()
 		if sub != nil {
 			sub.Close()
@@ -898,8 +895,8 @@ type readyOutcome struct {
 // the supervisor can admit exactly the row the user committed. It opens no
 // stream and starts no terminal work itself.
 func (s *Supervisor) awaitReady(ctx context.Context, input *terminalInputLifetime, service ports.BrokerNavigator, sub ports.BrokerSubscription) readyOutcome {
-	if key := s.pendingPickerKey; key != "" {
-		s.pendingPickerKey = ""
+	if key := s.picker.pendingPickerKey; key != "" {
+		s.picker.pendingPickerKey = ""
 		return readyOutcome{commitKey: key}
 	}
 	var changed <-chan struct{}
@@ -922,11 +919,11 @@ func (s *Supervisor) awaitReady(ctx context.Context, input *terminalInputLifetim
 			s.cfg.Picker.ApplySnapshot(service.Snapshot())
 			s.refreshPreview(service)
 			s.renderCurrent()
-		case <-s.preview.changed():
-			if s.preview.publish(s.cfg.Picker) {
+		case <-s.picker.preview.changed():
+			if s.picker.preview.publish(s.cfg.Picker) {
 				s.renderCurrent()
 			}
-		case outcome := <-s.kills.results():
+		case outcome := <-s.picker.kills.results():
 			s.finishPickerKill(service, outcome)
 		case <-ops:
 			op, key := s.cfg.Picker.TakeOp()
@@ -944,7 +941,7 @@ func (s *Supervisor) awaitReady(ctx context.Context, input *terminalInputLifetim
 				if op.exit {
 					// Ctrl+C is the explicit exit. With no attachment to
 					// return to, it is the only close that ends the process.
-					s.preview.close(s.cfg.Picker)
+					s.picker.preview.close(s.cfg.Picker)
 					return readyOutcome{terminated: true}
 				}
 				// Escape and q cancel; with no attachment there is nothing to
@@ -954,7 +951,7 @@ func (s *Supervisor) awaitReady(ctx context.Context, input *terminalInputLifetim
 				continue
 			}
 			if op.commit && key != "" {
-				s.preview.close(s.cfg.Picker)
+				s.picker.preview.close(s.cfg.Picker)
 				return readyOutcome{commitKey: key}
 			}
 		case <-ctx.Done():
@@ -974,10 +971,10 @@ func (s *Supervisor) refreshPreview(service ports.BrokerNavigator) {
 	}
 	geometry, err := s.cfg.Terminal.Geometry()
 	if err != nil || !geometry.Valid() {
-		s.preview.close(s.cfg.Picker)
+		s.picker.preview.close(s.cfg.Picker)
 		return
 	}
-	s.preview.refresh(service, s.cfg.Picker, geometry.Size)
+	s.picker.preview.refresh(service, s.cfg.Picker, geometry.Size)
 }
 
 // pickerOps is nil when no picker owns presentation decisions.
@@ -994,7 +991,7 @@ func (s *Supervisor) pickerOps() <-chan struct{} {
 func (s *Supervisor) takePickerClose() bool {
 	op, key := s.cfg.Picker.TakeOp()
 	if op.commit && key != "" {
-		s.pendingPickerKey = key
+		s.picker.pendingPickerKey = key
 	}
 	if op.close && !op.exit {
 		s.notifyPicker(pickerExitHint)

@@ -551,7 +551,7 @@ func (s *Supervisor) runInitialNavigation(ctx context.Context, input *terminalIn
 	if s.cfg.Picker != nil {
 		s.cfg.Picker.TakeOp()
 	}
-	s.pendingPickerKey = ""
+	s.picker.pendingPickerKey = ""
 	return s.runResolvedAttachment(ctx, input, service, pickerAttachmentTarget{request: request}, SessionEnvironmentLocalCLI)
 }
 
@@ -901,7 +901,7 @@ settlement:
 			overlay.resize()
 		case <-notices.arm(s.cfg.Picker):
 			s.renderCurrent()
-		case outcome := <-s.kills.results():
+		case outcome := <-s.picker.kills.results():
 			s.finishPickerKill(service, outcome)
 		case <-service.Done():
 			brokerLost = true

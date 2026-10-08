@@ -44,7 +44,7 @@ func (o *attachmentPickerOverlay) previewChanged() <-chan struct{} {
 	if !o.active {
 		return nil
 	}
-	return o.sup.preview.changed()
+	return o.sup.picker.preview.changed()
 }
 
 func (o *attachmentPickerOverlay) ops() <-chan struct{} {
@@ -113,7 +113,7 @@ func (o *attachmentPickerOverlay) drop() {
 		return
 	}
 	o.active = false
-	o.sup.preview.close(o.picker())
+	o.sup.picker.preview.close(o.picker())
 	o.picker().SetOwnsInput(false)
 }
 
@@ -124,7 +124,7 @@ func (o *attachmentPickerOverlay) applyPublication() {
 }
 
 func (o *attachmentPickerOverlay) publishPreview() {
-	if o.sup.preview.publish(o.picker()) {
+	if o.sup.picker.preview.publish(o.picker()) {
 		o.sup.renderCurrent()
 	}
 }
@@ -181,7 +181,7 @@ func (o *attachmentPickerOverlay) takeOp() {
 		}
 		s.nav.setSwap(&target)
 		o.swapping = true
-		s.preview.close(o.picker())
+		s.picker.preview.close(o.picker())
 		s.attachments.requestDetach(o.run.token)
 	case op.kill && key != "":
 		s.startPickerKill(o.service, key)
