@@ -61,8 +61,8 @@ func (d *Daemon) captureSnapshotState(sess *session, generation uint64) (*snapsh
 			paneCapture.tail = paneCapture.sealed.Tail()
 			p.mu.Unlock()
 			paneCapture.cwd = fallbackCwd
-			if d.procCwd != nil && pid > 0 {
-				if cwd, err := d.procCwd(pid); err == nil && cwd != "" {
+			if d.proc != nil && pid > 0 {
+				if cwd, err := d.proc.Cwd(pid); err == nil && cwd != "" {
 					paneCapture.cwd = cwd
 				}
 			}
@@ -82,14 +82,14 @@ func (d *Daemon) captureSession(sess *session) bool {
 }
 
 func (d *Daemon) capturePaneProcess(pty interface{ ForegroundPgid() (int, error) }, shellPid int) *snapcodec.Process {
-	if d == nil || pty == nil || shellPid <= 0 || d.procGroupArgv == nil {
+	if d == nil || pty == nil || shellPid <= 0 || !d.hasProcessDetails() {
 		return nil
 	}
 	pgid, err := pty.ForegroundPgid()
 	if err != nil || pgid <= 0 || pgid == shellPid {
 		return nil
 	}
-	argv, err := d.procGroupArgv(pgid, shellPid)
+	argv, err := d.proc.GroupArgv(pgid, shellPid)
 	if err != nil || len(argv) == 0 || argv[0] == "" {
 		return nil
 	}

@@ -146,6 +146,7 @@ func (d *Daemon) handleResizeInput(ac *attachedClient, data []byte) {
 	}
 }
 
+// retainResizeESCLocked requires ac.overlays.resizeMu, not d.mu.
 func (d *Daemon) retainResizeESCLocked(ac *attachedClient) {
 	rt := ac.overlays
 	rt.resizePending = append(rt.resizePending[:0], keys.ESC)

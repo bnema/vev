@@ -71,10 +71,10 @@ func TestRefreshPaneTitleUsesForegroundProcessComm(t *testing.T) {
 	clk.EXPECT().Now().Return(time.Time{}).Maybe()
 	d := newTestDaemon(t, nil, clk)
 	d.shell = "/bin/zsh"
-	d.procComm = func(pid int) (string, error) {
+	d.proc = &processInspectorFake{comm: func(pid int) (string, error) {
 		require.Equal(t, 1234, pid)
 		return "vim\n", nil
-	}
+	}}
 
 	title := d.refreshPaneTitle(sess, "pane-1")
 	require.Equal(t, "vim", title)
@@ -99,10 +99,10 @@ func TestRefreshPaneTitleUsesProvidedOwningTab(t *testing.T) {
 	sess.tabs = append(sess.tabs, second)
 	sess.mu.Unlock()
 	d := newTestDaemon(t, nil, stubClock{})
-	d.procComm = func(pid int) (string, error) {
+	d.proc = &processInspectorFake{comm: func(pid int) (string, error) {
 		require.Equal(t, 222, pid)
 		return "vim", nil
-	}
+	}}
 
 	require.Equal(t, "vim", d.refreshPaneTitle(sess, "pane-1", second))
 	secondPane := second.panes["pane-1"]
@@ -120,11 +120,11 @@ func TestRefreshPaneTitleCachesByTTLAndRefreshesOnFocus(t *testing.T) {
 	clk.EXPECT().Now().RunAndReturn(func() time.Time { return now }).Maybe()
 	d := newTestDaemon(t, nil, clk)
 	var calls atomic.Int32
-	d.procComm = func(pid int) (string, error) {
+	d.proc = &processInspectorFake{comm: func(pid int) (string, error) {
 		require.Equal(t, 1234, pid)
 		calls.Add(1)
 		return "vim\n", nil
-	}
+	}}
 
 	require.Equal(t, "vim", d.refreshPaneTitle(sess, "pane-1"))
 	now = now.Add(paneTitleCacheTTL / 2)
@@ -141,7 +141,7 @@ func TestRefreshFloatingPaneTitlePreservesConfiguredCommandFallback(t *testing.T
 	clk.EXPECT().Now().Return(time.Time{}).Maybe()
 	d := newTestDaemon(t, nil, clk)
 	d.shell = "/usr/bin/fish"
-	d.procComm = func(int) (string, error) { return "", errors.New("unused") }
+	d.proc = &processInspectorFake{comm: func(int) (string, error) { return "", errors.New("unused") }}
 	p := newPane("floating", pty, domain.Size{Cols: 20, Rows: 5})
 	p.title.displayFallback = floatingCommandFallback("btop --utf", d.shell)
 
@@ -186,7 +186,7 @@ func TestRefreshPaneTitleLookupFailureKeepsProcessNameEmpty(t *testing.T) {
 	clk.EXPECT().Now().Return(time.Time{}).Maybe()
 	d := newTestDaemon(t, nil, clk)
 	d.shell = "/usr/bin/fish"
-	d.procComm = func(int) (string, error) { return "", errors.New("unused") }
+	d.proc = &processInspectorFake{comm: func(int) (string, error) { return "", errors.New("unused") }}
 	p := testAttachmentTab(sess).focusedPane()
 
 	p.mu.Lock()
@@ -203,4 +203,42 @@ func TestRefreshPaneTitleLookupFailureKeepsProcessNameEmpty(t *testing.T) {
 	p.refreshTerminalTitleLocked()
 	p.mu.Unlock()
 	require.Equal(t, "sh", d.refreshPaneDisplayTitle(sess, p, true), "pointer refresh must retain its pane-owned fallback")
+}
+
+// processInspectorFake is a hand-written ports.ProcessInspector whose
+// behavior is set per test through func fields; an unset func reports an
+// error, the same as an inspector that cannot read the process.
+type processInspectorFake struct {
+	cwd       func(int) (string, error)
+	comm      func(int) (string, error)
+	argv      func(int) ([]string, error)
+	groupArgv func(int, int) ([]string, error)
+}
+
+func (f *processInspectorFake) Cwd(pid int) (string, error) {
+	if f.cwd == nil {
+		return "", errProcessInspectionUnavailable
+	}
+	return f.cwd(pid)
+}
+
+func (f *processInspectorFake) Comm(pid int) (string, error) {
+	if f.comm == nil {
+		return "", errProcessInspectionUnavailable
+	}
+	return f.comm(pid)
+}
+
+func (f *processInspectorFake) Argv(pid int) ([]string, error) {
+	if f.argv == nil {
+		return nil, errProcessInspectionUnavailable
+	}
+	return f.argv(pid)
+}
+
+func (f *processInspectorFake) GroupArgv(pgid, shellPid int) ([]string, error) {
+	if f.groupArgv == nil {
+		return nil, errProcessInspectionUnavailable
+	}
+	return f.groupArgv(pgid, shellPid)
 }

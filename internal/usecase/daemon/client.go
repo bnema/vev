@@ -18,6 +18,42 @@
 // moveLifecycleReservation.Release must never be called with d.mu held: it takes
 // moveLifecycleMu first, releases both the move-gate and purge-gate reservations
 // in that order, and only then drops moveLifecycleMu.
+//
+// Snapshot worker locks (snapshotWorker in snapshot_worker_state.go):
+// snapshotWorker.mu (d.snapshots.mu) is a leaf with respect to d.mu and the
+// session (mu), tab, and pane locks: no path acquires any of them while holding
+// it, and the capture, queue, and worker code never takes d.mu. The only nested
+// acquisition is a session's snapshotMu inside it (enqueueFinalSnapshotCapture
+// finishes a replaced capture), so snapshotMu holders must release snapshotMu
+// before taking snapshotWorker.mu, as finishSnapshotCapture does. That nested
+// finishSnapshotCapture(replaced, false) cannot re-enter snapshotWorker.mu:
+// final-queue captures are never normalWorkerAdmitted, and succeeded=false
+// suppresses the forced-successor scheduling path.
+// snapshotWorker.noticeMu guards the active persistence-failure signature; it
+// is a leaf and is never held together with snapshotWorker.mu. Restoration
+// takes d.mu only outside snapshotWorker.mu.
+//
+// paletteHistory.mu guards the daemon-wide recent-command list. It is a leaf:
+// it is only held to copy or rewrite that slice, never while calling out.
+//
+// purgeAllMu serializes whole KillAll purges (purgeAllSessions). It is the
+// outermost daemon-level lock on that path: the owner takes d.mu (briefly, to
+// open and close the purge admission gate) and later per-session teardown locks
+// while holding it. No path acquires purgeAllMu while holding d.mu,
+// moveLifecycleMu, a session lock, or a pane lock. It is not an admission gate;
+// admission is the d.mu-guarded purgeAdmission* state.
+//
+// attnMu guards only the attention animation frame counter (animFrame). It is
+// a leaf: attentionFrame, advanceAttentionFrame, and setAttentionFrame take it
+// for the read or write and call nothing while holding it.
+//
+// Naming rule for the Locked suffix: on a Daemon method (or a free function
+// taking a Daemon-owned structure) a ...Locked suffix means the caller holds
+// d.mu. On a method of any other type, it means the caller holds that
+// receiver's own mutex (session.mu, tab.mu, pane.mu, and so on). Whenever a
+// ...Locked function instead requires a different lock (for example
+// overlayRuntime.copyMu, snapshotWorker.mu, moveLifecycleMu, or
+// barScriptState.mu), its doc comment names that lock explicitly.
 package daemon
 
 import (

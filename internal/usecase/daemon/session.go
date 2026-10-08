@@ -380,7 +380,7 @@ func (d *Daemon) createSessionLockedWithModeAndInactiveFence(name string, epheme
 		tabs:         tabs,
 		cwd:          cwd,
 		env:          env,
-		snapshotWake: d.snapshotWake,
+		snapshotWake: d.snapshots.wake,
 	}
 	if !ephemeral && name != "" {
 		sess.snapshotChunkCache = newSnapshotChunkCache(snapshotChunkCacheLimit)
@@ -901,8 +901,7 @@ func (d *Daemon) startPaneGoroutines(sess *session, tb *tab, p *pane) {
 		return
 	}
 	// Scheduler ownership was removed; this launch creates exactly one reader.
-	d.sessWg.Add(1)
-	go d.readPanePTY(p)
+	d.sessWg.Go(func() { d.readPanePTY(p) })
 }
 
 // detachIfCurrent publishes terminal attachment invalidation through the attachment
@@ -2111,7 +2110,7 @@ func (d *Daemon) cwdSampler(ctx context.Context) {
 			return
 		case <-t.C():
 		}
-		if d.procCwd != nil {
+		if d.proc != nil {
 			d.refreshNamedSessionCwds()
 		}
 		if err := d.flushCatalogue(); err != nil {
@@ -2136,7 +2135,7 @@ func (d *Daemon) refreshNamedSessionCwds() {
 }
 
 func (d *Daemon) refreshSessionCwd(sess *session) {
-	if d.procCwd == nil {
+	if d.proc == nil {
 		return
 	}
 	tb := sess.firstTab()
@@ -2149,7 +2148,7 @@ func (d *Daemon) refreshSessionCwd(sess *session) {
 	if p == nil {
 		return
 	}
-	cwd, err := d.procCwd(p.pty.Pid())
+	cwd, err := d.proc.Cwd(p.pty.Pid())
 	if err != nil || cwd == "" {
 		return
 	}

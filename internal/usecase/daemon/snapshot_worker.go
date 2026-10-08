@@ -13,10 +13,10 @@ func (d *Daemon) reportSnapshotFailure(capture *snapshotCapture, phase string, c
 		return
 	}
 	signature := snapshotFailureSignature(phase, cause)
-	d.snapshotNoticeMu.Lock()
-	changed := d.snapshotActiveFailureSignature != signature
-	d.snapshotActiveFailureSignature = signature
-	d.snapshotNoticeMu.Unlock()
+	d.snapshots.noticeMu.Lock()
+	changed := d.snapshots.activeFailureSignature != signature
+	d.snapshots.activeFailureSignature = signature
+	d.snapshots.noticeMu.Unlock()
 
 	n := domain.Notification{
 		Code:     domain.NoticeSnapshotWrite,
@@ -38,38 +38,38 @@ func (d *Daemon) clearSnapshotFailure() {
 	if d == nil {
 		return
 	}
-	d.snapshotNoticeMu.Lock()
-	d.snapshotActiveFailureSignature = ""
-	d.snapshotNoticeMu.Unlock()
+	d.snapshots.noticeMu.Lock()
+	d.snapshots.activeFailureSignature = ""
+	d.snapshots.noticeMu.Unlock()
 }
 
 func (d *Daemon) startSnapshotEncodeWorker() {
 	if d == nil {
 		return
 	}
-	d.snapshotWorkerMu.Lock()
-	if d.snapshotWorkerCancel != nil {
-		d.snapshotWorkerMu.Unlock()
+	d.snapshots.mu.Lock()
+	if d.snapshots.cancel != nil {
+		d.snapshots.mu.Unlock()
 		return
 	}
 	// Shutdown owns the worker lifetime so it can flush captures after Serve
 	// cancels its parent context. The worker is always stopped explicitly.
 	workerCtx, cancel := context.WithCancel(context.Background())
-	d.snapshotWorkerID++
-	workerID := d.snapshotWorkerID
-	d.snapshotWorkerCtx = workerCtx
-	d.snapshotWorkerCancel = cancel
-	d.snapshotWorkerDone = make(chan struct{})
-	d.snapshotWorkerFlush = make(chan struct{})
-	d.snapshotWorkerFinalWake = make(chan struct{}, 1)
-	d.snapshotFinalJobs = make(map[*session]*snapshotCapture)
-	d.snapshotFinalOrder = nil
-	d.snapshotWorkerClosing = false
-	d.snapshotWorkerInFlight = nil
-	done := d.snapshotWorkerDone
-	flush := d.snapshotWorkerFlush
-	finalWake := d.snapshotWorkerFinalWake
-	d.snapshotWorkerMu.Unlock()
+	d.snapshots.id++
+	workerID := d.snapshots.id
+	d.snapshots.ctx = workerCtx
+	d.snapshots.cancel = cancel
+	d.snapshots.done = make(chan struct{})
+	d.snapshots.flush = make(chan struct{})
+	d.snapshots.finalWake = make(chan struct{}, 1)
+	d.snapshots.finalJobs = make(map[*session]*snapshotCapture)
+	d.snapshots.finalOrder = nil
+	d.snapshots.closing = false
+	d.snapshots.inFlight = nil
+	done := d.snapshots.done
+	flush := d.snapshots.flush
+	finalWake := d.snapshots.finalWake
+	d.snapshots.mu.Unlock()
 	go d.runSnapshotEncodeWorker(workerCtx, workerID, done, flush, finalWake)
 }
 
@@ -89,7 +89,7 @@ func (d *Daemon) runSnapshotEncodeWorker(workerCtx context.Context, workerID uin
 			if !d.drainFinalSnapshotCaptures(workerCtx, workerID) {
 				return
 			}
-		case capture := <-d.snapshotJobs:
+		case capture := <-d.snapshots.jobs:
 			if !d.publishSnapshotCapture(workerCtx, workerID, capture) {
 				return
 			}
@@ -100,7 +100,7 @@ func (d *Daemon) runSnapshotEncodeWorker(workerCtx context.Context, workerID uin
 func (d *Daemon) flushSnapshotCaptures(workerCtx context.Context, workerID uint64) {
 	for {
 		select {
-		case capture := <-d.snapshotJobs:
+		case capture := <-d.snapshots.jobs:
 			if !d.publishSnapshotCapture(workerCtx, workerID, capture) {
 				return
 			}
@@ -162,14 +162,14 @@ func (d *Daemon) publishSnapshotCapture(workerCtx context.Context, workerID uint
 }
 
 func (d *Daemon) takeFinalSnapshotCapture() *snapshotCapture {
-	d.snapshotWorkerMu.Lock()
-	defer d.snapshotWorkerMu.Unlock()
-	for len(d.snapshotFinalOrder) > 0 {
-		sess := d.snapshotFinalOrder[0]
-		d.snapshotFinalOrder[0] = nil
-		d.snapshotFinalOrder = d.snapshotFinalOrder[1:]
-		capture := d.snapshotFinalJobs[sess]
-		delete(d.snapshotFinalJobs, sess)
+	d.snapshots.mu.Lock()
+	defer d.snapshots.mu.Unlock()
+	for len(d.snapshots.finalOrder) > 0 {
+		sess := d.snapshots.finalOrder[0]
+		d.snapshots.finalOrder[0] = nil
+		d.snapshots.finalOrder = d.snapshots.finalOrder[1:]
+		capture := d.snapshots.finalJobs[sess]
+		delete(d.snapshots.finalJobs, sess)
 		if capture != nil {
 			return capture
 		}
@@ -178,20 +178,20 @@ func (d *Daemon) takeFinalSnapshotCapture() *snapshotCapture {
 }
 
 func (d *Daemon) setSnapshotWorkerInFlight(workerID uint64, capture *snapshotCapture) bool {
-	d.snapshotWorkerMu.Lock()
-	defer d.snapshotWorkerMu.Unlock()
-	if d.snapshotWorkerID != workerID || d.snapshotWorkerCancel == nil || d.snapshotWorkerCtx == nil || d.snapshotWorkerCtx.Err() != nil {
+	d.snapshots.mu.Lock()
+	defer d.snapshots.mu.Unlock()
+	if d.snapshots.id != workerID || d.snapshots.cancel == nil || d.snapshots.ctx == nil || d.snapshots.ctx.Err() != nil {
 		return false
 	}
-	d.snapshotWorkerInFlight = capture
+	d.snapshots.inFlight = capture
 	return true
 }
 
 func (d *Daemon) clearSnapshotWorkerInFlight(workerID uint64, capture *snapshotCapture) {
-	d.snapshotWorkerMu.Lock()
-	defer d.snapshotWorkerMu.Unlock()
-	if d.snapshotWorkerID == workerID && d.snapshotWorkerInFlight == capture {
-		d.snapshotWorkerInFlight = nil
+	d.snapshots.mu.Lock()
+	defer d.snapshots.mu.Unlock()
+	if d.snapshots.id == workerID && d.snapshots.inFlight == capture {
+		d.snapshots.inFlight = nil
 	}
 }
 
@@ -240,11 +240,11 @@ func (d *Daemon) WaitDurableWriters() {
 	if d == nil {
 		return
 	}
-	d.snapshotWorkerMu.Lock()
-	snapshotDone := d.snapshotWorkerDone
-	maintenanceDone := d.maintenanceWorkerDone
-	restoreDone := d.restoreWorkerDone
-	d.snapshotWorkerMu.Unlock()
+	d.snapshots.mu.Lock()
+	snapshotDone := d.snapshots.done
+	maintenanceDone := d.snapshots.maintenanceWorkerDone
+	restoreDone := d.snapshots.restoreWorkerDone
+	d.snapshots.mu.Unlock()
 	if snapshotDone != nil {
 		<-snapshotDone
 		d.finishStoppedSnapshotWorker(false)
@@ -260,37 +260,37 @@ func (d *Daemon) WaitDurableWriters() {
 }
 
 func (d *Daemon) requestDurableWriterStop() (context.CancelFunc, <-chan struct{}) {
-	d.snapshotWorkerMu.Lock()
-	defer d.snapshotWorkerMu.Unlock()
+	d.snapshots.mu.Lock()
+	defer d.snapshots.mu.Unlock()
 	d.cancelDurableMaintenanceLocked()
-	cancel := d.snapshotWorkerCancel
+	cancel := d.snapshots.cancel
 	if cancel == nil {
 		return nil, nil
 	}
-	if !d.snapshotWorkerClosing {
-		d.snapshotWorkerClosing = true
-		close(d.snapshotWorkerFlush)
+	if !d.snapshots.closing {
+		d.snapshots.closing = true
+		close(d.snapshots.flush)
 	}
-	return cancel, d.snapshotWorkerDone
+	return cancel, d.snapshots.done
 }
 
 // durableWriterFailureNames includes admitted buffered captures as well as the
-// active and final queues. snapshotAdmitted tracks normal captures from queue
+// active and final queues. snapshots.admitted tracks normal captures from queue
 // admission through completion, so worker dequeue cannot make one disappear.
 func (d *Daemon) durableWriterFailureNames() []string {
-	d.snapshotWorkerMu.Lock()
-	defer d.snapshotWorkerMu.Unlock()
+	d.snapshots.mu.Lock()
+	defer d.snapshots.mu.Unlock()
 	seen := make(map[string]struct{})
 	add := func(capture *snapshotCapture) {
 		if capture != nil && capture.name != "" {
 			seen[capture.name] = struct{}{}
 		}
 	}
-	add(d.snapshotWorkerInFlight)
-	for _, capture := range d.snapshotFinalJobs {
+	add(d.snapshots.inFlight)
+	for _, capture := range d.snapshots.finalJobs {
 		add(capture)
 	}
-	for capture := range d.snapshotAdmitted {
+	for capture := range d.snapshots.admitted {
 		add(capture)
 	}
 	names := make([]string, 0, len(seen))
@@ -302,27 +302,27 @@ func (d *Daemon) durableWriterFailureNames() []string {
 }
 
 func (d *Daemon) finishStoppedSnapshotWorker(abandoned bool) {
-	d.snapshotWorkerMu.Lock()
-	inFlight := d.snapshotWorkerInFlight
-	d.snapshotWorkerCtx = nil
-	d.snapshotWorkerCancel = nil
-	d.snapshotWorkerDone = nil
-	d.snapshotWorkerFlush = nil
-	d.snapshotWorkerFinalWake = nil
-	d.snapshotWorkerClosing = false
-	d.snapshotWorkerInFlight = nil
-	queued := make([]*snapshotCapture, 0, len(d.snapshotJobs)+len(d.snapshotFinalJobs))
-	for _, capture := range d.snapshotFinalJobs {
+	d.snapshots.mu.Lock()
+	inFlight := d.snapshots.inFlight
+	d.snapshots.ctx = nil
+	d.snapshots.cancel = nil
+	d.snapshots.done = nil
+	d.snapshots.flush = nil
+	d.snapshots.finalWake = nil
+	d.snapshots.closing = false
+	d.snapshots.inFlight = nil
+	queued := make([]*snapshotCapture, 0, len(d.snapshots.jobs)+len(d.snapshots.finalJobs))
+	for _, capture := range d.snapshots.finalJobs {
 		queued = append(queued, capture)
 	}
-	d.snapshotFinalJobs = nil
-	d.snapshotFinalOrder = nil
+	d.snapshots.finalJobs = nil
+	d.snapshots.finalOrder = nil
 	for {
 		select {
-		case capture := <-d.snapshotJobs:
+		case capture := <-d.snapshots.jobs:
 			queued = append(queued, capture)
 		default:
-			d.snapshotWorkerMu.Unlock()
+			d.snapshots.mu.Unlock()
 			if abandoned {
 				d.finishSnapshotCapture(inFlight, false)
 			}

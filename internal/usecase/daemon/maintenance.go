@@ -19,16 +19,16 @@ func (d *Daemon) startDurableMaintenance() {
 	if d == nil || d.recovery == nil || !d.snapshotGarbageCollection {
 		return
 	}
-	d.snapshotWorkerMu.Lock()
-	if d.maintenanceWorkerCancel != nil {
-		d.snapshotWorkerMu.Unlock()
+	d.snapshots.mu.Lock()
+	if d.snapshots.maintenanceWorkerCancel != nil {
+		d.snapshots.mu.Unlock()
 		return
 	}
 	ctx, cancel := context.WithCancel(d.serveCtx)
-	d.maintenanceWorkerCancel = cancel
+	d.snapshots.maintenanceWorkerCancel = cancel
 	done := make(chan struct{})
-	d.maintenanceWorkerDone = done
-	d.snapshotWorkerMu.Unlock()
+	d.snapshots.maintenanceWorkerDone = done
+	d.snapshots.mu.Unlock()
 
 	go func() {
 		defer close(done)
@@ -39,15 +39,15 @@ func (d *Daemon) startDurableMaintenance() {
 // cancelDurableMaintenance stops the GC worker without waiting for it;
 // WaitDurableWriters owns the join.
 func (d *Daemon) cancelDurableMaintenance() {
-	d.snapshotWorkerMu.Lock()
-	defer d.snapshotWorkerMu.Unlock()
+	d.snapshots.mu.Lock()
+	defer d.snapshots.mu.Unlock()
 	d.cancelDurableMaintenanceLocked()
 }
 
-// cancelDurableMaintenanceLocked requires snapshotWorkerMu.
+// cancelDurableMaintenanceLocked requires snapshotWorker.mu (d.snapshots.mu).
 func (d *Daemon) cancelDurableMaintenanceLocked() {
-	if d.maintenanceWorkerCancel != nil {
-		d.maintenanceWorkerCancel()
+	if d.snapshots.maintenanceWorkerCancel != nil {
+		d.snapshots.maintenanceWorkerCancel()
 	}
 }
 

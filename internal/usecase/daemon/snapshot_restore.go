@@ -45,14 +45,14 @@ func (d *Daemon) startSnapshotRestoration() {
 	if d == nil {
 		return
 	}
-	d.snapshotWorkerMu.Lock()
-	if d.restoreWorkerDone != nil {
-		d.snapshotWorkerMu.Unlock()
+	d.snapshots.mu.Lock()
+	if d.snapshots.restoreWorkerDone != nil {
+		d.snapshots.mu.Unlock()
 		return
 	}
 	done := make(chan struct{})
-	d.restoreWorkerDone = done
-	d.snapshotWorkerMu.Unlock()
+	d.snapshots.restoreWorkerDone = done
+	d.snapshots.mu.Unlock()
 	d.sessWg.Go(func() {
 		defer close(done)
 		d.restoreSnapshots(d.serveCtx)
@@ -292,7 +292,7 @@ func (d *Daemon) restoreSnapshotPane(ctx context.Context, sessionName, tabStable
 func (d *Daemon) newRestoredSession(snap snapcodec.Session, sctx context.Context, cancel context.CancelFunc, tabs []*tab) *session {
 	// Restored sessions keep ordered tabs; attachment repair deterministically
 	// selects the first tab instead of restoring an interactive client view.
-	sess := &session{sessionCore: sessionCore{name: snap.Name, createdAt: int64(snap.CreatedAt)}, ctx: sctx, cancel: cancel, tabs: tabs, env: copyEnvironment(d.baseEnv), envProvisional: true, snapshotWake: d.snapshotWake, snapshotChunkCache: newSnapshotChunkCache(snapshotChunkCacheLimit)}
+	sess := &session{sessionCore: sessionCore{name: snap.Name, createdAt: int64(snap.CreatedAt)}, ctx: sctx, cancel: cancel, tabs: tabs, env: copyEnvironment(d.baseEnv), envProvisional: true, snapshotWake: d.snapshots.wake, snapshotChunkCache: newSnapshotChunkCache(snapshotChunkCacheLimit)}
 	// Restored tabs remain private until persistAndRegisterRestoredSession.
 	// Initialize owners now so registration and reader startup cannot expose an
 	// ownerless pane.

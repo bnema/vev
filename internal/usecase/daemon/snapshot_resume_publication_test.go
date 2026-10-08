@@ -204,9 +204,9 @@ func TestStoppedNamedSessionResumePublishesNextCheckpointInSameDaemon(t *testing
 	require.Len(t, attempts, 3, "the resumed checkpoint must reach the repository after the initial and terminal checkpoints")
 	require.NoError(t, publicationErrors[2])
 	require.False(t, resumed.snapDirty.Load(), "the published resumed checkpoint must clear dirty state")
-	d.snapshotNoticeMu.Lock()
-	failure := d.snapshotActiveFailureSignature
-	d.snapshotNoticeMu.Unlock()
+	d.snapshots.noticeMu.Lock()
+	failure := d.snapshots.activeFailureSignature
+	d.snapshots.noticeMu.Unlock()
 	require.Empty(t, failure, "successful resumed publication must not retain a failure signature")
 	require.Equal(t, closedRecord.Committed.Generation+1, resumedRecord.Committed.Generation,
 		"same-daemon resume must publish exactly committed generation+1")

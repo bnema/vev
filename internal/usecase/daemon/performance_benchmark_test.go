@@ -180,9 +180,9 @@ func TestPerformanceFixtureExplicitCloseReleasesIterationState(t *testing.T) {
 	}
 	d.mu.Unlock()
 	require.NotContains(t, sessionIDs, sess.id)
-	d.snapshotWorkerMu.Lock()
-	workerCancel := d.snapshotWorkerCancel
-	d.snapshotWorkerMu.Unlock()
+	d.snapshots.mu.Lock()
+	workerCancel := d.snapshots.cancel
+	d.snapshots.mu.Unlock()
 	require.Nil(t, workerCancel)
 }
 

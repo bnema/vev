@@ -361,8 +361,8 @@ func (d *Daemon) newFloatingLaunchSpec(sess *session, tb *tab, cfg domain.Floati
 	focused := tb.focusedPane()
 	tabStableID, tabCtx := tb.stableID, tb.ctx
 	tb.mu.Unlock()
-	if focused != nil && d.procCwd != nil && focused.pty != nil {
-		if live, err := d.procCwd(focused.pty.Pid()); err == nil && live != "" {
+	if focused != nil && d.proc != nil && focused.pty != nil {
+		if live, err := d.proc.Cwd(focused.pty.Pid()); err == nil && live != "" {
 			cwd = live
 		}
 	}

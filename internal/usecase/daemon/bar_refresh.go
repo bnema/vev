@@ -136,13 +136,13 @@ func (d *Daemon) collectBarScriptContext(sess *session, anchor string) (barScrip
 	pid := 0
 	if p := tb.focusedPane(); p != nil {
 		ctx.Pane = p.stableID
-		if d != nil && d.procCwd != nil && p.pty != nil {
+		if d != nil && d.proc != nil && p.pty != nil {
 			pid = p.pty.Pid()
 		}
 	}
 	tb.mu.Unlock()
-	if pid != 0 && d != nil && d.procCwd != nil {
-		if cwd, err := d.procCwd(pid); err == nil && cwd != "" {
+	if pid != 0 && d != nil && d.proc != nil {
+		if cwd, err := d.proc.Cwd(pid); err == nil && cwd != "" {
 			ctx.PaneCWD = cwd
 		}
 	}
@@ -316,6 +316,7 @@ func (d *Daemon) refreshBarScriptsIfDue(sess *session, now time.Time, force bool
 	return true
 }
 
+// scheduleBarScriptRefreshLocked requires d.barScripts.mu, not d.mu.
 func (d *Daemon) scheduleBarScriptRefreshLocked(sess *session, delay time.Duration) {
 	if d.barScripts.pending[sess.id] {
 		return

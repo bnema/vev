@@ -1262,7 +1262,7 @@ func TestMouseWheelOverUnfocusedPaneDoesNotFocusAndForwardsChildMouse(t *testing
 	p2.EXPECT().Resize(domain.Geometry{Size: domain.Size{Cols: 20, Rows: 5}}).Return(nil).Maybe()
 	p2.EXPECT().Write([]byte("\x1b[<64;1;1M")).Return(len("\x1b[<64;1;1M"), nil).Once()
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p1)
-	d.procComm = nil
+	d.proc = nil
 	tb := testAttachmentTab(sess)
 	p2pane := newPane("pane-2", p2, domain.Size{Cols: 20, Rows: 5})
 	p2pane.screen.Write([]byte("\x1b[?1000h\x1b[?1006h"))
@@ -1444,7 +1444,7 @@ func TestMouseDividerAndTitleBarDoNotForwardBogusCoordinates(t *testing.T) {
 			p2 := portsmocks.NewMockPTY(t)
 			p2.EXPECT().Resize(mock.Anything).Return(nil).Maybe()
 			d, sess, ac, _ := newManualSessionWithPTYs(t, p1)
-			d.procComm = nil
+			d.proc = nil
 			tb := testAttachmentTab(sess)
 			tb.focusedPane().screen.Write([]byte("\x1b[?1000h\x1b[?1006h"))
 			tb.mu.Lock()
@@ -1467,7 +1467,7 @@ func TestCopyModeDragOutsideSplitPaneClampsToPaneContent(t *testing.T) {
 	p2 := portsmocks.NewMockPTY(t)
 	p2.EXPECT().Resize(domain.Geometry{Size: domain.Size{Cols: 20, Rows: 10}}).Return(nil).Maybe()
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p1)
-	d.procComm = nil
+	d.proc = nil
 	tb := testAttachmentTab(sess)
 	for i := range 10 {
 		writeTestRow(tb.focusedPane().screen, i, string(rune('a'+i)))
@@ -1501,7 +1501,7 @@ func TestMouseHitTestFocusesPaneAndTranslatesSGRColumns(t *testing.T) {
 	p2.EXPECT().Resize(domain.Geometry{Size: domain.Size{Cols: 20, Rows: 5}}).Return(nil).Maybe()
 	p2.EXPECT().Write([]byte("\x1b[<0;1;1M")).Return(len("\x1b[<0;1;1M"), nil).Once()
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p1)
-	d.procComm = nil
+	d.proc = nil
 	tb := testAttachmentTab(sess)
 	p2pane := newPane("pane-2", p2, domain.Size{Cols: 20, Rows: 5})
 	p2pane.screen.Write([]byte("\x1b[?1000h\x1b[?1006h"))
@@ -1528,7 +1528,7 @@ func TestMouseGatedWhileNoticesOverlayActive(t *testing.T) {
 	p2 := portsmocks.NewMockPTY(t)
 	p2.EXPECT().Resize(domain.Geometry{Size: domain.Size{Cols: 20, Rows: 5}}).Return(nil).Maybe()
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p1)
-	d.procComm = nil
+	d.proc = nil
 	tb := testAttachmentTab(sess)
 	p2pane := newPane("pane-2", p2, domain.Size{Cols: 20, Rows: 5})
 	p2pane.screen.Write([]byte("\x1b[?1000h\x1b[?1006h"))
@@ -1558,7 +1558,7 @@ func TestMouseCollapsedStackBarExpandsAndFocuses(t *testing.T) {
 	p2 := portsmocks.NewMockPTY(t)
 	p2.EXPECT().Resize(domain.Geometry{Size: domain.Size{Cols: 20, Rows: 4}}).Return(nil).Maybe()
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p1)
-	d.procComm = nil
+	d.proc = nil
 	tb := testAttachmentTab(sess)
 	p2pane := newPane("pane-2", p2, domain.Size{Cols: 20, Rows: 3})
 	tb.mu.Lock()

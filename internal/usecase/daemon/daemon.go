@@ -148,25 +148,16 @@ type Daemon struct {
 	// re-suspension, detach, or session teardown can never be retired by a
 	// stale timer. Guarded by mu.
 	suspended map[*attachedClient]*suspendedAttachmentRetention
-	// graphicsNamespaces reserves deterministic, attachment/session-scoped Kitty
-	// ID blocks. Once a block may have reached an outer terminal it remains in
-	// this bounded table for the daemon lifetime: side-effect Output frames have
-	// no terminal ACK. Pool exhaustion disables graphics for new attachments and
-	// leaves their ordinary text output intact.
-	graphicsNamespaces           map[uint64]struct{}
-	graphicsNamespaceFences      map[uint64]uint64
-	graphicsNamespaceQuarantines map[uint64]*graphicsNamespaceQuarantine
-	// graphicsNamespaceSalt separates daemon lifetimes before attachment keys
-	// are hashed. Kitty IDs are terminal-global, so a restarted or neighboring
-	// daemon must not deterministically reopen the previous daemon's block.
-	graphicsNamespaceSalt uint64
+	// graphics reserves attachment/session-scoped Kitty ID blocks. Guarded by
+	// mu; see graphicsNamespacePool.
+	graphics graphicsNamespacePool
 
 	attnMu    sync.Mutex
 	animFrame int
 	animWake  chan struct{}
 
-	paletteRecentMu sync.Mutex
-	paletteRecent   []string
+	// paletteHistory is the daemon-wide recent-command order; its mu is a leaf.
+	paletteHistory paletteHistory
 	// daemonTestHooks holds deterministic test seams; production leaves every
 	// hook nil.
 	daemonTestHooks
@@ -186,65 +177,30 @@ type Daemon struct {
 	snapshotRepository        ports.SnapshotRepository
 	recovery                  *recoveryusecase.Coordinator
 	snapshotGarbageCollection bool
-	maintenanceWorkerCancel   context.CancelFunc
-	maintenanceWorkerDone     chan struct{}
-	// restoreWorkerDone is the restoration goroutine's ownership signal. Startup
-	// restoration reconciles durable checkpoints, so it is a durable writer and
-	// is guarded by snapshotWorkerMu with the other two.
-	restoreWorkerDone chan struct{}
-	snapsEnabled      bool
-	noticeStore       ports.NoticeStore
-	snapshotJobs      chan *snapshotCapture
-	// snapshotAdmitted contains every capture accepted by either worker queue,
-	// including captures buffered in snapshotJobs. Guarded by snapshotWorkerMu.
-	snapshotAdmitted map[*snapshotCapture]struct{}
-	// snapshotWake wakes the repository scheduler when a session becomes dirty
-	// or an attempt completes. It is never closed and producers only send
-	// non-blockingly.
-	snapshotWake            chan struct{}
-	snapshotWorkerMu        sync.Mutex
-	snapshotWorkerID        uint64
-	snapshotWorkerCtx       context.Context
-	snapshotWorkerCancel    context.CancelFunc
-	snapshotWorkerDone      chan struct{}
-	snapshotWorkerFlush     chan struct{}
-	snapshotWorkerFinalWake chan struct{}
-	// snapshotFinalJobs coalesces terminal captures by session when the bounded
-	// regular queue is full. It retains at most snapshotFinalQueueCapacity named
-	// sessions, each with only its newest terminal state while the worker blocks.
-	snapshotFinalJobs      map[*session]*snapshotCapture
-	snapshotFinalOrder     []*session
-	snapshotWorkerClosing  bool
-	snapshotWorkerInFlight *snapshotCapture
-	// snapshotNoticeMu guards the active global persistence failure signature.
-	// It is separate from snapshotWorkerMu so notice routing cannot block a
-	// producer or a repository worker.
-	snapshotNoticeMu               sync.Mutex
-	snapshotActiveFailureSignature string
-	shutdownNoticeMu               sync.Mutex
-	shutdownNoticedSessions        map[string]struct{}
-	restoreDone                    chan struct{}
-	restoreOnce                    sync.Once
-	procCwd                        func(int) (string, error)
-	procComm                       func(int) (string, error)
-	procArgv                       func(int) ([]string, error)
-	procGroupArgv                  func(int, int) ([]string, error)
-	dirOrHome                      func(string) string
-	bindings                       atomic.Pointer[keys.Bindings]
-	codeOverrides                  atomic.Pointer[map[string]string]
-	restoreProcessAllowlist        atomic.Pointer[map[string]struct{}]
-	floatingConfig                 atomic.Pointer[domain.FloatingConfig]
-	copyConfig                     atomic.Pointer[domain.CopyConfig]
-	paletteConfig                  atomic.Pointer[domain.PaletteConfig]
-	navConfig                      atomic.Pointer[domain.NavConfig]
-	tabsConfig                     atomic.Pointer[domain.TabsConfig]
-	ephemeralConfig                atomic.Pointer[domain.EphemeralConfig]
-	scrollbackConfig               atomic.Pointer[domain.ScrollbackConfig]
-	themeConfig                    atomic.Pointer[themeConfigSnapshot]
-	barScripts                     *barScriptState
-	notices                        *noticeCenter
-	resumeParkGrace                time.Duration
-	suspendedSafetyExpiry          time.Duration
+	snapsEnabled              bool
+	noticeStore               ports.NoticeStore
+	// snapshots owns the snapshot worker, the durable-writer lifecycle
+	// signals, and the global persistence-failure notice state.
+	snapshots               snapshotWorker
+	shutdownNoticeMu        sync.Mutex
+	shutdownNoticedSessions map[string]struct{}
+	restoreDone             chan struct{}
+	restoreOnce             sync.Once
+	// proc inspects pane processes (cwd, foreground command, argv). Nil means
+	// no inspection is available; see WithProcessInspector and WithCwdReader.
+	proc      ports.ProcessInspector
+	dirOrHome func(string) string
+	// bindings is read by keys.Router through its own atomic pointer, so it is
+	// published next to (not inside) the runtime config snapshot.
+	bindings atomic.Pointer[keys.Bindings]
+	// config is the immutable runtime configuration snapshot, published with
+	// defaults by New and replaced by every ApplyConfig; read it through
+	// currentRuntimeConfig.
+	config                atomic.Pointer[runtimeConfig]
+	barScripts            *barScriptState
+	notices               *noticeCenter
+	resumeParkGrace       time.Duration
+	suspendedSafetyExpiry time.Duration
 	// tempDir overrides os.TempDir() for clipboard-image-transfer writes
 	// (see clipboard.go); empty means use os.TempDir().
 	tempDir string
@@ -572,10 +528,12 @@ func WithSnapshotGarbageCollection() Option {
 }
 
 // WithCwdReader overrides the process cwd reader used for persistence tests.
+// Every other inspection keeps using the installed process inspector, or stays
+// unavailable when none is installed.
 func WithCwdReader(fn func(int) (string, error)) Option {
 	return func(d *Daemon) {
 		if fn != nil {
-			d.procCwd = fn
+			d.proc = cwdOverrideInspector{base: unwrapCwdOverride(d.proc), cwd: fn}
 		}
 	}
 }
@@ -586,10 +544,7 @@ func WithProcessInspector(ins ports.ProcessInspector) Option {
 		if ins == nil {
 			return
 		}
-		d.procCwd = ins.Cwd
-		d.procComm = ins.Comm
-		d.procArgv = ins.Argv
-		d.procGroupArgv = ins.GroupArgv
+		d.proc = ins
 	}
 }
 
@@ -715,32 +670,31 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 	}
 	paneProcessCtx, paneProcessCancel := context.WithCancel(context.Background())
 	d := &Daemon{
-		sessions:                     make(map[domain.SessionID]*session),
-		inactive:                     make(map[string]inactiveSession),
-		creating:                     make(map[string]struct{}),
-		resume:                       newResumeCredentials(),
-		suspended:                    make(map[*attachedClient]*suspendedAttachmentRetention),
-		graphicsNamespaces:           make(map[uint64]struct{}),
-		graphicsNamespaceFences:      make(map[uint64]uint64),
-		graphicsNamespaceQuarantines: make(map[uint64]*graphicsNamespaceQuarantine),
-		graphicsNamespaceSalt:        newGraphicsNamespaceSalt(),
-		paneProcessCtx:               paneProcessCtx,
-		paneProcessCancel:            paneProcessCancel,
-		ptys:                         ptys,
-		clock:                        clock,
-		log:                          log,
-		baseEnv:                      os.Environ(),
-		shell:                        defaultShellCommand,
-		dirOrHome:                    dirOrHome,
-		done:                         make(chan struct{}),
-		restoreDone:                  make(chan struct{}),
-		animWake:                     make(chan struct{}, 1),
-		snapshotJobs:                 make(chan *snapshotCapture, snapshotQueueCapacity),
-		snapshotAdmitted:             make(map[*snapshotCapture]struct{}),
-		snapshotWake:                 make(chan struct{}, 1),
-		notices:                      newNoticeCenter(),
-		resumeParkGrace:              defaultResumeParkGrace,
-		suspendedSafetyExpiry:        defaultSuspendedSafetyExpiry,
+		sessions:          make(map[domain.SessionID]*session),
+		inactive:          make(map[string]inactiveSession),
+		creating:          make(map[string]struct{}),
+		resume:            newResumeCredentials(),
+		suspended:         make(map[*attachedClient]*suspendedAttachmentRetention),
+		graphics:          newGraphicsNamespacePool(),
+		paneProcessCtx:    paneProcessCtx,
+		paneProcessCancel: paneProcessCancel,
+		ptys:              ptys,
+		clock:             clock,
+		log:               log,
+		baseEnv:           os.Environ(),
+		shell:             defaultShellCommand,
+		dirOrHome:         dirOrHome,
+		done:              make(chan struct{}),
+		restoreDone:       make(chan struct{}),
+		animWake:          make(chan struct{}, 1),
+		snapshots: snapshotWorker{
+			jobs:     make(chan *snapshotCapture, snapshotQueueCapacity),
+			admitted: make(map[*snapshotCapture]struct{}),
+			wake:     make(chan struct{}, 1),
+		},
+		notices:               newNoticeCenter(),
+		resumeParkGrace:       defaultResumeParkGrace,
+		suspendedSafetyExpiry: defaultSuspendedSafetyExpiry,
 		barScripts: &barScriptState{
 			cfg:         barConfigFromDomain(domain.Defaults().Bar),
 			outputs:     make(map[domain.SessionID]barScriptOutputs),
@@ -750,15 +704,7 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 			reload:      make(chan struct{}, 1),
 		},
 	}
-	defaults := domain.Defaults()
-	defaultFloating := defaults.Floating
-	d.floatingConfig.Store(&defaultFloating)
-	defaultCopy := defaults.Copy
-	d.copyConfig.Store(&defaultCopy)
-	defaultPalette := defaults.Palette
-	d.paletteConfig.Store(&defaultPalette)
-	defaultTabs := defaults.Tabs
-	d.tabsConfig.Store(&defaultTabs)
+	d.config.Store(defaultRuntimeConfig())
 	for _, o := range opts {
 		o(d)
 	}
@@ -767,14 +713,6 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 	}
 	if d.bindings.Load() == nil {
 		d.bindings.Store(keys.DefaultBindings())
-	}
-	if d.codeOverrides.Load() == nil {
-		empty := map[string]string{}
-		d.codeOverrides.Store(&empty)
-	}
-	if d.restoreProcessAllowlist.Load() == nil {
-		allow := buildRestoreProcessAllowlist(domain.DefaultSnapshotRestoreProcesses())
-		d.restoreProcessAllowlist.Store(&allow)
 	}
 	records := d.catalogueRecords
 	var maxSeq uint64

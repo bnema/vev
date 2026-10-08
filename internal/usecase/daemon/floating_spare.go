@@ -100,8 +100,8 @@ func (d *Daemon) ensureFloatingSpare(sess *session, tb *tab) {
 				}
 				d.reapInstalledFloating(spare)
 			}
-			d.sessWg.Add(1)
-			go d.readPanePTY(p)
+			reader := p
+			d.sessWg.Go(func() { d.readPanePTY(reader) })
 			p = nil
 		}
 		sess.floatingLaunchMu.Unlock()

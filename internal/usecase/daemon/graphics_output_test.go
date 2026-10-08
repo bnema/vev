@@ -398,13 +398,13 @@ func TestGraphicsNamespaceQuarantinesOnParkExpiryAndFailedCleanup(t *testing.T) 
 		done: make(chan struct{}),
 	}
 	d.mu.Lock()
-	d.graphicsNamespaces[block] = struct{}{}
+	d.graphics.reserved[block] = struct{}{}
 	d.resume.parked[1] = parked
 	d.mu.Unlock()
 	d.expireParked(1, parked)
 	require.Nil(t, parked.ac.output.graphicsOutput)
 	d.mu.Lock()
-	_, reserved := d.graphicsNamespaces[block]
+	_, reserved := d.graphics.reserved[block]
 	d.mu.Unlock()
 	require.False(t, reserved, "park expiry with no outer objects may release the attachment namespace")
 
@@ -417,12 +417,12 @@ func TestGraphicsNamespaceQuarantinesOnParkExpiryAndFailedCleanup(t *testing.T) 
 		output: attachmentOutputWithGraphics(failedState),
 	}
 	d.mu.Lock()
-	d.graphicsNamespaces[block] = struct{}{}
+	d.graphics.reserved[block] = struct{}{}
 	d.mu.Unlock()
 	require.Error(t, d.cleanupAttachmentOutput(failed), "failing transport must surface the cleanup send error")
 	require.Nil(t, failed.output.graphicsOutput)
 	d.mu.Lock()
-	_, reserved = d.graphicsNamespaces[block]
+	_, reserved = d.graphics.reserved[block]
 	d.mu.Unlock()
 	require.True(t, reserved, "failed terminal cleanup must quarantine the namespace")
 }
@@ -453,7 +453,7 @@ func TestGraphicsNamespaceStaysQuarantinedAfterSocketSendSuccessWithoutTerminalF
 	require.Zero(t, cleanup.New, "graphics cleanup is an unacknowledged side-effect frame")
 
 	d.mu.Lock()
-	_, quarantined := d.graphicsNamespaceQuarantines[(oldBase-1)/graphicsIDNamespaceSize]
+	_, quarantined := d.graphics.quarantines[(oldBase-1)/graphicsIDNamespaceSize]
 	newBase, _ := d.reserveGraphicsNamespaceLeaseLocked(key)
 	d.mu.Unlock()
 	require.True(t, quarantined, "socket-send success cannot prove terminal cleanup")
@@ -491,7 +491,7 @@ func TestGraphicsNamespaceStaysQuarantinedAfterFinalDeleteAndParkExpiry(t *testi
 	d.expireParked(1, parked)
 
 	d.mu.Lock()
-	_, quarantined := d.graphicsNamespaceQuarantines[(oldBase-1)/graphicsIDNamespaceSize]
+	_, quarantined := d.graphics.quarantines[(oldBase-1)/graphicsIDNamespaceSize]
 	newBase, _ := d.reserveGraphicsNamespaceLeaseLocked(key)
 	d.mu.Unlock()
 	require.True(t, quarantined, "an apparently empty parked state still has unacknowledged terminal history")
@@ -502,7 +502,7 @@ func TestGraphicsNamespacePoolExhaustionFallsBackToText(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	d.mu.Lock()
 	for block := uint64(0); block < graphicsIDNamespaceCount; block++ {
-		d.graphicsNamespaces[block] = struct{}{}
+		d.graphics.reserved[block] = struct{}{}
 	}
 	ac := d.prepareAttachedClientLocked(
 		&session{sessionCore: sessionCore{id: "work"}},
@@ -552,7 +552,7 @@ func TestGraphicsNamespaceQuarantineFencesTimedOutLateDelete(t *testing.T) {
 
 	d.mu.Lock()
 	newBase, newFence := d.reserveGraphicsNamespaceLeaseLocked(key)
-	_, quarantined := d.graphicsNamespaceQuarantines[(oldBase-1)/graphicsIDNamespaceSize]
+	_, quarantined := d.graphics.quarantines[(oldBase-1)/graphicsIDNamespaceSize]
 	d.mu.Unlock()
 	require.True(t, quarantined, "timed-out cleanup must keep its namespace quarantined")
 	require.NotEqual(t, oldBase, newBase, "new allocation must skip the quarantined namespace")
@@ -575,7 +575,7 @@ func TestGraphicsNamespaceQuarantineFencesTimedOutLateDelete(t *testing.T) {
 	require.Contains(t, string(staleOutput.Data), "i="+strconv.FormatUint(oldID, 10))
 	require.NotContains(t, string(staleOutput.Data), "i="+strconv.FormatUint(newID, 10), "late cleanup must never target the fresh attachment")
 	d.mu.Lock()
-	_, retained := d.graphicsNamespaceQuarantines[(oldBase-1)/graphicsIDNamespaceSize]
+	_, retained := d.graphics.quarantines[(oldBase-1)/graphicsIDNamespaceSize]
 	d.mu.Unlock()
 	require.True(t, retained, "late transport success is not a terminal ACK and must not release the namespace")
 }

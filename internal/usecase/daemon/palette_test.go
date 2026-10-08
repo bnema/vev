@@ -387,7 +387,7 @@ func TestPaletteSelectedActiveSessionSwitchesWithoutRecordingCommandRecency(t *t
 	require.Same(t, target, ac.currentSession())
 	require.Contains(t, target.snapshotAttachments(), ac, "canonical handoff reuses the attached client")
 	require.False(t, ac.overlays.paletteActive())
-	require.Empty(t, d.paletteRecent, "session selections are not command recency")
+	require.Empty(t, d.paletteHistory.recent, "session selections are not command recency")
 	awaitFrame(t, sends, "Output")
 	awaitFrame(t, sends, "Output")
 }
@@ -923,7 +923,7 @@ func TestCommandByEffectiveCodeExcludesAPIOnlyCommands(t *testing.T) {
 		"new-tab": "TAB",
 		"toast":   "API",
 	}
-	d.codeOverrides.Store(&overrides)
+	updateRuntimeConfig(d, func(rc *runtimeConfig) { rc.codeOverrides = overrides })
 
 	cmd, ok := d.commandByEffectiveCode("tab")
 	require.True(t, ok)
@@ -936,11 +936,11 @@ func TestCommandByEffectiveCodeExcludesAPIOnlyCommands(t *testing.T) {
 
 func TestPaletteRecentCommandsNewestFirstThenRegistryOrder(t *testing.T) {
 	d := &Daemon{}
-	d.recordPaletteUse("SSP")
-	d.recordPaletteUse("NXT")
+	d.paletteHistory.record("SSP")
+	d.paletteHistory.record("NXT")
 	// STALE is not a registered command code; it must be dropped from output.
-	d.recordPaletteUse("STALE")
-	d.recordPaletteUse("SSP")
+	d.paletteHistory.record("STALE")
+	d.paletteHistory.record("SSP")
 
 	commands := d.paletteCommands()
 	codes := make([]string, len(commands))
@@ -960,7 +960,7 @@ func TestPaletteRecencyCanBeUpdatedConcurrently(t *testing.T) {
 			wg.Add(1)
 			go func(code string) {
 				defer wg.Done()
-				d.recordPaletteUse(code)
+				d.paletteHistory.record(code)
 				_ = d.paletteCommands()
 			}(code)
 		}
@@ -1228,7 +1228,7 @@ func TestPaletteTabCompletesSelectedCommandWithoutForwardingToPTY(t *testing.T) 
 			d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 			invs := installPaletteInvalidationObserver(sess)
 			if tt.recent != "" {
-				d.recordPaletteUse(tt.recent)
+				d.paletteHistory.record(tt.recent)
 			}
 			if tt.config != nil {
 				d.ApplyConfig(domain.Config{Codes: tt.config})

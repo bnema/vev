@@ -247,9 +247,9 @@ func (d *Daemon) finishSnapshotCapture(capture *snapshotCapture, succeeded bool)
 		wake := capture.session.snapshotWake
 		capture.session.snapshotMu.Unlock()
 		if capture.normalWorkerAdmitted {
-			d.snapshotWorkerMu.Lock()
-			delete(d.snapshotAdmitted, capture)
-			d.snapshotWorkerMu.Unlock()
+			d.snapshots.mu.Lock()
+			delete(d.snapshots.admitted, capture)
+			d.snapshots.mu.Unlock()
 		}
 		if wake != nil {
 			select {

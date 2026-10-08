@@ -135,7 +135,7 @@ func TestQuarantineDiscardDoesNotDoubleDecrementPendingCaptures(t *testing.T) {
 	// Model the worker having already dequeued the stale capture: the global
 	// bounded queue still holds it, so free the slot before the replacement.
 	select {
-	case dequeued := <-d.snapshotJobs:
+	case dequeued := <-d.snapshots.jobs:
 		require.Same(t, first, dequeued)
 	default:
 		t.Fatal("the discarded capture must still be queued in the global worker queue")
@@ -356,9 +356,9 @@ func TestForcedSnapshotShutdownTimeoutRetainsRetryableStateAndNotice(t *testing.
 		require.NotNil(t, sess.snapshotQueuedCapture, "the one routine capture remains retryable")
 		require.Nil(t, sess.snapshotInFlightCapture)
 	}()
-	d.snapshotWorkerMu.Lock()
-	require.LessOrEqual(t, len(d.snapshotJobs), snapshotQueueCapacity)
-	d.snapshotWorkerMu.Unlock()
+	d.snapshots.mu.Lock()
+	require.LessOrEqual(t, len(d.snapshots.jobs), snapshotQueueCapacity)
+	d.snapshots.mu.Unlock()
 
 	// The retained capture is not published after quarantine, but releasing the
 	// unrelated blocked call lets the worker discard it and lets cleanup join.
@@ -572,7 +572,7 @@ func TestServeShutdownCheckpointsBeforeStoppingSnapshotWorker(t *testing.T) {
 
 	awaitFrame(t, sends, "Welcome")
 	markSnapshotDirty(firstSession(d))
-	d.snapshotWake <- struct{}{}
+	d.snapshots.wake <- struct{}{}
 	first := <-published
 	require.Equal(t, uint64(1), first.Generation)
 
@@ -629,7 +629,7 @@ func TestServeShutdownDeadlineStillJoinsUncooperativeSnapshotRepository(t *testi
 
 	awaitFrame(t, sends, "Welcome")
 	markSnapshotDirty(firstSession(d))
-	d.snapshotWake <- struct{}{}
+	d.snapshots.wake <- struct{}{}
 	select {
 	case <-firstPublicationCompleted:
 	case <-time.After(testWaitTimeout):
@@ -642,9 +642,9 @@ func TestServeShutdownDeadlineStillJoinsUncooperativeSnapshotRepository(t *testi
 	case <-time.After(testWaitTimeout):
 		t.Fatal("shutdown terminal checkpoint did not reach the worker")
 	}
-	d.snapshotWorkerMu.Lock()
-	workerDone := d.snapshotWorkerDone
-	d.snapshotWorkerMu.Unlock()
+	d.snapshots.mu.Lock()
+	workerDone := d.snapshots.done
+	d.snapshots.mu.Unlock()
 	require.NotNil(t, workerDone)
 	clock.nextFinalTimer(t).fire()
 	select {
@@ -926,7 +926,7 @@ func TestSnapshotSchedulerImmediateEligibilityAndStaleCapturesRemainDirty(t *tes
 		}).Once()
 
 		sess := newSnapshotTestSession(t, "immediate", false, "/work")
-		sess.snapshotWake = d.snapshotWake
+		sess.snapshotWake = d.snapshots.wake
 		sess.snapDirty.Store(true)
 		d.sessions[sess.id] = sess
 
@@ -1000,10 +1000,10 @@ func TestSnapshotWorkerQueueIsBoundedAndForcedCapturesCoalesce(t *testing.T) {
 	markSnapshotDirty(queued)
 	require.True(t, d.scheduleSnapshot(queued))
 
-	d.snapshotWorkerMu.Lock()
-	require.NotNil(t, d.snapshotWorkerInFlight)
-	require.Len(t, d.snapshotJobs, snapshotQueueCapacity)
-	d.snapshotWorkerMu.Unlock()
+	d.snapshots.mu.Lock()
+	require.NotNil(t, d.snapshots.inFlight)
+	require.Len(t, d.snapshots.jobs, snapshotQueueCapacity)
+	d.snapshots.mu.Unlock()
 
 	saturated := newSnapshotTestSession(t, "saturated", false, "/work")
 	markSnapshotDirty(saturated)
@@ -1041,7 +1041,7 @@ func TestSnapshotRepositorySaverUsesEarliestDeadlineAndRecomputes(t *testing.T) 
 	}).Once()
 
 	later := newSnapshotTestSession(t, "later", false, "/work")
-	later.snapshotWake = d.snapshotWake
+	later.snapshotWake = d.snapshots.wake
 	later.snapDirty.Store(true)
 	later.snapshotNextEligibleAt = now.Add(10 * time.Minute)
 	d.sessions[later.id] = later
@@ -1056,11 +1056,11 @@ func TestSnapshotRepositorySaverUsesEarliestDeadlineAndRecomputes(t *testing.T) 
 	require.Equal(t, 10*time.Minute, <-timer.resets)
 
 	earlier := newSnapshotTestSession(t, "earlier", false, "/work")
-	earlier.snapshotWake = d.snapshotWake
+	earlier.snapshotWake = d.snapshots.wake
 	earlier.snapDirty.Store(true)
 	earlier.snapshotNextEligibleAt = now.Add(5 * time.Minute)
 	d.sessions[earlier.id] = earlier
-	d.snapshotWake <- struct{}{}
+	d.snapshots.wake <- struct{}{}
 	require.Equal(t, 5*time.Minute, <-timer.resets)
 
 	clock.advance(now.Add(5 * time.Minute))
@@ -1083,7 +1083,7 @@ func TestSnapshotRepositorySaverUsesEarliestDeadlineAndRecomputes(t *testing.T) 
 	require.Equal(t, 5*time.Minute, <-timer.resets)
 
 	delete(d.sessions, later.id)
-	d.snapshotWake <- struct{}{}
+	d.snapshots.wake <- struct{}{}
 	require.Equal(t, 24*time.Hour, <-timer.resets)
 
 	cancel()

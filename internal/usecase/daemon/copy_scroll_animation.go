@@ -66,6 +66,7 @@ func (d *Daemon) smoothCopyWheel(sess *session, ac *attachedClient, delta int) {
 	}
 }
 
+// advanceCopyScrollLocked requires ac.overlays.copyMu, not d.mu.
 func (d *Daemon) advanceCopyScrollLocked(sess *session, ac *attachedClient) (bool, bool) {
 	rt := ac.overlays
 	motion := &rt.copyScroll

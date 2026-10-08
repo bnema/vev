@@ -17,7 +17,7 @@ func (d *Daemon) snapshotRepositorySaver(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-d.snapshotWake:
+		case <-d.snapshots.wake:
 		case <-timer.C():
 		}
 	}
