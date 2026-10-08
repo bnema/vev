@@ -591,6 +591,9 @@ func (d *Daemon) boundedSendOutputErrTransport(ac *attachedClient, b []byte) (po
 		if err == nil {
 			err = expected.transport.SendOutputSynchronous(output)
 		}
+		if err == nil {
+			ac.output.sideEffectSentLocked(output)
+		}
 		return expected.transport, err
 	}
 	return d.boundedSendWith(expected.transport, func() error {
@@ -605,7 +608,11 @@ func (d *Daemon) boundedSendOutputErrTransport(ac *attachedClient, b []byte) (po
 		if err != nil {
 			return err
 		}
-		return expected.transport.SendOutput(output)
+		if err := expected.transport.SendOutput(output); err != nil {
+			return err
+		}
+		ac.output.sideEffectSentLocked(output)
+		return nil
 	})
 }
 

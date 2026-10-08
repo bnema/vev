@@ -293,6 +293,9 @@ func (d *Daemon) boundedSendClipboardForward(item clipboardForward, ticket *atta
 				err = expected.transport.SendOutput(output)
 			}
 		}
+		if err == nil {
+			ac.output.sideEffectSentLocked(output)
+		}
 		if err != nil {
 			ticket.reportTransportFailure(expected)
 		}

@@ -33,6 +33,13 @@ const MaxOutputDataLen = (16 << 20) - 1 - 55 - (8 + 16 + 2 + 64 + 1 + 2 + 128 + 
 // MaxOutputWindow caps output states sent before client acknowledgement.
 const MaxOutputWindow = 8
 
+// MaxOutputWindowBytes caps the Output data a daemon keeps unacknowledged per
+// attachment, state frames and side effects together. A full window of large
+// frames would otherwise overrun every bounded buffer between daemon and
+// terminal. The daemon may always send one frame when none is unacknowledged,
+// so a single frame up to MaxOutputDataLen still makes progress.
+const MaxOutputWindowBytes = 2 << 20
+
 // ConnectionCapabilities describes transport behavior relevant to session
 // flow without naming a concrete carriage.
 type ConnectionCapabilities struct {
