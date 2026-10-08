@@ -364,6 +364,10 @@ func (l *listener) startSession(transport wire.BoundedTransport, release func())
 		session.shutdown()
 		return nil, ErrListenerClosed
 	}
+	// The session owns the carriage from here: drop it from pending in the
+	// same critical section, so a Register racing admit's own untrack never
+	// sees a stale pending carriage and refuses to retire.
+	delete(l.pending, transport)
 	l.sessions[session] = struct{}{}
 	l.mu.Unlock()
 	go session.run()
