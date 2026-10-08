@@ -1397,7 +1397,7 @@ func TestEphemeralParkExpiryKeepsSessionWhenCloseOnExitOff(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
 	d := newTestDaemon(t, newFactory(t, pty), clk)
-	d.ephemeralConfig.Store(&domain.EphemeralConfig{CloseOnExit: false})
+	updateRuntimeConfig(d, func(rc *runtimeConfig) { rc.ephemeral = domain.EphemeralConfig{CloseOnExit: false} })
 
 	tr := &closeTrackingTransport{}
 	sess, ac, err := d.route(helloResumeCapable(protocol.IntentEphemeral, "", 0), tr)

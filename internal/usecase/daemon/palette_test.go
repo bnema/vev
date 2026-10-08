@@ -923,7 +923,7 @@ func TestCommandByEffectiveCodeExcludesAPIOnlyCommands(t *testing.T) {
 		"new-tab": "TAB",
 		"toast":   "API",
 	}
-	d.codeOverrides.Store(&overrides)
+	updateRuntimeConfig(d, func(rc *runtimeConfig) { rc.codeOverrides = overrides })
 
 	cmd, ok := d.commandByEffectiveCode("tab")
 	require.True(t, ok)

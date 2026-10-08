@@ -113,13 +113,13 @@ func TestCopyScrollReducedMotionAndKeyboardCancellation(t *testing.T) {
 	f.ac.ackOutputState(f.ac.output.currentEpoch(), f.ac.output.next)
 	clock := newCoordinatorMockClock(t, 8)
 	f.d.clock = clock.clock
-	f.d.copyConfig.Store(&domain.CopyConfig{ReduceMotion: true})
+	updateRuntimeConfig(f.d, func(rc *runtimeConfig) { rc.copy = domain.CopyConfig{ReduceMotion: true} })
 	rt := f.ac.overlays
 	start := rt.copyMode.ViewportTop
 	f.d.smoothCopyWheel(f.sess, f.ac, -3)
 	require.Equal(t, start-3, rt.copyMode.ViewportTop)
 	require.Empty(t, clock.timers, "reduced motion must not arm an animation")
-	f.d.copyConfig.Store(&domain.CopyConfig{})
+	updateRuntimeConfig(f.d, func(rc *runtimeConfig) { rc.copy = domain.CopyConfig{} })
 	f.d.smoothCopyWheel(f.sess, f.ac, -3)
 	timer := awaitCoordinatorScheduledTimer(t, clock)
 	require.True(t, rt.HandleInput(f.d, []byte("k")))

@@ -230,21 +230,16 @@ type Daemon struct {
 	procArgv                       func(int) ([]string, error)
 	procGroupArgv                  func(int, int) ([]string, error)
 	dirOrHome                      func(string) string
-	bindings                       atomic.Pointer[keys.Bindings]
-	codeOverrides                  atomic.Pointer[map[string]string]
-	restoreProcessAllowlist        atomic.Pointer[map[string]struct{}]
-	floatingConfig                 atomic.Pointer[domain.FloatingConfig]
-	copyConfig                     atomic.Pointer[domain.CopyConfig]
-	paletteConfig                  atomic.Pointer[domain.PaletteConfig]
-	navConfig                      atomic.Pointer[domain.NavConfig]
-	tabsConfig                     atomic.Pointer[domain.TabsConfig]
-	ephemeralConfig                atomic.Pointer[domain.EphemeralConfig]
-	scrollbackConfig               atomic.Pointer[domain.ScrollbackConfig]
-	themeConfig                    atomic.Pointer[themeConfigSnapshot]
-	barScripts                     *barScriptState
-	notices                        *noticeCenter
-	resumeParkGrace                time.Duration
-	suspendedSafetyExpiry          time.Duration
+	// bindings is read by keys.Router through its own atomic pointer, so it is
+	// published next to (not inside) the runtime config snapshot.
+	bindings atomic.Pointer[keys.Bindings]
+	// config is the immutable runtime configuration snapshot built and
+	// stored once by ApplyConfig; read it through runtimeConfig.
+	config                atomic.Pointer[runtimeConfig]
+	barScripts            *barScriptState
+	notices               *noticeCenter
+	resumeParkGrace       time.Duration
+	suspendedSafetyExpiry time.Duration
 	// tempDir overrides os.TempDir() for clipboard-image-transfer writes
 	// (see clipboard.go); empty means use os.TempDir().
 	tempDir string
@@ -750,15 +745,7 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 			reload:      make(chan struct{}, 1),
 		},
 	}
-	defaults := domain.Defaults()
-	defaultFloating := defaults.Floating
-	d.floatingConfig.Store(&defaultFloating)
-	defaultCopy := defaults.Copy
-	d.copyConfig.Store(&defaultCopy)
-	defaultPalette := defaults.Palette
-	d.paletteConfig.Store(&defaultPalette)
-	defaultTabs := defaults.Tabs
-	d.tabsConfig.Store(&defaultTabs)
+	d.config.Store(defaultRuntimeConfig())
 	for _, o := range opts {
 		o(d)
 	}
@@ -767,14 +754,6 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 	}
 	if d.bindings.Load() == nil {
 		d.bindings.Store(keys.DefaultBindings())
-	}
-	if d.codeOverrides.Load() == nil {
-		empty := map[string]string{}
-		d.codeOverrides.Store(&empty)
-	}
-	if d.restoreProcessAllowlist.Load() == nil {
-		allow := buildRestoreProcessAllowlist(domain.DefaultSnapshotRestoreProcesses())
-		d.restoreProcessAllowlist.Store(&allow)
 	}
 	records := d.catalogueRecords
 	var maxSeq uint64

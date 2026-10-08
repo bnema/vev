@@ -142,7 +142,7 @@ func TestSuspendedAttachmentSafetyExpiryEvictsAfterTimer(t *testing.T) {
 
 func TestSuspendedAttachmentExpiryLeavesEphemeralSessionRegistered(t *testing.T) {
 	d, sess, ac, timer, _ := newSuspendedExpiryFixture(t)
-	d.ephemeralConfig.Store(&domain.EphemeralConfig{CloseOnExit: false})
+	updateRuntimeConfig(d, func(rc *runtimeConfig) { rc.ephemeral = domain.EphemeralConfig{CloseOnExit: false} })
 	sess.mu.Lock()
 	sess.ephemeral = true
 	sess.mu.Unlock()

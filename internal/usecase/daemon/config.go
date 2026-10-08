@@ -18,7 +18,7 @@ import (
 
 var commandCodePattern = regexp.MustCompile(`^[A-Z0-9]{2,3}$`)
 
-// themeConfigSnapshot is published as one immutable value. Its zero value is
+// themeConfigSnapshot is the theme slice of runtimeConfig. Its zero value is
 // the default theme configuration: automatic mode with palette inheritance on.
 type themeConfigSnapshot struct {
 	mode       domain.ThemeMode
@@ -26,17 +26,54 @@ type themeConfigSnapshot struct {
 	accent     domain.ThemeAccent
 }
 
-func (d *Daemon) storeThemeConfig(cfg domain.Config) {
-	snapshot := themeConfigSnapshot{mode: cfg.Theme, paletteOff: !cfg.ThemePalette, accent: cfg.ThemeAccent}
-	d.themeConfig.Store(&snapshot)
+// runtimeConfig is the immutable derived configuration published by
+// ApplyConfig as one atomic snapshot, so a reader never observes values from
+// two different reloads. Never mutate a published snapshot; build a new one.
+//
+// The key bindings are deliberately not part of the snapshot: keys.Router reads
+// them through its own *atomic.Pointer[keys.Bindings] (see Daemon.bindings).
+type runtimeConfig struct {
+	codeOverrides           map[string]string
+	restoreProcessAllowlist map[string]struct{}
+	floating                domain.FloatingConfig
+	copy                    domain.CopyConfig
+	palette                 domain.PaletteConfig
+	nav                     domain.NavConfig
+	tabs                    domain.TabsConfig
+	ephemeral               domain.EphemeralConfig
+	scrollback              domain.ScrollbackConfig
+	theme                   themeConfigSnapshot
+}
+
+// defaultRuntimeConfig is the configuration in force before the first
+// ApplyConfig: vev defaults for every section, no code overrides, and the
+// default theme snapshot.
+func defaultRuntimeConfig() *runtimeConfig {
+	defaults := domain.Defaults()
+	return &runtimeConfig{
+		codeOverrides:           map[string]string{},
+		restoreProcessAllowlist: buildRestoreProcessAllowlist(domain.DefaultSnapshotRestoreProcesses()),
+		floating:                defaults.Floating,
+		copy:                    defaults.Copy,
+		palette:                 defaults.Palette,
+		nav:                     defaults.Nav,
+		tabs:                    defaults.Tabs,
+		ephemeral:               defaults.Ephemeral,
+		scrollback:              domain.DefaultScrollbackConfig(),
+	}
+}
+
+// runtimeConfig returns the current snapshot, or the defaults when none has
+// been published (zero-value Daemon). The result is never nil.
+func (d *Daemon) runtimeConfig() *runtimeConfig {
+	if cfg := d.config.Load(); cfg != nil {
+		return cfg
+	}
+	return defaultRuntimeConfig()
 }
 
 func (d *Daemon) currentThemeConfig() themeConfigSnapshot {
-	snapshot := d.themeConfig.Load()
-	if snapshot == nil {
-		return themeConfigSnapshot{}
-	}
-	return *snapshot
+	return d.runtimeConfig().theme
 }
 
 // ApplyConfig validates and atomically swaps daemon runtime configuration.
@@ -49,27 +86,23 @@ func (d *Daemon) ApplyConfig(cfg domain.Config) {
 		scrollback = domain.DefaultScrollbackConfig()
 		allWarnings = append(allWarnings, domain.Warning{Msg: "invalid scrollback limits; using vev defaults"})
 	}
-	d.scrollbackConfig.Store(&scrollback)
+	snapshot := &runtimeConfig{
+		codeOverrides:           overrides,
+		restoreProcessAllowlist: restoreProcessAllowlistFromConfig(cfg.Snapshot),
+		floating:                cfg.Floating,
+		copy:                    cfg.Copy,
+		palette:                 cfg.Palette,
+		nav:                     cfg.Nav,
+		tabs:                    cfg.Tabs,
+		ephemeral:               cfg.Ephemeral,
+		scrollback:              scrollback,
+		theme:                   themeConfigSnapshot{mode: cfg.Theme, paletteOff: !cfg.ThemePalette, accent: cfg.ThemeAccent},
+	}
+	d.bindings.Store(bindings)
+	d.config.Store(snapshot)
 	for _, warning := range allWarnings {
 		d.logConfigWarning(warning)
 	}
-	allowlist := restoreProcessAllowlistFromConfig(cfg.Snapshot)
-	d.bindings.Store(bindings)
-	d.codeOverrides.Store(&overrides)
-	d.restoreProcessAllowlist.Store(&allowlist)
-	floating := cfg.Floating
-	d.floatingConfig.Store(&floating)
-	copyConfig := cfg.Copy
-	d.copyConfig.Store(&copyConfig)
-	palette := cfg.Palette
-	d.paletteConfig.Store(&palette)
-	nav := cfg.Nav
-	d.navConfig.Store(&nav)
-	tabs := cfg.Tabs
-	d.tabsConfig.Store(&tabs)
-	ephemeral := cfg.Ephemeral
-	d.ephemeralConfig.Store(&ephemeral)
-	d.storeThemeConfig(cfg)
 	d.applyHistoryLimits()
 	barChanged := false
 	if d.barScripts != nil {
@@ -245,11 +278,7 @@ func buildRestoreProcessAllowlist(values []string) map[string]struct{} {
 }
 
 func (d *Daemon) restoreProcessAllowlistSnapshot() map[string]struct{} {
-	allow := d.restoreProcessAllowlist.Load()
-	if allow == nil {
-		return buildRestoreProcessAllowlist(domain.DefaultSnapshotRestoreProcesses())
-	}
-	return *allow
+	return d.runtimeConfig().restoreProcessAllowlist
 }
 
 func (d *Daemon) logConfigWarning(w domain.Warning) {
@@ -261,53 +290,31 @@ func (d *Daemon) logConfigWarning(w domain.Warning) {
 }
 
 func (d *Daemon) currentCopyConfig() domain.CopyConfig {
-	if cfg := d.copyConfig.Load(); cfg != nil {
-		return *cfg
-	}
-	return domain.Defaults().Copy
+	return d.runtimeConfig().copy
 }
 
 func (d *Daemon) currentPaletteConfig() domain.PaletteConfig {
-	if cfg := d.paletteConfig.Load(); cfg != nil {
-		return *cfg
-	}
-	return domain.Defaults().Palette
+	return d.runtimeConfig().palette
 }
 
 func (d *Daemon) currentNavConfig() domain.NavConfig {
-	if cfg := d.navConfig.Load(); cfg != nil {
-		return *cfg
-	}
-	return domain.Defaults().Nav
+	return d.runtimeConfig().nav
 }
 
 func (d *Daemon) currentTabsConfig() domain.TabsConfig {
-	if cfg := d.tabsConfig.Load(); cfg != nil {
-		return *cfg
-	}
-	return domain.Defaults().Tabs
+	return d.runtimeConfig().tabs
 }
 
 func (d *Daemon) currentEphemeralConfig() domain.EphemeralConfig {
-	if cfg := d.ephemeralConfig.Load(); cfg != nil {
-		return *cfg
-	}
-	return domain.Defaults().Ephemeral
+	return d.runtimeConfig().ephemeral
 }
 
 func (d *Daemon) currentFloatingConfig() domain.FloatingConfig {
-	if cfg := d.floatingConfig.Load(); cfg != nil {
-		return *cfg
-	}
-	return domain.Defaults().Floating
+	return d.runtimeConfig().floating
 }
 
 func (d *Daemon) codeOverrideSnapshot() map[string]string {
-	overrides := d.codeOverrides.Load()
-	if overrides == nil {
-		return nil
-	}
-	return *overrides
+	return d.runtimeConfig().codeOverrides
 }
 
 func commandWithOverrides(cmd command.Command, overrides map[string]string) command.Command {

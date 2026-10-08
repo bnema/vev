@@ -164,6 +164,20 @@ func TestEffectiveThemePaletteGate(t *testing.T) {
 	}
 }
 
+// updateRuntimeConfig publishes a modified copy of the current runtime config
+// snapshot, the way ApplyConfig does, without touching unrelated sections.
+func updateRuntimeConfig(d *Daemon, mutate func(*runtimeConfig)) {
+	next := *d.runtimeConfig()
+	mutate(&next)
+	d.config.Store(&next)
+}
+
+func storeThemeForTest(d *Daemon, cfg domain.Config) {
+	updateRuntimeConfig(d, func(rc *runtimeConfig) {
+		rc.theme = themeConfigSnapshot{mode: cfg.Theme, paletteOff: !cfg.ThemePalette, accent: cfg.ThemeAccent}
+	})
+}
+
 func TestThemeConfigSnapshotIsAtomic(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 
@@ -184,7 +198,7 @@ func TestThemeConfigSnapshotIsAtomic(t *testing.T) {
 		{name: "light palette disabled", mode: domain.ThemeLight, gate: false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			d.storeThemeConfig(domain.Config{Theme: tt.mode, ThemePalette: tt.gate})
+			storeThemeForTest(d, domain.Config{Theme: tt.mode, ThemePalette: tt.gate})
 			require.Equal(t, themeConfigSnapshot{mode: tt.mode, paletteOff: !tt.gate}, d.currentThemeConfig())
 		})
 	}
@@ -209,15 +223,15 @@ func TestThemeConfigSnapshotIsAtomic(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		d.storeThemeConfig(first)
+		storeThemeForTest(d, first)
 		close(firstPublished)
 		<-firstObserved
-		d.storeThemeConfig(second)
+		storeThemeForTest(d, second)
 		close(secondPublished)
 		<-secondObserved
 		for range 10_000 {
-			d.storeThemeConfig(second)
-			d.storeThemeConfig(first)
+			storeThemeForTest(d, second)
+			storeThemeForTest(d, first)
 		}
 	}()
 	go func() {
