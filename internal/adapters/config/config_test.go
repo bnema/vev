@@ -1048,7 +1048,8 @@ func ptr[T any](v T) *T { return &v }
 
 // When native watching fails (inotify limits), watch keeps the current
 // config, warns once and polls instead of giving up.
-func TestWatchFallsBackToPolling(t *testing.T) { //nolint:paralleltest // replaces kvWatch
+// Not parallel: it replaces kvWatch.
+func TestWatchFallsBackToPolling(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config")
 	writeAtomic(t, path, []byte("theme = light\n"))
 	var polled atomic.Bool
