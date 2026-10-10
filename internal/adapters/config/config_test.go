@@ -2,10 +2,12 @@ package config
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -112,6 +114,20 @@ func TestParse(t *testing.T) {
 		{
 			name:  "floating command can be empty or quoted",
 			input: "floating.command = echo ready\nfloating.command = \"\"\n",
+			want: domain.Config{
+				Theme: domain.ThemeAuto,
+				Floating: domain.FloatingConfig{
+					Width:  80,
+					Height: 80,
+				},
+				BindingEntries: []domain.ConfigEntry{},
+				Codes:          map[string]string{},
+			},
+			wantWarnings: []domain.Warning{{Line: 2, Msg: "duplicate key \"floating.command\""}},
+		},
+		{
+			name:  "a value that is only a comment is empty",
+			input: "floating.command = echo ready\nfloating.command = # default shell\n",
 			want: domain.Config{
 				Theme: domain.ThemeAuto,
 				Floating: domain.FloatingConfig{
@@ -872,6 +888,15 @@ func startWatch(t *testing.T, path string) (<-chan watchChange, func()) {
 	}
 }
 
+// writeAtomic replaces path in one step, like most editors: the watcher
+// never sees a truncated file, whatever the scheduling.
+func writeAtomic(t *testing.T, path string, data []byte) {
+	t.Helper()
+	tmp := path + ".tmp"
+	require.NoError(t, os.WriteFile(tmp, data, 0o600))
+	require.NoError(t, os.Rename(tmp, path))
+}
+
 func nextChange(t *testing.T, changes <-chan watchChange) watchChange {
 	t.Helper()
 	select {
@@ -901,7 +926,7 @@ func TestWatchReloadsOnChange(t *testing.T) {
 			name:    "changed file reloads with parse warnings",
 			initial: ptr("theme = dark\n"),
 			write: func(t *testing.T, path string) {
-				require.NoError(t, os.WriteFile(path, []byte("theme = light\nbad line\n"), 0o600))
+				writeAtomic(t, path, []byte("theme = light\nbad line\n"))
 			},
 			wantConfig:   light,
 			wantWarnings: []domain.Warning{{Line: 2, Msg: "missing '='"}},
@@ -910,7 +935,7 @@ func TestWatchReloadsOnChange(t *testing.T) {
 			name:    "created file loads",
 			initial: nil,
 			write: func(t *testing.T, path string) {
-				require.NoError(t, os.WriteFile(path, []byte("theme = light\n"), 0o600))
+				writeAtomic(t, path, []byte("theme = light\n"))
 			},
 			wantConfig: light,
 		},
@@ -927,7 +952,7 @@ func TestWatchReloadsOnChange(t *testing.T) {
 			initial: ptr("theme = light\n"),
 			write: func(t *testing.T, path string) {
 				// Larger than kvconf.DefaultMaxBytes.
-				require.NoError(t, os.WriteFile(path, []byte(strings.Repeat("# x\n", kvconf.DefaultMaxBytes/4+1)), 0o600))
+				writeAtomic(t, path, []byte(strings.Repeat("# x\n", kvconf.DefaultMaxBytes/4+1)))
 			},
 			wantConfig:  domain.Defaults(),
 			wantAnyWarn: true,
@@ -936,7 +961,7 @@ func TestWatchReloadsOnChange(t *testing.T) {
 			name:    "invalid UTF-8 reports defaults and a warning",
 			initial: ptr("theme = light\n"),
 			write: func(t *testing.T, path string) {
-				require.NoError(t, os.WriteFile(path, []byte("theme = \xff\n"), 0o600))
+				writeAtomic(t, path, []byte("theme = \xff\n"))
 			},
 			wantConfig:  domain.Defaults(),
 			wantAnyWarn: true,
@@ -948,7 +973,7 @@ func TestWatchReloadsOnChange(t *testing.T) {
 
 			path := filepath.Join(t.TempDir(), "config")
 			if tt.initial != nil {
-				require.NoError(t, os.WriteFile(path, []byte(*tt.initial), 0o600))
+				writeAtomic(t, path, []byte(*tt.initial))
 			}
 			changes, stop := startWatch(t, path)
 			tt.write(t, path)
@@ -965,51 +990,91 @@ func TestWatchReloadsOnChange(t *testing.T) {
 	}
 }
 
-func TestWatchReportsStatErrorOnce(t *testing.T) {
+// A load error is reported once until a good load, then again.
+func TestWatchReportsLoadErrorOnce(t *testing.T) {
 	t.Parallel()
 
-	// A name longer than NAME_MAX makes every stat fail with the same error.
+	path := filepath.Join(t.TempDir(), "config")
+	writeAtomic(t, path, []byte("theme = light\n"))
+	changes, stop := startWatch(t, path)
+	invalid := []byte("theme = \xff\n")
+
+	writeAtomic(t, path, invalid)
+	got := nextChange(t, changes)
+	require.Equal(t, domain.Defaults(), got.cfg)
+	require.Len(t, got.warnings, 1)
+
+	// The same failure again is not reported; the next good load is.
+	writeAtomic(t, path, invalid)
+	writeAtomic(t, path, []byte("theme = dark\n"))
+	got = nextChange(t, changes)
+	require.Equal(t, domain.ThemeDark, got.cfg.Theme)
+	require.Empty(t, got.warnings)
+
+	// After a good load, the failure is news again.
+	writeAtomic(t, path, invalid)
+	got = nextChange(t, changes)
+	require.Len(t, got.warnings, 1)
+	stop()
+}
+
+// A stat error at startup other than a missing file is reported.
+func TestWatchReportsStartupStatError(t *testing.T) {
+	t.Parallel()
+
+	// A name longer than NAME_MAX makes every stat fail.
 	path := filepath.Join(t.TempDir(), strings.Repeat("x", 5000))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
-	changes := make(chan []domain.Warning, 4)
-	ready := make(chan struct{})
+	changes := make(chan watchChange, 4)
 	done := make(chan error, 1)
 	go func() {
-		done <- watch(ctx, path, kvconf.WatchOptions{Debounce: 10 * time.Millisecond, Ready: ready},
-			func(cfg domain.Config, warnings []domain.Warning) {
-				require.Equal(t, domain.Defaults(), cfg)
-				changes <- warnings
-			})
+		done <- watch(ctx, path, kvconf.WatchOptions{Poll: time.Hour}, func(cfg domain.Config, warnings []domain.Warning) {
+			changes <- watchChange{cfg: cfg, warnings: warnings}
+		})
 	}()
-
-	select {
-	case first := <-changes:
-		require.Len(t, first, 1)
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for the initial stat error")
-	}
-	select {
-	case extra := <-changes:
-		t.Fatalf("watch() repeated persistent stat error: %#v", extra)
-	case <-done:
-		// The watcher may refuse such a path; the error is still reported once.
-	case <-time.After(300 * time.Millisecond):
-	}
-
+	got := nextChange(t, changes)
+	require.Equal(t, domain.Defaults(), got.cfg)
+	require.Len(t, got.warnings, 1)
 	cancel()
 	select {
-	case err := <-done:
-		_ = err
+	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for watch() to return")
-	}
-	select {
-	case extra := <-changes:
-		t.Fatalf("watch() repeated persistent stat error: %#v", extra)
-	default:
 	}
 }
 
 func ptr[T any](v T) *T { return &v }
+
+// When native watching fails (inotify limits), watch keeps the current
+// config, warns once and polls instead of giving up.
+func TestWatchFallsBackToPolling(t *testing.T) { //nolint:paralleltest // replaces kvWatch
+	path := filepath.Join(t.TempDir(), "config")
+	writeAtomic(t, path, []byte("theme = light\n"))
+	var polled atomic.Bool
+	orig := kvWatch
+	t.Cleanup(func() { kvWatch = orig })
+	kvWatch = func(ctx context.Context, path string, opts kvconf.WatchOptions, out chan<- struct{}) error {
+		if opts.Poll == 0 {
+			return errors.New("too many open files")
+		}
+		polled.Store(true)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	changes := make(chan watchChange, 4)
+	done := make(chan error, 1)
+	go func() {
+		done <- watch(ctx, path, kvconf.WatchOptions{}, func(cfg domain.Config, warnings []domain.Warning) {
+			changes <- watchChange{cfg: cfg, warnings: warnings}
+		})
+	}()
+	got := nextChange(t, changes)
+	require.Equal(t, domain.ThemeLight, got.cfg.Theme, "the current config is kept")
+	require.Len(t, got.warnings, 1)
+	require.Contains(t, got.warnings[0].Msg, "polling every")
+	cancel()
+	require.ErrorIs(t, <-done, context.Canceled)
+	require.True(t, polled.Load())
+}

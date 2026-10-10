@@ -3,7 +3,8 @@
 vev reads `~/.config/vev/config` (`$XDG_CONFIG_HOME` is respected).
 
 - No file means defaults.
-- Changes apply live within a couple of seconds.
+- Changes apply live as soon as the file is saved.
+- `#` starts a comment at the start of a line or after a space, except inside a quoted word. The file must be UTF-8 and at most 1 MiB; otherwise vev logs a warning and uses the defaults.
 - Exception: `web.listen` and `web.origin` need a gateway restart. See [browser terminal](web-terminal.md#listener-and-public-origin).
 - Invalid values log a warning and fall back to the default.
 

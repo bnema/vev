@@ -54,6 +54,11 @@ func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 			pending = pending[1:]
 		}
 		lineNo, key, value := entry.Line, entry.Key, entry.Value
+		// "key = # note" has an empty value: kvconf only strips a '#' that
+		// follows other text.
+		if strings.HasPrefix(value, "#") {
+			value = ""
+		}
 
 		switch {
 		case key == "web.listen" || key == "web.origin":
@@ -307,6 +312,12 @@ func Watch(ctx context.Context, path string, onChange func(domain.Config, []doma
 	return watch(ctx, path, kvconf.WatchOptions{}, onChange)
 }
 
+// fallbackPoll is the polling interval used when native watching fails.
+const fallbackPoll = 2 * time.Second
+
+// kvWatch is kvconf.Watch; tests replace it to make native watching fail.
+var kvWatch = kvconf.Watch
+
 func watch(ctx context.Context, path string, opts kvconf.WatchOptions, onChange func(domain.Config, []domain.Warning)) error {
 	lastErrMsg := ""
 	reportErr := func(err error) {
@@ -319,16 +330,13 @@ func watch(ctx context.Context, path string, opts kvconf.WatchOptions, onChange 
 		reportErr(err)
 	}
 
-	watchCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
 	changed := make(chan struct{}, 1)
 	watchErr := make(chan error, 1)
-	go func() { watchErr <- kvconf.Watch(watchCtx, path, opts, changed) }()
+	go func() { watchErr <- kvWatch(ctx, path, opts, changed) }()
 
 	for {
 		select {
 		case <-ctx.Done():
-			cancel()
 			<-watchErr
 			return ctx.Err()
 		case err := <-watchErr:
@@ -338,7 +346,18 @@ func watch(ctx context.Context, path string, opts kvconf.WatchOptions, onChange 
 			if err == nil {
 				err = errors.New("config watcher stopped")
 			}
-			return err
+			if opts.Poll > 0 {
+				return err
+			}
+			// The OS ran out of watches (inotify limits): poll like before
+			// rather than lose live reload until the daemon restarts. The
+			// warning rides on the current config, which must not reset.
+			opts.Poll = fallbackPoll
+			go func() { watchErr <- kvWatch(ctx, path, opts, changed) }()
+			if cfg, warnings, err2 := Load(path); err2 == nil {
+				lastErrMsg = ""
+				onChange(cfg, append(warnings, domain.Warning{Msg: fmt.Sprintf("config watcher: %v; polling every %s", err, fallbackPoll)}))
+			}
 		case <-changed:
 			cfg, warnings, err := Load(path)
 			if err != nil {
