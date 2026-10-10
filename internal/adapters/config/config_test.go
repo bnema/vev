@@ -2,7 +2,6 @@ package config
 
 import (
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -10,8 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bnema/kvconf"
 	"github.com/bnema/vev/internal/domain"
-	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/stretchr/testify/require"
 )
 
@@ -833,179 +832,184 @@ func TestLoadMissingFileReturnsDefaults(t *testing.T) {
 	}
 }
 
-func TestWatchReloadsChangedFileWithFakeClock(t *testing.T) {
-	t.Parallel()
+type watchChange struct {
+	cfg      domain.Config
+	warnings []domain.Warning
+}
 
-	path := filepath.Join(t.TempDir(), "config")
-	if err := os.WriteFile(path, []byte("theme = dark\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	clk := newWatchClockMock(t)
+// startWatch runs watch on path and returns the onChange stream once the
+// watches are installed. The returned stop cancels it and checks its result.
+func startWatch(t *testing.T, path string) (<-chan watchChange, func()) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	t.Cleanup(cancel)
 
-	type change struct {
-		cfg      domain.Config
-		warnings []domain.Warning
-	}
-	changes := make(chan change, 2)
+	changes := make(chan watchChange, 8)
+	ready := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
-		done <- Watch(ctx, clk.clock, path, func(cfg domain.Config, warnings []domain.Warning) {
-			changes <- change{cfg: cfg, warnings: warnings}
-		})
+		done <- watch(ctx, path, kvconf.WatchOptions{Debounce: 10 * time.Millisecond, Ready: ready},
+			func(cfg domain.Config, warnings []domain.Warning) {
+				changes <- watchChange{cfg: cfg, warnings: warnings}
+			})
 	}()
-
-	clk.waitForTimer()
-	if err := os.WriteFile(path, []byte("theme = light\nbad line\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	clk.fire()
-
-	var got change
 	select {
-	case got = <-changes:
-	case <-time.After(2 * time.Second):
+	case <-ready:
+	case err := <-done:
+		t.Fatalf("watch() returned before ready: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the watcher to be ready")
+	}
+	return changes, func() {
+		t.Helper()
+		cancel()
+		select {
+		case err := <-done:
+			require.ErrorIs(t, err, context.Canceled)
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for watch() to return")
+		}
+	}
+}
+
+func nextChange(t *testing.T, changes <-chan watchChange) watchChange {
+	t.Helper()
+	select {
+	case got := <-changes:
+		return got
+	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for config reload")
-	}
-	if got.cfg.Theme != domain.ThemeLight {
-		t.Fatalf("Watch() theme = %v, want %v", got.cfg.Theme, domain.ThemeLight)
-	}
-	if !reflect.DeepEqual(got.warnings, []domain.Warning{{Line: 2, Msg: "missing '='"}}) {
-		t.Fatalf("Watch() warnings = %#v", got.warnings)
-	}
-
-	cancel()
-	if err := <-done; !errors.Is(err, context.Canceled) {
-		t.Fatalf("Watch() error = %v, want context.Canceled", err)
+		return watchChange{}
 	}
 }
 
-func TestWatchUsesDefaultsWhenReloadLoadFails(t *testing.T) {
+func TestWatchReloadsOnChange(t *testing.T) {
 	t.Parallel()
 
-	path := filepath.Join(t.TempDir(), "config")
-	if err := os.WriteFile(path, []byte("theme = dark\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	light := domain.Defaults()
+	light.Theme = domain.ThemeLight
 
-	clk := newWatchClockMock(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	type change struct {
-		cfg      domain.Config
-		warnings []domain.Warning
+	tests := []struct {
+		name         string
+		initial      *string // nil: the file does not exist yet
+		write        func(t *testing.T, path string)
+		wantConfig   domain.Config
+		wantWarnings []domain.Warning
+		wantAnyWarn  bool
+	}{
+		{
+			name:    "changed file reloads with parse warnings",
+			initial: ptr("theme = dark\n"),
+			write: func(t *testing.T, path string) {
+				require.NoError(t, os.WriteFile(path, []byte("theme = light\nbad line\n"), 0o600))
+			},
+			wantConfig:   light,
+			wantWarnings: []domain.Warning{{Line: 2, Msg: "missing '='"}},
+		},
+		{
+			name:    "created file loads",
+			initial: nil,
+			write: func(t *testing.T, path string) {
+				require.NoError(t, os.WriteFile(path, []byte("theme = light\n"), 0o600))
+			},
+			wantConfig: light,
+		},
+		{
+			name:    "deleted file reloads to defaults",
+			initial: ptr("theme = light\n"),
+			write: func(t *testing.T, path string) {
+				require.NoError(t, os.Remove(path))
+			},
+			wantConfig: domain.Defaults(),
+		},
+		{
+			name:    "load failure reports defaults and a warning",
+			initial: ptr("theme = light\n"),
+			write: func(t *testing.T, path string) {
+				// Larger than kvconf.DefaultMaxBytes.
+				require.NoError(t, os.WriteFile(path, []byte(strings.Repeat("# x\n", kvconf.DefaultMaxBytes/4+1)), 0o600))
+			},
+			wantConfig:  domain.Defaults(),
+			wantAnyWarn: true,
+		},
+		{
+			name:    "invalid UTF-8 reports defaults and a warning",
+			initial: ptr("theme = light\n"),
+			write: func(t *testing.T, path string) {
+				require.NoError(t, os.WriteFile(path, []byte("theme = \xff\n"), 0o600))
+			},
+			wantConfig:  domain.Defaults(),
+			wantAnyWarn: true,
+		},
 	}
-	changes := make(chan change, 2)
-	done := make(chan error, 1)
-	go func() {
-		done <- Watch(ctx, clk.clock, path, func(cfg domain.Config, warnings []domain.Warning) {
-			changes <- change{cfg: cfg, warnings: warnings}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			path := filepath.Join(t.TempDir(), "config")
+			if tt.initial != nil {
+				require.NoError(t, os.WriteFile(path, []byte(*tt.initial), 0o600))
+			}
+			changes, stop := startWatch(t, path)
+			tt.write(t, path)
+
+			got := nextChange(t, changes)
+			require.Equal(t, tt.wantConfig, got.cfg)
+			if tt.wantAnyWarn {
+				require.NotEmpty(t, got.warnings)
+			} else {
+				require.Equal(t, tt.wantWarnings, got.warnings)
+			}
+			stop()
 		})
-	}()
-
-	clk.waitForTimer()
-	tooLong := strings.Repeat("x", 70*1024)
-	if err := os.WriteFile(path, []byte(tooLong), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	clk.fire()
-
-	got := <-changes
-	require.Equal(t, domain.Defaults(), got.cfg)
-	require.NotEmpty(t, got.warnings)
-
-	cancel()
-	if err := <-done; !errors.Is(err, context.Canceled) {
-		t.Fatalf("Watch() error = %v, want context.Canceled", err)
 	}
 }
 
-func TestWatchDoesNotRepeatPersistentStatError(t *testing.T) {
+func TestWatchReportsStatErrorOnce(t *testing.T) {
 	t.Parallel()
 
+	// A name longer than NAME_MAX makes every stat fail with the same error.
 	path := filepath.Join(t.TempDir(), strings.Repeat("x", 5000))
-	clk := newWatchClockMock(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	changes := make(chan []domain.Warning, 4)
+	ready := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
-		done <- Watch(ctx, clk.clock, path, func(_ domain.Config, warnings []domain.Warning) {
-			changes <- warnings
-		})
+		done <- watch(ctx, path, kvconf.WatchOptions{Debounce: 10 * time.Millisecond, Ready: ready},
+			func(cfg domain.Config, warnings []domain.Warning) {
+				require.Equal(t, domain.Defaults(), cfg)
+				changes <- warnings
+			})
 	}()
 
-	first := <-changes
-	require.Len(t, first, 1)
-	clk.waitForTimer()
-	clk.fire()
-	clk.fire()
-
+	select {
+	case first := <-changes:
+		require.Len(t, first, 1)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the initial stat error")
+	}
 	select {
 	case extra := <-changes:
-		t.Fatalf("Watch() repeated persistent stat error: %#v", extra)
-	case <-time.After(100 * time.Millisecond):
+		t.Fatalf("watch() repeated persistent stat error: %#v", extra)
+	case <-done:
+		// The watcher may refuse such a path; the error is still reported once.
+	case <-time.After(300 * time.Millisecond):
 	}
 
 	cancel()
-	if err := <-done; !errors.Is(err, context.Canceled) {
-		t.Fatalf("Watch() error = %v, want context.Canceled", err)
-	}
-}
-
-type watchClockMock struct {
-	t      *testing.T
-	clock  *portsmocks.MockClock
-	ticks  chan time.Time
-	ready  chan struct{}
-	resets chan struct{}
-}
-
-func newWatchClockMock(t *testing.T) *watchClockMock {
-	t.Helper()
-	timer := portsmocks.NewMockTimer(t)
-	clock := portsmocks.NewMockClock(t)
-	m := &watchClockMock{
-		t:      t,
-		clock:  clock,
-		ticks:  make(chan time.Time),
-		ready:  make(chan struct{}),
-		resets: make(chan struct{}),
-	}
-	timer.EXPECT().C().Return(m.ticks)
-	timer.EXPECT().Reset(pollInterval).Run(func(time.Duration) {
-		m.resets <- struct{}{}
-	}).Return(false)
-	timer.EXPECT().Stop().Return(true)
-	clock.EXPECT().NewTimer(pollInterval).Run(func(time.Duration) {
-		close(m.ready)
-	}).Return(timer).Once()
-	return m
-}
-
-func (m *watchClockMock) waitForTimer() {
-	m.t.Helper()
 	select {
-	case <-m.ready:
-	case <-time.After(time.Second):
-		m.t.Fatal("timed out waiting for watcher timer creation")
-	}
-}
-
-func (m *watchClockMock) fire() {
-	m.t.Helper()
-	select {
-	case m.ticks <- time.Now():
-	case <-time.After(time.Second):
-		m.t.Fatal("timed out firing watcher timer")
+	case err := <-done:
+		_ = err
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for watch() to return")
 	}
 	select {
-	case <-m.resets:
-	case <-time.After(time.Second):
-		m.t.Fatal("timed out waiting for watcher timer reset")
+	case extra := <-changes:
+		t.Fatalf("watch() repeated persistent stat error: %#v", extra)
+	default:
 	}
 }
+
+func ptr[T any](v T) *T { return &v }

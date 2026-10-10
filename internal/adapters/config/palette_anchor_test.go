@@ -1,7 +1,6 @@
 package config
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -47,26 +46,17 @@ func TestLoadMissingPaletteAnchorDefaultsToCenter(t *testing.T) {
 }
 
 func TestWatchPaletteAnchorRestoresCenteredDefaultAfterFileRemoval(t *testing.T) {
+	t.Parallel()
+
 	path := filepath.Join(t.TempDir(), "config")
 	require.NoError(t, os.WriteFile(path, []byte("palette.anchor = top-right\n"), 0o600))
-	clk := newWatchClockMock(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	changes := make(chan domain.Config, 2)
-	done := make(chan error, 1)
-	go func() {
-		done <- Watch(ctx, clk.clock, path, func(cfg domain.Config, _ []domain.Warning) { changes <- cfg })
-	}()
-	clk.waitForTimer()
+	changes, stop := startWatch(t, path)
 
 	require.NoError(t, os.WriteFile(path, []byte("palette.anchor = bottom-left\n"), 0o600))
-	clk.fire()
-	require.Equal(t, domain.AnchorBottomLeft, (<-changes).Palette.Anchor)
+	require.Equal(t, domain.AnchorBottomLeft, nextChange(t, changes).cfg.Palette.Anchor)
 
 	require.NoError(t, os.Remove(path))
-	clk.fire()
-	got := <-changes
-	require.Equal(t, domain.PaletteConfig{Anchor: domain.AnchorCenter, AnchorSet: true}, got.Palette)
-	cancel()
-	require.ErrorIs(t, <-done, context.Canceled)
+	got := nextChange(t, changes)
+	require.Equal(t, domain.PaletteConfig{Anchor: domain.AnchorCenter, AnchorSet: true}, got.cfg.Palette)
+	stop()
 }

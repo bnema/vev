@@ -1,13 +1,10 @@
 package config
 
 import (
-	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/stretchr/testify/require"
@@ -118,38 +115,11 @@ func TestWatchThemeAccentInvalidReloadFallsBackToAuto(t *testing.T) {
 	require.Empty(t, warnings)
 	require.Equal(t, domain.ThemeAccent{Mode: domain.ThemeAccentSlot, Slot: 2}, initial.ThemeAccent)
 
-	clk := newWatchClockMock(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	type change struct {
-		cfg      domain.Config
-		warnings []domain.Warning
-	}
-	changes := make(chan change, 1)
-	done := make(chan error, 1)
-	go func() {
-		done <- Watch(ctx, clk.clock, path, func(cfg domain.Config, warnings []domain.Warning) {
-			changes <- change{cfg: cfg, warnings: warnings}
-		})
-	}()
-
-	clk.waitForTimer()
+	changes, stop := startWatch(t, path)
 	require.NoError(t, os.WriteFile(path, []byte("theme.accent = invalid\n"), 0o600))
-	clk.fire()
 
-	select {
-	case got := <-changes:
-		require.Equal(t, domain.ThemeAccent{Mode: domain.ThemeAccentAuto}, got.cfg.ThemeAccent)
-		require.Equal(t, []domain.Warning{{Line: 1, Msg: "invalid theme.accent \"invalid\""}}, got.warnings)
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for config reload")
-	}
-
-	cancel()
-	select {
-	case err := <-done:
-		require.True(t, errors.Is(err, context.Canceled))
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for config watcher shutdown")
-	}
+	got := nextChange(t, changes)
+	require.Equal(t, domain.ThemeAccent{Mode: domain.ThemeAccentAuto}, got.cfg.ThemeAccent)
+	require.Equal(t, []domain.Warning{{Line: 1, Msg: "invalid theme.accent \"invalid\""}}, got.warnings)
+	stop()
 }

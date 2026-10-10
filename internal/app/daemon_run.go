@@ -300,7 +300,7 @@ func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr err
 	watchCtx, stopWatch := context.WithCancel(ctx)
 	defer stopWatch()
 	go func() {
-		if err := config.Watch(watchCtx, clk, configPath, func(cfg domain.Config, warnings []domain.Warning) {
+		if err := config.Watch(watchCtx, configPath, func(cfg domain.Config, warnings []domain.Warning) {
 			logConfigWarnings(log, warnings)
 			d.ApplyConfig(cfg)
 		}); err != nil && !errors.Is(err, context.Canceled) {
