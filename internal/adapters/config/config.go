@@ -1,7 +1,7 @@
 package config
 
 import (
-	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -12,12 +12,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bnema/kvconf"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/domain/terminalcap"
-	"github.com/bnema/vev/internal/ports"
 )
-
-const pollInterval = 2 * time.Second
 
 var (
 	processNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$`)
@@ -43,29 +41,23 @@ func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 	seenScrollbackKeys := make(map[string]bool)
 	seenWebKeys := make(map[string]bool)
 
-	scanner := bufio.NewScanner(r)
-	lineNo := 0
-	for scanner.Scan() {
-		lineNo++
-		line := strings.TrimSpace(strings.TrimSuffix(scanner.Text(), "\r"))
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		line = stripInlineComment(line)
-		if line == "" {
-			continue
-		}
+	entries, syntax, err := kvconf.Parse(r, parseOptions)
+	if err != nil {
+		return domain.Defaults(), nil, err
+	}
+	pending := syntaxWarnings(syntax)
 
-		key, value, ok := strings.Cut(line, "=")
-		if !ok {
-			warnings = append(warnings, domain.Warning{Line: lineNo, Msg: "missing '='"})
-			continue
+	for _, entry := range entries {
+		// Interleave line-syntax warnings with domain warnings in file order.
+		for len(pending) > 0 && pending[0].Line < entry.Line {
+			warnings = append(warnings, pending[0])
+			pending = pending[1:]
 		}
-		key = strings.TrimSpace(key)
-		value = strings.TrimSpace(value)
-		if key == "" {
-			warnings = append(warnings, domain.Warning{Line: lineNo, Msg: "missing key"})
-			continue
+		lineNo, key, value := entry.Line, entry.Key, entry.Value
+		// "key = # note" has an empty value: kvconf only strips a '#' that
+		// follows other text.
+		if strings.HasPrefix(value, "#") {
+			value = ""
 		}
 
 		switch {
@@ -278,82 +270,104 @@ func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 			}
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return cfg, warnings, err
-	}
+	warnings = append(warnings, pending...)
 	return cfg, warnings, nil
+}
+
+// parseOptions keeps quotes and duplicates in the kvconf entries: vev unquotes
+// per key and reports its own duplicate warnings.
+var parseOptions = kvconf.Options{RawValues: true, AllowDuplicates: true}
+
+// syntaxWarnings maps kvconf line-syntax warnings to domain warnings.
+func syntaxWarnings(in []kvconf.Warning) []domain.Warning {
+	out := make([]domain.Warning, 0, len(in))
+	for _, w := range in {
+		msg := w.Msg
+		if msg == "expected key = value" {
+			msg = "missing '='"
+		}
+		out = append(out, domain.Warning{Line: w.Line, Msg: msg})
+	}
+	return out
 }
 
 // Load reads path and parses it. Missing config files are treated as defaults.
 func Load(path string) (domain.Config, []domain.Warning, error) {
-	f, err := os.Open(path)
+	data, err := kvconf.ReadFile(path, parseOptions)
 	if errors.Is(err, os.ErrNotExist) {
 		return domain.Defaults(), nil, nil
 	}
 	if err != nil {
 		return domain.Defaults(), nil, err
 	}
-	cfg, warnings, parseErr := Parse(f)
-	if closeErr := f.Close(); parseErr == nil && closeErr != nil {
-		return cfg, warnings, closeErr
-	}
-	return cfg, warnings, parseErr
+	return Parse(bytes.NewReader(data))
 }
 
-// Watch polls path for mtime/size changes every two seconds and calls onChange
-// with each successfully loaded config. Missing files are allowed and reload to
-// defaults when the watched state changes.
-func Watch(ctx context.Context, clock ports.Clock, path string, onChange func(domain.Config, []domain.Warning)) error {
-	last, err := fileStamp(path)
+// Watch follows path with native file notifications (kvconf.Watch) and calls
+// onChange with the config reloaded after each change. Missing files are
+// allowed and reload to defaults. A load failure reports defaults plus a
+// warning; the same failure is not reported twice in a row. Watch returns
+// ctx.Err() when ctx ends.
+func Watch(ctx context.Context, path string, onChange func(domain.Config, []domain.Warning)) error {
+	return watch(ctx, path, kvconf.WatchOptions{}, onChange)
+}
+
+// fallbackPoll is the polling interval used when native watching fails.
+const fallbackPoll = 2 * time.Second
+
+// kvWatch is kvconf.Watch; tests replace it to make native watching fail.
+var kvWatch = kvconf.Watch
+
+func watch(ctx context.Context, path string, opts kvconf.WatchOptions, onChange func(domain.Config, []domain.Warning)) error {
 	lastErrMsg := ""
-	if err != nil {
-		lastErrMsg = err.Error()
-		onChange(domain.Defaults(), []domain.Warning{{Msg: lastErrMsg}})
+	reportErr := func(err error) {
+		if msg := err.Error(); msg != lastErrMsg {
+			lastErrMsg = msg
+			onChange(domain.Defaults(), []domain.Warning{{Msg: msg}})
+		}
 	}
-	timer := clock.NewTimer(pollInterval)
-	defer timer.Stop()
+	if _, err := os.Stat(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		reportErr(err)
+	}
+
+	changed := make(chan struct{}, 1)
+	watchErr := make(chan error, 1)
+	go func() { watchErr <- kvWatch(ctx, path, opts, changed) }()
 
 	for {
 		select {
 		case <-ctx.Done():
+			<-watchErr
 			return ctx.Err()
-		case <-timer.C():
-			current, statErr := fileStamp(path)
-			if statErr != nil {
-				if statErr.Error() != lastErrMsg {
-					lastErrMsg = statErr.Error()
-					onChange(domain.Defaults(), []domain.Warning{{Msg: lastErrMsg}})
-				}
-			} else if current != last || lastErrMsg != "" {
-				lastErrMsg = ""
-				last = current
-				cfg, warnings, err := Load(path)
-				if err != nil {
-					cfg = domain.Defaults()
-					warnings = append(warnings, domain.Warning{Msg: err.Error()})
-				}
-				onChange(cfg, warnings)
+		case err := <-watchErr:
+			if ctx.Err() != nil {
+				return ctx.Err()
 			}
-			timer.Reset(pollInterval)
+			if err == nil {
+				err = errors.New("config watcher stopped")
+			}
+			if opts.Poll > 0 {
+				return err
+			}
+			// The OS ran out of watches (inotify limits): poll like before
+			// rather than lose live reload until the daemon restarts. The
+			// warning rides on the current config, which must not reset.
+			opts.Poll = fallbackPoll
+			go func() { watchErr <- kvWatch(ctx, path, opts, changed) }()
+			if cfg, warnings, err2 := Load(path); err2 == nil {
+				lastErrMsg = ""
+				onChange(cfg, append(warnings, domain.Warning{Msg: fmt.Sprintf("config watcher: %v; polling every %s", err, fallbackPoll)}))
+			}
+		case <-changed:
+			cfg, warnings, err := Load(path)
+			if err != nil {
+				reportErr(err)
+				continue
+			}
+			lastErrMsg = ""
+			onChange(cfg, warnings)
 		}
 	}
-}
-
-type stamp struct {
-	modTime time.Time
-	size    int64
-	exists  bool
-}
-
-func fileStamp(path string) (stamp, error) {
-	st, err := os.Stat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return stamp{}, nil
-	}
-	if err != nil {
-		return stamp{}, err
-	}
-	return stamp{modTime: st.ModTime(), size: st.Size(), exists: true}, nil
 }
 
 func parseEchoPredict(value string) (domain.EchoPredictMode, bool) {
@@ -473,31 +487,4 @@ func parseTheme(value string) (domain.ThemeMode, bool) {
 	default:
 		return domain.ThemeAuto, false
 	}
-}
-
-func stripInlineComment(line string) string {
-	inQuote := false
-	escaped := false
-	for i, r := range line {
-		if escaped {
-			escaped = false
-			continue
-		}
-		if inQuote && r == '\\' {
-			escaped = true
-			continue
-		}
-		if r == '"' {
-			inQuote = !inQuote
-			continue
-		}
-		if !inQuote && r == '#' && (i == 0 || isSpace(rune(line[i-1]))) {
-			return strings.TrimSpace(line[:i])
-		}
-	}
-	return line
-}
-
-func isSpace(r rune) bool {
-	return r == ' ' || r == '\t' || r == '\r' || r == '\n'
 }
