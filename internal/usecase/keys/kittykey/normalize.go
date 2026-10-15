@@ -6,6 +6,10 @@ import (
 	"unicode/utf8"
 )
 
+// maxNormalizedSeq bounds one held key sequence. Associated text makes a key
+// event as long as the text an IME commits at once.
+const maxNormalizedSeq = 4096
+
 // Kitty functional key codes of the modifier and lock keys. RequestFlags
 // reports them; OuterFlags never does.
 const (
@@ -24,8 +28,9 @@ const (
 //
 // Input already in the OuterFlags or legacy encoding passes through
 // unchanged, so enabling a Normalizer before the terminal switches flags is
-// safe. A trailing incomplete CSI sequence is held until the next call; a
-// lone trailing ESC is not, because the key router owns its timing.
+// safe. A trailing incomplete escape sequence, a lone ESC included, is held
+// until the next call: with FlagDisambiguate the Escape key itself arrives as
+// CSI 27 u, so a lone ESC only ends a read split inside a sequence.
 // A Normalizer is not safe for concurrent use.
 type Normalizer struct {
 	pending []byte
@@ -115,17 +120,20 @@ func partialSuffix(data, marker []byte) int {
 // only digits, ';' and ':'. size is 0 when data starts no such sequence;
 // partial reports a strict prefix that may still complete.
 func scanCSI(data []byte) (params []byte, final byte, size int, partial bool) {
-	if len(data) < 2 || data[1] != '[' {
+	if len(data) == 1 {
+		return nil, 0, 0, true
+	}
+	if data[1] != '[' {
 		return nil, 0, 0, false
 	}
-	for i := 2; i < len(data) && i < maxSeq; i++ {
+	for i := 2; i < len(data) && i < maxNormalizedSeq; i++ {
 		b := data[i]
 		if (b >= '0' && b <= '9') || b == ';' || b == ':' {
 			continue
 		}
 		return data[2:i], b, i + 1, false
 	}
-	return nil, 0, 0, len(data) < maxSeq
+	return nil, 0, 0, len(data) < maxNormalizedSeq
 }
 
 // rewrite returns the OuterFlags form of one key sequence, or false when the
@@ -160,10 +168,11 @@ func (n *Normalizer) rewriteFunctional(params []byte, final byte) ([]byte, bool)
 	if !ok {
 		return nil, false
 	}
-	n.track(Event{Mods: mods, Release: event == eventRelease}, false)
+	n.track(Event{Mods: mods &^ modLocks, Release: event == eventRelease}, false)
 	if event == eventRelease {
 		return nil, true
 	}
+	// Functional keys keep their lock bits under OuterFlags.
 	out := []byte("\x1b[")
 	if mods != 0 || (final == '~' || string(fields[0]) != "1") {
 		out = append(out, fields[0]...)
@@ -207,14 +216,18 @@ func encodeOuter(key fullKey) []byte {
 	if ev.Release || isModifierOrLock(ev.Code) {
 		return nil
 	}
-	plain := ev.Mods&^ModShift == 0
 	switch {
-	case ev.Code == 0 || (plain && len(key.text) > 0):
+	case len(key.text) > 0 || ev.Code == 0:
+		// A terminal sends the text a key generates as is, whatever the
+		// modifiers that produced it.
 		return appendRunes(nil, key.text)
 	case ev.Mods == 0 && (ev.Code == KeyEnter || ev.Code == KeyTab || ev.Code == KeyBackspace):
 		return []byte{byte(ev.Code)}
-	case plain && isTextKey(ev.Code):
+	case ev.Mods&^ModShift == 0 && isTextKey(ev.Code):
 		return legacyText(ev)
+	case !isTextKey(ev.Code):
+		// Lock bits are reported for keys that do not produce text.
+		ev.Mods |= key.locks
 	}
 	return encodeCSIu(ev, OuterFlags)
 }

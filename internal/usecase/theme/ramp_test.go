@@ -160,7 +160,10 @@ func TestMRUStylePlacesHistoryBetweenActiveAndBar(t *testing.T) {
 					style := MRUStyle(ramp, index, count)
 					require.Equal(t, okLabLerp(bar, active, weight), style.BackgroundRGB, "count=%d index=%d", count, index)
 					foreground, _ := primaryText(tt.theme, style.BackgroundRGB)
-					require.Equal(t, okLabLerp(foreground, style.BackgroundRGB, mruTextDim(index, count)), style.ForegroundRGB)
+					require.Equal(t, dimText(foreground, style.BackgroundRGB, mruTextDim(index, count)), style.ForegroundRGB)
+					if ContrastRatio(foreground, style.BackgroundRGB) >= normalTextContrast {
+						require.GreaterOrEqual(t, ContrastRatio(style.ForegroundRGB, style.BackgroundRGB), normalTextContrast, "count=%d index=%d keeps normal-text contrast", count, index)
+					}
 				}
 			}
 			require.Equal(t, okLabLerp(bar, active, 0.5), MRUStyle(ramp, 0, 1).BackgroundRGB, "the newest entry always sits halfway")
@@ -182,6 +185,31 @@ func TestMRUTextDimFadesOldestToSeventyPercent(t *testing.T) {
 		for index, want := range tt.want {
 			require.InDelta(t, want, mruTextDim(index, tt.count), 1e-9, "count=%d index=%d", tt.count, index)
 		}
+	}
+}
+
+func TestDimTextStopsAtNormalTextContrast(t *testing.T) {
+	black, white, grey := renderer.RGB{}, renderer.RGB{R: 255, G: 255, B: 255}, renderer.RGB{R: 0x80, G: 0x80, B: 0x80}
+	tests := []struct {
+		name    string
+		text    renderer.RGB
+		surface renderer.RGB
+		want    renderer.RGB
+	}{
+		{name: "high contrast fades fully", text: white, surface: black, want: okLabLerp(white, black, 0.3)},
+		{name: "marginal contrast fades only to the floor", text: grey, surface: black},
+		{name: "low contrast stays undimmed", text: grey, surface: grey, want: grey},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := dimText(tt.text, tt.surface, 0.3)
+			if tt.want != (renderer.RGB{}) {
+				require.Equal(t, tt.want, got)
+			}
+			if ContrastRatio(tt.text, tt.surface) >= normalTextContrast {
+				require.GreaterOrEqual(t, ContrastRatio(got, tt.surface), normalTextContrast)
+			}
+		})
 	}
 }
 

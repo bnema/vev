@@ -1,6 +1,10 @@
 package theme
 
-import renderer "github.com/bnema/vev-vt"
+import (
+	"math"
+
+	renderer "github.com/bnema/vev-vt"
+)
 
 const (
 	normalTextContrast = 4.5
@@ -199,9 +203,22 @@ func mruTextDim(index, count int) float64 {
 	return mruMaxTextDim * float64(index) / float64(count-1)
 }
 
+// dimText fades text toward its surface by up to weight, never below
+// normal-text contrast unless the undimmed text was already below it.
+func dimText(text, surface renderer.RGB, weight float64) renderer.RGB {
+	for step := int(math.Round(weight * 100)); step > 0; step-- {
+		candidate := okLabLerp(text, surface, float64(step)/100)
+		if ContrastRatio(candidate, surface) >= normalTextContrast {
+			return candidate
+		}
+	}
+	return text
+}
+
 // MRUStyle places history entries by mruWeight between the bar and the active
 // surface. The background is never moved for contrast; the text picks the
-// better of the theme foreground and background, then fades by mruTextDim.
+// better of the theme foreground and background, then fades by mruTextDim
+// within normal-text contrast.
 func MRUStyle(ramp Ramp, index, count int) renderer.Style {
 	if !ramp.rgb || count <= 0 {
 		return ramp.SurfaceRecent
@@ -210,6 +227,5 @@ func MRUStyle(ramp Ramp, index, count int) renderer.Style {
 	weight := mruWeight(index, count)
 	background := okLabLerp(ramp.SurfaceBar.BackgroundRGB, ramp.SurfaceActive.BackgroundRGB, weight)
 	foreground, _ := primaryText(Theme{Foreground: ramp.foreground, Background: ramp.background}, background)
-	foreground = okLabLerp(foreground, background, mruTextDim(index, count))
-	return rgbSurface(foreground, background)
+	return rgbSurface(dimText(foreground, background, mruTextDim(index, count)), background)
 }

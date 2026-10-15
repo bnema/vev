@@ -117,6 +117,8 @@ func Parse(data []byte) (ev Event, n int, ok, partial bool) {
 // fullKey is one CSI u key event with the fields Event leaves out.
 type fullKey struct {
 	ev Event
+	// locks holds the Caps Lock and Num Lock bits Event.Mods leaves out.
+	locks int
 	// text holds the associated text (FlagText), control codes removed.
 	text []rune
 }
@@ -156,7 +158,8 @@ func parseParams(params []byte) (fullKey, bool) {
 		if !ok {
 			return fullKey{}, false
 		}
-		ev.Mods = mods
+		ev.Mods = mods &^ modLocks
+		key.locks = mods & modLocks
 		ev.Release = event == eventRelease
 	}
 	// A third field carries associated text (FlagText). Only a Normalizer
@@ -181,8 +184,8 @@ const (
 	eventRelease = 3
 )
 
-// parseMods decodes a "mods[:event]" field: the modifier bits with the lock
-// bits removed, and the event type (press when absent).
+// parseMods decodes a "mods[:event]" field: the modifier bits, lock bits
+// included, and the event type (press when absent).
 func parseMods(field []byte) (mods, event int, ok bool) {
 	sub := splitByte(field, ':')
 	if len(sub) > 2 {
@@ -199,7 +202,7 @@ func parseMods(field []byte) (mods, event int, ok bool) {
 			return 0, 0, false
 		}
 	}
-	return (encoded - 1) &^ modLocks, event, true
+	return encoded - 1, event, true
 }
 
 // Translate rewrites every complete CSI u key sequence and kitty F1-F4 form in

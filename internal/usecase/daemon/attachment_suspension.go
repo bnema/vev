@@ -51,6 +51,9 @@ func (d *Daemon) suspendAttachment(token attachmentCapability, request protocol.
 	ac.lifecycle.activity = attachmentSuspended
 	ac.lifecycle.retained = target
 	ac.lifecycle.mu.Unlock()
+	// A suspended attachment drops modifier reports; its activation starts
+	// from a released Ctrl and the client reports a hold afresh.
+	ac.ctrlHeld.Store(false)
 	sess.mu.Unlock()
 	d.mu.Unlock()
 	cleanup.finish()

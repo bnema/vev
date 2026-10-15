@@ -1,6 +1,7 @@
 package kittykey
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -31,7 +32,15 @@ func TestNormalizerRewritesRequestFlagsToOuterFlags(t *testing.T) {
 		{name: "escape", in: "\x1b[27u", want: "\x1b[27u"},
 		{name: "ctrl letter", in: "\x1b[99;5u", want: "\x1b[99;5u"},
 		{name: "ctrl digit with base", in: "\x1b[38::49;5u", want: "\x1b[38::49;5u"},
-		{name: "alt letter ignores text", in: "\x1b[97;3;97u", want: "\x1b[97;3u"},
+		{name: "alt letter without text", in: "\x1b[97;3u", want: "\x1b[97;3u"},
+		{name: "altgr text wins over modifiers", in: "\x1b[113;7;64u", want: "@"},
+		{name: "long ime commit", in: "\x1b[0;;" + strings.Repeat("19968:", 11) + "19968u", want: strings.Repeat("一", 12)},
+		{name: "caps lock dropped from text key", in: "\x1b[97;65;65u", want: "A"},
+		{name: "caps lock kept on ctrl letter", in: "\x1b[97;69u", want: "\x1b[97;5u"},
+		{name: "num lock kept on escape", in: "\x1b[27;129u", want: "\x1b[27;129u"},
+		{name: "caps lock kept on arrow", in: "\x1b[1;65A", want: "\x1b[1;65A"},
+		{name: "caps lock arrow repeat", in: "\x1b[1;65:2A", want: "\x1b[1;65A"},
+		{name: "caps lock delete", in: "\x1b[3;65~", want: "\x1b[3;65~"},
 		{name: "ctrl press dropped", in: "\x1b[57442;5u", want: ""},
 		{name: "ctrl release dropped", in: "\x1b[57442;1:3u", want: ""},
 		{name: "shift key dropped", in: "\x1b[57441;2u", want: ""},
@@ -48,7 +57,7 @@ func TestNormalizerRewritesRequestFlagsToOuterFlags(t *testing.T) {
 		{name: "keyboard reply untouched", in: "\x1b[?5u", want: "\x1b[?5u"},
 		{name: "cursor report untouched", in: "\x1b[12;40R", want: "\x1b[12;40R"},
 		{name: "paste body untouched", in: "\x1b[200~\x1b[97;1:3u\x1b[201~\x1b[97;1:3u", want: "\x1b[200~\x1b[97;1:3u\x1b[201~"},
-		{name: "lone esc passes", in: "x\x1b", want: "x\x1b"},
+		{name: "lone esc held", in: "x\x1b", want: "x"},
 		{name: "trailing garbage", in: "\x1b[97;;97u\x1b[zz", want: "a\x1b[zz"},
 		{name: "bad event type kept", in: "\x1b[97;1:4u", want: "\x1b[97;1:4u"},
 	}
@@ -69,6 +78,7 @@ func TestNormalizerHoldsSplitSequences(t *testing.T) {
 		{name: "split csi u", reads: []string{"a\x1b[97;", ";98u"}, want: []string{"a", "b"}},
 		{name: "split csi prefix", reads: []string{"\x1b[", "57442;1:3u"}, want: []string{"", ""}},
 		{name: "split paste close", reads: []string{"\x1b[200~x\x1b[20", "1~\x1b[97;;97u"}, want: []string{"\x1b[200~x", "\x1b[201~a"}},
+		{name: "split after esc", reads: []string{"\x1b", "[57442;5u", "\x1b", "[97;;97u"}, want: []string{"", "", "", "a"}},
 		{name: "split paste open", reads: []string{"\x1b[20", "0~\x1b[97;1:3u\x1b[201~"}, want: []string{"", "\x1b[200~\x1b[97;1:3u\x1b[201~"}},
 	}
 	for _, tt := range tests {
@@ -78,6 +88,27 @@ func TestNormalizerHoldsSplitSequences(t *testing.T) {
 				require.Equal(t, tt.want[i], string(n.Normalize([]byte(read))), "read %d", i)
 			}
 		})
+	}
+}
+
+// TestNormalizerEverySplitMatchesOneRead feeds each input split at every byte
+// and requires the same output and Ctrl state as one read.
+func TestNormalizerEverySplitMatchesOneRead(t *testing.T) {
+	inputs := []string{
+		"\x1b[57442;5u\x1b[49;5u\x1b[49;5:3u",
+		"a\x1b[97;;97u\x1b[57442;1:3u",
+		"\x1b[200~\x1b[97;1:3u\x1b[201~\x1b[1;65:2A",
+		"\x1b[0;;19968:19968u\x1b[27u",
+	}
+	for _, in := range inputs {
+		var whole Normalizer
+		want := string(whole.Normalize([]byte(in)))
+		for cut := 1; cut < len(in); cut++ {
+			var n Normalizer
+			got := string(n.Normalize([]byte(in[:cut]))) + string(n.Normalize([]byte(in[cut:])))
+			require.Equal(t, want, got, "input %q cut %d", in, cut)
+			require.Equal(t, whole.CtrlHeld(), n.CtrlHeld(), "input %q cut %d", in, cut)
+		}
 	}
 }
 

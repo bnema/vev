@@ -1092,8 +1092,13 @@ func TestStatusBarRendersMRUNamesAndInlineBell(t *testing.T) {
 
 func TestStatusBarShowsMRURanksWhileCtrlHeld(t *testing.T) {
 	mru := []recentRouteDisplay{{name: "local"}, {name: "neferwl@arch"}, {name: "old"}}
+	var tenEntries []recentRouteDisplay
+	for _, name := range "abcdefghij" {
+		tenEntries = append(tenEntries, recentRouteDisplay{name: string(name)})
+	}
 	tests := []struct {
 		name      string
+		mru       []recentRouteDisplay
 		showRanks bool
 		width     int
 		want      string
@@ -1101,10 +1106,15 @@ func TestStatusBarShowsMRURanksWhileCtrlHeld(t *testing.T) {
 		{name: "names only", width: 44, want: " cur  local  neferwl@arch  old "},
 		{name: "ranks while held", showRanks: true, width: 50, want: " cur  1:local  2:neferwl@arch  3:old "},
 		{name: "rank widths drop whole oldest entries", showRanks: true, width: 44, want: " cur  1:local  2:neferwl@arch "},
+		{name: "only ctrl digits get ranks", showRanks: true, width: 100, mru: tenEntries, want: " cur  1:a  2:b  3:c  4:d  5:e  6:f  7:g  8:h  9:i  j "},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			state := barState{status: statusSnapshot{session: "cur"}, mru: mru, showRanks: tt.showRanks}
+			entries := mru
+			if tt.mru != nil {
+				entries = tt.mru
+			}
+			state := barState{status: statusSnapshot{session: "cur"}, mru: entries, showRanks: tt.showRanks}
 			row := make([]renderer.Cell, tt.width)
 
 			drawStatusBarState(row, state, resolveStyles(nil))

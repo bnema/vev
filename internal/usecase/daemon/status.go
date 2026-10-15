@@ -16,6 +16,7 @@ import (
 )
 
 const (
+	// maxMRUSessions is how many history entries Ctrl+1..9 reach.
 	maxMRUSessions     = 9
 	pulseFrameCount    = 30
 	pulseFrameInterval = 120 * time.Millisecond
@@ -92,7 +93,7 @@ func drawStatusBarState(row []renderer.Cell, state barState, styles themeui.Styl
 		fittedMRU := fitMRU(state.mru, len(row), x, rightText, state.showRanks)
 		for i, sess := range fittedMRU {
 			style := styles.MRUStyle(i, len(fittedMRU))
-			if state.showRanks {
+			if state.showRanks && i < maxMRUSessions {
 				drawRankedStatusSessionEntry(row, &x, rankedRecent{rank: i + 1, name: sess.name, attention: sess.attention}, style, state.attentionFrame, styles.Reduced)
 				continue
 			}
@@ -458,12 +459,12 @@ func rankPrefixWidth(rank int) int {
 	return statusTextWidth(strconv.Itoa(rank) + ":")
 }
 
-// fitMRU keeps the leading entries that fit. ranked adds each entry's "N:"
-// rank prefix to its width.
+// fitMRU keeps the leading entries that fit. ranked adds the "N:" rank prefix
+// of each entry Ctrl+1..9 reaches to its width.
 func fitMRU(entries []recentRouteDisplay, rowLen, leftUsed int, feedback string, ranked bool) []recentRouteDisplay {
 	cost := func(i int, entry recentRouteDisplay) int {
 		width := recentRouteDisplayWidth(entry)
-		if ranked {
+		if ranked && i < maxMRUSessions {
 			width += rankPrefixWidth(i + 1)
 		}
 		return width
