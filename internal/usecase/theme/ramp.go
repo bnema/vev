@@ -185,9 +185,23 @@ func mruWeight(index, count int) float64 {
 	return 0.5 * (1 - float64(index)/float64(count))
 }
 
+// mruMaxTextDim is how far the oldest history entry's text fades toward its
+// background: it keeps 70% of its strength.
+const mruMaxTextDim = 0.3
+
+// mruTextDim is the share of the way from the text color to the background for
+// a history entry: the newest keeps full text, the oldest fades by
+// mruMaxTextDim, linearly in between: 3 entries → 0, 0.15, 0.3.
+func mruTextDim(index, count int) float64 {
+	if count <= 1 {
+		return 0
+	}
+	return mruMaxTextDim * float64(index) / float64(count-1)
+}
+
 // MRUStyle places history entries by mruWeight between the bar and the active
-// surface. The background is never moved for contrast; only the text picks the
-// better of the theme foreground and background.
+// surface. The background is never moved for contrast; the text picks the
+// better of the theme foreground and background, then fades by mruTextDim.
 func MRUStyle(ramp Ramp, index, count int) renderer.Style {
 	if !ramp.rgb || count <= 0 {
 		return ramp.SurfaceRecent
@@ -196,5 +210,6 @@ func MRUStyle(ramp Ramp, index, count int) renderer.Style {
 	weight := mruWeight(index, count)
 	background := okLabLerp(ramp.SurfaceBar.BackgroundRGB, ramp.SurfaceActive.BackgroundRGB, weight)
 	foreground, _ := primaryText(Theme{Foreground: ramp.foreground, Background: ramp.background}, background)
+	foreground = okLabLerp(foreground, background, mruTextDim(index, count))
 	return rgbSurface(foreground, background)
 }

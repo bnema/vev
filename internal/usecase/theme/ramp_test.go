@@ -160,11 +160,28 @@ func TestMRUStylePlacesHistoryBetweenActiveAndBar(t *testing.T) {
 					style := MRUStyle(ramp, index, count)
 					require.Equal(t, okLabLerp(bar, active, weight), style.BackgroundRGB, "count=%d index=%d", count, index)
 					foreground, _ := primaryText(tt.theme, style.BackgroundRGB)
-					require.Equal(t, foreground, style.ForegroundRGB)
+					require.Equal(t, okLabLerp(foreground, style.BackgroundRGB, mruTextDim(index, count)), style.ForegroundRGB)
 				}
 			}
 			require.Equal(t, okLabLerp(bar, active, 0.5), MRUStyle(ramp, 0, 1).BackgroundRGB, "the newest entry always sits halfway")
 		})
+	}
+}
+
+func TestMRUTextDimFadesOldestToSeventyPercent(t *testing.T) {
+	tests := []struct {
+		count int
+		want  []float64
+	}{
+		{count: 1, want: []float64{0}},
+		{count: 2, want: []float64{0, 0.3}},
+		{count: 3, want: []float64{0, 0.15, 0.3}},
+		{count: 4, want: []float64{0, 0.1, 0.2, 0.3}},
+	}
+	for _, tt := range tests {
+		for index, want := range tt.want {
+			require.InDelta(t, want, mruTextDim(index, tt.count), 1e-9, "count=%d index=%d", tt.count, index)
+		}
 	}
 }
 
