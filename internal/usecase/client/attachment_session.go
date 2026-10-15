@@ -386,6 +386,15 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 	if err := sendFocus(); err != nil {
 		return w.settle(ctx, fg, stream, token, err)
 	}
+	// A Ctrl held on its own shows the recent-session ranks.
+	ctrl := newCtrlReporter(attachmentTerminalCtrl(fg), w.cfg.Clock)
+	defer ctrl.stop()
+	sendCtrl := func(message protocol.ModifierState, ok bool) error {
+		if ok {
+			return w.send(ctx, fg, stream, message)
+		}
+		return nil
+	}
 	// pending is the one undecided input delivery waiting on the outbox.
 	var pending *pendingInputAck
 	defer func() {
@@ -456,6 +465,14 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 		select {
 		case <-focus.changed:
 			if err := sendFocus(); err != nil {
+				return w.settle(ctx, fg, stream, token, err)
+			}
+		case <-ctrl.changed:
+			if err := sendCtrl(ctrl.next()); err != nil {
+				return w.settle(ctx, fg, stream, token, err)
+			}
+		case <-ctrl.timerC():
+			if err := sendCtrl(ctrl.due()); err != nil {
 				return w.settle(ctx, fg, stream, token, err)
 			}
 		case <-input.wake:

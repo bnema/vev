@@ -346,6 +346,41 @@ func TestProtoTerminalFocusWire(t *testing.T) {
 	require.Error(t, err, "unknown focus is never encoded")
 }
 
+// TestProtoModifierStateWire pins the ModifierState payload byte for byte and
+// refuses a truncated prefix and trailing garbage.
+func TestProtoModifierStateWire(t *testing.T) {
+	tests := []struct {
+		name string
+		ctrl bool
+		want []byte
+	}{
+		// field 34 (length-delimited) -> ModifierState{field 1 = ctrl}.
+		{name: "ctrl held", ctrl: true, want: []byte{0x92, 0x02, 0x02, 0x08, 0x01}},
+		{name: "released", ctrl: false, want: []byte{0x92, 0x02, 0x00}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			message := protocol.ModifierState{Ctrl: tt.ctrl}
+			envelope, err := encodeProtoClient(message)
+			require.NoError(t, err)
+			raw, err := proto.Marshal(envelope)
+			require.NoError(t, err)
+			require.Equal(t, tt.want, raw)
+
+			require.Error(t, wire.ScanEnvelope(&wire.ClientEnvelope{}, raw[:len(raw)-1]), "truncated prefix")
+			require.Error(t, wire.ScanEnvelope(&wire.ClientEnvelope{}, append(append([]byte(nil), raw...), 0xFF)), "trailing garbage")
+			require.NoError(t, wire.ScanEnvelope(&wire.ClientEnvelope{}, raw))
+			decoded := &wire.ClientEnvelope{}
+			require.NoError(t, proto.Unmarshal(raw, decoded))
+			got, err := decodeProtoClient(decoded)
+			require.NoError(t, err)
+			require.Equal(t, message, got)
+		})
+	}
+	_, err := decodeProtoClient(&wire.ClientEnvelope{Payload: &wire.ClientEnvelope_ModifierState{}})
+	require.Error(t, err, "a missing payload is never decoded")
+}
+
 func protoMessageName(message any) string {
 	return protoShortName(message)
 }

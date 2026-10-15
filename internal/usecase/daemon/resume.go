@@ -636,6 +636,8 @@ func (d *Daemon) resumeParkedLocked(h protocol.Hello, tr ports.ServerConnection,
 	d.reconfigureAttachmentOutput(sess, ac, h)
 	// The replacement terminal's focus, too, is declared before first paint.
 	ac.setTerminalFocus(h.TerminalFocus)
+	// The replacement attachment reports a held Ctrl afresh.
+	ac.ctrlHeld.Store(false)
 	ac.clientPID.Store(h.ClientPID)
 	ac.setClientEnvironment(helloClientEnvironment(h))
 	geometry := h.Geometry()

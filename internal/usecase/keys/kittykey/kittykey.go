@@ -25,8 +25,12 @@ const (
 	FlagAllKeys       = 1 << 3
 	FlagText          = 1 << 4
 
-	// OuterFlags are the flags vev requests from the outer terminal.
+	// OuterFlags is the key encoding the rest of vev consumes. A Normalizer
+	// rewrites the richer RequestFlags stream into it.
 	OuterFlags = FlagDisambiguate | FlagAlternateKeys
+	// RequestFlags are the flags vev requests from the outer terminal: every
+	// key, modifier presses and releases included, as an escape code.
+	RequestFlags = OuterFlags | FlagReportEvents | FlagAllKeys | FlagText
 )
 
 // Modifier bits, as encoded in the mods parameter minus one.
@@ -101,61 +105,104 @@ func Parse(data []byte) (ev Event, n int, ok, partial bool) {
 		if b != 'u' || i == 2 {
 			return Event{}, 0, false, false
 		}
-		ev, ok := parseParams(data[2:i])
-		return ev, i + 1, ok, false
+		key, ok := parseParams(data[2:i])
+		if !ok || key.ev.Code == 0 {
+			return Event{}, 0, false, false
+		}
+		return key.ev, i + 1, true, false
 	}
 	return Event{}, 0, false, i < maxSeq
 }
 
-func parseParams(params []byte) (Event, bool) {
+// fullKey is one CSI u key event with the fields Event leaves out.
+type fullKey struct {
+	ev Event
+	// locks holds the Caps Lock and Num Lock bits Event.Mods leaves out.
+	locks int
+	// text holds the associated text (FlagText), control codes removed.
+	text []rune
+}
+
+func parseParams(params []byte) (fullKey, bool) {
 	fields := splitByte(params, ';')
 	if len(fields) > 3 {
-		return Event{}, false
+		return fullKey{}, false
 	}
 	keys := splitByte(fields[0], ':')
 	if len(keys) > 3 {
-		return Event{}, false
+		return fullKey{}, false
 	}
 	code, ok := atoi(keys[0])
-	if !ok || code == 0 {
-		return Event{}, false
+	if !ok {
+		return fullKey{}, false
 	}
-	ev := Event{Code: rune(code)}
+	key := fullKey{}
+	ev := &key.ev
+	ev.Code = rune(code)
 	if len(keys) > 1 && len(keys[1]) > 0 {
 		v, ok := atoi(keys[1])
 		if !ok {
-			return Event{}, false
+			return fullKey{}, false
 		}
 		ev.Shifted = rune(v)
 	}
 	if len(keys) > 2 && len(keys[2]) > 0 {
 		v, ok := atoi(keys[2])
 		if !ok {
-			return Event{}, false
+			return fullKey{}, false
 		}
 		ev.Base = rune(v)
 	}
 	if len(fields) > 1 && len(fields[1]) > 0 {
-		sub := splitByte(fields[1], ':')
-		if len(sub) > 2 {
-			return Event{}, false
+		mods, event, ok := parseMods(fields[1])
+		if !ok {
+			return fullKey{}, false
 		}
-		mods, ok := atoi(sub[0])
-		if !ok || mods < 1 {
-			return Event{}, false
-		}
-		ev.Mods = (mods - 1) &^ modLocks
-		if len(sub) == 2 && len(sub[1]) > 0 {
-			event, ok := atoi(sub[1])
-			if !ok || event < 1 || event > 3 {
-				return Event{}, false
+		ev.Mods = mods &^ modLocks
+		key.locks = mods & modLocks
+		ev.Release = event == eventRelease
+	}
+	// A third field carries associated text (FlagText). Only a Normalizer
+	// needs it; re-encoding a key never does.
+	if len(fields) > 2 && len(fields[2]) > 0 {
+		for _, field := range splitByte(fields[2], ':') {
+			v, ok := atoi(field)
+			if !ok {
+				return fullKey{}, false
 			}
-			ev.Release = event == 3
+			if r := rune(v); r >= 0x20 && (r < 0x7f || r > 0x9f) && utf8.ValidRune(r) {
+				key.text = append(key.text, r)
+			}
 		}
 	}
-	// A third field carries associated text (FlagText); it is not needed to
-	// re-encode the key and is intentionally ignored.
-	return ev, true
+	return key, true
+}
+
+// Event types; a repeat (2) is handled as a press.
+const (
+	eventPress   = 1
+	eventRelease = 3
+)
+
+// parseMods decodes a "mods[:event]" field: the modifier bits, lock bits
+// included, and the event type (press when absent).
+func parseMods(field []byte) (mods, event int, ok bool) {
+	sub := splitByte(field, ':')
+	if len(sub) > 2 {
+		return 0, 0, false
+	}
+	encoded, ok := atoi(sub[0])
+	if !ok || encoded < 1 {
+		return 0, 0, false
+	}
+	event = eventPress
+	if len(sub) == 2 && len(sub[1]) > 0 {
+		event, ok = atoi(sub[1])
+		if !ok || event < eventPress || event > eventRelease {
+			return 0, 0, false
+		}
+	}
+	return encoded - 1, event, true
 }
 
 // Translate rewrites every complete CSI u key sequence and kitty F1-F4 form in

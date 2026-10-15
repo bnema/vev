@@ -17,7 +17,7 @@ import (
 // daemonmux physical preamble conversation (multiplex.proto), whose
 // negotiated ceilings and accepted daemon binding ride the same wire
 // version as the session and broker conversations.
-const Version uint16 = 66
+const Version uint16 = 67
 
 // HandshakeTimeout bounds every transport handshake from connect through the
 // first committed publication. It excludes the preceding client-local
@@ -399,6 +399,13 @@ func (m TerminalFocus) Validate() error {
 		return ErrInvalidTerminalFocus
 	}
 	return nil
+}
+
+// ModifierState reports the modifier keys held on their own in the client's
+// terminal. A client sends it only when its terminal reports modifier key
+// events, so an attachment that never sends it shows no modifier held.
+type ModifierState struct {
+	Ctrl bool
 }
 
 func validEnvironmentPolicy(policy EnvironmentPolicy) bool {

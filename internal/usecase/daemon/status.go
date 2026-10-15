@@ -16,6 +16,7 @@ import (
 )
 
 const (
+	// maxMRUSessions is how many history entries Ctrl+1..9 reach.
 	maxMRUSessions     = 9
 	pulseFrameCount    = 30
 	pulseFrameInterval = 120 * time.Millisecond
@@ -89,9 +90,13 @@ func drawStatusBarState(row []renderer.Cell, state barState, styles themeui.Styl
 			drawRankedStatusSessionEntry(row, &x, sess, style, state.attentionFrame, styles.Reduced)
 		}
 	} else {
-		fittedMRU := fitMRU(state.mru, len(row), x, rightText)
+		fittedMRU := fitMRU(state.mru, len(row), x, rightText, state.showRanks)
 		for i, sess := range fittedMRU {
 			style := styles.MRUStyle(i, len(fittedMRU))
+			if state.showRanks && i < maxMRUSessions {
+				drawRankedStatusSessionEntry(row, &x, rankedRecent{rank: i + 1, name: sess.name, attention: sess.attention}, style, state.attentionFrame, styles.Reduced)
+				continue
+			}
 			drawStatusSessionEntry(row, &x, sess, style, state.attentionFrame, styles.Reduced)
 		}
 	}
@@ -169,6 +174,9 @@ type barState struct {
 	statusFeedback string
 	mru            []recentRouteDisplay
 	rankedRecent   []rankedRecent
+	// showRanks prefixes each mru entry with its Ctrl+N rank while the
+	// client holds Ctrl.
+	showRanks      bool
 	attentionFrame int
 	// theme is the client's terminal theme, if reported. Its zero value
 	// (Theme{}, Known: false) is a valid "no theme" default that resolves to
@@ -304,6 +312,7 @@ func (d *Daemon) barStateForAttachmentPaletteHintsFor(cur *session, ac *attached
 		state.rankedRecent = ranked
 	} else if routeSnapshot.Generation != 0 {
 		state.mru = formatRecentRouteSnapshot(historyRouteSnapshot(routeSnapshot))
+		state.showRanks = ac != nil && ac.ctrlHeld.Load()
 	}
 	return state
 }
@@ -416,13 +425,13 @@ func recentRouteDisplayWidth(entry recentRouteDisplay) int {
 	return width
 }
 
-func fitWholeRecentEntries[T any](entries []T, budget int, cost func(T) int) []T {
+func fitWholeRecentEntries[T any](entries []T, budget int, cost func(int, T) int) []T {
 	if budget <= 0 || len(entries) == 0 {
 		return nil
 	}
 	used := 0
 	for i, entry := range entries {
-		used += cost(entry)
+		used += cost(i, entry)
 		if used > budget {
 			return entries[:i]
 		}
@@ -436,17 +445,30 @@ func fitRankedRecent(entries []rankedRecent, rowLen, leftUsed int, feedback stri
 		reserve = statusTextWidth(feedback) + 2
 	}
 	budget := rowLen - leftUsed - reserve
-	return fitWholeRecentEntries(entries, budget, func(entry rankedRecent) int {
+	return fitWholeRecentEntries(entries, budget, func(_ int, entry rankedRecent) int {
 		return recentRouteDisplayWidth(recentRouteDisplay{
 			name:      entry.name,
 			kind:      entry.kind,
 			ephemeral: entry.ephemeral,
 			attention: entry.attention,
-		}) + statusTextWidth(strconv.Itoa(entry.rank)+":")
+		}) + rankPrefixWidth(entry.rank)
 	})
 }
 
-func fitMRU(entries []recentRouteDisplay, rowLen, leftUsed int, feedback string) []recentRouteDisplay {
+func rankPrefixWidth(rank int) int {
+	return statusTextWidth(strconv.Itoa(rank) + ":")
+}
+
+// fitMRU keeps the leading entries that fit. ranked adds the "N:" rank prefix
+// of each entry Ctrl+1..9 reaches to its width.
+func fitMRU(entries []recentRouteDisplay, rowLen, leftUsed int, feedback string, ranked bool) []recentRouteDisplay {
+	cost := func(i int, entry recentRouteDisplay) int {
+		width := recentRouteDisplayWidth(entry)
+		if ranked && i < maxMRUSessions {
+			width += rankPrefixWidth(i + 1)
+		}
+		return width
+	}
 	// With no feedback, keep one blank trailing cell; with feedback, reserve
 	// its " text" width plus a one-cell gap so drawRightPlainText always fits.
 	copyReserve := 1
@@ -463,11 +485,11 @@ func fitMRU(entries []recentRouteDisplay, rowLen, leftUsed int, feedback string)
 		budget -= mruFutureRightReserve(rowLen)
 		// Keep at least one recent session when it physically fits; the reserved
 		// right side is only a budget preference, not a reason to hide all recents.
-		if firstCost := recentRouteDisplayWidth(entries[0]); firstCost <= physicalBudget && budget < firstCost {
+		if firstCost := cost(0, entries[0]); firstCost <= physicalBudget && budget < firstCost {
 			budget = firstCost
 		}
 	}
-	return fitWholeRecentEntries(entries, budget, recentRouteDisplayWidth)
+	return fitWholeRecentEntries(entries, budget, cost)
 }
 
 const (
