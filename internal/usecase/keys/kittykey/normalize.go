@@ -28,14 +28,17 @@ const (
 //
 // Input already in the OuterFlags or legacy encoding passes through
 // unchanged, so enabling a Normalizer before the terminal switches flags is
-// safe. A trailing incomplete escape sequence, a lone ESC included, is held
-// until the next call: with FlagDisambiguate the Escape key itself arrives as
-// CSI 27 u, so a lone ESC only ends a read split inside a sequence.
+// safe. A trailing incomplete escape sequence is held until the next call. A
+// lone trailing ESC is held only once a CSI u key event proved the terminal
+// reports Escape as CSI 27 u; before that it may be a real Escape press.
 // A Normalizer is not safe for concurrent use.
 type Normalizer struct {
 	pending []byte
 	paste   bool
 	ctrl    bool
+	// kitty records that a CSI u key event arrived, so the terminal encodes
+	// Escape itself as one and a lone ESC can only start a split sequence.
+	kitty bool
 }
 
 // CtrlHeld reports whether Ctrl is held on its own: a Ctrl key is down and no
@@ -82,6 +85,10 @@ func (n *Normalizer) Normalize(data []byte) []byte {
 			continue
 		}
 		params, final, size, partial := scanCSI(rest)
+		if partial && len(rest) == 1 && !n.kitty {
+			out = append(out, rest...)
+			return out
+		}
 		if partial {
 			n.hold(rest)
 			return out
@@ -148,6 +155,7 @@ func (n *Normalizer) rewrite(params []byte, final byte) ([]byte, bool) {
 		if !ok {
 			return nil, false
 		}
+		n.kitty = true
 		n.track(key.ev, true)
 		return encodeOuter(key), true
 	case '~', 'A', 'B', 'C', 'D', 'E', 'F', 'H', 'P', 'Q', 'S':
@@ -225,10 +233,9 @@ func encodeOuter(key fullKey) []byte {
 		return []byte{byte(ev.Code)}
 	case ev.Mods&^ModShift == 0 && isTextKey(ev.Code):
 		return legacyText(ev)
-	case !isTextKey(ev.Code):
-		// Lock bits are reported for keys that do not produce text.
-		ev.Mods |= key.locks
 	}
+	// A key sent as an escape code reports the lock bits too.
+	ev.Mods |= key.locks
 	return encodeCSIu(ev, OuterFlags)
 }
 

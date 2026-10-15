@@ -39,6 +39,9 @@ func newTerminalKeys() *terminalKeys {
 // kittykey.RequestFlags; input still in the old encoding passes unchanged.
 func (k *terminalKeys) enable() { k.enabled.Store(true) }
 
+// disable stops normalizing, for a terminal that refused the flags.
+func (k *terminalKeys) disable() { k.enabled.Store(false) }
+
 // normalize rewrites one read. focus is the terminal focus after the read:
 // a window that lost focus may never report the Ctrl release.
 func (k *terminalKeys) normalize(data []byte, focus domain.TerminalFocus) []byte {

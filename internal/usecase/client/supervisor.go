@@ -1726,6 +1726,7 @@ func (s *Supervisor) detectTerminalCapabilities(ctx context.Context, pump *termi
 		// Normalize before the terminal switches, so no read escapes it.
 		pump.keys.enable()
 		if err := s.cfg.Terminal.EnableKittyKeyboard(kittykey.RequestFlags); err != nil {
+			pump.keys.disable()
 			s.logger.Warn("enabling kitty keyboard protocol failed", "err", err)
 			caps.KittyKeyboard = false
 		}
