@@ -51,7 +51,10 @@ type terminalInputPump struct {
 	in io.Reader
 	// focus is the terminal focus decoded from this reader. The pump strips
 	// focus reports before any consumer sees the bytes.
-	focus      *TerminalFocusState
+	focus *TerminalFocusState
+	// keys rewrites kitty key events to the encoding consumers read and
+	// tracks a held Ctrl, once the terminal reports every key event.
+	keys       *terminalKeys
 	done       chan struct{}
 	automation chan terminalAutomationRequest
 
@@ -91,6 +94,7 @@ func newTerminalInputPump(in io.Reader) *terminalInputPump {
 	return &terminalInputPump{
 		in:           in,
 		focus:        newTerminalFocusState(),
+		keys:         newTerminalKeys(),
 		done:         make(chan struct{}),
 		automation:   make(chan terminalAutomationRequest),
 		activation:   1,
@@ -392,10 +396,12 @@ func (p *terminalInputPump) start() {
 				n, err := p.in.Read(buf)
 				result := terminalReadResult{err: err}
 				if n > 0 {
-					if data := stripTerminalFocusReports(p.focus, buf[:n]); len(data) != 0 {
+					data := stripTerminalFocusReports(p.focus, buf[:n])
+					if data = p.keys.normalize(data, p.focus.Focus()); len(data) != 0 {
 						result.data = append([]byte(nil), data...)
 					} else if err == nil {
-						// A read that only carried focus reports delivers nothing.
+						// A read that only carried focus reports or dropped key
+						// events delivers nothing.
 						continue
 					}
 				}

@@ -93,6 +93,12 @@ message TerminalFocus {
   uint32 focus = 1;
 }
 
+// ModifierState reports which held modifier keys the client's terminal
+// reports on their own.
+message ModifierState {
+  bool ctrl = 1;
+}
+
 // SelectTab shows one exact tab of the attached session on this attachment.
 message SelectTab {
   string tab_id = 1;

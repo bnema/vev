@@ -703,6 +703,52 @@ func (x *TerminalFocus) GetFocus() uint32 {
 	return 0
 }
 
+// ModifierState reports which held modifier keys the client's terminal
+// reports on their own.
+type ModifierState struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Ctrl          bool                   `protobuf:"varint,1,opt,name=ctrl,proto3" json:"ctrl,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ModifierState) Reset() {
+	*x = ModifierState{}
+	mi := &file_terminal_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ModifierState) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ModifierState) ProtoMessage() {}
+
+func (x *ModifierState) ProtoReflect() protoreflect.Message {
+	mi := &file_terminal_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ModifierState.ProtoReflect.Descriptor instead.
+func (*ModifierState) Descriptor() ([]byte, []int) {
+	return file_terminal_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *ModifierState) GetCtrl() bool {
+	if x != nil {
+		return x.Ctrl
+	}
+	return false
+}
+
 // SelectTab shows one exact tab of the attached session on this attachment.
 type SelectTab struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -713,7 +759,7 @@ type SelectTab struct {
 
 func (x *SelectTab) Reset() {
 	*x = SelectTab{}
-	mi := &file_terminal_proto_msgTypes[10]
+	mi := &file_terminal_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -725,7 +771,7 @@ func (x *SelectTab) String() string {
 func (*SelectTab) ProtoMessage() {}
 
 func (x *SelectTab) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_proto_msgTypes[10]
+	mi := &file_terminal_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -738,7 +784,7 @@ func (x *SelectTab) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SelectTab.ProtoReflect.Descriptor instead.
 func (*SelectTab) Descriptor() ([]byte, []int) {
-	return file_terminal_proto_rawDescGZIP(), []int{10}
+	return file_terminal_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *SelectTab) GetTabId() string {
@@ -758,7 +804,7 @@ type UIFence struct {
 
 func (x *UIFence) Reset() {
 	*x = UIFence{}
-	mi := &file_terminal_proto_msgTypes[11]
+	mi := &file_terminal_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -770,7 +816,7 @@ func (x *UIFence) String() string {
 func (*UIFence) ProtoMessage() {}
 
 func (x *UIFence) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_proto_msgTypes[11]
+	mi := &file_terminal_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -783,7 +829,7 @@ func (x *UIFence) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UIFence.ProtoReflect.Descriptor instead.
 func (*UIFence) Descriptor() ([]byte, []int) {
-	return file_terminal_proto_rawDescGZIP(), []int{11}
+	return file_terminal_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *UIFence) GetActionId() uint64 {
@@ -808,7 +854,7 @@ type UIReceipt struct {
 
 func (x *UIReceipt) Reset() {
 	*x = UIReceipt{}
-	mi := &file_terminal_proto_msgTypes[12]
+	mi := &file_terminal_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -820,7 +866,7 @@ func (x *UIReceipt) String() string {
 func (*UIReceipt) ProtoMessage() {}
 
 func (x *UIReceipt) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_proto_msgTypes[12]
+	mi := &file_terminal_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -833,7 +879,7 @@ func (x *UIReceipt) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UIReceipt.ProtoReflect.Descriptor instead.
 func (*UIReceipt) Descriptor() ([]byte, []int) {
-	return file_terminal_proto_rawDescGZIP(), []int{12}
+	return file_terminal_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *UIReceipt) GetActionId() uint64 {
@@ -883,7 +929,7 @@ type UIViewUpdate struct {
 
 func (x *UIViewUpdate) Reset() {
 	*x = UIViewUpdate{}
-	mi := &file_terminal_proto_msgTypes[13]
+	mi := &file_terminal_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -895,7 +941,7 @@ func (x *UIViewUpdate) String() string {
 func (*UIViewUpdate) ProtoMessage() {}
 
 func (x *UIViewUpdate) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_proto_msgTypes[13]
+	mi := &file_terminal_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -908,7 +954,7 @@ func (x *UIViewUpdate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UIViewUpdate.ProtoReflect.Descriptor instead.
 func (*UIViewUpdate) Descriptor() ([]byte, []int) {
-	return file_terminal_proto_rawDescGZIP(), []int{13}
+	return file_terminal_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *UIViewUpdate) GetEpoch() uint64 {
@@ -945,7 +991,7 @@ type RemotePreviewRequest struct {
 
 func (x *RemotePreviewRequest) Reset() {
 	*x = RemotePreviewRequest{}
-	mi := &file_terminal_proto_msgTypes[14]
+	mi := &file_terminal_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -957,7 +1003,7 @@ func (x *RemotePreviewRequest) String() string {
 func (*RemotePreviewRequest) ProtoMessage() {}
 
 func (x *RemotePreviewRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_proto_msgTypes[14]
+	mi := &file_terminal_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -970,7 +1016,7 @@ func (x *RemotePreviewRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RemotePreviewRequest.ProtoReflect.Descriptor instead.
 func (*RemotePreviewRequest) Descriptor() ([]byte, []int) {
-	return file_terminal_proto_rawDescGZIP(), []int{14}
+	return file_terminal_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *RemotePreviewRequest) GetVersion() uint32 {
@@ -1015,7 +1061,7 @@ type RemotePreviewWatch struct {
 
 func (x *RemotePreviewWatch) Reset() {
 	*x = RemotePreviewWatch{}
-	mi := &file_terminal_proto_msgTypes[15]
+	mi := &file_terminal_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1027,7 +1073,7 @@ func (x *RemotePreviewWatch) String() string {
 func (*RemotePreviewWatch) ProtoMessage() {}
 
 func (x *RemotePreviewWatch) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_proto_msgTypes[15]
+	mi := &file_terminal_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1040,7 +1086,7 @@ func (x *RemotePreviewWatch) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RemotePreviewWatch.ProtoReflect.Descriptor instead.
 func (*RemotePreviewWatch) Descriptor() ([]byte, []int) {
-	return file_terminal_proto_rawDescGZIP(), []int{15}
+	return file_terminal_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *RemotePreviewWatch) GetRequest() *RemotePreviewRequest {
@@ -1076,7 +1122,7 @@ type RemotePreview struct {
 
 func (x *RemotePreview) Reset() {
 	*x = RemotePreview{}
-	mi := &file_terminal_proto_msgTypes[16]
+	mi := &file_terminal_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1088,7 +1134,7 @@ func (x *RemotePreview) String() string {
 func (*RemotePreview) ProtoMessage() {}
 
 func (x *RemotePreview) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_proto_msgTypes[16]
+	mi := &file_terminal_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1101,7 +1147,7 @@ func (x *RemotePreview) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RemotePreview.ProtoReflect.Descriptor instead.
 func (*RemotePreview) Descriptor() ([]byte, []int) {
-	return file_terminal_proto_rawDescGZIP(), []int{16}
+	return file_terminal_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *RemotePreview) GetVersion() uint32 {
@@ -1219,7 +1265,9 @@ const file_terminal_proto_rawDesc = "" +
 	"\x06action\x18\x01 \x01(\rR\x06action\"\x14\n" +
 	"\x12OutputResetRequest\"%\n" +
 	"\rTerminalFocus\x12\x14\n" +
-	"\x05focus\x18\x01 \x01(\rR\x05focus\"\"\n" +
+	"\x05focus\x18\x01 \x01(\rR\x05focus\"#\n" +
+	"\rModifierState\x12\x12\n" +
+	"\x04ctrl\x18\x01 \x01(\bR\x04ctrl\"\"\n" +
 	"\tSelectTab\x12\x15\n" +
 	"\x06tab_id\x18\x01 \x01(\tR\x05tabId\"&\n" +
 	"\aUIFence\x12\x1b\n" +
@@ -1264,7 +1312,7 @@ func file_terminal_proto_rawDescGZIP() []byte {
 	return file_terminal_proto_rawDescData
 }
 
-var file_terminal_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
+var file_terminal_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
 var file_terminal_proto_goTypes = []any{
 	(*ViewContext)(nil),            // 0: vev.wire.v1.ViewContext
 	(*Output)(nil),                 // 1: vev.wire.v1.Output
@@ -1276,30 +1324,31 @@ var file_terminal_proto_goTypes = []any{
 	(*ClientNotice)(nil),           // 7: vev.wire.v1.ClientNotice
 	(*OutputResetRequest)(nil),     // 8: vev.wire.v1.OutputResetRequest
 	(*TerminalFocus)(nil),          // 9: vev.wire.v1.TerminalFocus
-	(*SelectTab)(nil),              // 10: vev.wire.v1.SelectTab
-	(*UIFence)(nil),                // 11: vev.wire.v1.UIFence
-	(*UIReceipt)(nil),              // 12: vev.wire.v1.UIReceipt
-	(*UIViewUpdate)(nil),           // 13: vev.wire.v1.UIViewUpdate
-	(*RemotePreviewRequest)(nil),   // 14: vev.wire.v1.RemotePreviewRequest
-	(*RemotePreviewWatch)(nil),     // 15: vev.wire.v1.RemotePreviewWatch
-	(*RemotePreview)(nil),          // 16: vev.wire.v1.RemotePreview
-	(*CommittedRouteIdentity)(nil), // 17: vev.wire.v1.CommittedRouteIdentity
-	(*RGB)(nil),                    // 18: vev.wire.v1.RGB
-	(*RemoteTarget)(nil),           // 19: vev.wire.v1.RemoteTarget
-	(*LifecycleID)(nil),            // 20: vev.wire.v1.LifecycleID
-	(*PreviewCell)(nil),            // 21: vev.wire.v1.PreviewCell
+	(*ModifierState)(nil),          // 10: vev.wire.v1.ModifierState
+	(*SelectTab)(nil),              // 11: vev.wire.v1.SelectTab
+	(*UIFence)(nil),                // 12: vev.wire.v1.UIFence
+	(*UIReceipt)(nil),              // 13: vev.wire.v1.UIReceipt
+	(*UIViewUpdate)(nil),           // 14: vev.wire.v1.UIViewUpdate
+	(*RemotePreviewRequest)(nil),   // 15: vev.wire.v1.RemotePreviewRequest
+	(*RemotePreviewWatch)(nil),     // 16: vev.wire.v1.RemotePreviewWatch
+	(*RemotePreview)(nil),          // 17: vev.wire.v1.RemotePreview
+	(*CommittedRouteIdentity)(nil), // 18: vev.wire.v1.CommittedRouteIdentity
+	(*RGB)(nil),                    // 19: vev.wire.v1.RGB
+	(*RemoteTarget)(nil),           // 20: vev.wire.v1.RemoteTarget
+	(*LifecycleID)(nil),            // 21: vev.wire.v1.LifecycleID
+	(*PreviewCell)(nil),            // 22: vev.wire.v1.PreviewCell
 }
 var file_terminal_proto_depIdxs = []int32{
-	17, // 0: vev.wire.v1.ViewContext.route:type_name -> vev.wire.v1.CommittedRouteIdentity
+	18, // 0: vev.wire.v1.ViewContext.route:type_name -> vev.wire.v1.CommittedRouteIdentity
 	0,  // 1: vev.wire.v1.Output.context:type_name -> vev.wire.v1.ViewContext
-	18, // 2: vev.wire.v1.Theme.foreground:type_name -> vev.wire.v1.RGB
-	18, // 3: vev.wire.v1.Theme.background:type_name -> vev.wire.v1.RGB
-	18, // 4: vev.wire.v1.Theme.palette:type_name -> vev.wire.v1.RGB
+	19, // 2: vev.wire.v1.Theme.foreground:type_name -> vev.wire.v1.RGB
+	19, // 3: vev.wire.v1.Theme.background:type_name -> vev.wire.v1.RGB
+	19, // 4: vev.wire.v1.Theme.palette:type_name -> vev.wire.v1.RGB
 	0,  // 5: vev.wire.v1.UIViewUpdate.context:type_name -> vev.wire.v1.ViewContext
-	19, // 6: vev.wire.v1.RemotePreviewRequest.target:type_name -> vev.wire.v1.RemoteTarget
-	14, // 7: vev.wire.v1.RemotePreviewWatch.request:type_name -> vev.wire.v1.RemotePreviewRequest
-	20, // 8: vev.wire.v1.RemotePreview.lifecycle_id:type_name -> vev.wire.v1.LifecycleID
-	21, // 9: vev.wire.v1.RemotePreview.cells:type_name -> vev.wire.v1.PreviewCell
+	20, // 6: vev.wire.v1.RemotePreviewRequest.target:type_name -> vev.wire.v1.RemoteTarget
+	15, // 7: vev.wire.v1.RemotePreviewWatch.request:type_name -> vev.wire.v1.RemotePreviewRequest
+	21, // 8: vev.wire.v1.RemotePreview.lifecycle_id:type_name -> vev.wire.v1.LifecycleID
+	22, // 9: vev.wire.v1.RemotePreview.cells:type_name -> vev.wire.v1.PreviewCell
 	10, // [10:10] is the sub-list for method output_type
 	10, // [10:10] is the sub-list for method input_type
 	10, // [10:10] is the sub-list for extension type_name
@@ -1320,7 +1369,7 @@ func file_terminal_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_terminal_proto_rawDesc), len(file_terminal_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   17,
+			NumMessages:   18,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

@@ -98,6 +98,8 @@ On remote attachments the client predicts local echo, after mosh. The attached l
 
 The client turns on focus reporting (DEC mode 1004). Its terminal input pump strips each `ESC [ I`/`ESC [ O` report into a `TerminalFocusState` that any client feature can read or watch, `Hello` declares the focus known at attach, so the first paint already respects it, and the attached loop sends every later change to the daemon as `TerminalFocus` ahead of the input read that carried it. The daemon keeps it per attachment as a lock-free `terminalFocus()`. Unknown focus, from a terminal that never reports, counts as possibly seen, so every feature keeps its previous behavior there. Attention uses it: only an attachment that may be seen clears a bell. Geometry uses it too: a reported focus gain makes the attachment the latest shared PTY geometry claimant, so session content resizes to the focused window.
 
+With the kitty keyboard protocol the client asks its terminal for every key event, modifier presses and releases included (`kittykey.RequestFlags`). The input pump runs a `kittykey.Normalizer` that rewrites that stream back to the `OuterFlags` encoding every consumer reads, so routers, pickers, and panes see the same bytes as before, and tracks whether Ctrl is held on its own. The attached loop reports a hold that lasted 150 ms, and its release, as `ModifierState`; the daemon keeps it per attachment and prefixes the status-bar history with its Ctrl+N ranks while it is held.
+
 ## Broker-owned hosts and daemon composition
 
 `vev _broker-ready --require local-authority|local-catalogue` is an internal,

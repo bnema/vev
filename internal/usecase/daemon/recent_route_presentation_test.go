@@ -146,7 +146,7 @@ func TestFitRecentRouteEntriesKeepsWholeWideAndAttentionEntries(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := fitMRU(tt.entries, tt.width, 0, "copy")
+			got := fitMRU(tt.entries, tt.width, 0, "copy", false)
 			names := make([]string, len(got))
 			for i, entry := range got {
 				names[i] = entry.name

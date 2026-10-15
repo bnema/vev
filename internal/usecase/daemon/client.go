@@ -112,6 +112,9 @@ type attachedClient struct {
 	// atomic so any daemon path reads it without taking a lock; see
 	// terminalFocus.
 	focus atomic.Uint32
+	// ctrlHeld is whether the client last reported Ctrl held on its own; the
+	// status bar then shows recent-session ranks.
+	ctrlHeld atomic.Bool
 	// clientPID is the local client process from Hello, 0 when remote. It is
 	// atomic because a resume replaces it while bar scripts read it.
 	clientPID atomic.Uint32

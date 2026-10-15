@@ -15,8 +15,8 @@ import (
 // shares a payload type except route navigation failure, and the preamble
 // constants agree with the schema authority.
 func TestEnvelopeInventoryProvesDirectionAndSemanticPath(t *testing.T) {
-	if protocol.Version != 66 {
-		t.Fatalf("protocol.Version = %d, want 66", protocol.Version)
+	if protocol.Version != 67 {
+		t.Fatalf("protocol.Version = %d, want 67", protocol.Version)
 	}
 	if ProtocolEpoch != 1 {
 		t.Fatalf("ProtocolEpoch = %d, want 1", ProtocolEpoch)
@@ -40,7 +40,7 @@ func TestEnvelopeInventoryProvesDirectionAndSemanticPath(t *testing.T) {
 		"ui_fence": true, "navigation_inventory_request": true,
 		"navigation_inventory_publication": true, "navigation_inventory_failure": true,
 		"picker_close": true, "picker_selection": true,
-		"select_tab": true, "terminal_focus": true,
+		"select_tab": true, "terminal_focus": true, "modifier_state": true,
 	}
 	serverSemantic := map[string]bool{
 		"attachment_suspended": true, "attachment_activated": true,

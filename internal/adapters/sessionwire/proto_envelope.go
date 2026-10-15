@@ -170,6 +170,13 @@ func encodeProtoClient(message protocol.ClientMessage) (*wire.ClientEnvelope, er
 			return nil, ErrInvalidMessage
 		}
 		return encodeProtoClient(*m)
+	case protocol.ModifierState:
+		return &wire.ClientEnvelope{Payload: &wire.ClientEnvelope_ModifierState{ModifierState: &wire.ModifierState{Ctrl: m.Ctrl}}}, nil
+	case *protocol.ModifierState:
+		if m == nil {
+			return nil, ErrInvalidMessage
+		}
+		return encodeProtoClient(*m)
 	case protocol.UIFence:
 		return &wire.ClientEnvelope{Payload: &wire.ClientEnvelope_UiFence{UiFence: uiFenceToWire(m)}}, nil
 	case *protocol.UIFence:
@@ -656,6 +663,11 @@ func decodeProtoClient(envelope *wire.ClientEnvelope) (protocol.ClientMessage, e
 		return selectTabFromWire(payload.SelectTab)
 	case *wire.ClientEnvelope_TerminalFocus:
 		return terminalFocusFromWire(payload.TerminalFocus)
+	case *wire.ClientEnvelope_ModifierState:
+		if payload.ModifierState == nil {
+			return nil, errProtoConvertRange
+		}
+		return protocol.ModifierState{Ctrl: payload.ModifierState.GetCtrl()}, nil
 	case *wire.ClientEnvelope_RemotePreviewWatch:
 		return remotePreviewWatchFromWire(payload.RemotePreviewWatch)
 	case *wire.ClientEnvelope_RouteAttentionSubscription:

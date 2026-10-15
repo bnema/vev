@@ -12,7 +12,7 @@ wrong-direction frame before any mutation (`sessionwire.ErrWrongDirection`
 
 Client → server: `Hello`, `Input`, `Resize`, `Detach`, `Ping`, `List`,
 `Kill`, `Theme`, `Ack`, `ImagePush`, `ClientNotice`, `CommandRequest`,
-`OutputResetRequest`, `SelectTab`, `TerminalFocus`, `RemotePreviewWatch`,
+`OutputResetRequest`, `SelectTab`, `TerminalFocus`, `ModifierState`, `RemotePreviewWatch`,
 `RouteAttentionSubscription`, `SamePeerSwitchRequest`,
 `RecentRouteSnapshot`, `RouteNavigationFailure`,
 `SessionCreationFailure`, `UIFence`, `NavigationInventoryRequest`,

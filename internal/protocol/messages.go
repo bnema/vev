@@ -21,6 +21,7 @@ func (CommandRequest) clientMessage()                 {}
 func (OutputResetRequest) clientMessage()             {}
 func (SelectTab) clientMessage()                      {}
 func (TerminalFocus) clientMessage()                  {}
+func (ModifierState) clientMessage()                  {}
 func (RemotePreviewWatch) clientMessage()             {}
 func (RouteAttentionSubscription) clientMessage()     {}
 func (SamePeerSwitchRequest) clientMessage()          {}

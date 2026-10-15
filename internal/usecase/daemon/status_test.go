@@ -1090,6 +1090,30 @@ func TestStatusBarRendersMRUNamesAndInlineBell(t *testing.T) {
 	t.Fatalf("inline bell not rendered: %q", rowText(row))
 }
 
+func TestStatusBarShowsMRURanksWhileCtrlHeld(t *testing.T) {
+	mru := []recentRouteDisplay{{name: "local"}, {name: "neferwl@arch"}, {name: "old"}}
+	tests := []struct {
+		name      string
+		showRanks bool
+		width     int
+		want      string
+	}{
+		{name: "names only", width: 44, want: " cur  local  neferwl@arch  old "},
+		{name: "ranks while held", showRanks: true, width: 50, want: " cur  1:local  2:neferwl@arch  3:old "},
+		{name: "rank widths drop whole oldest entries", showRanks: true, width: 44, want: " cur  1:local  2:neferwl@arch "},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			state := barState{status: statusSnapshot{session: "cur"}, mru: mru, showRanks: tt.showRanks}
+			row := make([]renderer.Cell, tt.width)
+
+			drawStatusBarState(row, state, resolveStyles(nil))
+
+			require.Equal(t, tt.want, strings.TrimRight(rowText(row), " ")+" ")
+		})
+	}
+}
+
 func TestStatusBarCurrentSessionUsesAccentStyle(t *testing.T) {
 	theme := themeui.Theme{Foreground: renderer.RGB{R: 220, G: 220, B: 220}, Background: renderer.RGB{R: 10, G: 10, B: 10}, HasFG: true, HasBG: true, Known: true}
 	styles := themeui.NewStyles(theme)
