@@ -20,7 +20,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-14]
+        # ermite has no macOS runner: macos-14 runs on GitHub only.
+        os: ${{ fromJSON(github.server_url == 'https://github.com' && '["ubuntu-latest","macos-14"]' || '["ubuntu-latest"]') }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
