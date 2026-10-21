@@ -4,7 +4,7 @@ go 1.27
 
 require (
 	github.com/bnema/kvconf v0.1.2
-	github.com/bnema/vev-vt v0.7.1
+	github.com/bnema/vev-vt v0.7.2
 	github.com/coder/websocket v1.8.15
 	github.com/quic-go/quic-go v0.62.0
 	github.com/stretchr/testify v1.12.1
