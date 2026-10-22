@@ -31,7 +31,7 @@ fi
 # --- Resolve version -------------------------------------------------------
 if [ "$VERSION" = "latest" ]; then
   VERSION="$(curl -fsSL "${FORGE}/-/github/api/repos/${REPO}/releases/latest" \
-    | grep '"tag_name"' | head -1 | cut -d '"' -f 4)"
+    | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
   [ -n "$VERSION" ] || err "could not resolve the latest release tag"
 fi
 info "installing vev ${VERSION} (${OS}/${ARCH}) to ${INSTALL_DIR}"
