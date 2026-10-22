@@ -2,6 +2,14 @@ version: 2
 
 project_name: vev
 
+# Releases are published on ermite. In CI the runner sets GITHUB_API_URL and
+# GITHUB_SERVER_URL to an address the job can reach; the public URLs are the
+# fallback for a local run.
+github_urls:
+  api: '{{ or (index .Env "GITHUB_API_URL") "https://git.bnema.dev/-/github/api" }}/'
+  upload: '{{ or (index .Env "GITHUB_API_URL") "https://git.bnema.dev/-/github/api" }}/uploads/'
+  download: '{{ or (index .Env "GITHUB_SERVER_URL") "https://git.bnema.dev" }}/'
+
 before:
   hooks:
     - go mod tidy
@@ -47,7 +55,7 @@ checksum:
 
 changelog:
   sort: asc
-  use: github
+  use: git
   filters:
     exclude:
       - '^docs(\(.+\))?:'
@@ -89,7 +97,7 @@ release:
 
     ### Script (Linux x86_64/arm64, macOS arm64)
     ```sh
-    curl -fsSL https://raw.githubusercontent.com/bnema/vev/{{ .Tag }}/install.sh | VEV_VERSION={{ .Tag }} sh
+    curl -fsSL https://git.bnema.dev/vev/raw/{{ .Tag }}/install.sh | VEV_VERSION={{ .Tag }} sh
     ```
 
     ### Arch Linux
@@ -107,19 +115,15 @@ release:
     xattr -d com.apple.quarantine ~/.local/bin/vev
     ```
 
-    {{- if .PreviousTag }}
-    **Full Changelog**: https://github.com/bnema/vev/compare/{{ .PreviousTag }}...{{ .Tag }}
-    {{- else }}
-    **Full Changelog**: https://github.com/bnema/vev/releases/tag/{{ .Tag }}
-    {{- end }}
-
 git:
   tag_sort: -version:refname
 
 aurs:
   - name: vev-bin
     ids: ['default']
-    homepage: https://github.com/bnema/vev
+    homepage: https://git.bnema.dev/vev
+    # Public URL: github_urls.download is the CI-only relay address.
+    url_template: 'https://git.bnema.dev/vev/releases/download/{{ .Tag }}/{{ .ArtifactName }}'
     description: Terminal multiplexer with a per-user daemon, server-side rendering, and minimal socket/SSH diffs
     maintainers:
       - bnema <b at bnema dot dev>

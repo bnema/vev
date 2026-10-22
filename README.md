@@ -2,7 +2,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License: MIT"></a>
-  <a href="https://github.com/bnema/vev/releases"><img src="https://img.shields.io/badge/platforms-Linux%20%7C%20macOS-blue?style=flat-square" alt="Platforms: Linux and macOS"></a>
+  <a href="https://git.bnema.dev/vev/releases"><img src="https://img.shields.io/badge/platforms-Linux%20%7C%20macOS-blue?style=flat-square" alt="Platforms: Linux and macOS"></a>
   <a href="https://github.com/bnema/vev/commits/main"><img src="https://badgen.net/github/last-commit/bnema/vev/main?icon=github" alt="Last commit"></a>
   <a href="https://github.com/bnema/vev/stargazers"><img src="https://badgen.net/github/stars/bnema/vev?icon=github" alt="GitHub stars"></a>
 </p>
@@ -37,7 +37,7 @@ Remote and hybrid need vev installed on the remote host. Use `vev host add --tra
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/bnema/vev/main/install.sh | sh
+curl -fsSL https://git.bnema.dev/vev/raw/main/install.sh | sh
 # Arch Linux: yay -S vev-bin
 # or: go install github.com/bnema/vev@latest
 ```

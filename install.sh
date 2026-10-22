@@ -1,9 +1,10 @@
 #!/bin/sh
 # vev installer — Linux x86_64/arm64 and macOS arm64.
-# Usage: curl -fsSL https://raw.githubusercontent.com/bnema/vev/main/install.sh | sh
+# Usage: curl -fsSL https://git.bnema.dev/vev/raw/main/install.sh | sh
 # Env: VEV_VERSION=vX.Y.Z to pin a version (default: latest release).
 set -eu
 
+FORGE="https://git.bnema.dev"
 REPO="bnema/vev"
 VERSION="${VEV_VERSION:-latest}"
 
@@ -29,7 +30,7 @@ fi
 
 # --- Resolve version -------------------------------------------------------
 if [ "$VERSION" = "latest" ]; then
-  VERSION="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
+  VERSION="$(curl -fsSL "${FORGE}/-/github/api/repos/${REPO}/releases/latest" \
     | grep '"tag_name"' | head -1 | cut -d '"' -f 4)"
   [ -n "$VERSION" ] || err "could not resolve the latest release tag"
 fi
@@ -39,7 +40,7 @@ info "installing vev ${VERSION} (${OS}/${ARCH}) to ${INSTALL_DIR}"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-BASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"
+BASE_URL="${FORGE}/vev/releases/download/${VERSION}"
 curl -fsSL -o "$TMP_DIR/$TARBALL" "$BASE_URL/$TARBALL" \
   || err "download failed: $BASE_URL/$TARBALL"
 curl -fsSL -o "$TMP_DIR/checksums.txt" "$BASE_URL/checksums.txt" \

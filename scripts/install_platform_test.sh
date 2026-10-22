@@ -43,7 +43,7 @@ assert_mapping() {
     fail "$os/$arch unexpectedly completed installation"
   fi
 
-  expected_url="https://github.com/bnema/vev/releases/download/v0.0.0/$tarball"
+  expected_url="https://git.bnema.dev/vev/releases/download/v0.0.0/$tarball"
   [ -f "$curl_log" ] || fail "$os/$arch did not attempt a download"
   grep -F "$expected_url" "$curl_log" >/dev/null \
     || fail "$os/$arch did not select $tarball"
