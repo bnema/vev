@@ -12,6 +12,7 @@ import (
 	"github.com/bnema/vev/internal/usecase/colorprofile"
 	"github.com/bnema/vev/internal/usecase/keys/kittykey"
 	pickerusecase "github.com/bnema/vev/internal/usecase/picker"
+	"github.com/bnema/vev/internal/usecase/ui"
 )
 
 // Move-destination picker over a live attachment.
@@ -42,8 +43,10 @@ type movePickerOverlay struct {
 	presenting bool
 }
 
-func newMovePickerOverlay(color terminalcap.ColorCapabilities) *movePickerOverlay {
-	return &movePickerOverlay{renderer: newPickerRenderer(colorprofile.Profile(color))}
+func newMovePickerOverlay(color terminalcap.ColorCapabilities, glyphs ui.GlyphSet) *movePickerOverlay {
+	renderer := newPickerRenderer(colorprofile.Profile(color))
+	renderer.glyphs = glyphs
+	return &movePickerOverlay{renderer: renderer}
 }
 
 // offer opens the namespace a move offer names. A superseding offer retires

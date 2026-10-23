@@ -1,0 +1,26 @@
+# claude 2.1.308: user-opened model picker is not a blocker
+---
+╭───────────────────────────────────────────────────╮
+│ ✻ Welcome to Claude Code!                         │
+│                                                   │
+│   cwd: /home/user/demo                            │
+╰───────────────────────────────────────────────────╯
+
+> fix the flaky TestRetry test
+
+⏺ I'll look at the retry test first.
+
+⏺ Read(internal/retry/retry_test.go)
+  ⎿  Read 84 lines (ctrl+o to expand)
+
+⏺ The test sleeps for a fixed 10ms and races the timer goroutine.
+
+──────────────────────────────────────────────────────────────────────────────
+ Select model
+ Switch between Claude models. Applies to this session and future sessions.
+
+ ❯ 1. Default (recommended)  Opus for complex work
+   2. Sonnet                  Everyday tasks
+   3. Haiku                   Quick answers
+
+ Enter to select · ↑/↓ to navigate · Esc to cancel

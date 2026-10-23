@@ -127,6 +127,9 @@ func TestImportBoundaryNegativeFixtures(t *testing.T) {
 		// Shared color-profile policy is a leaf use case both sides may import.
 		{"client accepts colorprofile", modulePath + "/internal/usecase/client", modulePath + "/internal/usecase/colorprofile", false, true},
 		{"daemon accepts colorprofile", modulePath + "/internal/usecase/daemon", modulePath + "/internal/usecase/colorprofile", false, true},
+		// Agent activity detection is a pure leaf use case the daemon consumes.
+		{"daemon accepts agentactivity", modulePath + "/internal/usecase/daemon", modulePath + "/internal/usecase/agentactivity", false, true},
+		{"agentactivity rejects adapter", modulePath + "/internal/usecase/agentactivity", modulePath + "/internal/adapters/pty", false, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

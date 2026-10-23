@@ -202,6 +202,7 @@ func TestApplyConfigPublishesOneSnapshot(t *testing.T) {
 			palette:                 custom.Palette,
 			nav:                     custom.Nav,
 			tabs:                    custom.Tabs,
+			agents:                  custom.Agents,
 			ephemeral:               custom.Ephemeral,
 			scrollback:              custom.Scrollback,
 			theme:                   themeConfigSnapshot{mode: domain.ThemeDark, paletteOff: true, accent: custom.ThemeAccent},

@@ -1,0 +1,20 @@
+# codex 0.163.0: title activity spinner
+---
+╭───────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.163.0)                    │
+│                                               │
+│ model:     gpt-5.4 high   /model to change    │
+│ directory: ~/demo                             │
+╰───────────────────────────────────────────────╯
+
+› add a --json flag to the status command
+
+• I'll find where the status command is defined.
+
+• Explored
+  └ Search status in cmd
+    Read status.go
+
+› Ask Codex to do anything
+
+  ? for shortcuts                                              100% context left

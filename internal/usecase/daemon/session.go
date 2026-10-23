@@ -139,7 +139,7 @@ func (s *session) nameSnapshot() string {
 
 // tab is a pane layout container; pane owns PTY/screen/scrollback/render scheduling state.
 type tab struct {
-	mu sync.Mutex // guards tree, panes, floating, nextPaneID, size, and pane map membership
+	mu sync.Mutex // guards tree, panes, floating, paneVisibilitySeq, nextPaneID, size, and pane map membership
 
 	// layoutGeneration invalidates prepared geometry whenever live tab layout
 	// state changes. layoutApplyMu serializes the lock-free PTY apply boundary.
@@ -162,11 +162,24 @@ type tab struct {
 	cancel     context.CancelFunc
 	// floating is independent from the normal layout tree and pane map.
 	floating floatingSlot
+	// paneVisibilitySeq changes whenever the set of panes the tab draws may
+	// change: a floating state change or a layout tree change. A paint
+	// captures it with the tree, so an agent Done acknowledgement can tell
+	// whether the tab still draws what the paint drew.
+	paneVisibilitySeq uint64
 
 	// attention fields are guarded by the owning session.mu.
 	attention             bool
 	attentionAt           time.Time
 	attentionVisiblePaint bool
+
+	// agentState is the tab's immutable agent activity snapshot. The agent
+	// activity scheduler goroutine is its only writer (see agent_activity.go);
+	// readers Load it without a lock. agentAck and agentAckQueued carry a
+	// paint's Done acknowledgement to that goroutine.
+	agentState     atomic.Pointer[agentTabState]
+	agentAck       atomic.Pointer[agentAck]
+	agentAckQueued atomic.Bool
 }
 
 // attachedClient is a client currently attached to a session's tab. rend is
@@ -791,6 +804,7 @@ func newTabWithStableIDAndTitle(tabStableID, paneStableID string, pty ports.PTY,
 
 func (tb *tab) bumpLayoutGenerationLocked() {
 	tb.layoutGeneration++
+	tb.paneVisibilitySeq++
 }
 
 func (tb *tab) focusedPane() *pane {
@@ -1082,6 +1096,11 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 		sess.snapshotMu.Unlock()
 	}
 	markSnapshotDirty(sess)
+	if wasEphemeral && d.agents != nil {
+		// Naming an ephemeral session gives it a new lifecycle: re-key its
+		// agent aggregate.
+		d.agents.requestReindex()
+	}
 	d.publishRenamedSessionRouteIdentity(sess)
 	return nil
 }

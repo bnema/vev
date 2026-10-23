@@ -170,3 +170,43 @@ func TestParseColorMode(t *testing.T) {
 		})
 	}
 }
+
+func TestConsoleTerm(t *testing.T) {
+	tests := []struct {
+		term string
+		want bool
+	}{
+		{"linux", true}, {"LINUX", true}, {"linux-16color", true}, {"ansi", true}, {"cons25", true},
+		{"dumb", true}, {"vt100", true}, {"vt220-8bit", true}, {"xterm-mono", true}, {"xterm-m", true}, {"vt52", true},
+		{"xterm-256color", false}, {"xterm-kitty", false}, {"vte", false}, {"vte-256color", false}, {"foot", false},
+		{"screen", false}, {"tmux-256color", false}, {"", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.term, func(t *testing.T) {
+			if got := ConsoleTerm(tt.term); got != tt.want {
+				t.Fatalf("ConsoleTerm(%q) = %t, want %t", tt.term, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveTermConsole(t *testing.T) {
+	tests := []struct {
+		name string
+		env  []string
+		term string
+		want bool
+	}{
+		{name: "env TERM", env: []string{"TERM=linux"}, want: true},
+		{name: "explicit TERM wins", env: []string{"TERM=linux"}, term: "xterm-256color", want: false},
+		{name: "explicit console TERM", env: []string{"TERM=xterm"}, term: "linux", want: true},
+		{name: "nothing known", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ResolveTerm(tt.env, tt.term, ColorCapabilities{}).Console; got != tt.want {
+				t.Fatalf("Console = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}

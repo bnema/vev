@@ -107,9 +107,12 @@ func (d *Daemon) reconfigureAttachmentOutput(sess *session, ac *attachedClient, 
 	// link negotiated: its renderer must encode for the terminal now attached.
 	// Only the mode changes the encoding; the source is stored but never
 	// forces a renderer swap.
-	color := terminalcap.Resolve(h.Env, h.Color).Color
+	resolved := terminalcap.ResolveTerm(h.Env, h.TermEnv, h.Color)
+	color := resolved.Color
 	swap := color.Mode != ac.terminalCapabilities.Color.Mode
 	ac.terminalCapabilities.Color = color
+	// So does its glyph repertoire.
+	ac.terminalCapabilities.Console = resolved.Console
 	if swap {
 		ac.output.setColorProfile(colorprofile.Profile(color))
 	}

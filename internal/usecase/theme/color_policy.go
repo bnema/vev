@@ -45,7 +45,8 @@ func ResolveForColor(t Theme, policy domain.ThemeAccent, color terminalcap.Color
 //   - inactive tabs and bars: plain; secondary text, muted borders and
 //     unfocused titles: faint;
 //   - focused borders: bold, in the accent palette slot when there is one;
-//     warn borders: bold yellow (slot 3); errors share the focused border.
+//     warn borders: bold yellow (slot 3); errors share the focused border;
+//   - the agent Done cell: green (slot 2), pulsing in bold.
 //
 // Monochrome uses the same attributes with no color at all. The accent never
 // fills a background: a palette slot is not guaranteed to contrast with the
@@ -103,6 +104,7 @@ func reducedStyles(accentSlot int, mono bool) Styles {
 		PromptBase:        plain,
 		CopyStatus:        with(plain, false, false, true, false),
 		SearchSelection:   active,
+		AgentDone:         withFG(plain, 2),
 	}
 	// Aliases consumed by render paths that have not migrated yet. Selection
 	// is the copy-mode selection role and StatusBar the focused pane title

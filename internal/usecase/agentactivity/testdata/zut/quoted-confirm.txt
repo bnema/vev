@@ -1,0 +1,26 @@
+# zut 59bf5a6 redraw at 80x24: assistant quotes the confirm dialog
+---
+
+  answer 0 with some words
+
+▌
+▌ question 1
+▌
+
+  answer 1 with some words
+
+▌
+▌ question 2
+▌
+
+  The dialog reads:
+
+      ── confirm tool call ──
+      1. yes (run this call)
+      esc to refuse
+
+  [1] gpt-5.4  ctx0%/272k
+  ~/demo
+
+▌
+

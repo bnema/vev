@@ -84,6 +84,8 @@ func (p movePostcommitPlan) execute(d *Daemon) {
 	}
 	p.unlockDispatch()
 	p.reservation.Release()
+	// The agent activity scheduler republishes moved panes on their new tab.
+	d.noteAgentPanesMoved(panes)
 	if p.followResult.published.ac != nil {
 		result, err := d.finishAttachmentTransition(attachmentTransitionRequest{ready: true}, p.followResult)
 		if err != nil {

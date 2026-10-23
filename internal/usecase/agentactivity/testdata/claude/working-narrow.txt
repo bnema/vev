@@ -1,0 +1,16 @@
+# claude 2.1.308 at 44 columns: the activity parenthetical wraps
+---
+> fix the flaky TestRetry test
+
+⏺ I'll look at the retry test first.
+
+⏺ Read(internal/retry/retry_test.go)
+  ⎿  Read 84 lines (ctrl+o to expand)
+
+✻ Pondering… (12s · ↓ 1.2k tokens · esc to
+interrupt)
+
+────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────
+  ? for shortcuts

@@ -16,6 +16,7 @@ import (
 	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/keys/kittykey"
+	"github.com/bnema/vev/internal/usecase/ui"
 )
 
 // Autonomous client supervisor.
@@ -412,6 +413,9 @@ type AttachmentEnvironment struct {
 	KittyKeyboard bool
 	// EchoPredict selects predictive local echo on remote attachments.
 	EchoPredict domain.EchoPredictMode
+	// Glyphs is the resolved ui.glyphs set for the client-drawn picker and
+	// notices. The zero value draws Nerd Font glyphs.
+	Glyphs ui.GlyphSet
 }
 
 // AttachmentLifecycleAction is an explicit process/attachment decision.

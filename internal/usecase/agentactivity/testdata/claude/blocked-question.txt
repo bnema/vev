@@ -1,0 +1,29 @@
+# claude 2.1.308: AskUserQuestion form
+---
+╭───────────────────────────────────────────────────╮
+│ ✻ Welcome to Claude Code!                         │
+│                                                   │
+│   cwd: /home/user/demo                            │
+╰───────────────────────────────────────────────────╯
+
+> fix the flaky TestRetry test
+
+⏺ I'll look at the retry test first.
+
+⏺ Read(internal/retry/retry_test.go)
+  ⎿  Read 84 lines (ctrl+o to expand)
+
+⏺ The test sleeps for a fixed 10ms and races the timer goroutine.
+
+──────────────────────────────────────────────────────────────────────────────
+ ☐ Clock
+
+Which clock should the test use?
+
+❯ 1. Fake clock
+     Inject ports.Clock and advance it manually
+  2. Real clock with retries
+     Keep time.Sleep and loosen the assertion
+  3. Type something.
+
+Enter to select · ↑/↓ to navigate · Esc to cancel

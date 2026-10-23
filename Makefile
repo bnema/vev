@@ -9,6 +9,9 @@ install:
 
 test:
 	go test ./... -race
+	# The race detector perturbs allocation counts, so the 0-alloc budget
+	# test runs once more without it.
+	go test ./internal/usecase/agentactivity -run TestSteadyStateAllocs
 	python3 -m unittest discover -s scripts/remote-resilience-harness -p '*_test.py'
 
 test-installer:

@@ -1,0 +1,32 @@
+# zut 59bf5a6 redraw at 60x30: narrow pane: confirm dialog drawer hides the status bar
+---
+▌
+▌ question 26
+▌
+
+  answer 26 with some words
+
+▌
+▌ question 27
+▌
+
+  answer 27 with some words
+
+▌
+▌ question 28
+▌
+
+  answer 28 with some words
+
+▌
+▌ question 29
+──────────────────── confirm tool call ─────────────────────
+
+  bash  sleep 20 && printf 'hello world'
+
+choose (↑/↓ or 1-4, enter to pick, esc to refuse, / for comm
+  1. yes (run this call)
+  2. yes, always this tool (skip prompts for this tool ...
+  3. yes, always (skip all prompts for the rest of the ...
+  4. no (refuse and let the model try something else)
+

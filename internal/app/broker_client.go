@@ -20,6 +20,7 @@ import (
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/bnema/vev/internal/usecase/client"
+	"github.com/bnema/vev/internal/usecase/ui"
 )
 
 // Common broker client composition.
@@ -94,6 +95,8 @@ type brokerClientPresentation struct {
 	ui      *client.UI
 	onState func(client.State)
 	clock   ports.Clock
+	// glyphs is the client's resolved ui.glyphs set.
+	glyphs  ui.GlyphSet
 	spinner ports.Timer
 	frame   int
 	// spinning is set while a transition notice is due or shown, so the
@@ -164,10 +167,10 @@ func (p *brokerClientPresentation) Render(state client.State) {
 		frame = p.picker.Render(geometry.Size)
 		notice = p.picker.RenderNotice(geometry.Size)
 	} else {
-		frame = client.RenderTransitionNotice(geometry.Size, p.frame, "Connecting to session…")
+		frame = client.RenderTransitionNotice(geometry.Size, p.frame, "Connecting to session…", p.glyphs)
 	}
 	if state.Connectivity == client.ConnectivityRetryWait {
-		notice = client.RenderTransitionNotice(geometry.Size, p.frame, "Connection lost; retrying…")
+		notice = client.RenderTransitionNotice(geometry.Size, p.frame, "Connection lost; retrying…", p.glyphs)
 	}
 	if len(frame) == 0 && len(notice) == 0 {
 		return
@@ -326,7 +329,8 @@ func runBrokerClient(ctx context.Context, cfg brokerClientConfig) error {
 		reader = clipboard.New()
 	}
 	picker := client.NewPicker(clk, 0, attachmentEnv.Color)
-	presentation := &brokerClientPresentation{terminal: cfg.Terminal, picker: picker, ui: cfg.UI, onState: cfg.OnState, clock: clk}
+	picker.SetGlyphs(attachmentEnv.Glyphs)
+	presentation := &brokerClientPresentation{terminal: cfg.Terminal, picker: picker, ui: cfg.UI, onState: cfg.OnState, clock: clk, glyphs: attachmentEnv.Glyphs}
 	supervisor, err := client.NewSupervisor(client.SupervisorConfig{
 		Logger:                   cfg.Logger,
 		Connector:                cfg.Connector,
@@ -731,6 +735,7 @@ func configuredTerminalAttachmentEnvironment(log *slog.Logger) client.Attachment
 	cfg := loadConfigOrDefaults(log, platform.ConfigPath())
 	env := userTerminalAttachmentEnvironment(log, cfg.Terminal)
 	env.EchoPredict = cfg.Echo.Predict
+	env.Glyphs = clientGlyphs(cfg.UI, env.TermEnv)
 	return env
 }
 
@@ -743,7 +748,14 @@ func outerTerminalAttachmentEnvironment(log *slog.Logger) client.AttachmentEnvir
 	env.ProbeTerminal = true
 	env.KittyKeyboard = cfg.Keyboard.KittyProtocol
 	env.EchoPredict = cfg.Echo.Predict
+	env.Glyphs = clientGlyphs(cfg.UI, env.TermEnv)
 	return env
+}
+
+// clientGlyphs resolves ui.glyphs for this client's own TERM. The daemon
+// resolves the same setting from Hello for the bars it renders.
+func clientGlyphs(cfg domain.UIConfig, term string) ui.GlyphSet {
+	return ui.ResolveGlyphs(cfg.Glyphs, terminalcap.ConsoleTerm(term))
 }
 
 // terminalSessionEnvironment captures one LocalCLI process snapshot for

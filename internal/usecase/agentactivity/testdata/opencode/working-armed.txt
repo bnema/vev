@@ -1,0 +1,14 @@
+# opencode v2.0.29: esc pressed once
+---
+  ┃  add a --json flag to the status command
+  ┃
+
+     I'll find where the status command is defined.
+
+     → Read cmd/status.go
+     ✱ Grep "status" (4 matches)
+
+  ┃
+  ┃  Build  gpt-5.4 OpenAI
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+   ⬝■■■■⬝⬝⬝  esc again to interrupt                            ctrl+p commands

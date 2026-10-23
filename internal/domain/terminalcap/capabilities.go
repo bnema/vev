@@ -63,6 +63,8 @@ type Capabilities struct {
 	Color         ColorCapabilities
 	Application   Application
 	KittyGraphics bool
+	// Console reports a limited glyph repertoire (see ConsoleTerm).
+	Console bool
 }
 
 // SupportsKittyGraphics reports whether the active outer-terminal probe
@@ -74,7 +76,7 @@ func Detect(env []string) Capabilities {
 	values := environmentValues(env)
 	term := strings.ToLower(strings.TrimSpace(values["TERM"]))
 	colorTerm := strings.ToLower(strings.TrimSpace(values["COLORTERM"]))
-	caps := Capabilities{Color: ColorCapabilities{Mode: ANSI256}}
+	caps := Capabilities{Color: ColorCapabilities{Mode: ANSI256}, Console: ConsoleTerm(term)}
 
 	if values["KITTY_WINDOW_ID"] != "" || values["KITTY_PID"] != "" || values["KITTY_LISTEN_ON"] != "" {
 		caps.Application = ApplicationKitty
@@ -133,6 +135,25 @@ func termColorMode(term string) (ColorMode, bool) {
 	return 0, false
 }
 
+// ConsoleTerm reports whether a TERM value names a terminal with a limited
+// glyph repertoire: the Linux and BSD consoles, plain ANSI, dumb, the DEC vt*
+// family, and monochrome variants. Such terminals get ASCII status glyphs.
+func ConsoleTerm(term string) bool {
+	term = strings.ToLower(strings.TrimSpace(term))
+	switch term {
+	case "linux", "ansi", "cons25", "dumb":
+		return true
+	}
+	return strings.HasPrefix(term, "linux-") || strings.HasPrefix(term, "cons25-") ||
+		strings.HasSuffix(term, ".linux") || decVTTerm(term) ||
+		strings.HasSuffix(term, "-m") || strings.HasSuffix(term, "-mono")
+}
+
+// decVTTerm matches vt52, vt100, vt220-8bit and the like, not vte.
+func decVTTerm(term string) bool {
+	return len(term) > 2 && strings.HasPrefix(term, "vt") && term[2] >= '0' && term[2] <= '9'
+}
+
 // ParseColorMode parses a user color override: auto, truecolor, 256, 16, or
 // mono, case-insensitively and ignoring surrounding space. An empty value is
 // auto. When auto is true the caller must use detection and mode is
@@ -170,7 +191,16 @@ func environmentValues(env []string) map[string]string {
 // the daemon may not see the client environment that produced the inference.
 // Any other claim falls back to environment detection.
 func Resolve(env []string, declared ColorCapabilities) Capabilities {
+	return ResolveTerm(env, "", declared)
+}
+
+// ResolveTerm is Resolve with the client's explicit TERM value, which wins
+// over env's for console detection when set.
+func ResolveTerm(env []string, term string, declared ColorCapabilities) Capabilities {
 	caps := Detect(env)
+	if strings.TrimSpace(term) != "" {
+		caps.Console = ConsoleTerm(term)
+	}
 	switch {
 	case declared.Source == SourceDeclared || declared.Source == SourceForced:
 		caps.Color = declared

@@ -253,7 +253,7 @@ func TestFitTabLabels(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := fitTabLabels(tt.tabs, tt.rowLen, tt.rightText)
+			got := fitTabLabels(tt.tabs, tt.rowLen, tt.rightText, false)
 
 			require.Equal(t, tt.want, got)
 
@@ -302,7 +302,7 @@ func TestDrawTopBarSnapshotStylesTabNameAndTitle(t *testing.T) {
 		require.False(t, styles.TabTitle.Equal(styles.StatusBar), "sanity: muted title style must differ from the base style on a truecolor theme")
 		require.False(t, styles.TabTitleActive.Equal(styles.Accent), "sanity: muted active-title style must differ from the base accent style")
 
-		labels := fitTabLabels(tabs, rowLen, "")
+		labels := fitTabLabels(tabs, rowLen, "", false)
 
 		// Frame 0 is the bell's blank beat: the attention space and the blank
 		// bell cell must both be exactly the tab's base style (not
@@ -310,7 +310,7 @@ func TestDrawTopBarSnapshotStylesTabNameAndTitle(t *testing.T) {
 		// This also pins down segment order: name, then (if attention)
 		// space+bell, then title, then the trailing space.
 		row := make([]renderer.Cell, rowLen)
-		drawTopBarSnapshot(row, status, 0, "", styles)
+		drawTopBarActivity(row, status, 0, 0, nil, ui.GlyphSet{}, "", styles)
 		x := 0
 
 		// tab 0: inactive, no attention: name, title, trailing space.
@@ -372,7 +372,7 @@ func TestDrawTopBarSnapshotStylesTabNameAndTitle(t *testing.T) {
 		// On a visible pulse frame, the bell glyph itself must keep the same
 		// background as its tab's base style.
 		visibleRow := make([]renderer.Cell, rowLen)
-		drawTopBarSnapshot(visibleRow, status, 1, "", styles)
+		drawTopBarActivity(visibleRow, status, 1, 1, nil, ui.GlyphSet{}, "", styles)
 		require.Equal(t, rune(ui.AttentionGlyph), visibleRow[tab1Bell].Rune)
 		require.True(t, visibleRow[tab1Bell].Style.HasBackgroundRGB)
 		require.Equal(t, styles.Accent.BackgroundRGB, visibleRow[tab1Bell].Style.BackgroundRGB, "tab 1's visible bell must keep the active base background")
@@ -389,7 +389,7 @@ func TestDrawTopBarSnapshotStylesTabNameAndTitle(t *testing.T) {
 		require.True(t, styles.TabTitleActive.Equal(styles.Accent))
 
 		row := make([]renderer.Cell, rowLen)
-		drawTopBarSnapshot(row, status, 0, "", styles)
+		drawTopBarActivity(row, status, 0, 0, nil, ui.GlyphSet{}, "", styles)
 
 		// " api (shell) " (tab 0) + " logs  " (tab 1: name, attention
 		// space+blank bell, trailing space) + " err  (build failed) " (tab 2:
@@ -835,7 +835,7 @@ func TestTopBarRightAnchor(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			row := make([]renderer.Cell, tt.width)
 
-			drawTopBarSnapshot(row, tt.status, 0, tt.topRight, resolveStyles(nil))
+			drawTopBarActivity(row, tt.status, 0, 0, nil, ui.GlyphSet{}, tt.topRight, resolveStyles(nil))
 
 			require.Equal(t, tt.want, rowText(row))
 			if tt.continuationCell > 0 {
@@ -1387,7 +1387,7 @@ func TestStatusBarsUseCompleteSemanticSurfaces(t *testing.T) {
 	t.Run("top bar maps inactive active and secondary roles while filling the row", func(t *testing.T) {
 		row := make([]renderer.Cell, 48)
 		status := statusSnapshot{tabs: []statusTab{{name: "idle", paneTitle: "shell"}, {name: "selected", active: true}}}
-		drawTopBarSnapshot(row, status, 0, "clock", styles)
+		drawTopBarActivity(row, status, 0, 0, nil, ui.GlyphSet{}, "clock", styles)
 
 		for _, cell := range row[28:40] {
 			require.True(t, cell.Style.Equal(styles.SurfaceBar), "unowned top-bar filler must retain SurfaceBar")
@@ -1450,7 +1450,7 @@ func TestStatusBarsUseCompleteSemanticSurfaces(t *testing.T) {
 
 	t.Run("attention pulse preserves its active or inactive base surface", func(t *testing.T) {
 		row := make([]renderer.Cell, 32)
-		drawTopBarSnapshot(row, statusSnapshot{tabs: []statusTab{{name: "active", active: true, attention: true}, {name: "idle", attention: true}}}, 1, "", styles)
+		drawTopBarActivity(row, statusSnapshot{tabs: []statusTab{{name: "active", active: true, attention: true}, {name: "idle", attention: true}}}, 1, 1, nil, ui.GlyphSet{}, "", styles)
 		bells := make([]int, 0, 2)
 		for i, cell := range row {
 			if cell.Rune == ui.AttentionGlyph {

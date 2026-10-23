@@ -1,0 +1,26 @@
+# zut 59bf5a6 redraw at 80x24: turn finished, long transcript
+---
+
+▌
+▌ question 27
+▌
+
+  answer 27 with some words
+
+▌
+▌ question 28
+▌
+
+  answer 28 with some words
+
+▌
+▌ question 29
+▌
+
+  answer 29 with some words
+
+  [1] gpt-5.4  ctx0%/272k
+  ~/demo
+
+▌
+

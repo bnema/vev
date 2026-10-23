@@ -30,6 +30,7 @@ func recentRoutePresentationsFromSnapshot(snapshot protocol.RecentRouteSnapshot)
 			kind:      kind,
 			ephemeral: entry.Ephemeral,
 			attention: entry.Attention,
+			lifecycle: entry.Target.LifecycleID,
 		}
 	}
 	return out

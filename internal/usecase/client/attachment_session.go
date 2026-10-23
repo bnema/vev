@@ -12,6 +12,7 @@ import (
 	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/usecase/ui"
 )
 
 // Real attachment worker.
@@ -75,6 +76,8 @@ type sessionAttachmentConfig struct {
 	TermEnv  string
 	Cwd      string
 	Color    terminalcap.ColorCapabilities
+	// Glyphs is the resolved ui.glyphs set for the client-drawn move picker.
+	Glyphs ui.GlyphSet
 	// PID is this client's process ID; Hello carries it on local attaches.
 	PID uint32
 	// Capabilities are the outer terminal's probed capabilities, declared in
@@ -361,7 +364,7 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 		return w.send(ctx, fg, stream, request)
 	}
 	samePeerUI := attachmentSamePeerUI(fg)
-	picker := &attachmentMovePicker{worker: w, fg: fg, overlay: overlay, stream: stream, size: w.cfg.Geometry.Size, move: newMovePickerOverlay(w.cfg.Color)}
+	picker := &attachmentMovePicker{worker: w, fg: fg, overlay: overlay, stream: stream, size: w.cfg.Geometry.Size, move: newMovePickerOverlay(w.cfg.Color, w.cfg.Glyphs)}
 	defer picker.stopEscape()
 	echo := newAttachmentEcho(w, fg)
 	defer echo.close()

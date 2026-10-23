@@ -1,0 +1,26 @@
+# zut 59bf5a6 redraw at 44x24: narrow pane: status bar splits the working line onto its own row
+---
+▌
+▌ question 27
+▌
+
+  answer 27 with some words
+
+▌
+▌ question 28
+▌
+
+  answer 28 with some words
+
+▌
+▌ question 29
+▌
+
+  answer 29 with some words
+
+  ⠋ Receiving response from gpt-5.4 - 12s
+  [1] gpt-5.4  ctx0%/272k
+  ~/demo
+
+▌
+

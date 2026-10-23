@@ -8,6 +8,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/picker"
+	"github.com/bnema/vev/internal/usecase/ui"
 )
 
 // This file owns the client side of the picker interaction: source admission,
@@ -323,6 +324,8 @@ func clampPreviewDimension(value int, maxValue uint16) uint16 {
 // client-picker frame is a local presentation overlay, not daemon output,
 // so its bytes never enter the output ACK window.
 type pickerRenderer struct {
+	// glyphs is the client's resolved ui.glyphs set; zero draws Nerd Font.
+	glyphs       ui.GlyphSet
 	renderer     *ansirenderer.Renderer
 	profile      ansirenderer.ColorProfile
 	renderStyles []picker.RenderStyles
@@ -383,6 +386,7 @@ func (r *pickerRenderer) render(loop *pickerLoop, size domain.Size, preview pick
 	if len(styles) == 0 && r.profile == ansirenderer.ColorProfileMonochrome {
 		styles = []picker.RenderStyles{picker.DefaultRenderStyles(true)}
 	}
+	loop.model.SetAttentionGlyph(r.glyphs.Attention)
 	inner := loop.model.Render(picker.Size(presentation.Inner), preview, styles...)
 	copyFrameRect(base, presentation.Inner, inner)
 

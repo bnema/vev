@@ -22,6 +22,9 @@ type recentRoutePresentation struct {
 	kind      recentRouteKind
 	ephemeral bool
 	attention bool
+	// lifecycle is the route's session lifecycle, used only to look up the
+	// session's agent activity.
+	lifecycle domain.SessionLifecycleID
 }
 
 // recentRouteDisplay is a formatted, render-ready copy of a presentation. The
@@ -31,6 +34,9 @@ type recentRouteDisplay struct {
 	kind      recentRouteKind
 	ephemeral bool
 	attention bool
+	lifecycle domain.SessionLifecycleID
+	// activity is the session's agent cell, resolved at bar composition.
+	activity statusActivity
 }
 
 // formatRecentRoutePresentations is the single label formatter used by the
@@ -47,6 +53,7 @@ func formatRecentRoutePresentations(entries []recentRoutePresentation) []recentR
 			kind:      entry.kind,
 			ephemeral: entry.ephemeral,
 			attention: entry.attention,
+			lifecycle: entry.lifecycle,
 		}
 	}
 	return out

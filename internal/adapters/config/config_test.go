@@ -367,6 +367,9 @@ func TestParse(t *testing.T) {
 			if !tt.want.Ephemeral.CloseOnExit {
 				tt.want.Ephemeral = domain.Defaults().Ephemeral
 			}
+			if !tt.want.Agents.SpinnerSet && !tt.want.Agents.Activity {
+				tt.want.Agents = domain.Defaults().Agents
+			}
 			if !tt.want.Keyboard.KittyProtocol {
 				tt.want.Keyboard = domain.Defaults().Keyboard
 			}

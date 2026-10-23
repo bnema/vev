@@ -68,7 +68,10 @@ type capturedRenderState struct {
 	cursor             capturedCursorInputs
 	tabGeneration      uint64
 	floatingGeneration uint64
-	receipts           []damageReceipt // private capture receipts; compose must not inspect these
+	// paneVisibilitySeq is the tab's paneVisibilitySeq read with the layout
+	// and floating state this frame draws.
+	paneVisibilitySeq uint64
+	receipts          []damageReceipt // private capture receipts; compose must not inspect these
 }
 
 // viewContext describes only this captured composition, never live session state.
@@ -387,6 +390,7 @@ func captureLocalRenderState(
 		overlays:           overlays,
 		layout:             capturedTabLayout{area: layoutSnap.area, focus: layoutSnap.focus, placements: scratch.placements, dividers: scratch.dividers, fingerprint: layoutSnap.fingerprint, valid: layoutSnap.ok},
 		floatingGeneration: tb.floating.generation,
+		paneVisibilitySeq:  tb.paneVisibilitySeq,
 		receipts:           scratch.receipts[:0],
 	}
 	state.panes = scratch.panes[:0]

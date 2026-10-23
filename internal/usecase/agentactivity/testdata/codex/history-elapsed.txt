@@ -1,0 +1,20 @@
+# codex 0.163.0: finished turn; a history row with an elapsed time sits above the separator
+---
+╭───────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.163.0)                    │
+│                                               │
+│ model:     gpt-5.4 high   /model to change    │
+│ directory: ~/demo                             │
+╰───────────────────────────────────────────────╯
+
+› add a --json flag to the status command
+
+• Added --json and ran the tests.
+
+• Tests pass (12s)
+
+─ Worked for 1m 5s ─────────────────────────────────────────────────────────────
+
+› Ask Codex to do anything
+
+  ? for shortcuts                                              100% context left

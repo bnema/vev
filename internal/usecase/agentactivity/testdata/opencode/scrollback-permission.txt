@@ -1,0 +1,22 @@
+# opencode v2.0.29: old permission prompt above the bottom window
+---
+  ┃  △ Permission required
+  ┃  $ go test ./cmd/...
+  ┃   Allow once    Always allow    Reject
+
+  ┃  add a --json flag to the status command
+  ┃
+
+     I'll find where the status command is defined.
+
+     → Read cmd/status.go
+     ✱ Grep "status" (4 matches)
+
+     Added --json; tests pass.
+
+     ▣ Build · gpt-5.4 · 1m 5s
+
+  ┃
+  ┃  Build  gpt-5.4 OpenAI
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+   ~/demo                                       tab agents  ctrl+p commands

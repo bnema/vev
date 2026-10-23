@@ -39,6 +39,7 @@ func (tb *tab) beginFloatingWarmLocked(desiredVisible bool) uint64 {
 	tb.floating.generation++
 	tb.floating.state = floatingWarming
 	tb.floating.desiredVisible = desiredVisible
+	tb.paneVisibilitySeq++
 	return tb.floating.generation
 }
 
@@ -65,8 +66,10 @@ func (tb *tab) toggleFloatingLocked() (bool, uint64) {
 		tb.floating.desiredVisible = !tb.floating.desiredVisible
 	case floatingHidden:
 		tb.floating.state = floatingVisible
+		tb.paneVisibilitySeq++
 	case floatingVisible:
 		tb.floating.state = floatingHidden
+		tb.paneVisibilitySeq++
 	}
 	return false, tb.floating.generation
 }
@@ -83,6 +86,7 @@ func (tb *tab) installFloatingLocked(p *pane, generation uint64) bool {
 	} else {
 		tb.floating.state = floatingHidden
 	}
+	tb.paneVisibilitySeq++
 	return true
 }
 
@@ -95,6 +99,7 @@ func (tb *tab) failFloatingLocked(generation uint64) bool {
 	tb.floating.state = floatingUninitialized
 	tb.floating.pane = nil
 	tb.floating.desiredVisible = false
+	tb.paneVisibilitySeq++
 	return true
 }
 
@@ -120,6 +125,7 @@ func (tb *tab) takeFloatingLocked() *pane {
 	tb.floating.state = floatingUninitialized
 	tb.floating.pane = nil
 	tb.floating.desiredVisible = false
+	tb.paneVisibilitySeq++
 	return p
 }
 
@@ -249,6 +255,10 @@ func (d *Daemon) toggleFloating(sess *session, ac *attachedClient) error {
 			d.invalidateRender(sess, ac, true, "floating.go")
 		}
 		return nil
+	}
+	if hidden || visible {
+		// An agent Done on the floating pane is unseen only while hidden.
+		d.noteAgentPaneVisibility(tb)
 	}
 	if hidden {
 		d.invalidateRender(sess, ac, true, "floating.go")

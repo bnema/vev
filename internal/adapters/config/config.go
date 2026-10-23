@@ -34,6 +34,8 @@ func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 	seenPaletteKeys := make(map[string]bool)
 	seenNavKeys := make(map[string]bool)
 	seenTabsKeys := make(map[string]bool)
+	seenAgentsKeys := make(map[string]bool)
+	seenUIKeys := make(map[string]bool)
 	seenEphemeralKeys := make(map[string]bool)
 	seenKeyboardKeys := make(map[string]bool)
 	seenEchoKeys := make(map[string]bool)
@@ -157,6 +159,30 @@ func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 				continue
 			}
 			cfg.Tabs.TerminalTitle = on
+		case key == "agents.activity":
+			warnings = warnDuplicateKey(warnings, seenAgentsKeys, key, lineNo)
+			on, ok := parseOnOff(value)
+			if !ok {
+				warnings = append(warnings, domain.Warning{Line: lineNo, Msg: fmt.Sprintf("invalid agents.activity %q", value)})
+				continue
+			}
+			cfg.Agents.Activity = on
+		case key == "agents.spinner":
+			warnings = warnDuplicateKey(warnings, seenAgentsKeys, key, lineNo)
+			frames, ok := parseSpinner(value)
+			if !ok {
+				warnings = append(warnings, domain.Warning{Line: lineNo, Msg: fmt.Sprintf("invalid agents.spinner %q; using the ui.glyphs spinner", value)})
+				cfg.Agents.Spinner, cfg.Agents.SpinnerSet = nil, false
+				continue
+			}
+			cfg.Agents.Spinner, cfg.Agents.SpinnerSet = frames, true
+		case key == "ui.glyphs":
+			warnings = warnDuplicateKey(warnings, seenUIKeys, key, lineNo)
+			mode, ok := parseGlyphMode(value)
+			if !ok {
+				warnings = append(warnings, domain.Warning{Line: lineNo, Msg: fmt.Sprintf("invalid ui.glyphs %q (want auto, nerd, unicode, or ascii); using auto", value)})
+			}
+			cfg.UI.Glyphs = mode
 		case key == "ephemeral.close-on-exit":
 			warnings = warnDuplicateKey(warnings, seenEphemeralKeys, key, lineNo)
 			on, ok := parseOnOff(value)

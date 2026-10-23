@@ -324,7 +324,12 @@ func (g *sharedPTYGeometry) applyTabLayoutTransactionWithNotice(d *Daemon, sess 
 	}
 }
 
+// applyTabLayout applies tb's committed layout to its panes. Callers run it
+// with every lock released after a layout change, which may collapse or
+// expand a stack member, so it also asks agent activity to re-check which
+// panes tb draws.
 func (g *sharedPTYGeometry) applyTabLayout(d *Daemon, sess *session, tb *tab) bool {
+	d.noteAgentPaneVisibility(tb)
 	failed, ok := g.applyTabLayoutTransaction(d, sess, tb)
 	if !ok {
 		return false

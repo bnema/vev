@@ -1,0 +1,26 @@
+# zut 59bf5a6 redraw at 80x24: user typed a working line into the input
+---
+▌
+▌ question 0
+▌
+
+  answer 0 with some words
+
+▌
+▌ question 1
+▌
+
+  answer 1 with some words
+
+▌
+▌ question 2
+▌
+
+  answer 2 with some words
+
+  [1] gpt-5.4  ctx0%/272k
+  ~/demo
+
+▌ ⠙ Running tool: bash - 12s is stuck
+
+

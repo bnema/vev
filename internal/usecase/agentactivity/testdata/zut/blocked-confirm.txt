@@ -1,0 +1,42 @@
+# zut 59bf5a6 redraw at 120x40: boxed confirm dialog over a short transcript
+---
+▌
+▌ question 0
+▌
+
+  answer 0 with some words
+
+  ⠋ Waiting for approval: bash - 12s  [1] gpt-5.4  ctx0%/272k
+  ~/demo
+
+▌
+
+
+
+
+            ╭───────────────────────────────────── confirm tool call ──────────────────────────────────────╮
+            │                                                                                              │
+            │  bash  sleep 20 && printf 'hello world'                                                      │
+            │                                                                                              │
+            │choose (↑/↓ or 1-4, enter to pick, esc to refuse, / for commands):                            │
+            │  1. yes (run this call)                                                                      │
+            │  2. yes, always this tool (skip prompts for this tool for the rest of the session)           │
+            │  3. yes, always (skip all prompts for the rest of the session)                               │
+            │  4. no (refuse and let the model try something else)                                         │
+            │                                                                                              │
+            ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

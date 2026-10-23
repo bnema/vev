@@ -1,0 +1,16 @@
+# claude 2.1.308: assistant quotes status phrases in chat; prompt is visible
+---
+╭───────────────────────────────────────────────────╮
+│ ✻ Welcome to Claude Code!                         │
+╰───────────────────────────────────────────────────╯
+
+> what does the status line mean
+
+⏺ While a turn runs the line reads "✻ Thinking… (esc to interrupt)". Press
+  esc to interrupt it. A remote hook may show Waiting for permission… until
+  you approve it on the other device.
+
+──────────────────────────────────────────────────────────────────────────────
+❯ 
+──────────────────────────────────────────────────────────────────────────────
+  ? for shortcuts

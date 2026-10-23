@@ -1,0 +1,42 @@
+# zut 59bf5a6 redraw at 120x40: working status bar under a short transcript, rows below the prompt blank
+---
+▌
+▌ question 0
+▌
+
+  answer 0 with some words
+
+  ⠋ Running tool: bash - 12s  [1] gpt-5.4  ctx0%/272k
+  ~/demo
+
+▌
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

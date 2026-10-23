@@ -143,6 +143,8 @@ type Model struct {
 	query         ui.TextInput
 	searchMatches map[int]searchMatch
 	matchRows     []int
+	// bell is the attention glyph; zero draws the Nerd Font bell.
+	bell rune
 	// folded names the section headers the user collapsed. It is local
 	// presentation state, kept across publications by section label.
 	folded map[string]bool
@@ -202,6 +204,21 @@ func New(lines []protocol.PickerLine, config Config) *Model {
 	m := &Model{intent: config.Intent, sort: config.Sort}
 	m.setLines(lines, config.Cursor)
 	return m
+}
+
+// SetAttentionGlyph selects the glyph drawn for rows with a pending
+// attention event, from the client's resolved ui.glyphs set.
+func (m *Model) SetAttentionGlyph(bell rune) {
+	if m != nil {
+		m.bell = bell
+	}
+}
+
+func (m *Model) attentionMarker() string {
+	if m.bell == 0 {
+		return " " + string(ui.AttentionGlyph)
+	}
+	return " " + string(m.bell)
 }
 
 // Intent reports which picker produced this model.
@@ -908,7 +925,7 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 		if r.rendersAsHeader() {
 			if r.line.Attention && x < contentClipX {
 				// A session header rings when any of its tabs does.
-				x = ui.DrawText(frame, x, rect.Y+y, contentClipX, " "+string(ui.AttentionGlyph), base)
+				x = ui.DrawText(frame, x, rect.Y+y, contentClipX, m.attentionMarker(), base)
 			}
 			// The short detail (tab count, attached marker) is right-aligned
 			// before the badge, muted but not dimmed so it stays readable.
@@ -923,7 +940,7 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 		}
 
 		if r.line.Attention {
-			x = ui.DrawText(frame, x, rect.Y+y, clipX, " "+string(ui.AttentionGlyph), base)
+			x = ui.DrawText(frame, x, rect.Y+y, clipX, m.attentionMarker(), base)
 		}
 
 		if r.line.Detail != "" && x < clipX {

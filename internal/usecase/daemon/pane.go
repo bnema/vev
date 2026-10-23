@@ -137,6 +137,7 @@ type pane struct {
 	ptyResponses     []byte
 	ptyClipboards    []string
 	ptyAttention     bool
+	ptyBell          bool             // a BEL since the last effects drain; see pendingBell
 	popupGeometry    floatingGeometry // last geometry committed after a successful floating resize
 	title            paneTitleState
 	ctx              context.Context
@@ -152,6 +153,21 @@ type pane struct {
 	// spareExited records that a prestarted spare's reader ended, so a claim
 	// racing that exit still reaps the slot it installed.
 	spareExited atomic.Bool
+	// activitySeq counts PTY reads for agent activity coalescing;
+	// activityDirty is set while a scan of this pane is queued. Both are
+	// lock-free so the reader never waits on the activity scheduler.
+	activitySeq   atomic.Uint64
+	activityDirty atomic.Bool
+	// agentOwned is set by the activity scheduler while it tracks an
+	// identified agent in this pane. The agent indicator then owns the
+	// tab's attention cell, so a terminal BEL (agents ring one per turn)
+	// is deferred to the scheduler through pendingBell. A BEL before
+	// identification still rings.
+	agentOwned atomic.Bool
+	// pendingBell is set by the PTY path for a BEL from an agent-owned
+	// pane. The scheduler alone clears it once the turn settles: a Done or
+	// Blocked publish replaces the bell, any other settled state rings it.
+	pendingBell atomic.Bool
 }
 
 func closePaneProcess(p *pane) {

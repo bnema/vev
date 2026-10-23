@@ -1,0 +1,42 @@
+# zut 59bf5a6 redraw at 120x40: turn finished, short transcript leaves the rows below the prompt blank
+---
+▌
+▌ question 0
+▌
+
+  answer 0 with some words
+
+  [1] gpt-5.4  ctx0%/272k
+  ~/demo
+
+▌
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

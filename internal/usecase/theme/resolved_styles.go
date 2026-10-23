@@ -63,6 +63,7 @@ func stylesFromRamp(t Theme, accent Accent, ramp Ramp) Styles {
 		PromptBase:      renderer.DefaultStyle(),
 		CopyStatus:      ramp.SurfaceBar,
 		SearchSelection: EmphasisStyle(ramp.SurfaceActive, t),
+		AgentDone:       agentDoneStyle(t, ramp.SurfaceBar),
 	}
 	return withMRUStyles(withLegacyAliases(styles, t), ramp)
 }
@@ -159,6 +160,7 @@ func neutralStyles(t Theme) Styles {
 		PromptBase:        renderer.DefaultStyle(),
 		CopyStatus:        accent,
 		SearchSelection:   accent,
+		AgentDone:         agentDoneStyle(t, status),
 	}
 	styles = withLegacyAliases(styles, t)
 	// PaletteDesc is a Phase 3 compatibility alias. It retains its legacy

@@ -3,7 +3,10 @@ package daemon
 import (
 	"time"
 
+	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/usecase/agentactivity"
+	"github.com/bnema/vev/internal/usecase/ui"
 )
 
 // viewOptions controls optional (costly) fields captured by snapshotView.
@@ -113,8 +116,10 @@ func (s *session) snapshotView(opts viewOptions) sessionView {
 	return view
 }
 
-// pickerView renders this snapshot as the picker's daemon-private value type.
-func (view sessionView) pickerView() pickerSessionView {
+// pickerView projects the view for the picker. The session label carries one
+// mark: the bell for a pending attention event, otherwise the session's
+// aggregate agent activity drawn statically (see pickerMarks).
+func (view sessionView) pickerView(marks pickerMarks, indicator agentactivity.Indicator) pickerSessionView {
 	out := pickerSessionView{
 		ID:          view.id,
 		Incarnation: view.incarnation,
@@ -139,8 +144,37 @@ func (view sessionView) pickerView() pickerSessionView {
 			attention = true
 		}
 	}
-	if attention {
-		out.Name = attentionSuffix(out.Name)
+	if mark := marks.forSession(attention, indicator); mark != 0 {
+		out.Name = attentionSuffix(out.Name, mark)
 	}
 	return out
+}
+
+// pickerMarks are the glyphs of daemon-built picker session labels. The
+// client draws picker rows as static text, so Working shows the spinner's
+// first frame instead of animating.
+type pickerMarks struct {
+	bell, working, done rune
+}
+
+func newPickerMarks(glyphs ui.GlyphSet, spinner []rune) pickerMarks {
+	glyphs = glyphs.OrNerd()
+	marks := pickerMarks{bell: glyphs.Attention, done: glyphs.Done}
+	if len(spinner) > 0 && renderer.RuneWidth(spinner[0]) == 1 {
+		marks.working = spinner[0]
+	}
+	return marks
+}
+
+// forSession returns the label mark, or 0 for none.
+func (m pickerMarks) forSession(attention bool, indicator agentactivity.Indicator) rune {
+	switch tabActivity(attention, indicator, false, false) {
+	case activityBell:
+		return m.bell
+	case activityWorking:
+		return m.working
+	case activityDone:
+		return m.done
+	}
+	return 0
 }

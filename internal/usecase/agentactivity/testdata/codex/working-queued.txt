@@ -1,0 +1,28 @@
+# codex 0.163.0: status indicator with details and queued messages
+---
+╭───────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.163.0)                    │
+│                                               │
+│ model:     gpt-5.4 high   /model to change    │
+│ directory: ~/demo                             │
+╰───────────────────────────────────────────────╯
+
+› add a --json flag to the status command
+
+• I'll find where the status command is defined.
+
+• Explored
+  └ Search status in cmd
+    Read status.go
+
+• Editing status.go (1m 05s • esc to interrupt)
+  └ Adding the flag
+    Wiring the encoder
+
+• Queued follow-up inputs
+  ↳ also update the docs
+    ⌥↑ edit last queued message
+
+› Ask Codex to do anything
+
+  ? for shortcuts                                              100% context left

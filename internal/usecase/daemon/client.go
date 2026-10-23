@@ -43,9 +43,26 @@
 // moveLifecycleMu, a session lock, or a pane lock. It is not an admission gate;
 // admission is the d.mu-guarded purgeAdmission* state.
 //
-// attnMu guards only the attention animation frame counter (animFrame). It is
-// a leaf: attentionFrame, advanceAttentionFrame, and setAttentionFrame take it
+// attnMu guards only the monotonic animation tick (animTick). It is
+// a leaf: animationTick, advanceAttentionFrame, and setAttentionFrame take it
 // for the read or write and call nothing while holding it.
+//
+// Agent activity (agent_activity.go) adds no lock. The scheduler goroutine
+// owns every pane and tab activity record and is the only writer of each
+// tab's immutable agentState snapshot and of the per-lifecycle session index
+// (agentActivityScheduler.sessions), which status composition, the picker,
+// and the animator Load. The PTY read path, pane teardown, config reload,
+// session naming, and paint acknowledgements reach it through atomic flags
+// and non-blocking channel sends. The scheduler is the only writer of each
+// pane's agentOwned flag, which the PTY effects path Loads to defer terminal
+// BELs from panes with an identified agent by setting the pane's pendingBell;
+// the scheduler alone clears pendingBell when it resolves the bell. The
+// scheduler takes pane.mu only to copy screen rows; d.mu, session.mu, tab.mu,
+// or an attachment's routeMu only to read sessions, lifecycles, attachments,
+// pane lists, which panes a tab draws, or route entries, one at a time, except
+// through noteAttention (session.mu → viewMu, as on the PTY path); and never
+// paints itself: it requests repaints and pokes the animator, as
+// noteAttention does.
 //
 // Naming rule for the Locked suffix: on a Daemon method (or a free function
 // taking a Daemon-owned structure) a ...Locked suffix means the caller holds

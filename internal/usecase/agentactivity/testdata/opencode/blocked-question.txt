@@ -1,0 +1,17 @@
+# opencode v2.0.29: question tool
+---
+  ┃  add a --json flag to the status command
+  ┃
+
+     I'll find where the status command is defined.
+
+     → Read cmd/status.go
+     ✱ Grep "status" (4 matches)
+
+  ┃  Which output format should --json use?
+  ┃
+  ┃  1. One object
+  ┃  2. JSON lines
+  ┃  3. Type your own answer
+  ┃
+   ↑/↓ select · enter confirm · esc cancel

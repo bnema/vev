@@ -1,0 +1,19 @@
+# claude 2.1.308: six-line wrapped input pushes the prompt above the lowest six rows
+---
+╭───────────────────────────────────────────────────╮
+│ ✻ Welcome to Claude Code!                         │
+╰───────────────────────────────────────────────────╯
+
+> fix the flaky TestRetry test
+
+⏺ The test sleeps for a fixed 10ms and races the timer goroutine.
+
+──────────────────────────────────────────────────────────────────────────────
+❯ before you change anything, explain why the retry loop
+  uses a real timer, whether the fake clock in ports
+  covers the backoff path, which callers depend on the
+  current jitter, how long the test takes today, and
+  what a deterministic version would look like when it
+  runs twenty times in a row under the race detector
+──────────────────────────────────────────────────────────────────────────────
+  ? for shortcuts

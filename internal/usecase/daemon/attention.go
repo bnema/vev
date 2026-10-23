@@ -8,6 +8,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/usecase/agentactivity"
 	"github.com/bnema/vev/internal/usecase/picker"
 )
 
@@ -35,9 +36,9 @@ func (d *Daemon) noteAttention(sess *session, tb *tab) {
 	}
 	sess.mu.Unlock()
 
-	// Do not repaint here: this runs on the PTY reader goroutine, and paint
-	// can block on a slow client's socket (Transport.Send has no deadline) —
-	// that would let one wedged client stall a different session's reader.
+	// Do not repaint here: this runs on the PTY reader goroutine or the agent
+	// activity scheduler, and a synchronous paint can block on a slow
+	// client's socket (Transport.Send has no deadline), stalling the caller.
 	// The animator's first tick (<=120ms) delivers the repaint, and pulse
 	// frame 0 renders the bell as blank anyway, so nothing is visibly lost
 	// by not painting immediately.
@@ -47,7 +48,10 @@ func (d *Daemon) noteAttention(sess *session, tb *tab) {
 // jumpAttention switches to the oldest pending attention target: a tab of the
 // attached session first, then another session of this daemon, then the
 // oldest bell among the client's routes on any other daemon, which the client
-// navigates to. Returning nil never implies a switch happened —
+// navigates to. Without any bell it switches to the agent tab that finished
+// first and is still unseen: in the attached session first, then in another
+// session of this daemon. Done never crosses the wire, so finished agents on
+// other daemons are not reached. Returning nil never implies a switch happened —
 // it also covers "no target exists", which is routine and not an error. Only
 // a failure to reach a target that does exist is a genuine error.
 func (d *Daemon) jumpAttention(sess *session, ac *attachedClient) error {
@@ -59,21 +63,48 @@ func (d *Daemon) jumpAttentionForAttachment(sess *session, ac *attachedClient, e
 		return nil
 	}
 	if idx, ok := oldestAttentionTab(sess); ok {
-		if sess.switchAttachmentTab(ac, idx) {
-			var lease *attachmentLease
-			if effect != nil {
-				lease = effect.lease
-			}
-			d.activateTabAfterResizeForLease(sess, sess.tabForAttachment(ac), false, ac, lease)
-			d.invalidateRender(sess, ac, true, "attention.go")
-		}
+		d.jumpLocalTab(sess, ac, effect, idx)
 		return nil
 	}
-
-	target, ok := d.oldestOtherSessionAttention(sess)
-	if !ok {
-		return d.jumpRouteAttention(sess, ac, effect)
+	if target, ok := d.oldestOtherSessionAttention(sess); ok {
+		return d.jumpOtherSession(sess, ac, effect, target)
 	}
+	if handled, err := d.jumpRouteAttention(sess, ac, effect); handled {
+		return err
+	}
+
+	// Published Done checks outlive a reload that turns activity off until
+	// the scheduler clears them; they are not drawn then, so not targets.
+	if !d.currentRuntimeConfig().agents.Activity {
+		return nil
+	}
+	// The viewed tab is skipped: its Done clears through the paint ack, which
+	// may still be queued, so a repeated jump moves on to the next target.
+	if idx, _, ok := oldestDoneTab(sess, ac.viewSnapshot().tabID); ok {
+		d.jumpLocalTab(sess, ac, effect, idx)
+		return nil
+	}
+	if target, ok := d.oldestOtherSessionDone(sess); ok {
+		return d.jumpOtherSession(sess, ac, effect, target)
+	}
+	return nil
+}
+
+// jumpLocalTab switches ac to tab idx of its attached session.
+func (d *Daemon) jumpLocalTab(sess *session, ac *attachedClient, effect *attachmentEffect, idx int) {
+	if !sess.switchAttachmentTab(ac, idx) {
+		return
+	}
+	var lease *attachmentLease
+	if effect != nil {
+		lease = effect.lease
+	}
+	d.activateTabAfterResizeForLease(sess, sess.tabForAttachment(ac), false, ac, lease)
+	d.invalidateRender(sess, ac, true, "attention.go")
+}
+
+// jumpOtherSession moves ac to target, a tab of another local session.
+func (d *Daemon) jumpOtherSession(sess *session, ac *attachedClient, effect *attachmentEffect, target attentionTarget) error {
 	pickerTarget := picker.Target{Session: target.sessionID, TabIndex: target.tabIndex}
 	if effect == nil {
 		return d.switchToTarget(sess, ac, pickerTarget)
@@ -84,17 +115,18 @@ func (d *Daemon) jumpAttentionForAttachment(sess *session, ac *attachedClient, e
 // jumpRouteAttention asks the client to navigate to the oldest attention
 // route it published for another daemon. The serving daemon's own sessions
 // were already considered, so a local route of this daemon is skipped.
-func (d *Daemon) jumpRouteAttention(sess *session, ac *attachedClient, effect *attachmentEffect) error {
+// handled reports that such a route existed.
+func (d *Daemon) jumpRouteAttention(sess *session, ac *attachedClient, effect *attachmentEffect) (handled bool, err error) {
 	entry, ok := oldestRouteAttention(ac.routeSnapshotCopy(), d.ownsLifecycle)
 	if !ok {
-		return nil
+		return false, nil
 	}
 	exec := paletteExec{d: d, sess: sess, attachment: sess, ac: ac, effect: effect}
-	err := exec.NavigateRecentRoute(entry)
+	err = exec.NavigateRecentRoute(entry)
 	if errors.Is(err, errAttachmentTransition) {
-		return nil
+		return true, nil
 	}
-	return err
+	return true, err
 }
 
 // oldestRouteAttention selects the route whose attention the client observed
@@ -174,6 +206,59 @@ func (d *Daemon) oldestOtherSessionAttention(current *session) (attentionTarget,
 		}
 	}
 	return target, found
+}
+
+// oldestOtherSessionDone returns the tab of another local session whose agent
+// finished first and is still unseen. Nothing is a target while activity is
+// off.
+func (d *Daemon) oldestOtherSessionDone(current *session) (attentionTarget, bool) {
+	if !d.currentRuntimeConfig().agents.Activity {
+		return attentionTarget{}, false
+	}
+	d.mu.Lock()
+	sessions := make([]*session, 0, len(d.sessions))
+	for _, sess := range d.sessions {
+		if sess != nil && sess != current {
+			sessions = append(sessions, sess)
+		}
+	}
+	d.mu.Unlock()
+
+	var target attentionTarget
+	var best uint64
+	found := false
+	for _, sess := range sessions {
+		idx, seq, ok := oldestDoneTab(sess, "")
+		if !ok {
+			continue
+		}
+		if !found || seq < best {
+			target, best, found = attentionTarget{sessionID: sess.id, tabIndex: idx}, seq, true
+		}
+	}
+	return target, found
+}
+
+// oldestDoneTab returns the tab of sess showing a Done check whose agent
+// finished first, skipping the tab skip.
+func oldestDoneTab(sess *session, skip domain.TabStableID) (int, uint64, bool) {
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	idx := -1
+	var oldest uint64
+	for i, tb := range sess.tabs {
+		if skip != "" && domain.TabStableID(tb.stableID) == skip {
+			continue
+		}
+		seq, ok := tb.agentDoneSeq()
+		if !ok {
+			continue
+		}
+		if idx == -1 || seq < oldest {
+			idx, oldest = i, seq
+		}
+	}
+	return idx, oldest, idx != -1
 }
 
 func oldestAttentionTabWithTime(sess *session) (int, time.Time, bool) {
@@ -272,30 +357,147 @@ func (d *Daemon) pokeAttentionTicker() {
 	}
 }
 
+// attentionFrame returns the bell pulse frame derived from the animator tick.
 func (d *Daemon) attentionFrame() int {
+	return int(d.animationTick() % pulseFrameCount)
+}
+
+// animationTick returns the monotonic animator tick. The bell pulse uses it
+// modulo pulseFrameCount and the spinner modulo its frame count, so neither
+// wraps inside the other's cycle.
+func (d *Daemon) animationTick() uint64 {
 	if d == nil {
 		return 0
 	}
 	d.attnMu.Lock()
 	defer d.attnMu.Unlock()
-	return d.animFrame
+	return d.animTick
 }
 
-func (d *Daemon) attentionAnimator(ctx context.Context) {
-	active := false
-	var timer ports.Timer
-	for {
-		if !active {
-			if !d.anyAttention() {
-				d.setAttentionFrame(0)
-				select {
-				case <-ctx.Done():
-					return
-				case <-d.animWake:
-					continue
-				}
+// animationTargets says what a pulse tick must repaint. A pending bell may
+// show in any attachment's route entries, so it repaints every attachment
+// (all). Agent animation (a Blocked agent's bell, a Working spinner, or an
+// unseen Done check) shows in its own session's tab bar and in the session
+// entry of every attachment whose route snapshot lists it, so it repaints
+// those sessions only.
+type animationTargets struct {
+	all      bool
+	sessions []*session
+}
+
+func (t animationTargets) active() bool { return t.all || len(t.sessions) > 0 }
+
+// animatorActive reports whether some displayed cell animates. A Done check
+// pulses until a paint acknowledges it.
+func (d *Daemon) animatorActive() bool { return d.animationTargets().active() }
+
+// animationTargets reads every session, attachment, and route snapshot, so
+// the animator computes it once per tick.
+func (d *Daemon) animationTargets() animationTargets {
+	if d.anyAttention() {
+		return animationTargets{all: true}
+	}
+	return animationTargets{sessions: d.agentAnimatingSessions()}
+}
+
+// agentAnimatingSessions lists the sessions with an animating agent tab and
+// the sessions with an attachment whose bar lists an animating session.
+func (d *Daemon) agentAnimatingSessions() []*session {
+	cfg := d.currentRuntimeConfig().agents
+	if !cfg.Activity {
+		return nil
+	}
+	spinner := cfg.SpinnerEnabled()
+	d.mu.Lock()
+	sessions := sessionsSnapshot(d.sessions)
+	d.mu.Unlock()
+	animating := d.agentAnimatingLifecycles(spinner)
+	out := make([]*session, 0, len(sessions))
+	for _, sess := range sessions {
+		if sess.agentAnimating(spinner) || sessionViewsLifecycle(sess, animating) {
+			out = append(out, sess)
+		}
+	}
+	return out
+}
+
+// agentAnimatingLifecycles returns the lifecycles whose session entry
+// animates: a Blocked bell, a Done check, or a Working spinner when spinner
+// is set.
+func (d *Daemon) agentAnimatingLifecycles(spinner bool) map[domain.SessionLifecycleID]struct{} {
+	if d.agents == nil {
+		return nil
+	}
+	p := d.agents.sessions.Load()
+	if p == nil {
+		return nil
+	}
+	var out map[domain.SessionLifecycleID]struct{}
+	for lifecycle, indicator := range *p {
+		if indicator == agentactivity.IndicatorBlocked || indicator == agentactivity.IndicatorDone ||
+			(spinner && indicator == agentactivity.IndicatorWorking) {
+			if out == nil {
+				out = make(map[domain.SessionLifecycleID]struct{})
 			}
-			active = true
+			out[lifecycle] = struct{}{}
+		}
+	}
+	return out
+}
+
+// sessionViewsLifecycle reports whether an attachment of sess lists one of
+// lifecycles in its bar.
+func sessionViewsLifecycle(sess *session, lifecycles map[domain.SessionLifecycleID]struct{}) bool {
+	if len(lifecycles) == 0 {
+		return false
+	}
+	for _, ac := range sess.snapshotAttachments() {
+		if routeShowsLifecycle(ac, lifecycles) {
+			return true
+		}
+	}
+	return false
+}
+
+func (d *Daemon) repaintAnimationTargets(targets animationTargets) {
+	if targets.all {
+		d.repaintAllAttachedClients()
+		return
+	}
+	for _, sess := range targets.sessions {
+		d.repaintAttachedClients(sess)
+	}
+}
+
+// attentionAnimator advances the pulse and spinner tick while some cell
+// animates and parks otherwise. It computes the animation targets once per
+// wake or tick and uses them both to repaint and to decide whether to park.
+// Open pickers are refreshed while a bell is pending and once more on the
+// wake or tick that finds the last bell cleared, so they drop its mark.
+func (d *Daemon) attentionAnimator(ctx context.Context) {
+	var timer ports.Timer
+	targets := d.animationTargets()
+	prevAll := targets.all
+	// next recomputes the targets and refreshes the pickers when a bell is
+	// or was pending.
+	next := func() {
+		targets = d.animationTargets()
+		if targets.all || prevAll {
+			d.refreshClientPickers()
+		}
+		prevAll = targets.all
+	}
+	for {
+		d.refreshAgentPickers()
+		if !targets.active() {
+			d.setAttentionFrame(0)
+			select {
+			case <-ctx.Done():
+				return
+			case <-d.animWake:
+				next()
+				continue
+			}
 		}
 
 		if timer == nil {
@@ -317,17 +519,28 @@ func (d *Daemon) attentionAnimator(ctx context.Context) {
 				default:
 				}
 			}
+			next()
 		case <-timer.C():
 			d.advanceAttentionFrame()
-			d.refreshClientPickers()
-			d.repaintAllAttachedClients()
+			// Picker marks are static except the pulsing bell: an agent's
+			// label change arrives through refreshAgentPickers.
+			next()
+			d.repaintAnimationTargets(targets)
 		}
 
-		if !d.anyAttention() {
+		if !targets.active() {
 			d.setAttentionFrame(0)
 			d.repaintAllAttachedClients()
-			active = false
 		}
+	}
+}
+
+// refreshAgentPickers republishes open pickers once after a session's agent
+// aggregate changed their labels. Ticks refresh them only while a bell is
+// pending and on the tick that clears the last one.
+func (d *Daemon) refreshAgentPickers() {
+	if d.agentPickerRefresh.Swap(false) {
+		d.refreshClientPickers()
 	}
 }
 
@@ -354,12 +567,14 @@ func (d *Daemon) anyAttention() bool {
 
 func (d *Daemon) advanceAttentionFrame() {
 	d.attnMu.Lock()
-	d.animFrame = (d.animFrame + 1) % pulseFrameCount
+	d.animTick++
 	d.attnMu.Unlock()
 }
 
+// setAttentionFrame sets the animator tick; the animator resets it to 0 when
+// it parks.
 func (d *Daemon) setAttentionFrame(frame int) {
 	d.attnMu.Lock()
-	d.animFrame = frame
+	d.animTick = uint64(max(frame, 0))
 	d.attnMu.Unlock()
 }

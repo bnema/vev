@@ -173,7 +173,7 @@ func TestProcessPTYDataRetainsCallbacksDuringResizeReplay(t *testing.T) {
 	publishActiveClipboardCapability(d, sess, ac, ac.transport())
 	tb, p := testAttachmentTab(sess), testAttachmentTab(sess).focusedPane()
 	p.screen.OnResponse = func(b []byte) { p.ptyResponses = append(p.ptyResponses, b...) }
-	p.screen.OnBell = func() { p.ptyAttention = true }
+	p.screen.OnBell = func() { p.ptyBell = true }
 	p.screen.OnClipboard = func(b64 string) { p.ptyClipboards = append(p.ptyClipboards, b64) }
 	p.resizeApplying = true
 	p.resizePending = []byte("\x1b]2;resized\a\a\x1b]52;c;YQ==\a\x1b[6n")

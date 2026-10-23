@@ -1,0 +1,26 @@
+# zut 59bf5a6 redraw at 80x24: assistant markdown that looks like a working line
+---
+  answer 0 with some words
+
+▌
+▌ question 1
+▌
+
+  answer 1 with some words
+
+▌
+▌ question 2
+▌
+
+  Steps I took:
+
+  • Running tests - 12s
+  • ⠙ Running tool: bash - 3s
+
+  ┃ ⠙ Waiting for review - 1m5s
+
+  [1] gpt-5.4  ctx0%/272k
+  ~/demo
+
+▌
+

@@ -1,0 +1,52 @@
+# zut 59bf5a6 redraw at 200x50: tall pane: confirm dialog above the window, approval status visible
+---
+
+  answer 22 with some words
+
+▌
+▌ question 23
+▌
+
+  answer 23 with some words
+
+▌
+▌ question 24
+▌
+
+  answer 24 with some words
+
+▌
+▌ question 25
+▌
+
+  answer 25 with som╭───────────────────────────────────────────────────────────────────── confirm tool call ──────────────────────────────────────────────────────────────────────╮
+                    │                                                                                                                                                              │
+▌                   │  bash  sleep 20 && printf 'hello world'                                                                                                                      │
+▌ question 26       │                                                                                                                                                              │
+▌                   │choose (↑/↓ or 1-4, enter to pick, esc to refuse, / for commands):                                                                                            │
+                    │  1. yes (run this call)                                                                                                                                      │
+  answer 26 with som│  2. yes, always this tool (skip prompts for this tool for the rest of the session)                                                                           │
+                    │  3. yes, always (skip all prompts for the rest of the session)                                                                                               │
+▌                   │  4. no (refuse and let the model try something else)                                                                                                         │
+▌ question 27       │                                                                                                                                                              │
+▌                   ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+  answer 27 with some words
+
+▌
+▌ question 28
+▌
+
+  answer 28 with some words
+
+▌
+▌ question 29
+▌
+
+  answer 29 with some words
+
+  ⠋ Waiting for approval: bash - 12s  [1] gpt-5.4  ctx0%/272k
+  ~/demo
+
+▌
+

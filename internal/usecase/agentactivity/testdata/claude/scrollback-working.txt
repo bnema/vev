@@ -1,0 +1,28 @@
+# claude 2.1.308: old activity line above the bottom window
+---
+✻ Pondering… (12s · ↓ 1.2k tokens · esc to interrupt)
+╭───────────────────────────────────────────────────╮
+│ ✻ Welcome to Claude Code!                         │
+│                                                   │
+│   cwd: /home/user/demo                            │
+╰───────────────────────────────────────────────────╯
+
+> fix the flaky TestRetry test
+
+⏺ I'll look at the retry test first.
+
+⏺ Read(internal/retry/retry_test.go)
+  ⎿  Read 84 lines (ctrl+o to expand)
+
+⏺ The test sleeps for a fixed 10ms and races the timer goroutine.
+
+⏺ Replaced the sleep with a fake clock.
+
+⏺ All 20 runs pass.
+
+✻ Cooked for 2m 3s
+
+──────────────────────────────────────────────────────────────────────────────
+❯ 
+──────────────────────────────────────────────────────────────────────────────
+  ? for shortcuts

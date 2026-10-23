@@ -1,0 +1,17 @@
+# zut 59bf5a6 redraw at 80x24: assistant checklist with activity verbs and elapsed times
+---
+▌
+▌ question 2
+▌
+
+  Deploy log:
+
+  ✓ Running migrations - 3s
+  ✔ Sending notifications - 1m5s
+  ✗ Waiting for health check - 12s
+  ⏺ Receiving webhooks - 2s
+
+  [1] gpt-5.4  ctx0%/272k
+  ~/demo
+
+▌

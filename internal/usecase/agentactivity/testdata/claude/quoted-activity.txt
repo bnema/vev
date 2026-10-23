@@ -1,0 +1,17 @@
+# claude 2.1.308: assistant quotes an activity line, indented under its marker
+---
+╭───────────────────────────────────────────────────╮
+│ ✻ Welcome to Claude Code!                         │
+╰───────────────────────────────────────────────────╯
+
+> what does the spinner line look like
+
+⏺ It looks like this while a turn runs:
+
+  ✻ Pondering… (12s · ↓ 1.2k tokens · esc to interrupt)
+  ✶ Reticulating…
+
+──────────────────────────────────────────────────────────────────────────────
+❯ 
+──────────────────────────────────────────────────────────────────────────────
+  ? for shortcuts

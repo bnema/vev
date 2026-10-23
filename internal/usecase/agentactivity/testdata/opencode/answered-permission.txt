@@ -1,0 +1,17 @@
+# opencode v2.0.29: answered permission dialog still inside the bottom window
+---
+  ┃  add a --json flag to the status command
+  ┃
+
+  ┃  △ Permission required
+  ┃  $ go test ./cmd/...
+  ┃   Allow once    Always allow    Reject
+
+     ✓ Allowed once
+
+     Added --json; tests pass.
+
+  ┃
+  ┃  Build  gpt-5.4 OpenAI
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+   ~/demo                                       tab agents  ctrl+p commands

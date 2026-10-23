@@ -433,6 +433,31 @@ func TestExportedLeafHelpers(t *testing.T) {
 	require.Equal(t, []PaneID{"a", "b"}, LeafIDs(root))
 }
 
+func TestCollapsedLeaf(t *testing.T) {
+	t.Parallel()
+	root := &Node{Kind: Split, Dir: Horizontal, Children: []*Node{
+		NewLeaf("a"),
+		{Kind: Stack, Children: []*Node{NewLeaf("b"), NewLeaf("c")}, Expanded: "b"},
+	}}
+	tests := []struct {
+		name string
+		id   PaneID
+		want bool
+	}{
+		{name: "leaf outside a stack", id: "a"},
+		{name: "expanded stack member", id: "b"},
+		{name: "collapsed stack member", id: "c", want: true},
+		{name: "missing leaf", id: "z"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.want, CollapsedLeaf(root, tt.id))
+		})
+	}
+	require.False(t, CollapsedLeaf(nil, "a"))
+}
+
 func TestFocusDir(t *testing.T) {
 	t.Parallel()
 	area := domain.Rect{Width: 62, Height: 5}

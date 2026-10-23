@@ -1,0 +1,16 @@
+# claude 2.1.308: multi-line typed input quoting status and permission text
+---
+╭───────────────────────────────────────────────────╮
+│ ✻ Welcome to Claude Code!                         │
+╰───────────────────────────────────────────────────╯
+
+> fix the flaky TestRetry test
+
+⏺ The test sleeps for a fixed 10ms and races the timer goroutine.
+
+──────────────────────────────────────────────────────────────────────────────
+❯ the bar keeps saying
+  ✻ Thinking… (3s · esc to interrupt)
+  and Waiting for permission… after the turn
+──────────────────────────────────────────────────────────────────────────────
+  ? for shortcuts

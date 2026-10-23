@@ -1,0 +1,15 @@
+# opencode v2.0.29: user typed the hint into the input
+---
+  ┃  add a --json flag to the status command
+  ┃
+
+     I'll find where the status command is defined.
+
+     → Read cmd/status.go
+     ✱ Grep "status" (4 matches)
+
+  ┃
+  ┃  please add an esc interrupt handler ■■■■
+  ┃  Build  gpt-5.4 OpenAI
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+   ~/demo                                       tab agents  ctrl+p commands

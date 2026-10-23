@@ -62,11 +62,7 @@ func (d *Daemon) readPanePTY(p *pane) {
 	}
 	buf := make([]byte, ptyReadBufSize)
 	p.mu.Lock()
-	p.screen.OnResponse = func(b []byte) { p.ptyResponses = append(p.ptyResponses, b...) }
-	p.screen.OnBell = func() { p.ptyAttention = true }
-	p.screen.OnNotify = func(string, string) { p.ptyAttention = true }
-	p.screen.OnProgress = func(bool) { p.ptyAttention = true }
-	p.screen.OnClipboard = func(b64 string) { p.ptyClipboards = append(p.ptyClipboards, b64) }
+	p.installScreenEffectsLocked()
 	p.mu.Unlock()
 	for {
 		n, err := p.pty.Read(buf)
@@ -90,6 +86,17 @@ func (d *Daemon) readPanePTY(p *pane) {
 	}
 }
 
+// installScreenEffectsLocked routes VT side effects into the pane fields that
+// processPanePTYData drains. A BEL is kept apart from notifications and
+// progress so an agent-owned pane can defer it (see deferAgentBell).
+func (p *pane) installScreenEffectsLocked() {
+	p.screen.OnResponse = func(b []byte) { p.ptyResponses = append(p.ptyResponses, b...) }
+	p.screen.OnBell = func() { p.ptyBell = true }
+	p.screen.OnNotify = func(string, string) { p.ptyAttention = true }
+	p.screen.OnProgress = func(bool) { p.ptyAttention = true }
+	p.screen.OnClipboard = func(b64 string) { p.ptyClipboards = append(p.ptyClipboards, b64) }
+}
+
 type panePTYEffects struct {
 	lease             paneEffectLease
 	renderCoordinator *renderCoordinator
@@ -98,6 +105,7 @@ type panePTYEffects struct {
 	completeSyncRead  bool
 	syncEnded         bool
 	attention         bool
+	bell              bool
 	responses         []byte
 	clipboards        []string
 	syncCleanup       syncTimerCleanup
@@ -147,7 +155,8 @@ func (d *Daemon) processPanePTYData(p *pane, data []byte, bufferDuringApply bool
 		}
 	}
 	effects.attention = p.ptyAttention
-	p.ptyAttention = false
+	effects.bell = p.ptyBell
+	p.ptyAttention, p.ptyBell = false, false
 	effects.responses = append([]byte(nil), p.ptyResponses...)
 	effects.responses = filterUnsupportedKittyAnimationResponses(effects.responses)
 	p.ptyResponses = p.ptyResponses[:0]
@@ -155,6 +164,9 @@ func (d *Daemon) processPanePTYData(p *pane, data []byte, bufferDuringApply bool
 	p.ptyClipboards = p.ptyClipboards[:0]
 	p.mu.Unlock()
 	effects.syncCleanup.finish()
+	if owner != nil {
+		d.noteAgentOutput(p)
+	}
 	d.applyPanePTYEffects(p, effects)
 }
 
@@ -208,7 +220,10 @@ func (d *Daemon) applyPanePTYEffects(p *pane, effects panePTYEffects) {
 	if effects.lease.Current() {
 		markSnapshotDirty(owner.session)
 	}
-	if effects.attention && effects.lease.Current() {
+	if effects.bell && effects.lease.Current() && d.deferAgentBell(p) {
+		effects.bell = false
+	}
+	if (effects.attention || effects.bell) && effects.lease.Current() {
 		d.noteAttention(owner.session, owner.tab)
 	}
 	for _, b64 := range effects.clipboards {
@@ -469,6 +484,13 @@ func (d *Daemon) paintLocked(entry *session, ac *attachedClient, tb *tab, reset 
 	endCapture(0, ok)
 	if !ok {
 		return paintRejected, afterUnlock
+	}
+	// Done is not drawn for the tab this attachment shows, so the first
+	// captured paint that may be seen acknowledges it for every attachment,
+	// with the pane visibility its layout was captured under. The scheduler
+	// clears it and repaints; paint mutates nothing.
+	if gen := bars.status.activeAgentDoneGen; local && gen != 0 {
+		sess.ackAgentDone(d, tb, ac, gen, state.paneVisibilitySeq)
 	}
 	if ac.renderStages.capture != nil {
 		ac.renderStages.capture()

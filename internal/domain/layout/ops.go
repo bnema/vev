@@ -543,6 +543,23 @@ func closeRefocusCandidate(n *Node, target PaneID) PaneID {
 // ContainsLeaf reports whether n contains a leaf with id.
 func ContainsLeaf(n *Node, id PaneID) bool { return containsLeaf(n, id) }
 
+// CollapsedLeaf reports whether the leaf id is a stack member other than its
+// stack's expanded one, so only its title bar is drawn.
+func CollapsedLeaf(n *Node, id PaneID) bool {
+	if n == nil {
+		return false
+	}
+	if n.Kind == Stack && stackDirectLeafIndex(n, id) >= 0 {
+		return n.Expanded != id
+	}
+	for _, child := range n.Children {
+		if CollapsedLeaf(child, id) {
+			return true
+		}
+	}
+	return false
+}
+
 func containsLeaf(n *Node, id PaneID) bool {
 	if n == nil {
 		return false

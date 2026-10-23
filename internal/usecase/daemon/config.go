@@ -41,6 +41,8 @@ type runtimeConfig struct {
 	palette                 domain.PaletteConfig
 	nav                     domain.NavConfig
 	tabs                    domain.TabsConfig
+	agents                  domain.AgentsConfig
+	ui                      domain.UIConfig
 	ephemeral               domain.EphemeralConfig
 	scrollback              domain.ScrollbackConfig
 	theme                   themeConfigSnapshot
@@ -59,6 +61,8 @@ func defaultRuntimeConfig() *runtimeConfig {
 		palette:                 defaults.Palette,
 		nav:                     defaults.Nav,
 		tabs:                    defaults.Tabs,
+		agents:                  defaults.Agents,
+		ui:                      defaults.UI,
 		ephemeral:               defaults.Ephemeral,
 		scrollback:              domain.DefaultScrollbackConfig(),
 	}
@@ -95,12 +99,18 @@ func (d *Daemon) ApplyConfig(cfg domain.Config) {
 		palette:                 cfg.Palette,
 		nav:                     cfg.Nav,
 		tabs:                    cfg.Tabs,
+		agents:                  cfg.Agents,
+		ui:                      cfg.UI,
 		ephemeral:               cfg.Ephemeral,
 		scrollback:              scrollback,
 		theme:                   themeConfigSnapshot{mode: cfg.Theme, paletteOff: !cfg.ThemePalette, accent: cfg.ThemeAccent, barTransparent: cfg.Bar.Transparent},
 	}
 	d.bindings.Store(bindings)
+	previous := d.currentRuntimeConfig()
 	d.config.Store(snapshot)
+	if d.agents != nil && previous.agents.Activity != snapshot.agents.Activity {
+		d.agents.requestReconfigure()
+	}
 	for _, warning := range allWarnings {
 		d.logConfigWarning(warning)
 	}
@@ -128,6 +138,8 @@ func (d *Daemon) ApplyConfig(cfg domain.Config) {
 	}
 	d.reapplyThemeAllSessions()
 	d.repaintAllAttachedClients()
+	// A spinner turned on or off changes whether Working tabs animate.
+	d.pokeAttentionTicker()
 
 	if len(allWarnings) > 0 {
 		d.notify(nil, domain.NoticeWarn, domain.NoticeConfigReload,

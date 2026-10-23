@@ -38,6 +38,15 @@ nav.overflow-sessions = off
 # Show the focused pane's terminal title in tab labels; off keeps the process name only.
 tabs.terminal-title = on
 
+# Agent CLI activity in tab labels (Claude Code, Codex, opencode, zut).
+agents.activity = on
+# Working spinner: circle, jump, minidot, dot, line, hamburger, star, off, or custom frames.
+# Leave it out to use the ui.glyphs spinner.
+# agents.spinner = circle
+
+# Status glyphs (bell, bell-check, spinner): auto, nerd, unicode, or ascii.
+ui.glyphs = auto
+
 # Remove a numbered (ephemeral) session when its last client exits.
 ephemeral.close-on-exit = on
 
@@ -54,6 +63,7 @@ echo.predict = adaptive
 # Rebindable actions. Leave a line out to keep its built-in binding.
 open-palette = alt+space
 toggle-floating-pane = alt+f
+# Jump to the oldest bell, else to the oldest finished agent you have not seen.
 jump-attention = alt+a
 focus-pane-left = alt+h
 focus-pane-right = alt+l
@@ -133,6 +143,53 @@ code.yank-last-notification = YLN
 - They count uncompressed history, not process memory.
 - A reload applies to existing panes right away. Lowering a limit drops the oldest rows.
 - Idle panes compress old history in the background. This saves memory but does not raise the limit.
+
+## Agent activity
+
+With `agents.activity = on` (default), vev detects agent CLIs running in a pane and shows their state in the tab's attention cell:
+
+| State | Cell |
+|---|---|
+| Waiting for you (permission or question) | pulsing bell while it lasts; the bell is raised once per prompt |
+| Working | spinner |
+| Finished a turn you have not seen | pulsing green bell-check, until a focused client draws the agent's pane |
+| Idle | nothing |
+
+- The cell shows one state, by priority: a bell or a waiting agent, then a finished agent, then a working agent. A tab with several agent panes and a session entry with several agent tabs follow the same order, so a finished agent shows even while another one works. The tab you are viewing does not show a finished agent it draws: it shows the spinner while another of its agents works, and nothing otherwise. A finished agent in a hidden floating pane or a collapsed stack member shows until the pane is drawn.
+- The bell-check uses the terminal's ANSI green (bright green when green is too dark against the bar). 16-color terminals use ANSI green in bold; monochrome terminals pulse in bold only. Pickers show it without animation.
+- `jump-attention` (Alt+a) reaches waiting agents through their bell and, once no bell is left, finished agents in this daemon's sessions, oldest first.
+- Detection reads the bottom of the screen and the terminal title. It is best effort.
+- Once an agent is detected, its terminal bell (agents ring one at the end of a turn) waits until the turn ends. A turn that finishes with Done (shown, or already seen in the tab you are viewing) or a bell rung while the agent waits for an answer raises no extra attention. A turn that ends without Done, such as a short one, rings the bell, and so does a later bell. A bell rung while the agent is still starting, before detection, still shows. Notifications and progress reports still raise attention.
+- `off` stops detection and clears the glyphs; bells from every pane show again.
+
+`agents.spinner` takes a preset or custom frames separated by spaces:
+
+| Preset | Frames |
+|---|---|
+| `circle` | Nerd Font circle slices `nf-md-circle_slice_1` to `_8` (U+F0A9E–U+F0AA5) |
+| `jump` | `⢄ ⢂ ⢁ ⡁ ⡈ ⡐ ⡠` |
+| `minidot` | `⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏` |
+| `dot` | `⣾ ⣽ ⣻ ⢿ ⡿ ⣟ ⣯ ⣷` |
+| `line` | `\| / - \` |
+| `hamburger` | `☱ ☲ ☴ ☲` |
+| `star` | `✶ ✸ ✹ ✺ ✹ ✷` |
+| `off` | no spinner; the bell and bell-check still show |
+
+Custom frames take 2–32 frames, each one character exactly one cell wide, for example `agents.spinner = ◐ ◓ ◑ ◒`. Without `agents.spinner`, or with an invalid value (which logs a warning), the spinner follows `ui.glyphs`. A set `agents.spinner` always wins. Frames advance every 120 ms.
+
+## Status glyphs
+
+`ui.glyphs` selects the glyphs of the attention bell, the Done bell-check, and the default spinner in the bars and pickers. Every glyph is one cell wide.
+
+| Value | Bell | Done | Spinner |
+|---|---|---|---|
+| `nerd` | Nerd Font bell | Nerd Font bell-check `nf-md-bell_check` (U+F11E5) | `circle` |
+| `unicode` | `•` | `✓` | `◐ ◓ ◑ ◒` |
+| `ascii` | `!` | `*` | `\| / - \` |
+
+- `auto` (default) uses `ascii` on the Linux console and other limited terminals (`TERM` of `linux`, `ansi`, `cons25`, `dumb`, `vt` followed by a digit such as `vt100`, or a monochrome name) and `nerd` everywhere else.
+- Each client resolves its own set from its `TERM`, so a console client and a desktop client attached to the same session each see glyphs their terminal can draw.
+- The bell and the Done glyph pulse on every set; on `ascii` they blink on and off.
 
 ## Ephemeral sessions
 

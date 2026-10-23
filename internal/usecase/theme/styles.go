@@ -55,6 +55,73 @@ func PulseAttribute(base renderer.Style) renderer.Style {
 	return base
 }
 
+// PulseDone is PulseColor for the agent Done cell: the glyph fades from the
+// cell's background toward the done color instead of the base foreground.
+// An indexed done color, or a base without an RGB background, cannot be
+// blended, so the glyph keeps the done color and only the beat pulses.
+func PulseDone(base, done renderer.Style, intensity float64) renderer.Style {
+	style := base
+	style.Bold = true
+	switch {
+	case done.HasForegroundRGB && base.HasBackgroundRGB:
+		style.HasForegroundRGB = true
+		style.ForegroundRGB = Blend(base.BackgroundRGB, done.ForegroundRGB, intensity)
+	case done.HasForegroundRGB:
+		style.HasForegroundRGB = true
+		style.ForegroundRGB = done.ForegroundRGB
+	case done.Foreground >= 0:
+		style.HasForegroundRGB = false
+		style.Foreground = done.Foreground
+	}
+	return style
+}
+
+// PulseDoneAttribute is PulseDone for reduced-color attachments: the done
+// palette slot, if any, in bold on the visible beat.
+func PulseDoneAttribute(base, done renderer.Style) renderer.Style {
+	base.Bold = true
+	if !done.HasForegroundRGB && done.Foreground >= 0 {
+		base.HasForegroundRGB = false
+		base.Foreground = done.Foreground
+	}
+	return base
+}
+
+// ansiGreen and ansiBrightGreen are the terminal palette slots of the agent
+// Done color.
+const (
+	ansiGreen       = 2
+	ansiBrightGreen = 10
+)
+
+// IndexedAgentDone is the agent Done color by palette index: ANSI green.
+func IndexedAgentDone() renderer.Style {
+	style := renderer.DefaultStyle()
+	style.Foreground = ansiGreen
+	return style
+}
+
+// agentDoneStyle resolves the agent Done foreground: the terminal's own ANSI
+// green, or bright green when green lacks contrast against the bar, and
+// indexed green when the palette or the bar background is unknown.
+func agentDoneStyle(t Theme, bar renderer.Style) renderer.Style {
+	if !t.UsePalette || !bar.HasBackgroundRGB {
+		return IndexedAgentDone()
+	}
+	known := func(slot uint) bool { return t.PaletteKnown&(uint16(1)<<slot) != 0 }
+	background := bar.BackgroundRGB
+	switch {
+	case known(ansiGreen) && ContrastRatio(t.Palette[ansiGreen], background) >= accentContrastMin:
+		return foregroundStyle(t.Palette[ansiGreen])
+	case known(ansiBrightGreen) && (!known(ansiGreen) ||
+		ContrastRatio(t.Palette[ansiBrightGreen], background) > ContrastRatio(t.Palette[ansiGreen], background)):
+		return foregroundStyle(t.Palette[ansiBrightGreen])
+	case known(ansiGreen):
+		return foregroundStyle(t.Palette[ansiGreen])
+	}
+	return IndexedAgentDone()
+}
+
 // MRUFade fades an MRU style by position, reaching 60 percent of the terminal
 // background color at the oldest entry.
 func MRUFade(base renderer.Style, t Theme, i, count int) renderer.Style {
@@ -111,6 +178,10 @@ type Styles struct {
 	PromptBase        renderer.Style
 	CopyStatus        renderer.Style
 	SearchSelection   renderer.Style
+	// AgentDone carries only the foreground of the agent Done cell: an RGB
+	// terminal green, or a palette index. Renderers apply it over the cell's
+	// own background (see PulseDone).
+	AgentDone renderer.Style
 
 	// Compatibility aliases for pre-cache render paths.
 	StatusBar            renderer.Style

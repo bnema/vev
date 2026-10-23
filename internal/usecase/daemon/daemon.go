@@ -152,9 +152,15 @@ type Daemon struct {
 	// mu; see graphicsNamespacePool.
 	graphics graphicsNamespacePool
 
-	attnMu    sync.Mutex
-	animFrame int
-	animWake  chan struct{}
+	attnMu   sync.Mutex
+	animTick uint64
+	animWake chan struct{}
+
+	// agents is the shared agent activity scheduler; see agent_activity.go.
+	agents *agentActivityScheduler
+	// agentPickerRefresh asks the animator to republish open pickers once,
+	// after a session's agent aggregate changed their labels.
+	agentPickerRefresh atomic.Bool
 
 	// paletteHistory is the daemon-wide recent-command order; its mu is a leaf.
 	paletteHistory paletteHistory
@@ -694,6 +700,7 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 		},
 	}
 	d.config.Store(defaultRuntimeConfig())
+	d.agents = newAgentActivityScheduler(d)
 	for _, o := range opts {
 		o(d)
 	}
@@ -748,6 +755,11 @@ func (d *Daemon) Serve(ctx context.Context, l ports.ServerListener) error {
 	d.sessWg.Go(func() {
 		d.barScriptPoller(d.serveCtx)
 	})
+	if d.agents != nil {
+		d.sessWg.Go(func() {
+			d.agents.run(d.serveCtx)
+		})
+	}
 	d.sessWg.Go(func() {
 		d.historyMaintenance(d.serveCtx)
 	})
@@ -1417,7 +1429,7 @@ func (d *Daemon) finishAttach(sess *session, tr ports.ServerConnection, sz domai
 		// otherwise falls back to the session's normal first-tab repair.
 		initialTabIndex = preferredTabIndex(sess, h.PreferredTabID)
 	}
-	terminalCapabilities := terminalcap.Resolve(h.Env, h.Color)
+	terminalCapabilities := terminalcap.ResolveTerm(h.Env, h.TermEnv, h.Color)
 	// Kitty graphics are enabled only by the explicit direct-terminal
 	// declaration in Hello. Environment values remain useful for color and
 	// diagnostics, but cannot authorize terminal-global graphics side effects.

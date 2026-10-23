@@ -161,7 +161,7 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 	// The alternate cache owns these rows; the committed cache remains intact
 	// until prepare/send succeeds. Row extraction would allocate on each paint.
 	topBar := slices.Grow(scratch.bars.top[:0], width)[:width]
-	drawTopBarSnapshot(topBar, state.bars.status, state.bars.attentionFrame, state.bars.topRight, styles)
+	drawTopBarActivity(topBar, state.bars.status, state.bars.attentionFrame, state.bars.animTick, state.bars.spinner, state.bars.glyphs, state.bars.topRight, styles)
 	frame.WriteRow(0, 0, topBar)
 	bottomBar := slices.Grow(scratch.bars.bottom[:0], width)[:width]
 	drawStatusBarState(bottomBar, state.bars, styles)

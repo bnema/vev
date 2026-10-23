@@ -8,6 +8,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/keys/kittykey"
+	"github.com/bnema/vev/internal/usecase/ui"
 )
 
 // Picker is the composition seam over the client-owned picker.
@@ -55,6 +56,14 @@ func PickerPresentation(state State) bool {
 // picker renders indexed colors without it.
 func NewPicker(clock ports.Clock, freshness time.Duration, color terminalcap.ColorCapabilities) *Picker {
 	return &Picker{controller: newPickerController(clock, freshness, color)}
+}
+
+// SetGlyphs selects the client's resolved ui.glyphs set. Call it before the
+// picker first renders.
+func (p *Picker) SetGlyphs(glyphs ui.GlyphSet) {
+	p.controller.mu.Lock()
+	p.controller.renderer.glyphs = glyphs
+	p.controller.mu.Unlock()
 }
 
 // ApplySnapshot forwards a broker publication to the supervisor-owned picker.

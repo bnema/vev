@@ -1,0 +1,14 @@
+# opencode v2.0.29: user-opened settings dialog is not a blocker
+---
+  ┃  add a --json flag to the status command
+  ┃
+
+     I'll find where the status command is defined.
+
+     → Read cmd/status.go
+     ✱ Grep "status" (4 matches)
+
+  ┃  Theme
+  ┃  opencode
+  ┃
+   enter save   esc dismiss

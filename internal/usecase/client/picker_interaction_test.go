@@ -11,6 +11,7 @@ import (
 	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/picker"
+	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/stretchr/testify/require"
 )
 
@@ -79,7 +80,7 @@ func TestPickerRenderersFollowTerminalColorProfile(t *testing.T) {
 			return NewPicker(nil, 0, color).controller.renderer
 		},
 		"move picker": func(color terminalcap.ColorCapabilities) *pickerRenderer {
-			return newMovePickerOverlay(color).renderer
+			return newMovePickerOverlay(color, ui.GlyphSet{}).renderer
 		},
 	}
 	for name, build := range renderers {

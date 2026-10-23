@@ -1,0 +1,16 @@
+# codex 0.163.0: ctrl+t transcript pager
+---
+/ T R A N S C R I P T / / / / / / / / / / / / / / / / / / / / / / / / / / / /
+› add a --json flag to the status command
+
+• I'll find where the status command is defined.
+
+• Explored
+  └ Search status in cmd
+    Read status.go
+
+
+
+⌃space select
+ ↑/↓ to scroll · pgup/pgdn to page · home/end to jump
+ q close · f3 find · esc browse prompts

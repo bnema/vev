@@ -8,6 +8,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/usecase/agentactivity"
 	"github.com/bnema/vev/internal/usecase/picker"
 	"github.com/bnema/vev/internal/usecase/ui"
 )
@@ -49,6 +50,15 @@ func (d *Daemon) localPickerViews(cur *session, ac *attachedClient) pickerLocalV
 	// renameSession mid-sort.
 	live := inv.live
 	var current pickerSourceFilter
+	glyphs := d.glyphsFor(ac)
+	marks := newPickerMarks(glyphs, d.spinnerFrames(glyphs))
+	lookup := d.agentSessionLookup()
+	indicatorFor := func(view sessionView) agentactivity.Indicator {
+		if lookup == nil {
+			return agentactivity.IndicatorNone
+		}
+		return lookup(view.incarnation)
+	}
 	for _, item := range live {
 		snap := item.view
 		if item.sess == cur {
@@ -81,8 +91,9 @@ func (d *Daemon) localPickerViews(cur *session, ac *attachedClient) pickerLocalV
 	recentLive := make([]pickerSessionView, 0, len(live))
 	groupedLive := make([]pickerSessionView, 0, len(live))
 	for i, item := range live {
-		recentLive = append(recentLive, item.view.pickerView())
-		view := item.view.pickerView()
+		indicator := indicatorFor(item.view)
+		recentLive = append(recentLive, item.view.pickerView(marks, indicator))
+		view := item.view.pickerView(marks, indicator)
 		if i == 0 {
 			view.Section = "LOCAL"
 		}
@@ -135,8 +146,11 @@ func withLocalStoppedSection(stopped []pickerSessionView, local bool) []pickerSe
 	return stopped
 }
 
-func attentionSuffix(label string) string {
-	return label + " " + string(ui.AttentionGlyph)
+func attentionSuffix(label string, bell rune) string {
+	if bell == 0 {
+		bell = ui.AttentionGlyph
+	}
+	return label + " " + string(bell)
 }
 
 func remotePickerPreviewSize(size domain.Size) (uint16, uint16) {

@@ -90,6 +90,46 @@ type TabsConfig struct {
 	TerminalTitle bool
 }
 
+// AgentsConfig contains agent CLI activity indicator settings.
+type AgentsConfig struct {
+	// Activity enables agent identification and screen scanning. Off shows
+	// no agent glyphs.
+	Activity bool
+	// Spinner holds the Working spinner frames, one terminal cell each, when
+	// SpinnerSet is true. Empty draws no spinner; Blocked and Done glyphs
+	// still show. An unset spinner follows the resolved ui.glyphs set.
+	Spinner    []rune
+	SpinnerSet bool
+}
+
+// SpinnerEnabled reports whether Working tabs draw a spinner. Every glyph set
+// has one, so only an explicit "off" disables it.
+func (c AgentsConfig) SpinnerEnabled() bool { return !c.SpinnerSet || len(c.Spinner) > 0 }
+
+// GlyphMode selects the glyphs vev draws in its bars and picker.
+type GlyphMode uint8
+
+const (
+	// GlyphsAuto uses ASCII on a limited outer terminal (the Linux console)
+	// and Nerd Font glyphs otherwise, resolved per attachment.
+	GlyphsAuto GlyphMode = iota
+	GlyphsNerd
+	GlyphsUnicode
+	GlyphsASCII
+)
+
+// UIConfig contains chrome presentation settings.
+type UIConfig struct {
+	Glyphs GlyphMode
+}
+
+// DefaultAgentSpinner returns the frames of the default Nerd Font spinner,
+// the "circle" preset: Material Design circle slices
+// nf-md-circle_slice_1..8 (U+F0A9E..U+F0AA5).
+func DefaultAgentSpinner() []rune {
+	return []rune("\U000f0a9e\U000f0a9f\U000f0aa0\U000f0aa1\U000f0aa2\U000f0aa3\U000f0aa4\U000f0aa5")
+}
+
 // EphemeralConfig contains numbered-session lifetime settings.
 type EphemeralConfig struct {
 	// CloseOnExit removes an ephemeral session once its last attachment ends
@@ -175,6 +215,8 @@ type Config struct {
 	Floating       FloatingConfig
 	Nav            NavConfig
 	Tabs           TabsConfig
+	Agents         AgentsConfig
+	UI             UIConfig
 	Ephemeral      EphemeralConfig
 	Keyboard       KeyboardConfig
 	Echo           EchoConfig
@@ -216,6 +258,9 @@ func Defaults() Config {
 		},
 		Tabs: TabsConfig{
 			TerminalTitle: true,
+		},
+		Agents: AgentsConfig{
+			Activity: true,
 		},
 		Ephemeral: EphemeralConfig{
 			CloseOnExit: true,
