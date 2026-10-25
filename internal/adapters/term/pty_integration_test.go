@@ -36,6 +36,7 @@ func openPTYPair(t *testing.T) (master, slave *os.File) {
 // exercising the real-tty paths (MakeRaw/Restore, GetSize) against an
 // actual PTY, since those are pure-syscall lines that unit tests with
 // pipes can't cover.
+// real I/O: opens a real PTY.
 func TestTerminal_RealPTY_RawModeSizeAndEscapes(t *testing.T) {
 	master, slave := openPTYPair(t)
 	defer func() { _ = master.Close() }()
