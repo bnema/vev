@@ -202,6 +202,10 @@ func newLifecycleShutdownClock(t *testing.T) (*portsmocks.MockClock, *lifecycleS
 	return clk, state
 }
 
+// nextTimer waits for the shutdown timer with a wall-clock deadline because its
+// callers run real daemon I/O outside a synctest bubble.
+//
+//testpolicy:realtime callers drive a real-I/O daemon, which cannot run in a bubble
 func (s *lifecycleShutdownState) nextTimer(t *testing.T) *lifecycleTimerState {
 	t.Helper()
 	select {
