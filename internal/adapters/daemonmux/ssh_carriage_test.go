@@ -56,6 +56,7 @@ const sshMuxHelperMarker = "vev-daemonmux-ssh-carriage-helper"
 // carriage. It is inert unless re-executed by a carriage test with the helper
 // marker, at which point its stdio is the physical carriage and it must never
 // write anything but framed envelopes to stdout.
+// real I/O: SSH subprocess and OS pipes
 func TestSSHMuxHelperProcess(t *testing.T) {
 	args := flag.Args()
 	if len(args) < 2 || args[0] != sshMuxHelperMarker {
@@ -237,6 +238,7 @@ func requireNoGoroutineLeak(t *testing.T, baseline int) {
 // ServerSupervisor/AggregateListener, and the typed Listener delivers
 // independent daemon admissions. Only one physical connection and one process
 // exist for all 102 streams.
+// real I/O: SSH subprocess and OS pipes
 func TestSSHCarriageSupervisorTwoThenHundredTypedAdmissions(t *testing.T) {
 	baseline := runtime.NumGoroutine()
 	binding := mustServerBinding(t)
@@ -319,6 +321,7 @@ func TestSSHCarriageSupervisorTwoThenHundredTypedAdmissions(t *testing.T) {
 // physical carriage publishes its terminal outcome before fanning out to every
 // logical stream it carried, while a sibling physical carriage on the same
 // supervisor is untouched and a fresh stream on the lost physical is refused.
+// real I/O: SSH subprocess and OS pipes
 func TestSSHCarriagePhysicalFailureFansOutAndIsIsolated(t *testing.T) {
 	binding := mustServerBinding(t)
 	policy := binding.Policy()
@@ -395,6 +398,7 @@ func TestSSHCarriagePhysicalFailureFansOutAndIsIsolated(t *testing.T) {
 // context covers only setup: once EndpointConnector.Connect returned over a real
 // ssh carriage, cancelling the setup context never stops the pooled physical
 // connection, which Close alone owns.
+// real I/O: SSH subprocess and OS pipes
 func TestSSHCarriageSetupContextDetachedFromPhysicalLifetime(t *testing.T) {
 	binding := mustServerBinding(t)
 	spec := sshMuxHelperCommand("daemon", filepath.Join(t.TempDir(), "helper.pid"))
@@ -422,6 +426,7 @@ func TestSSHCarriageSetupContextDetachedFromPhysicalLifetime(t *testing.T) {
 // TestSSHCarriageCanceledSetupAdmitsNothing proves one canceled setup context
 // prevents the subprocess from starting at all: no process, no physical
 // connection, no stream.
+// real I/O: SSH subprocess and OS pipes
 func TestSSHCarriageCanceledSetupAdmitsNothing(t *testing.T) {
 	binding := mustServerBinding(t)
 	pidPath := filepath.Join(t.TempDir(), "helper.pid")
@@ -444,6 +449,7 @@ func TestSSHCarriageCanceledSetupAdmitsNothing(t *testing.T) {
 // covers the daemonmux physical handshake over a real ssh carriage: a helper
 // that never answers the preamble fails the whole Connect within the setup
 // deadline and publishes no physical connection.
+// real I/O: SSH subprocess and OS pipes
 func TestSSHCarriageSetupDeadlineBoundsTheMuxHandshake(t *testing.T) {
 	binding := mustServerBinding(t)
 	spec := sshMuxHelperCommand("silent")
@@ -461,6 +467,7 @@ func TestSSHCarriageSetupDeadlineBoundsTheMuxHandshake(t *testing.T) {
 // TestSSHCarriageConnectErrorBoundedAndSanitized proves a failed ssh carriage
 // surfaces a bounded, control-byte-free public error that never carries raw
 // remote stderr.
+// real I/O: SSH subprocess and OS pipes
 func TestSSHCarriageConnectErrorBoundedAndSanitized(t *testing.T) {
 	const marker = "remote-secret-value"
 	binding := mustServerBinding(t)
@@ -559,6 +566,7 @@ func nextSSHServerFrame(t *testing.T, client RawFramedTransport) []byte {
 // carriage, that a logical consumer which never drains one stream's inbound
 // queue neither blocks the reader nor a sibling: the stalled stream is reset by
 // its own bound while the sibling keeps receiving.
+// real I/O: SSH subprocess and OS pipes
 func TestSSHCarriageBlockedConsumerSiblingProgress(t *testing.T) {
 	pump, client := sshDaemonPump(t)
 
@@ -607,6 +615,7 @@ func TestSSHCarriageBlockedConsumerSiblingProgress(t *testing.T) {
 // TestSSHCarriageResetIsolation proves, over a real ssh carriage, that one
 // stream-local refusal schedules exactly one Reset for its own stream and
 // leaves the physical connection and every sibling healthy.
+// real I/O: SSH subprocess and OS pipes
 func TestSSHCarriageResetIsolation(t *testing.T) {
 	pump, client := sshDaemonPump(t)
 

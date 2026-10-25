@@ -127,6 +127,7 @@ func (s *superviseServer) soleChildPump(t *testing.T) *Pump {
 // delivers independent typed daemon admissions, and every stream's traffic is
 // isolated. Only one physical connection and one physical child exist for all
 // 102 streams.
+// real I/O: Unix-domain socket carriage
 func TestUnixCarriageSupervisorTwoThenHundredTypedAdmissions(t *testing.T) {
 	binding := mustServerBinding(t)
 	policy := binding.Policy()
@@ -244,6 +245,7 @@ func nextUnixServerFrame(t *testing.T, client RawFramedTransport) []byte {
 // carriage, that a logical consumer which never drains one stream's inbound
 // queue neither blocks the reader nor a sibling: the stalled stream is reset by
 // its own bound while the sibling keeps receiving.
+// real I/O: Unix-domain socket carriage
 func TestUnixCarriageBlockedConsumerSiblingProgress(t *testing.T) {
 	pump, client := unixDaemonPump(t)
 
@@ -292,6 +294,7 @@ func TestUnixCarriageBlockedConsumerSiblingProgress(t *testing.T) {
 // TestUnixCarriageResetIsolation proves, over a real Unix carriage, that one
 // stream-local refusal schedules exactly one Reset for its own stream and
 // leaves the physical connection and every sibling healthy.
+// real I/O: Unix-domain socket carriage
 func TestUnixCarriageResetIsolation(t *testing.T) {
 	pump, client := unixDaemonPump(t)
 

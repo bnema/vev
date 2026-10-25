@@ -57,6 +57,7 @@ func p3cPoolLimits() broker.PoolLimits {
 // TestPoolSharesCompatibleAliasesOverOnePhysical proves the pool pools two
 // compatible aliases over exactly one daemonmux physical connection: only one
 // carriage is dialed, and both logical streams flow over it.
+// real I/O: Unix-domain socket-backed pooled carriage
 func TestPoolSharesCompatibleAliasesOverOnePhysical(t *testing.T) {
 	binding := mustRemoteServerBinding(t)
 	policy := binding.Policy()
@@ -99,6 +100,7 @@ func TestPoolSharesCompatibleAliasesOverOnePhysical(t *testing.T) {
 // TestPoolRefusesConflictingPolicyWithoutDial proves the pool rejects a request
 // whose policy conflicts with the resolved endpoint policy before any carriage
 // is dialed.
+// real I/O: Unix-domain socket-backed pooled carriage
 func TestPoolRefusesConflictingPolicyWithoutDial(t *testing.T) {
 	binding := mustServerBinding(t)
 	server := newSuperviseServer(t, binding, DefaultMuxCeilings(), 0, nil)
@@ -125,6 +127,7 @@ func TestPoolRefusesConflictingPolicyWithoutDial(t *testing.T) {
 // TestPoolSurfacesPhysicalLossPerStream proves a carriage loss is published
 // per affected logical stream through the pool: the pooled stream terminates
 // with a broker stream-lost error once the accepted physical carriage dies.
+// real I/O: Unix-domain socket-backed pooled carriage
 func TestPoolSurfacesPhysicalLossPerStream(t *testing.T) {
 	binding := mustRemoteServerBinding(t)
 	policy := binding.Policy()

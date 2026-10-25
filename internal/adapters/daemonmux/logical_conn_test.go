@@ -84,6 +84,14 @@ func newPairedPumpsUnstarted(t *testing.T, ceilings MuxCeilings) (*Pump, *Pump, 
 	require.NoError(t, err)
 	daemon, err := NewPump(daemonCarrier, DirectionClient, ceilings)
 	require.NoError(t, err)
+	signals := &admissionSignals{ready: make(map[PhysicalStreamID]chan struct{})}
+	pairedAdmissions.Store(daemon, signals)
+	t.Cleanup(func() { pairedAdmissions.Delete(daemon) })
+	require.NoError(t, daemon.OnAdmitted(func(open Open) {
+		signals.mu.Lock()
+		defer signals.mu.Unlock()
+		close(signals.channel(open.Ref.Physical))
+	}))
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() {
 		cancel()
@@ -131,14 +139,40 @@ func controlRequest(stream int) ports.BrokerOpenStreamRequest {
 
 // awaitStream waits until a stream identity has been admitted on the daemon
 // side.
-func awaitStream(pump *Pump, id PhysicalStreamID, deadline time.Time) (StreamStatus, error) {
-	for time.Now().Before(deadline) {
-		if status, ok := pump.Engine().Status(id); ok && status.State != StreamTerminal {
-			return status, nil
-		}
-		time.Sleep(time.Millisecond)
+type admissionSignals struct {
+	mu    sync.Mutex
+	ready map[PhysicalStreamID]chan struct{}
+}
+
+var pairedAdmissions sync.Map
+
+func (s *admissionSignals) channel(id PhysicalStreamID) chan struct{} {
+	ch := s.ready[id]
+	if ch == nil {
+		ch = make(chan struct{})
+		s.ready[id] = ch
 	}
-	return StreamStatus{}, fmt.Errorf("daemonmux test: stream %d was not admitted", id)
+	return ch
+}
+func awaitStream(pump *Pump, id PhysicalStreamID, deadline time.Time) (StreamStatus, error) {
+	value, ok := pairedAdmissions.Load(pump)
+	if !ok {
+		return StreamStatus{}, fmt.Errorf("missing paired admission observer")
+	}
+	signals := value.(*admissionSignals)
+	signals.mu.Lock()
+	ch := signals.channel(id)
+	signals.mu.Unlock()
+	select {
+	case <-ch:
+	case <-time.After(time.Until(deadline)):
+		return StreamStatus{}, fmt.Errorf("stream %d was not admitted", id)
+	}
+	status, ok := pump.Engine().Status(id)
+	if !ok || status.State == StreamTerminal {
+		return StreamStatus{}, fmt.Errorf("stream %d was not admitted", id)
+	}
+	return status, nil
 }
 
 // sessionPeer is a test-only daemon-side typed session: it frames the same mux
@@ -191,14 +225,15 @@ type daemonAcceptor struct {
 	pump  *Pump
 	flood int
 
-	mu    sync.Mutex
-	count int
-	peers map[PhysicalStreamID]*sessionPeer
-	errCh chan error
+	mu      sync.Mutex
+	count   int
+	peers   map[PhysicalStreamID]*sessionPeer
+	errCh   chan error
+	changed chan struct{}
 }
 
 func newDaemonAcceptor(pump *Pump, flood int) *daemonAcceptor {
-	return &daemonAcceptor{pump: pump, flood: flood, peers: map[PhysicalStreamID]*sessionPeer{}, errCh: make(chan error, 256)}
+	return &daemonAcceptor{pump: pump, flood: flood, peers: map[PhysicalStreamID]*sessionPeer{}, errCh: make(chan error, 256), changed: make(chan struct{})}
 }
 
 func (a *daemonAcceptor) start(id PhysicalStreamID, deadline time.Time) {
@@ -273,6 +308,8 @@ func (a *daemonAcceptor) add(id PhysicalStreamID, peer *sessionPeer) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.count++
+	close(a.changed)
+	a.changed = make(chan struct{})
 	if peer != nil {
 		a.peers[id] = peer
 	}
@@ -286,29 +323,27 @@ func (a *daemonAcceptor) fail(err error) {
 }
 
 func (a *daemonAcceptor) wait(count int, deadline time.Time) error {
-	for time.Now().Before(deadline) {
+	guard := time.After(time.Until(deadline))
+	for {
+		a.mu.Lock()
+		n, ch := a.count, a.changed
+		a.mu.Unlock()
 		select {
 		case err := <-a.errCh:
 			return err
 		default:
 		}
-		a.mu.Lock()
-		accepted := a.count
-		a.mu.Unlock()
-		if accepted >= count {
+		if n >= count {
 			return nil
 		}
-		time.Sleep(time.Millisecond)
+		select {
+		case err := <-a.errCh:
+			return err
+		case <-ch:
+		case <-guard:
+			return fmt.Errorf("accepted %d of %d streams", n, count)
+		}
 	}
-	a.mu.Lock()
-	accepted := a.count
-	a.mu.Unlock()
-	select {
-	case err := <-a.errCh:
-		return err
-	default:
-	}
-	return fmt.Errorf("daemonmux test: accepted %d of %d streams", accepted, count)
 }
 
 func (a *daemonAcceptor) closePeers() {

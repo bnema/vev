@@ -35,16 +35,17 @@ const listenerIdleBudget = time.Hour
 // its expiry are asserted exactly instead of racing wall time. Timers that come
 // due at the same instant fire in creation order.
 type listenerClock struct {
-	mock   *portsmocks.MockClock
-	t      *testing.T
-	mu     sync.Mutex
-	now    time.Time
-	order  uint64
-	timers map[*listenerTimer]struct{}
+	mock    *portsmocks.MockClock
+	t       *testing.T
+	mu      sync.Mutex
+	now     time.Time
+	order   uint64
+	timers  map[*listenerTimer]struct{}
+	changed chan struct{}
 }
 
 func newListenerClock(t *testing.T, start time.Time) *listenerClock {
-	c := &listenerClock{mock: portsmocks.NewMockClock(t), t: t, now: start, timers: make(map[*listenerTimer]struct{})}
+	c := &listenerClock{mock: portsmocks.NewMockClock(t), t: t, now: start, timers: make(map[*listenerTimer]struct{}), changed: make(chan struct{})}
 	c.mock.EXPECT().Now().RunAndReturn(c.Now).Maybe()
 	c.mock.EXPECT().NewTimer(mock.Anything).RunAndReturn(func(d time.Duration) ports.Timer {
 		timer := &listenerTimer{clock: c, ch: make(chan time.Time, 1)}
@@ -55,6 +56,8 @@ func newListenerClock(t *testing.T, start time.Time) *listenerClock {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		timer.arm(d)
+		close(c.changed)
+		c.changed = make(chan struct{})
 		return timerMock
 	}).Maybe()
 	return c
@@ -524,7 +527,7 @@ func TestListenerHundredTypedAdmissions(t *testing.T) {
 	for i, connection := range connections {
 		require.NoError(t, connection.Close(), "stream %d", i+1)
 	}
-	for id := PhysicalStreamID(1); id <= 3; id++ {
+	for id := PhysicalStreamID(1); id <= count; id++ {
 		requireStreamState(t, h.daemonPump, id, StreamTerminal)
 	}
 	for i, connection := range connections {
@@ -895,8 +898,8 @@ func TestListenerCloseUnblocksAcceptAndJoinsGoroutines(t *testing.T) {
 	require.NoError(t, h.brokerPump.Close())
 	require.NoError(t, h.daemonPump.Close())
 
-	require.Eventually(t, func() bool { return !watchRegistered(h.daemonPump, 1) }, listenerTestDeadline, time.Millisecond,
-		"listener connection leaked a pump watch entry")
+	awaitClosed(t, daemonConnection.watchDone, listenerTestDeadline)
+	require.False(t, watchRegistered(h.daemonPump, 1), "listener connection leaked a pump watch entry")
 	require.Eventually(t, func() bool { return runtime.NumGoroutine() <= before+3 }, listenerTestDeadline, time.Millisecond,
 		"listener goroutines leaked")
 }
@@ -1123,8 +1126,21 @@ func TestListenerDeliverSkipsExpiredAdmissionWithoutWatchdog(t *testing.T) {
 	// Wait until the watchdog is blocked on stream 1's timer, then move the
 	// clock past the deadline without firing that timer: only the consumer's own
 	// deadline check can settle the stream here.
-	require.Eventually(t, func() bool { return h.clock.timerCount() == 1 }, listenerTestDeadline, time.Millisecond,
-		"watchdog never armed the admission deadline")
+	guard := time.After(listenerTestDeadline)
+	for {
+		h.clock.mu.Lock()
+		n, ch := len(h.clock.timers), h.clock.changed
+		h.clock.mu.Unlock()
+		if n == 1 {
+			break
+		}
+		select {
+		case <-ch:
+		case <-guard:
+			t.Fatal("watchdog never armed admission deadline")
+		}
+	}
+
 	h.moveClock(h.clock.Now().Add(budget + time.Second))
 
 	probe := h.acceptAsync()

@@ -177,6 +177,7 @@ func nextQUICServerFrame(t *testing.T, client RawFramedTransport) []byte {
 // delivers independent typed daemon admissions, and every stream's traffic is
 // isolated. Only one physical connection, one physical child, and one QUIC
 // stream exist for all 102 streams.
+// real I/O: UDP sockets and QUIC carriage
 func TestQUICCarriageSupervisorTwoThenHundredTypedAdmissions(t *testing.T) {
 	binding := mustServerBinding(t)
 	policy := binding.Policy()
@@ -260,6 +261,7 @@ func TestQUICCarriageSupervisorTwoThenHundredTypedAdmissions(t *testing.T) {
 // carriage, that a logical consumer which never drains one stream's inbound
 // queue neither blocks the reader nor a sibling: the stalled stream is reset by
 // its own bound while the sibling keeps receiving.
+// real I/O: UDP sockets and QUIC carriage
 func TestQUICCarriageBlockedConsumerSiblingProgress(t *testing.T) {
 	pump, client := quicDaemonPump(t)
 
@@ -308,6 +310,7 @@ func TestQUICCarriageBlockedConsumerSiblingProgress(t *testing.T) {
 // TestQUICCarriageResetIsolation proves, over a real QUIC carriage, that one
 // stream-local refusal schedules exactly one Reset for its own stream and
 // leaves the physical connection and every sibling healthy.
+// real I/O: UDP sockets and QUIC carriage
 func TestQUICCarriageResetIsolation(t *testing.T) {
 	pump, client := quicDaemonPump(t)
 
@@ -347,6 +350,7 @@ func TestQUICCarriageResetIsolation(t *testing.T) {
 // logical stream it carried, while a sibling physical QUIC connection on the
 // same supervisor is untouched and a fresh stream on the lost physical is
 // refused.
+// real I/O: UDP sockets and QUIC carriage
 func TestQUICCarriagePhysicalFailureFansOutAndIsIsolated(t *testing.T) {
 	binding := mustServerBinding(t)
 	policy := binding.Policy()
@@ -438,6 +442,7 @@ func TestQUICCarriagePhysicalFailureFansOutAndIsIsolated(t *testing.T) {
 // context covers only setup: once EndpointConnector.Connect returned over a real
 // QUIC carriage, cancelling the setup context never stops the pooled physical
 // connection, which Close alone owns.
+// real I/O: UDP sockets and QUIC carriage
 func TestQUICCarriageSetupContextDetachedFromPhysicalLifetime(t *testing.T) {
 	binding := mustServerBinding(t)
 	server, readiness, addr := quicCarriageEndpoint(t)
@@ -470,6 +475,7 @@ func TestQUICCarriageSetupContextDetachedFromPhysicalLifetime(t *testing.T) {
 // TestQUICCarriageCanceledSetupAdmitsNothing proves one setup context covers
 // bootstrap, dial, auth, and the mux handshake: a canceled setup admits no
 // physical connection, no child, and no stream.
+// real I/O: UDP sockets and QUIC carriage
 func TestQUICCarriageCanceledSetupAdmitsNothing(t *testing.T) {
 	binding := mustServerBinding(t)
 	server, readiness, addr := quicCarriageEndpoint(t)
@@ -492,6 +498,7 @@ func TestQUICCarriageCanceledSetupAdmitsNothing(t *testing.T) {
 // covers the daemonmux physical handshake over a real QUIC carriage: a daemon
 // that never answers the preamble fails the whole Connect within the setup
 // deadline and publishes no physical connection.
+// real I/O: UDP sockets and QUIC carriage
 func TestQUICCarriageSetupDeadlineBoundsTheMuxHandshake(t *testing.T) {
 	binding := mustServerBinding(t)
 	_, readiness, addr := quicCarriageEndpoint(t)
