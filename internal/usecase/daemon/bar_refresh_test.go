@@ -187,7 +187,7 @@ func TestBarScriptForcedRefreshRespectsMinimumInterval(t *testing.T) {
 		require.False(t, d.refreshBarScriptsIfDue(sess, time.Unix(10, int64(500*time.Millisecond)), true))
 		require.Equal(t, 2, r.callCount())
 		// Advance fake time past the debounce interval so the scheduled refresh runs.
-		time.Sleep(2 * time.Second) // advances fake time to fire the refresh timer
+		advanceFakeTime(2 * time.Second)
 		synctest.Wait()
 		require.Equal(t, 4, r.callCount())
 	})
@@ -205,7 +205,7 @@ func TestBarScriptContextChangeDebouncesUntilMinimumInterval(t *testing.T) {
 		sess.cwd = "/other"
 		require.False(t, d.refreshBarScriptsIfDue(sess, time.Now().Add(100*time.Millisecond), false))
 		// Advance fake time past the debounce interval so the scheduled refresh runs.
-		time.Sleep(2 * time.Second) // advances fake time to fire the refresh timer
+		advanceFakeTime(2 * time.Second)
 		synctest.Wait()
 		require.Equal(t, 4, r.callCount())
 		require.Equal(t, "/other", r.calls[2].PaneCWD)
@@ -327,7 +327,7 @@ func TestBarScriptRunConsumesPendingAfterRunningClears(t *testing.T) {
 		close(r.release)
 		waitBarRefreshIdle(t, d)
 		// Advance fake time past the debounce interval so the scheduled refresh runs.
-		time.Sleep(2 * time.Second) // advances fake time to fire the refresh timer
+		advanceFakeTime(2 * time.Second)
 		synctest.Wait()
 		require.Equal(t, 4, r.callCount())
 	})

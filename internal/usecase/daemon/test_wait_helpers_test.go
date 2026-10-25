@@ -61,6 +61,12 @@ func requireAttachmentCleanup(t testing.TB, d *Daemon) {
 	}
 }
 
+// advanceFakeTime advances the synctest bubble's fake clock by d. It must only
+// be called from inside a bubble, where the sleep takes no wall time.
+func advanceFakeTime(d time.Duration) {
+	time.Sleep(d) //testpolicy:sleep advances the synctest bubble's fake clock
+}
+
 // requireReceived asserts a channel result after bubble goroutines are quiescent.
 func requireReceived[T any](t *testing.T, ch <-chan T, failure string) T {
 	t.Helper()
