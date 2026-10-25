@@ -91,24 +91,21 @@ func (c *mockServerConnection) LinkEvents() <-chan ports.LinkEvent {
 	return testLinkEvents(c.MockTransport)
 }
 
-type mockServerListener struct{ *wiremocks.MockListener }
-
-func newMockServerListener(t mockTestingT) *mockServerListener {
-	return &mockServerListener{MockListener: wiremocks.NewMockListener(t)}
-}
-
-func (l *mockServerListener) Accept() (ports.ServerConnection, error) {
-	raw, err := l.MockListener.Accept()
-	if err != nil {
-		return nil, err
-	}
-	// Daemon tests only ever offer connections built by newMockServerConnection
-	// and its helpers, so the accepted raw transport is already the bridge.
-	conn, ok := raw.(*mockServerConnection)
-	if !ok {
-		return nil, fmt.Errorf("test listener: unsupported raw connection %T", raw)
-	}
-	return conn, nil
+// expectAccept scripts l.Accept to return connections built by
+// newMockServerConnection and its helpers, so the raw transport is already the
+// typed bridge.
+func expectAccept(l *portsmocks.MockServerListener, accept func() (wire.Transport, error)) {
+	l.EXPECT().Accept().RunAndReturn(func() (ports.ServerConnection, error) {
+		raw, err := accept()
+		if err != nil {
+			return nil, err
+		}
+		conn, ok := raw.(*mockServerConnection)
+		if !ok {
+			return nil, fmt.Errorf("test listener: unsupported raw connection %T", raw)
+		}
+		return conn, nil
+	}).Maybe()
 }
 
 func testReceiveClient(raw wire.Transport) (protocol.ClientMessage, error) {

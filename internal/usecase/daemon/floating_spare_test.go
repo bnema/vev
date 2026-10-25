@@ -160,7 +160,7 @@ func TestFloatingSpareIsSharedPerSession(t *testing.T) {
 				d := newTestDaemon(t, ptys, newStubClock(t))
 				d.ApplyConfig(domain.Config{Floating: cfg})
 				cwds := map[int]string{1: "/work", 2: tt.claimCwd}
-				WithProcessInspector(&processInspectorFake{cwd: func(pid int) (string, error) { return cwds[pid], nil }})(d)
+				WithProcessInspector(newProcessInspector(t, processInspectorFuncs{cwd: func(pid int) (string, error) { return cwds[pid], nil }}))(d)
 				d.dirOrHome = func(cwd string) string { return cwd }
 
 				first := newTab(newPidPTY(t, 1), domain.Size{Cols: 120, Rows: 40})

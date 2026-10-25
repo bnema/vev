@@ -604,7 +604,7 @@ func TestServeSurvivesEmptyRegistryAndAcceptsNewSession(t *testing.T) {
 		firstTr, firstSends, _ := newConn(t, mustHello(protocol.IntentEphemeral, "", domain.Size{Cols: 80, Rows: 24}))
 		secondTr, secondSends, _ := newConn(t, mustHello(protocol.IntentEphemeral, "", domain.Size{Cols: 80, Rows: 24}))
 
-		l := newMockServerListener(t)
+		l := portsmocks.NewMockServerListener(t)
 		// Feed connections one at a time: the second is offered only after the
 		// first session has exited, so the mock factory's PTY order is deterministic
 		// and the reuse handshake proves the accept loop survived.
@@ -612,14 +612,14 @@ func TestServeSurvivesEmptyRegistryAndAcceptsNewSession(t *testing.T) {
 		connCh <- firstTr
 		closed := make(chan struct{})
 		var once sync.Once
-		l.EXPECT().Accept().RunAndReturn(func() (wire.Transport, error) {
+		expectAccept(l, func() (wire.Transport, error) {
 			select {
 			case c := <-connCh:
 				return c, nil
 			case <-closed:
 				return nil, io.EOF
 			}
-		}).Maybe()
+		})
 		l.EXPECT().Close().RunAndReturn(func() error { once.Do(func() { close(closed) }); return nil }).Maybe()
 		l.EXPECT().Addr().Return("mock").Maybe()
 
@@ -658,19 +658,19 @@ func TestServeGracefulShutdownOnContextCancel(t *testing.T) {
 		defer releasePTY()
 		tr, sends, _ := newConn(t, mustHello(protocol.IntentNew, "long", domain.Size{Cols: 80, Rows: 24}))
 
-		l := newMockServerListener(t)
+		l := portsmocks.NewMockServerListener(t)
 		connCh := make(chan wire.Transport, 1)
 		connCh <- tr
 		closed := make(chan struct{})
 		var once sync.Once
-		l.EXPECT().Accept().RunAndReturn(func() (wire.Transport, error) {
+		expectAccept(l, func() (wire.Transport, error) {
 			select {
 			case c := <-connCh:
 				return c, nil
 			case <-closed:
 				return nil, io.EOF
 			}
-		}).Maybe()
+		})
 		l.EXPECT().Close().RunAndReturn(func() error { once.Do(func() { close(closed) }); return nil }).Maybe()
 		l.EXPECT().Addr().Return("mock").Maybe()
 
@@ -801,19 +801,19 @@ func TestServeReturnsDespiteWedgedClientOnShutdown(t *testing.T) {
 		}).Maybe()
 		tr.EXPECT().Close().RunAndReturn(func() error { closeConn(); return nil }).Maybe()
 
-		l := newMockServerListener(t)
+		l := portsmocks.NewMockServerListener(t)
 		connCh := make(chan wire.Transport, 1)
 		connCh <- tr
 		lnClosed := make(chan struct{})
 		var lnOnce sync.Once
-		l.EXPECT().Accept().RunAndReturn(func() (wire.Transport, error) {
+		expectAccept(l, func() (wire.Transport, error) {
 			select {
 			case c := <-connCh:
 				return c, nil
 			case <-lnClosed:
 				return nil, io.EOF
 			}
-		}).Maybe()
+		})
 		l.EXPECT().Close().RunAndReturn(func() error { lnOnce.Do(func() { close(lnClosed) }); return nil }).Maybe()
 		l.EXPECT().Addr().Return("mock").Maybe()
 
@@ -1413,7 +1413,7 @@ func TestRefreshSessionCwdTouchesOnlyOnChange(t *testing.T) {
 		d := newTestDaemon(t, newFactory(t, p), newStubClock(t))
 		WithStore(t, store)(d)
 		cwd := "/tmp/work"
-		WithProcessInspector(&processInspectorFake{cwd: func(int) (string, error) { return cwd, nil }})(d)
+		WithProcessInspector(newProcessInspector(t, processInspectorFuncs{cwd: func(int) (string, error) { return cwd, nil }}))(d)
 
 		sess, err := createSessionForTest(d, "work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
 		require.NoError(t, err)
@@ -1628,7 +1628,7 @@ func TestNaturalExitStoppedButExplicitKillPurges(t *testing.T) {
 		store, state := newMockStore(t)
 		d := newTestDaemon(t, newFactorySeq(t, p1, p2), newStubClock(t))
 		WithStore(t, store)(d)
-		WithProcessInspector(&processInspectorFake{cwd: func(int) (string, error) { return "/tmp/latest", nil }})(d)
+		WithProcessInspector(newProcessInspector(t, processInspectorFuncs{cwd: func(int) (string, error) { return "/tmp/latest", nil }}))(d)
 
 		natural, err := createSessionForTest(d, "natural", false, "/tmp/old", sz, terminalEnv{}, d.baseEnv)
 		require.NoError(t, err)

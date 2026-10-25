@@ -664,21 +664,21 @@ func (c *serveShutdownClock) nextFinalTimer(t *testing.T) *budgetTimer {
 	return requireReceived(t, c.finalTimers, "shutdown checkpoint deadline timer was not created")
 }
 
-func serveSnapshotListener(t *testing.T, tr wire.Transport) *mockServerListener {
+func serveSnapshotListener(t *testing.T, tr wire.Transport) *portsmocks.MockServerListener {
 	t.Helper()
-	l := newMockServerListener(t)
+	l := portsmocks.NewMockServerListener(t)
 	connections := make(chan wire.Transport, 1)
 	connections <- tr
 	closed := make(chan struct{})
 	var once sync.Once
-	l.EXPECT().Accept().RunAndReturn(func() (wire.Transport, error) {
+	expectAccept(l, func() (wire.Transport, error) {
 		select {
 		case conn := <-connections:
 			return conn, nil
 		case <-closed:
 			return nil, io.EOF
 		}
-	}).Maybe()
+	})
 	l.EXPECT().Close().RunAndReturn(func() error {
 		once.Do(func() { close(closed) })
 		return nil
