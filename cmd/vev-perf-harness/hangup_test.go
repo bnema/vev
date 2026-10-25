@@ -20,6 +20,7 @@ import (
 // merge fails with an unpaired adapter_receive_start. A client that survives the
 // hangup closes its transport and serializes the matching receive-end first, so
 // the merge pairs.
+// real I/O: launches public CLI processes with PTYs and process groups.
 func TestClientTracePairsAfterPTYHangup(t *testing.T) {
 	if testing.Short() {
 		t.Skip("public CLI hangup lifecycle")
@@ -138,6 +139,7 @@ func TestClientTracePairsAfterPTYHangup(t *testing.T) {
 // client then closes and waits for its ssh transport, giving the traced broker mux stdio
 // descendant time to serialize its blocked receive's end mark and exit before
 // the client is reaped.
+// real I/O: launches public CLI processes with PTYs and process groups.
 func TestClientGracefulShutdownDrainsTracedStdioDescendant(t *testing.T) {
 	if testing.Short() {
 		t.Skip("public CLI stdio descendant lifecycle")
@@ -245,18 +247,34 @@ func TestClientGracefulShutdownDrainsTracedStdioDescendant(t *testing.T) {
 }
 
 func waitForProcessGroupGone(pgid int, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for {
+	return pollUntil(timeout, func() (bool, error) {
 		err := syscall.Kill(-pgid, 0)
 		if errors.Is(err, syscall.ESRCH) {
-			return nil
+			return true, nil
 		}
 		if err != nil {
-			return fmt.Errorf("probe process group %d: %w", pgid, err)
+			return false, fmt.Errorf("probe process group %d: %w", pgid, err)
 		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("process group %d remained after client shutdown", pgid)
+		return false, nil
+	})
+}
+
+// pollUntil is only for kernel process-group disappearance: descendants are not
+// owned waitable children and kill(0) has no portable notification source.
+func pollUntil(timeout time.Duration, ready func() (bool, error)) error {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	for {
+		done, err := ready()
+		if done || err != nil {
+			return err
 		}
-		time.Sleep(10 * time.Millisecond)
+		select {
+		case <-ticker.C:
+		case <-deadline.C:
+			return fmt.Errorf("process group remained after client shutdown")
+		}
 	}
 }

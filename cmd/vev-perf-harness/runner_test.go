@@ -14,9 +14,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/mock"
+
 	"github.com/bnema/vev/pkg/safedir"
 )
 
+// real I/O: exercises OS process inspection, subprocesses or file-backed terminal I/O.
 func TestHarnessCanonicalLocalRolesAreIsolatedAcrossRepetitions(t *testing.T) {
 	if testing.Short() {
 		t.Skip("public CLI repetition lifecycle")
@@ -56,7 +59,7 @@ func TestHarnessCanonicalLocalRolesAreIsolatedAcrossRepetitions(t *testing.T) {
 	}
 	closeTestFile(t, raw)
 	h := defaultHarness()
-	h.clock = &fakeClock{}
+	h.clock = newClockMock(t)
 	h.launcher = &cliLauncher{bin: bin}
 	for run := 1; run <= 3; run++ {
 		result, err := h.runOne(options{vevBin: bin, out: out, duration: minimumDuration}, m, local, run, raw)
@@ -113,6 +116,7 @@ func TestHarnessCanonicalLocalRolesAreIsolatedAcrossRepetitions(t *testing.T) {
 	}
 }
 
+// real I/O: exercises OS process inspection, subprocesses or file-backed terminal I/O.
 func TestHarnessResolvesCanonicalRelativePathsBeforeRoleCWDChanges(t *testing.T) {
 	if testing.Short() {
 		t.Skip("public CLI relative-path lifecycle")
@@ -162,7 +166,7 @@ func TestHarnessResolvesCanonicalRelativePathsBeforeRoleCWDChanges(t *testing.T)
 	// role to its run directory, so a failure to resolve them before launch
 	// would make VEV_PERF_TRACE point at a nonexistent nested directory.
 	h := defaultHarness()
-	h.clock = &fakeClock{}
+	h.clock = newClockMock(t)
 	if err := run([]string{
 		"--vev-bin", "./vev",
 		"--manifest", "testdata/perf/manifest.json",
@@ -216,9 +220,9 @@ func TestHarnessRejectsExistingRunDirectoryBeforeLaunchingRoles(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(stale, "preserve"), []byte("stale"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	launcher := &fakeLauncher{}
+	launcher := &launcherState{}
 	h := defaultHarness()
-	h.clock, h.launcher = &fakeClock{}, launcher
+	h.clock, h.launcher = newClockMock(t), newLauncherMock(t, launcher)
 	_, err = h.runOne(options{out: out, duration: minimumDuration}, manifest{}, s, 1, raw)
 	if err == nil || !strings.Contains(err.Error(), "create isolated run directory") {
 		t.Fatalf("existing run directory error = %v", err)
@@ -274,9 +278,9 @@ func TestHarnessFakeRunnerRoutesClientToPeerAndCleansEveryRole(t *testing.T) {
 				t.Fatal(err)
 			}
 			closeTestFile(t, raw)
-			l := &fakeLauncher{}
+			l := &launcherState{}
 			h := defaultHarness()
-			h.clock, h.launcher = &fakeClock{}, l
+			h.clock, h.launcher = newClockMock(t), newLauncherMock(t, l)
 			s := scenario{ID: "routed", Transport: tc.transport, Roles: []string{"daemon", "client", tc.peer}}
 			if _, err := h.runOne(options{out: dir, warmup: time.Second, duration: minimumDuration, repetitions: minimumRepetitions}, manifest{}, s, 1, raw); err != nil {
 				t.Fatal(err)
@@ -429,14 +433,36 @@ func (w *resizeOrderingWriter) Write(p []byte) (int, error) {
 	return w.Buffer.Write(p)
 }
 
+// resizeOrderingProcess adds the anonymous Resize seam (runner.go) to a generated
+// launchedProcess mock; no mock exists for that unnamed interface.
 type resizeOrderingProcess struct {
-	order    *[]string
-	inputs   [][]byte
-	resizes  int
-	measures int
+	*mocklaunchedProcess
+	order   *[]string
+	inputs  [][]byte
+	resizes int
 }
 
-func (*resizeOrderingProcess) Warmup([]byte) error { return nil }
+func newResizeOrderingProcess(t *testing.T, order *[]string) *resizeOrderingProcess {
+	p := &resizeOrderingProcess{mocklaunchedProcess: newMocklaunchedProcess(t), order: order}
+	measures := 0
+	p.EXPECT().Warmup(mock.Anything).Return(nil).Maybe()
+	p.EXPECT().Close().Return(nil).Maybe()
+	p.EXPECT().Measure(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(func(input []byte, injected, flushed func() error) error {
+		measures++
+		p.inputs = append(p.inputs, append([]byte(nil), input...))
+		if measures == 1 {
+			*p.order = append(*p.order, "workload_write")
+		}
+		if err := injected(); err != nil {
+			return err
+		}
+		if measures == 1 {
+			*p.order = append(*p.order, "workload_flush")
+		}
+		return flushed()
+	}).Maybe()
+	return p
+}
 
 func (p *resizeOrderingProcess) Resize(cols, rows uint16) error {
 	p.resizes++
@@ -446,38 +472,23 @@ func (p *resizeOrderingProcess) Resize(cols, rows uint16) error {
 	return nil
 }
 
-func (p *resizeOrderingProcess) Measure(input []byte, injected, flushed func() error) error {
-	p.measures++
-	p.inputs = append(p.inputs, append([]byte(nil), input...))
-	if p.measures == 1 {
-		*p.order = append(*p.order, "workload_write")
-	}
-	if err := injected(); err != nil {
-		return err
-	}
-	if p.measures == 1 {
-		*p.order = append(*p.order, "workload_flush")
-	}
-	return flushed()
-}
-
-func (*resizeOrderingProcess) Close() error { return nil }
-
-type resizeOrderingLauncher struct{ client *resizeOrderingProcess }
-
-func (l resizeOrderingLauncher) Launch(m processMapping, _ roleCommand) (launchedProcess, error) {
-	if m.Role == "client" {
-		return l.client, nil
-	}
-	return &fakeProcess{}, nil
+func resizeOrderingLauncher(t *testing.T, client *resizeOrderingProcess) *mocklauncher {
+	return newLauncherMock(t, &launcherState{}, func(l *mocklauncher) {
+		l.EXPECT().Launch(mock.Anything, mock.Anything).RunAndReturn(func(m processMapping, _ roleCommand) (launchedProcess, error) {
+			if m.Role == "client" {
+				return client, nil
+			}
+			return newProcessMock(t, &processState{}), nil
+		})
+	})
 }
 
 func TestResizeBoundaryPrecedesWorkloadWriteAndMarker(t *testing.T) {
 	dir := t.TempDir()
 	order := []string{}
-	client := &resizeOrderingProcess{order: &order}
+	client := newResizeOrderingProcess(t, &order)
 	h := defaultHarness()
-	h.clock, h.launcher = &fakeClock{}, resizeOrderingLauncher{client: client}
+	h.clock, h.launcher = newClockMock(t), resizeOrderingLauncher(t, client)
 	raw := &resizeOrderingWriter{order: &order}
 	_, err := h.runOne(options{out: dir, warmup: time.Second, duration: minimumDuration}, manifest{}, scenario{ID: "resize", Workload: "resize_sweep", Roles: []string{"daemon", "client"}}, 1, raw)
 	if err != nil {
@@ -523,7 +534,7 @@ func TestHarnessRawRecordsContainEveryMarkWhileSamplesRemainFiltered(t *testing.
 		t.Fatal(err)
 	}
 	h := defaultHarness()
-	h.clock, h.launcher = &fakeClock{}, &fakeLauncher{}
+	h.clock, h.launcher = newClockMock(t), newLauncherMock(t, &launcherState{})
 	result, err := h.runOne(options{out: dir, warmup: time.Second, duration: minimumDuration}, manifest{}, scenario{ID: "raw-complete", Roles: []string{"daemon", "client"}}, 1, raw)
 	if err != nil {
 		t.Fatal(err)
@@ -555,7 +566,7 @@ func TestHarnessPersistsFailedFlushDiagnostics(t *testing.T) {
 	}
 	failure := errors.New("flush failed")
 	h := defaultHarness()
-	h.clock, h.launcher = &fakeClock{}, failedFlushLauncher{err: failure}
+	h.clock, h.launcher = newClockMock(t), failedFlushLauncher(t, failure)
 	_, err = h.runOne(options{out: dir, warmup: time.Second, duration: minimumDuration}, manifest{}, scenario{ID: "failed-flush", Roles: []string{"daemon", "client"}}, 1, raw)
 	if !errors.Is(err, failure) {
 		t.Fatalf("run error=%v, want failed flush", err)
@@ -581,7 +592,7 @@ func TestHarnessSchedulesMeasuredEventsAcrossFullInterval(t *testing.T) {
 	}
 	closeTestFile(t, raw)
 	h := defaultHarness()
-	h.clock, h.launcher = &fakeClock{}, &fakeLauncher{}
+	h.clock, h.launcher = newClockMock(t), newLauncherMock(t, &launcherState{})
 	result, err := h.runOne(options{out: dir, warmup: time.Second, duration: minimumDuration}, manifest{}, scenario{ID: "schedule", Roles: []string{"daemon", "client"}}, 1, raw)
 	if err != nil {
 		t.Fatal(err)
@@ -610,12 +621,12 @@ func TestHarnessPreservesWorkloadAndCleanupErrors(t *testing.T) {
 	closeTestFile(t, raw)
 	primary := errors.New("primary workload failure")
 	cleanup := errors.New("daemon cleanup failure")
-	launcher := &fakeLauncher{
+	launcher := &launcherState{
 		measureErr: map[string]error{"client": primary},
 		closeErr:   map[string]error{"daemon": cleanup},
 	}
 	h := defaultHarness()
-	h.clock, h.launcher = &fakeClock{}, launcher
+	h.clock, h.launcher = newClockMock(t), newLauncherMock(t, launcher)
 	_, err = h.runOne(options{out: dir, warmup: time.Second, duration: minimumDuration, repetitions: minimumRepetitions}, manifest{}, scenario{ID: "errors", Roles: []string{"daemon", "client"}}, 1, raw)
 	if !errors.Is(err, primary) || !errors.Is(err, cleanup) {
 		t.Fatalf("workload and cleanup errors were not both preserved: %v", err)
@@ -637,11 +648,11 @@ func TestHarnessCleansRunDirectoryOnProcessFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	closeTestFile(t, raw)
-	launcher := &fakeLauncher{}
+	launcher := &launcherState{}
 	h := defaultHarness()
-	h.clock = &fakeClock{}
+	h.clock = newClockMock(t)
 	// The client is the second role and fails after the daemon has started.
-	h.launcher = &failingLauncher{fakeLauncher: launcher}
+	h.launcher = failingLauncher(t, launcher)
 	o := options{vevBin: "ignored", out: dir, warmup: time.Second, duration: minimumDuration, repetitions: minimumRepetitions}
 	if _, err := h.runOne(o, manifest{}, scenario{ID: "cleanup", Roles: []string{"daemon", "client"}}, 1, raw); err == nil {
 		t.Fatal("failed process accepted")

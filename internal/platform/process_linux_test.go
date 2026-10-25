@@ -17,6 +17,7 @@ func TestProcessCwdRejectsInvalidPID(t *testing.T) {
 	}
 }
 
+// real I/O: exercises OS process inspection, subprocesses or file-backed terminal I/O.
 func TestProcessArgv(t *testing.T) {
 	argv, err := ProcessArgv(os.Getpid())
 	if err != nil {

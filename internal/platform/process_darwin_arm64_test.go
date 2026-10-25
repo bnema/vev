@@ -33,6 +33,7 @@ func TestDarwinKinfoProcLayout(t *testing.T) {
 	}
 }
 
+// real I/O: exercises OS process inspection, subprocesses or file-backed terminal I/O.
 func TestDarwinProcessInspectorCurrentProcess(t *testing.T) {
 	inspector := NewProcessInspector()
 	pid := os.Getpid()
