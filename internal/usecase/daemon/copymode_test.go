@@ -427,14 +427,8 @@ func TestScrollbackEvictionFeedsCopyModeYank(t *testing.T) {
 		d := newTestDaemon(t, newFactory(t, p), clk.clock)
 		tr, sends, releaseConn := newConn(t, mustHello(protocol.IntentNew, "work", domain.Size{Cols: 16, Rows: 5}))
 		advanceRender := func() {
-			deadline := time.NewTimer(2 * time.Second)
-			defer deadline.Stop()
-			select {
-			case timer := <-clk.timers:
-				timer.ch <- time.Time{}
-			case <-deadline.C:
-				t.Fatal("coordinator did not arm a controllable render timer")
-			}
+			timer := requireReceived(t, clk.timers, "coordinator did not arm a controllable render timer")
+			timer.ch <- time.Time{}
 		}
 		var hg sync.WaitGroup
 		hg.Go(func() { d.handleConn(tr) })
@@ -447,43 +441,37 @@ func TestScrollbackEvictionFeedsCopyModeYank(t *testing.T) {
 		for i := range 12 {
 			reads <- fmt.Appendf(nil, "line-%02d\r\n", i)
 		}
-		require.Eventually(t, func() bool {
+		synctest.Wait()
+		{
 			sess := firstSession(d)
-			if sess == nil {
-				return false
-			}
+			require.NotNil(t, sess)
 			win := testAttachmentTab(sess)
-			if win == nil {
-				return false
-			}
+			require.NotNil(t, win)
 			win.mu.Lock()
 			p := win.focusedPane()
 			win.mu.Unlock()
-			if p == nil {
-				return false
-			}
+			require.NotNil(t, p)
 			p.mu.Lock()
-			defer p.mu.Unlock()
-			return scopy.NewSnapshot(p.history, p.screen, p.screen.LineBounds(), nil).Len() >= 12
-		}, 2*time.Second, 5*time.Millisecond)
+			held := scopy.NewSnapshot(p.history, p.screen, p.screen.LineBounds(), nil).Len()
+			p.mu.Unlock()
+			require.GreaterOrEqual(t, held, 12, "pane reader did not ingest every line at quiescence")
+		}
 
 		sess := firstSession(d)
 		require.NotNil(t, sess)
 		ac := sess.snapshotAttachments()[0]
 		require.NotNil(t, ac)
 		d.handleInput(sess, ac, []byte("\x1b "))
-		awaitCoordinatorOutput(t, sends, clk.timers, "while advancing render clock", "controllable timers did not produce an output frame")
+		requireCoordinatorOutput(t, sends, clk.timers, "while advancing render clock")
 		d.handleInput(sess, ac, []byte("VIS\r"))
-		awaitCoordinatorOutput(t, sends, clk.timers, "while advancing render clock", "controllable timers did not produce an output frame")
+		requireCoordinatorOutput(t, sends, clk.timers, "while advancing render clock")
 		d.handleInput(sess, ac, []byte{'g', ' ', 'G', 'y'})
 
 		var payload string
-		require.Eventually(t, func() bool {
+		for !strings.HasPrefix(payload, "\x1b]52;c;") {
 			out := requireEnvelope(t, sends, "Output")
-			msg := unmarshalTestOutput(t, out.Payload)
-			payload = string(msg.Data)
-			return strings.HasPrefix(payload, "\x1b]52;c;")
-		}, 2*time.Second, 5*time.Millisecond)
+			payload = string(unmarshalTestOutput(t, out.Payload).Data)
+		}
 		require.True(t, strings.HasPrefix(payload, "\x1b]52;c;"), "OSC52 payload = %q", payload)
 		require.True(t, strings.HasSuffix(payload, "\a"), "OSC52 payload = %q", payload)
 		decoded, err := base64.StdEncoding.DecodeString(strings.TrimSuffix(strings.TrimPrefix(payload, "\x1b]52;c;"), "\a"))
@@ -595,16 +583,15 @@ func TestCopyModeLoneEscapeExitsAfterDelay(t *testing.T) {
 		d.enterCopyMode(sess, ac)
 		requireEnvelope(t, sends, "Output")
 		d.handleInput(sess, ac, []byte("\x1b"))
-		timer := <-clkTimers
+		timer := requireReceived(t, clkTimers, "copy escape did not arm its timer")
 		ac.overlays.copyMu.Lock()
 		require.NotNil(t, ac.overlays.copyMode)
 		ac.overlays.copyMu.Unlock()
-		timer.ch <- time.Now()
-		require.Eventually(t, func() bool {
-			ac.overlays.copyMu.Lock()
-			defer ac.overlays.copyMu.Unlock()
-			return ac.overlays.copyMode == nil
-		}, time.Second, 5*time.Millisecond)
+		timer.fire()
+		synctest.Wait()
+		ac.overlays.copyMu.Lock()
+		require.Nil(t, ac.overlays.copyMode, "the pending escape did not close copy mode")
+		ac.overlays.copyMu.Unlock()
 	})
 }
 
@@ -622,7 +609,7 @@ func TestCopyModePendingEscapeDoesNotCloseNewMode(t *testing.T) {
 		d.enterCopyMode(sess, ac)
 		requireEnvelope(t, sends, "Output")
 		d.handleInput(sess, ac, []byte("\x1b"))
-		timer := <-clkTimers
+		timer := requireReceived(t, clkTimers, "copy escape did not arm its timer")
 		d.enterCopyMode(sess, ac)
 		requireEnvelope(t, sends, "Output")
 
@@ -634,12 +621,9 @@ func TestCopyModePendingEscapeDoesNotCloseNewMode(t *testing.T) {
 		d.handleInput(sess, ac, []byte("x"))
 		require.True(t, ac.overlays.copyActive(), "pending input from the replaced mode affected the new mode")
 
-		timer.ch <- time.Now()
-		require.Never(t, func() bool {
-			ac.overlays.copyMu.Lock()
-			defer ac.overlays.copyMu.Unlock()
-			return ac.overlays.copyMode == nil
-		}, 50*time.Millisecond, 5*time.Millisecond)
+		timer.fire()
+		synctest.Wait()
+		require.True(t, ac.overlays.copyActive(), "a stale pending escape closed the new copy mode")
 		ac.overlays.copyMu.Lock()
 		require.Nil(t, ac.overlays.copyESC.timer)
 		require.Nil(t, ac.overlays.copyESC.done)
@@ -981,5 +965,33 @@ func TestComposeCopyClientFrameStylesStatusContentAndSurround(t *testing.T) {
 			}
 			require.Contains(t, rowText(status), tt.want)
 		})
+	}
+}
+
+// requireCoordinatorOutput is the bubble form of awaitCoordinatorOutput: it
+// drives coordinator timers and returns the next Output frame, ignoring
+// RoutePosition frames.
+func requireCoordinatorOutput(t *testing.T, sends <-chan wire.Envelope, timers <-chan *coordinatorMockTimer, frameContext string) wire.Envelope {
+	t.Helper()
+	for {
+		synctest.Wait()
+		select {
+		case frame := <-sends:
+			name := envelopeMessageName(t, frame.Payload)
+			if name == "RoutePosition" {
+				continue
+			}
+			if name != "Output" {
+				t.Fatalf("unexpected frame type %s %s", name, frameContext)
+			}
+			return frame
+		default:
+		}
+		select {
+		case timer := <-timers:
+			timer.ch <- time.Time{}
+		default:
+			t.Fatal("controllable timers did not produce an output frame")
+		}
 	}
 }
