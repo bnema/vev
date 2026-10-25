@@ -35,6 +35,9 @@ type streamLog struct {
 	closed    chan struct{}
 	closeOnce sync.Once
 	err       error
+	// closeHook, when set, runs once during Close so a test can observe what
+	// the supervisor revoked before it closed the stream.
+	closeHook func()
 }
 
 func newSessionStream(t *testing.T, opts ...func(*portsmocks.MockBrokerLogicalConnection, *streamLog)) *streamLog {
@@ -63,7 +66,15 @@ func configureSessionStream(t *testing.T, s *streamLog, opts ...func(*portsmocks
 	s.conn.EXPECT().Capabilities().Return(protocol.ConnectionCapabilities{}).Maybe()
 	s.conn.EXPECT().LinkState().Return(ports.LinkStateConnected).Maybe()
 	s.conn.EXPECT().LinkEvents().Return(nil).Maybe()
-	s.conn.EXPECT().Close().RunAndReturn(func() error { s.closeOnce.Do(func() { close(s.closed) }); return nil }).Maybe()
+	s.conn.EXPECT().Close().RunAndReturn(func() error {
+		s.closeOnce.Do(func() {
+			close(s.closed)
+			if s.closeHook != nil {
+				s.closeHook()
+			}
+		})
+		return nil
+	}).Maybe()
 	s.conn.EXPECT().Done().Return((<-chan struct{})(s.closed)).Maybe()
 	s.conn.EXPECT().Err().RunAndReturn(func() error { s.mu.Lock(); defer s.mu.Unlock(); return s.err }).Maybe()
 	return s
@@ -722,4 +733,14 @@ func newBlockingSendSessionStream(t *testing.T) *blockingSendSessionStream {
 	})
 	base.conn = configured.conn
 	return s
+}
+
+// streamDone reports whether a logical connection has been closed.
+func streamDone(stream ports.BrokerLogicalConnection) bool {
+	select {
+	case <-stream.Done():
+		return true
+	default:
+		return false
+	}
 }

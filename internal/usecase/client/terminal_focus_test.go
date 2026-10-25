@@ -125,7 +125,7 @@ func TestTerminalInputPumpStripsFocusReports(t *testing.T) {
 		}()
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
-		_, adopted := host.Run(ctx, AttachmentToken{Generation: 1, Attempt: 1}, worker, newWorkerTestStream())
+		_, adopted := host.Run(ctx, AttachmentToken{Generation: 1, Attempt: 1}, worker, newSessionStream(t).conn)
 		require.True(t, adopted)
 
 		require.Equal(t, []byte("ab"), <-observed, "the focus-only read is never delivered")

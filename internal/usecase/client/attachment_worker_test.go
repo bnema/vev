@@ -33,77 +33,6 @@ func authorityToken(a *attachmentAuthority) AttachmentToken {
 	return fg.Token()
 }
 
-// workerTestStream is one scripted broker logical stream. It records typed
-// client messages and unblocks ReceiveServer when the supervisor closes it,
-// exactly like a real logical stream's Close contract.
-type workerTestStream struct {
-	mu        sync.Mutex
-	sent      []protocol.ClientMessage
-	closed    chan struct{}
-	closeOnce sync.Once
-	// closeHook, when set, runs during Close. It lets a test observe the
-	// supervisor's revocation-before-close ordering.
-	closeHook func()
-}
-
-func newWorkerTestStream() *workerTestStream {
-	return &workerTestStream{closed: make(chan struct{})}
-}
-
-func (s *workerTestStream) SendClient(message protocol.ClientMessage) error {
-	select {
-	case <-s.closed:
-		return errors.New("worker test stream is closed")
-	default:
-	}
-	s.mu.Lock()
-	s.sent = append(s.sent, message)
-	s.mu.Unlock()
-	return nil
-}
-
-func (s *workerTestStream) ReceiveServer() (protocol.ServerMessage, error) {
-	<-s.closed
-	return nil, io.EOF
-}
-
-func (s *workerTestStream) Capabilities() protocol.ConnectionCapabilities {
-	return protocol.ConnectionCapabilities{}
-}
-
-func (s *workerTestStream) LinkState() ports.LinkState { return 0 }
-
-func (s *workerTestStream) LinkEvents() <-chan ports.LinkEvent { return nil }
-
-func (s *workerTestStream) Close() error {
-	s.closeOnce.Do(func() {
-		close(s.closed)
-		if s.closeHook != nil {
-			s.closeHook()
-		}
-	})
-	return nil
-}
-
-func (s *workerTestStream) Done() <-chan struct{} { return s.closed }
-
-func (s *workerTestStream) Err() error { return nil }
-
-func (s *workerTestStream) messages() []protocol.ClientMessage {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return append([]protocol.ClientMessage(nil), s.sent...)
-}
-
-func (s *workerTestStream) isClosed() bool {
-	select {
-	case <-s.closed:
-		return true
-	default:
-		return false
-	}
-}
-
 // workerTestTerminal is the supervisor-owned terminal: it counts raw restores
 // so a test can prove the worker mechanism never restores, captures written
 // output, and doubles as the UI publication transaction.
@@ -246,18 +175,18 @@ func TestAttachmentWorkerExclusiveForeground(t *testing.T) {
 		term := newWorkerTestTerminal()
 		host := newWorkerTestHost(t, term, nil, nil)
 
-		run1, ok := host.Begin(context.Background(), AttachmentToken{Generation: 1, Attempt: 1}, blockingWorker(t), newWorkerTestStream())
+		run1, ok := host.Begin(context.Background(), AttachmentToken{Generation: 1, Attempt: 1}, blockingWorker(t), newSessionStream(t).conn)
 		require.True(t, ok)
 		require.NotNil(t, run1)
 
-		_, ok = host.Begin(context.Background(), AttachmentToken{Generation: 2, Attempt: 1}, blockingWorker(t), newWorkerTestStream())
+		_, ok = host.Begin(context.Background(), AttachmentToken{Generation: 2, Attempt: 1}, blockingWorker(t), newSessionStream(t).conn)
 		require.False(t, ok, "second foreground must be refused while the first is live")
 		require.Equal(t, AttachmentToken{Generation: 1, Attempt: 1}, host.authority.foreground().Token())
 
 		run1.Cancel()
 		require.Nil(t, host.authority.foreground())
 
-		run2, ok := host.Begin(context.Background(), AttachmentToken{Generation: 2, Attempt: 1}, blockingWorker(t), newWorkerTestStream())
+		run2, ok := host.Begin(context.Background(), AttachmentToken{Generation: 2, Attempt: 1}, blockingWorker(t), newSessionStream(t).conn)
 		require.True(t, ok, "a fresh generation may own the foreground after cancellation")
 		run2.Cancel()
 		require.Nil(t, host.authority.foreground())
@@ -269,7 +198,7 @@ func TestAttachmentWorkerExclusiveForeground(t *testing.T) {
 func TestAttachmentWorkerZeroTokenRefused(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		host := newWorkerTestHost(t, newWorkerTestTerminal(), nil, nil)
-		_, ok := host.Begin(context.Background(), AttachmentToken{}, blockingWorker(t), newWorkerTestStream())
+		_, ok := host.Begin(context.Background(), AttachmentToken{}, blockingWorker(t), newSessionStream(t).conn)
 		require.False(t, ok)
 		require.Nil(t, host.authority.foreground())
 	})
@@ -283,7 +212,7 @@ func TestAttachmentWorkerCanceledGenerationCannotAct(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		term := newWorkerTestTerminal()
 		host := newWorkerTestHost(t, term, nil, nil)
-		stream := newWorkerTestStream()
+		stream := newSessionStream(t)
 
 		fgReady := make(chan AttachmentForeground, 1)
 		worker := newTestWorker(t, func(ctx context.Context, fg AttachmentForeground) AttachmentEvent {
@@ -291,7 +220,7 @@ func TestAttachmentWorkerCanceledGenerationCannotAct(t *testing.T) {
 			<-ctx.Done()
 			return AttachmentEvent{Kind: AttachmentEventEnded}
 		})
-		run, ok := host.Begin(context.Background(), AttachmentToken{Generation: 4, Attempt: 2}, worker, stream)
+		run, ok := host.Begin(context.Background(), AttachmentToken{Generation: 4, Attempt: 2}, worker, stream.conn)
 		require.True(t, ok)
 		fg := <-fgReady
 		require.Equal(t, AttachmentToken{Generation: 4, Attempt: 2}, fg.Token())
@@ -315,7 +244,7 @@ func TestAttachmentWorkerCanceledGenerationCannotAct(t *testing.T) {
 
 		require.Empty(t, term.written(), "a canceled generation must not write the terminal")
 		require.Empty(t, term.publications(), "a canceled generation must not publish UI")
-		require.True(t, stream.isClosed(), "the supervisor closes the owned stream")
+		require.True(t, stream.closedNow(), "the supervisor closes the owned stream")
 	})
 }
 
@@ -331,7 +260,7 @@ func TestAttachmentWorkerConsumesAndForwardsInput(t *testing.T) {
 		defer pw.Close()
 
 		host := newWorkerTestHost(t, term, pump, nil)
-		stream := newWorkerTestStream()
+		stream := newSessionStream(t)
 
 		worker := newTestWorker(t, func(ctx context.Context, fg AttachmentForeground) AttachmentEvent {
 			event, ok := fg.Input(ctx)
@@ -347,7 +276,7 @@ func TestAttachmentWorkerConsumesAndForwardsInput(t *testing.T) {
 
 		go func() { _, _ = pw.Write([]byte("hello")) }()
 
-		event, adopted := host.Run(context.Background(), AttachmentToken{Generation: 1, Attempt: 1}, worker, stream)
+		event, adopted := host.Run(context.Background(), AttachmentToken{Generation: 1, Attempt: 1}, worker, stream.conn)
 		require.True(t, adopted)
 		require.Equal(t, AttachmentEventEnded, event.Kind)
 
@@ -365,7 +294,7 @@ func TestAttachmentWorkerResizeAuthorized(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		term := newWorkerTestTerminal()
 		host := newWorkerTestHost(t, term, nil, nil)
-		stream := newWorkerTestStream()
+		stream := newSessionStream(t)
 		geometry := domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}
 
 		saw := make(chan domain.Geometry, 1)
@@ -382,7 +311,7 @@ func TestAttachmentWorkerResizeAuthorized(t *testing.T) {
 			return AttachmentEvent{Kind: AttachmentEventEnded}
 		})
 
-		event, adopted := host.Run(context.Background(), AttachmentToken{Generation: 1, Attempt: 1}, worker, stream)
+		event, adopted := host.Run(context.Background(), AttachmentToken{Generation: 1, Attempt: 1}, worker, stream.conn)
 		require.True(t, adopted)
 		require.Equal(t, AttachmentEventEnded, event.Kind)
 		require.Equal(t, geometry, <-saw)
@@ -402,7 +331,7 @@ func TestAttachmentWorkerPublishesUIAuthorized(t *testing.T) {
 		term := newWorkerTestTerminal()
 		attached := make(chan AttachmentToken, 1)
 		host := newWorkerTestHost(t, term, nil, func(token AttachmentToken) { attached <- token })
-		stream := newWorkerTestStream()
+		stream := newSessionStream(t)
 
 		worker := newTestWorker(t, func(ctx context.Context, fg AttachmentForeground) AttachmentEvent {
 			// The pre-attach frame commits the Connecting presentation with a public
@@ -423,7 +352,7 @@ func TestAttachmentWorkerPublishesUIAuthorized(t *testing.T) {
 			return AttachmentEvent{Kind: AttachmentEventEnded}
 		})
 
-		event, adopted := host.Run(context.Background(), AttachmentToken{Generation: 7, Attempt: 2}, worker, stream)
+		event, adopted := host.Run(context.Background(), AttachmentToken{Generation: 7, Attempt: 2}, worker, stream.conn)
 		require.True(t, adopted)
 		require.Equal(t, AttachmentEventEnded, event.Kind)
 
@@ -456,14 +385,14 @@ func TestAttachmentWorkerEventReturnsToPickerWithoutTerminalRestore(t *testing.T
 			synctest.Test(t, func(t *testing.T) {
 				term := newWorkerTestTerminal()
 				host := newWorkerTestHost(t, term, nil, nil)
-				stream := newWorkerTestStream()
+				stream := newSessionStream(t)
 				// The worker reports a spoofed token; the host must override it with
 				// the granted generation/attempt.
 				worker := newTestWorker(t, func(ctx context.Context, fg AttachmentForeground) AttachmentEvent {
 					return AttachmentEvent{Token: AttachmentToken{Generation: 999}, Kind: tc.kind, Err: tc.err}
 				})
 
-				event, adopted := host.Run(context.Background(), AttachmentToken{Generation: 3, Attempt: 5}, worker, stream)
+				event, adopted := host.Run(context.Background(), AttachmentToken{Generation: 3, Attempt: 5}, worker, stream.conn)
 				require.True(t, adopted)
 				require.Equal(t, tc.kind, event.Kind)
 				require.Equal(t, AttachmentToken{Generation: 3, Attempt: 5}, event.Token)
@@ -473,7 +402,7 @@ func TestAttachmentWorkerEventReturnsToPickerWithoutTerminalRestore(t *testing.T
 					require.NoError(t, event.Err)
 				}
 				require.Equal(t, 0, term.restoreCount(), "the worker mechanism must not restore the terminal")
-				require.True(t, stream.isClosed(), "the supervisor closes the stream after the worker settles")
+				require.True(t, stream.closedNow(), "the supervisor closes the stream after the worker settles")
 				require.Nil(t, host.authority.foreground(), "the foreground is released after the worker settles")
 			})
 		})
@@ -487,8 +416,8 @@ func TestAttachmentWorkerLateEventDiscardedOnCancellation(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		term := newWorkerTestTerminal()
 		host := newWorkerTestHost(t, term, nil, nil)
-		stream := newWorkerTestStream()
-		run, ok := host.Begin(context.Background(), AttachmentToken{Generation: 1, Attempt: 1}, blockingWorker(t), stream)
+		stream := newSessionStream(t)
+		run, ok := host.Begin(context.Background(), AttachmentToken{Generation: 1, Attempt: 1}, blockingWorker(t), stream.conn)
 		require.True(t, ok)
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -497,7 +426,7 @@ func TestAttachmentWorkerLateEventDiscardedOnCancellation(t *testing.T) {
 		event, adopted := run.Wait(ctx)
 		require.False(t, adopted)
 		require.Equal(t, AttachmentEvent{}, event, "a late event from a canceled run is discarded")
-		require.True(t, stream.isClosed())
+		require.True(t, stream.closedNow())
 		require.Nil(t, host.authority.foreground())
 	})
 }
@@ -539,9 +468,9 @@ func TestAttachmentWorkerPreservesResidualInputAcrossAttempts(t *testing.T) {
 
 		go func() { _, _ = pw.Write([]byte("ab")) }()
 
-		_, adopted := host.Run(context.Background(), AttachmentToken{Generation: 1, Attempt: 1}, first, newWorkerTestStream())
+		_, adopted := host.Run(context.Background(), AttachmentToken{Generation: 1, Attempt: 1}, first, newSessionStream(t).conn)
 		require.True(t, adopted)
-		_, adopted = host.Run(context.Background(), AttachmentToken{Generation: 2, Attempt: 1}, second, newWorkerTestStream())
+		_, adopted = host.Run(context.Background(), AttachmentToken{Generation: 2, Attempt: 1}, second, newSessionStream(t).conn)
 		require.True(t, adopted)
 
 		require.Equal(t, []byte("ab"), <-observed)
@@ -549,7 +478,7 @@ func TestAttachmentWorkerPreservesResidualInputAcrossAttempts(t *testing.T) {
 		go func() { _, _ = pw.Write([]byte("fresh")) }()
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
-		_, adopted = host.Run(ctx, AttachmentToken{Generation: 3, Attempt: 3}, second, newWorkerTestStream())
+		_, adopted = host.Run(ctx, AttachmentToken{Generation: 3, Attempt: 3}, second, newSessionStream(t).conn)
 		require.True(t, adopted)
 		require.Equal(t, []byte("fresh"), <-observed, "third attempt must not replay the original pending read")
 
@@ -563,7 +492,7 @@ func TestAttachmentWorkerRevokesBeforeClosingStream(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		term := newWorkerTestTerminal()
 		host := newWorkerTestHost(t, term, nil, nil)
-		stream := newWorkerTestStream()
+		stream := newSessionStream(t)
 
 		fgReady := make(chan AttachmentForeground, 1)
 		worker := newTestWorker(t, func(ctx context.Context, fg AttachmentForeground) AttachmentEvent {
@@ -571,7 +500,7 @@ func TestAttachmentWorkerRevokesBeforeClosingStream(t *testing.T) {
 			<-ctx.Done()
 			return AttachmentEvent{Kind: AttachmentEventEnded}
 		})
-		run, ok := host.Begin(context.Background(), AttachmentToken{Generation: 1, Attempt: 1}, worker, stream)
+		run, ok := host.Begin(context.Background(), AttachmentToken{Generation: 1, Attempt: 1}, worker, stream.conn)
 		require.True(t, ok)
 		fg := <-fgReady
 
@@ -604,7 +533,7 @@ func TestAttachmentWorkerConcurrentBeginSingleOwner(t *testing.T) {
 			go func(i int) {
 				defer wg.Done()
 				<-start
-				run, ok := host.Begin(context.Background(), AttachmentToken{Generation: uint64(i + 1), Attempt: 1}, blockingWorker(t), newWorkerTestStream())
+				run, ok := host.Begin(context.Background(), AttachmentToken{Generation: uint64(i + 1), Attempt: 1}, blockingWorker(t), newSessionStream(t).conn)
 				if ok {
 					successes.Add(1)
 					runs <- run
@@ -632,17 +561,17 @@ func TestAttachmentWorkerRepeatedAttemptsNoLeak(t *testing.T) {
 
 		const attempts = 64
 		for i := 0; i < attempts; i++ {
-			stream := newWorkerTestStream()
+			stream := newSessionStream(t)
 			worker := newTestWorker(t, func(ctx context.Context, fg AttachmentForeground) AttachmentEvent {
 				if err := fg.Output(ports.UIContext{}, []byte("x")); err != nil {
 					return AttachmentEvent{Kind: AttachmentEventFailed, Err: err}
 				}
 				return AttachmentEvent{Kind: AttachmentEventEnded}
 			})
-			event, adopted := host.Run(context.Background(), AttachmentToken{Generation: uint64(i + 1), Attempt: 1}, worker, stream)
+			event, adopted := host.Run(context.Background(), AttachmentToken{Generation: uint64(i + 1), Attempt: 1}, worker, stream.conn)
 			require.True(t, adopted)
 			require.Equal(t, AttachmentEventEnded, event.Kind)
-			require.True(t, stream.isClosed())
+			require.True(t, stream.closedNow())
 			require.Nil(t, host.authority.foreground())
 		}
 		require.Equal(t, attempts, term.flushCount())
@@ -653,7 +582,7 @@ func TestAttachmentWorkerRepeatedAttemptsNoLeak(t *testing.T) {
 func TestAttachmentWorkerRetiredOutcomeNeverAdopted(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		host := newWorkerTestHost(t, newWorkerTestTerminal(), nil, nil)
-		run, ok := host.Begin(context.Background(), AttachmentToken{1, 1}, blockingWorker(t), newWorkerTestStream())
+		run, ok := host.Begin(context.Background(), AttachmentToken{1, 1}, blockingWorker(t), newSessionStream(t).conn)
 		require.True(t, ok)
 		run.Cancel()
 		for range 3 {
@@ -679,7 +608,7 @@ func TestAttachmentWorkerBoundedJoin(t *testing.T) {
 		run, ok := host.Begin(context.Background(), AttachmentToken{1, 1}, newTestWorker(t, func(context.Context, AttachmentForeground) AttachmentEvent {
 			<-unblock
 			return AttachmentEvent{Kind: AttachmentEventEnded}
-		}), newWorkerTestStream())
+		}), newSessionStream(t).conn)
 		require.True(t, ok)
 		cancelled := make(chan struct{})
 		go func() { run.Cancel(); close(cancelled) }()
@@ -700,11 +629,11 @@ func TestAttachmentWorkerBoundedJoin(t *testing.T) {
 			t.Fatal("finalize must close Done before the join")
 		}
 		require.ErrorIs(t, run.fg.Output(ports.UIContext{}, []byte("late")), errAttachmentForegroundRevoked)
-		_, ok = host.Begin(context.Background(), AttachmentToken{2, 1}, blockingWorker(t), newWorkerTestStream())
+		_, ok = host.Begin(context.Background(), AttachmentToken{2, 1}, blockingWorker(t), newSessionStream(t).conn)
 		require.False(t, ok, "a finalizing grant blocks a competing Begin")
 		_, claimed := pump.tryClaim()
 		require.False(t, claimed, "the consumer is retained during the final input window")
-		require.False(t, run.stream.(*workerTestStream).isClosed(), "the stream closes after the join")
+		require.False(t, streamDone(run.stream), "the stream closes after the join")
 		timer.fire()
 		select {
 		case <-cancelled:
@@ -718,7 +647,7 @@ func TestAttachmentWorkerBoundedJoin(t *testing.T) {
 		consumer, claimed := pump.tryClaim()
 		require.True(t, claimed, "revocation releases the consumer after the join")
 		pump.revoke(consumer)
-		require.True(t, run.stream.(*workerTestStream).isClosed())
+		require.True(t, streamDone(run.stream))
 		_, adopted := run.Wait(context.Background())
 		require.False(t, adopted)
 	})
@@ -735,12 +664,12 @@ func TestAttachmentWorkerPumpClaimAndCancelRace(t *testing.T) {
 		host := newWorkerTestHost(t, newWorkerTestTerminal(), pump, nil)
 		rival, claimed := pump.tryClaim()
 		require.True(t, claimed)
-		_, ok := host.Begin(context.Background(), AttachmentToken{1, 1}, blockingWorker(t), newWorkerTestStream())
+		_, ok := host.Begin(context.Background(), AttachmentToken{1, 1}, blockingWorker(t), newSessionStream(t).conn)
 		require.False(t, ok)
 		require.Nil(t, host.authority.foreground())
 		pump.revoke(rival)
 		for i := range 100 {
-			run, ok := host.Begin(context.Background(), AttachmentToken{uint64(i + 1), 1}, blockingWorker(t), newWorkerTestStream())
+			run, ok := host.Begin(context.Background(), AttachmentToken{uint64(i + 1), 1}, blockingWorker(t), newSessionStream(t).conn)
 			require.True(t, ok)
 			var next *attachmentRun
 			var wg sync.WaitGroup
@@ -748,7 +677,7 @@ func TestAttachmentWorkerPumpClaimAndCancelRace(t *testing.T) {
 			go func() { defer wg.Done(); run.Cancel() }()
 			go func() {
 				defer wg.Done()
-				next, _ = host.Begin(context.Background(), AttachmentToken{uint64(i + 2), 2}, blockingWorker(t), newWorkerTestStream())
+				next, _ = host.Begin(context.Background(), AttachmentToken{uint64(i + 2), 2}, blockingWorker(t), newSessionStream(t).conn)
 			}()
 			wg.Wait()
 			if next != nil {
@@ -766,7 +695,7 @@ func TestAttachmentWorkerClosedResizeDisabled(t *testing.T) {
 		term := newWorkerTestTerminal()
 		close(term.resizes) // uiterm-like terminal: no physical resize events
 		host := newWorkerTestHost(t, term, nil, nil)
-		run, ok := host.Begin(context.Background(), AttachmentToken{1, 1}, blockingWorker(t), newWorkerTestStream())
+		run, ok := host.Begin(context.Background(), AttachmentToken{1, 1}, blockingWorker(t), newSessionStream(t).conn)
 		require.True(t, ok)
 		result := make(chan bool, 1)
 		go func() { _, ok := run.fg.Resize(context.Background()); result <- ok }()
@@ -807,7 +736,7 @@ func TestAttachmentWorkerOutputTransaction(t *testing.T) {
 				term := newWorkerTestTerminal()
 				term.writeErr, term.flushErr, term.publishErr, term.shortWrite = tc.writeErr, tc.flushErr, tc.publishErr, tc.shortWrite
 				host := newWorkerTestHost(t, term, nil, nil)
-				run, ok := host.Begin(context.Background(), AttachmentToken{9, 2}, blockingWorker(t), newWorkerTestStream())
+				run, ok := host.Begin(context.Background(), AttachmentToken{9, 2}, blockingWorker(t), newSessionStream(t).conn)
 				require.True(t, ok)
 				defer run.Cancel()
 				err := run.fg.Output(ports.UIContext{Generation: 999, Status: ports.UIStatusAttached}, []byte("frame"))
@@ -832,18 +761,18 @@ func TestAttachmentWorkerNilSeams(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var nilTerm *workerTestTerminal
 		var nilWorker *MockAttachmentWorker
-		var nilStream *workerTestStream
+		var nilStream *portsmocks.MockBrokerLogicalConnection
 		var nilClock *portsmocks.MockClock
 		for _, cfg := range []attachmentHostConfig{
 			{},
 			{Terminal: nilTerm, UI: nilTerm, Clock: nilClock},
 		} {
 			host := newAttachmentHost(cfg)
-			_, ok := host.Begin(nil, AttachmentToken{1, 1}, nilWorker, newWorkerTestStream())
+			_, ok := host.Begin(nil, AttachmentToken{1, 1}, nilWorker, newSessionStream(t).conn)
 			require.False(t, ok)
 			_, ok = host.Begin(nil, AttachmentToken{1, 1}, blockingWorker(t), nilStream)
 			require.False(t, ok)
-			run, ok := host.Begin(nil, AttachmentToken{1, 1}, blockingWorker(t), newWorkerTestStream())
+			run, ok := host.Begin(nil, AttachmentToken{1, 1}, blockingWorker(t), newSessionStream(t).conn)
 			require.True(t, ok)
 			require.ErrorIs(t, run.fg.Output(ports.UIContext{}, nil), ports.ErrUIUnavailable)
 			run.Cancel()
@@ -852,7 +781,7 @@ func TestAttachmentWorkerNilSeams(t *testing.T) {
 
 		term := newWorkerTestTerminal()
 		host := newAttachmentHost(attachmentHostConfig{Terminal: workerBareTerminal{term}, UI: nilTerm})
-		run, ok := host.Begin(nil, AttachmentToken{1, 1}, blockingWorker(t), newWorkerTestStream())
+		run, ok := host.Begin(nil, AttachmentToken{1, 1}, blockingWorker(t), newSessionStream(t).conn)
 		require.True(t, ok)
 		require.NoError(t, run.fg.Output(ports.UIContext{}, []byte("frame")))
 		require.Equal(t, "frame", term.out.String())
@@ -872,7 +801,7 @@ func TestAttachmentWorkerGenerationIsSupervisorSupplied(t *testing.T) {
 		pump := newTerminalInputPump(nil)
 		host := newWorkerTestHost(t, term, pump, nil)
 		for i := uint64(1); i <= 3; i++ {
-			run, ok := host.Begin(context.Background(), AttachmentToken{i, i + 10}, blockingWorker(t), newWorkerTestStream())
+			run, ok := host.Begin(context.Background(), AttachmentToken{i, i + 10}, blockingWorker(t), newSessionStream(t).conn)
 			require.True(t, ok)
 			require.Equal(t, AttachmentToken{i, i + 10}, run.fg.Token())
 			require.NoError(t, run.fg.Output(ports.UIContext{Generation: 999, Status: ports.UIStatusAttached}, nil))
@@ -889,21 +818,21 @@ func TestAttachmentWorkerBeginRefusalsRetainStream(t *testing.T) {
 	t.Run("nil host", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			var host *attachmentHost
-			stream := newWorkerTestStream()
-			run, ok := host.Begin(context.Background(), AttachmentToken{1, 1}, blockingWorker(t), stream)
+			stream := newSessionStream(t)
+			run, ok := host.Begin(context.Background(), AttachmentToken{1, 1}, blockingWorker(t), stream.conn)
 			require.False(t, ok)
 			require.Nil(t, run)
-			require.False(t, stream.isClosed())
+			require.False(t, stream.closedNow())
 			require.Empty(t, stream.messages())
 		})
 	})
 	t.Run("zero token", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			host := newWorkerTestHost(t, newWorkerTestTerminal(), nil, nil)
-			stream := newWorkerTestStream()
-			_, ok := host.Begin(context.Background(), AttachmentToken{}, blockingWorker(t), stream)
+			stream := newSessionStream(t)
+			_, ok := host.Begin(context.Background(), AttachmentToken{}, blockingWorker(t), stream.conn)
 			require.False(t, ok)
-			require.False(t, stream.isClosed())
+			require.False(t, stream.closedNow())
 			require.Empty(t, stream.messages())
 			require.Nil(t, host.authority.foreground())
 		})
@@ -911,10 +840,10 @@ func TestAttachmentWorkerBeginRefusalsRetainStream(t *testing.T) {
 	t.Run("nil worker", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			host := newWorkerTestHost(t, newWorkerTestTerminal(), nil, nil)
-			stream := newWorkerTestStream()
-			_, ok := host.Begin(context.Background(), AttachmentToken{1, 1}, nil, stream)
+			stream := newSessionStream(t)
+			_, ok := host.Begin(context.Background(), AttachmentToken{1, 1}, nil, stream.conn)
 			require.False(t, ok)
-			require.False(t, stream.isClosed())
+			require.False(t, stream.closedNow())
 			require.Nil(t, host.authority.foreground())
 		})
 	})
@@ -929,12 +858,12 @@ func TestAttachmentWorkerBeginRefusalsRetainStream(t *testing.T) {
 	t.Run("foreground already live", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			host := newWorkerTestHost(t, newWorkerTestTerminal(), nil, nil)
-			first, ok := host.Begin(context.Background(), AttachmentToken{1, 1}, blockingWorker(t), newWorkerTestStream())
+			first, ok := host.Begin(context.Background(), AttachmentToken{1, 1}, blockingWorker(t), newSessionStream(t).conn)
 			require.True(t, ok)
-			stream := newWorkerTestStream()
-			_, ok = host.Begin(context.Background(), AttachmentToken{2, 1}, blockingWorker(t), stream)
+			stream := newSessionStream(t)
+			_, ok = host.Begin(context.Background(), AttachmentToken{2, 1}, blockingWorker(t), stream.conn)
 			require.False(t, ok)
-			require.False(t, stream.isClosed(), "a refused Begin must not close the caller's stream")
+			require.False(t, stream.closedNow(), "a refused Begin must not close the caller's stream")
 			require.Empty(t, stream.messages())
 			require.Same(t, first.fg, host.authority.foreground())
 			first.Cancel()
@@ -947,10 +876,10 @@ func TestAttachmentWorkerBeginRefusalsRetainStream(t *testing.T) {
 			rival, claimed := pump.tryClaim()
 			require.True(t, claimed)
 			defer pump.revoke(rival)
-			stream := newWorkerTestStream()
-			_, ok := host.Begin(context.Background(), AttachmentToken{1, 1}, blockingWorker(t), stream)
+			stream := newSessionStream(t)
+			_, ok := host.Begin(context.Background(), AttachmentToken{1, 1}, blockingWorker(t), stream.conn)
 			require.False(t, ok)
-			require.False(t, stream.isClosed())
+			require.False(t, stream.closedNow())
 			require.Empty(t, stream.messages())
 			require.Nil(t, host.authority.foreground())
 		})
@@ -1008,7 +937,7 @@ func TestAttachmentWorkerFinalizePreservesUndecidedInput(t *testing.T) {
 		written := make(chan error, 1)
 		go func() { _, err := pw.Write([]byte("ab")); written <- err }()
 
-		run, ok := host.Begin(context.Background(), AttachmentToken{1, 1}, first, newWorkerTestStream())
+		run, ok := host.Begin(context.Background(), AttachmentToken{1, 1}, first, newSessionStream(t).conn)
 		require.True(t, ok)
 		select {
 		case data := <-delivered:
@@ -1040,7 +969,7 @@ func TestAttachmentWorkerFinalizePreservesUndecidedInput(t *testing.T) {
 			observed <- append([]byte(nil), event.Data...)
 			return AttachmentEvent{Kind: AttachmentEventEnded}
 		})
-		_, adopted := host.Run(context.Background(), AttachmentToken{2, 1}, second, newWorkerTestStream())
+		_, adopted := host.Run(context.Background(), AttachmentToken{2, 1}, second, newSessionStream(t).conn)
 		require.True(t, adopted)
 		require.Equal(t, []byte("ab"), <-observed)
 
@@ -1048,7 +977,7 @@ func TestAttachmentWorkerFinalizePreservesUndecidedInput(t *testing.T) {
 		// exactly once.
 		freshWritten := make(chan error, 1)
 		go func() { _, err := pw.Write([]byte("fresh")); freshWritten <- err }()
-		_, adopted = host.Run(context.Background(), AttachmentToken{3, 1}, second, newWorkerTestStream())
+		_, adopted = host.Run(context.Background(), AttachmentToken{3, 1}, second, newSessionStream(t).conn)
 		require.True(t, adopted)
 		require.Equal(t, []byte("fresh"), <-observed)
 		require.NoError(t, <-freshWritten)
@@ -1071,7 +1000,7 @@ func TestAttachmentWorkerRetirementPrecedesWorkerCancellation(t *testing.T) {
 			}
 			return AttachmentEvent{Kind: AttachmentEventEnded}
 		})
-		run, ok := host.Begin(context.Background(), AttachmentToken{1, 1}, worker, newWorkerTestStream())
+		run, ok := host.Begin(context.Background(), AttachmentToken{1, 1}, worker, newSessionStream(t).conn)
 		require.True(t, ok)
 		ready <- run
 		run.Cancel()
@@ -1086,7 +1015,7 @@ func TestAttachmentWorkerBoundEventUsesGrantedGeneration(t *testing.T) {
 		host := newAttachmentHost(attachmentHostConfig{Input: newTerminalInputPump(nil)})
 		event, adopted := host.Run(context.Background(), AttachmentToken{99, 42}, newTestWorker(t, func(context.Context, AttachmentForeground) AttachmentEvent {
 			return AttachmentEvent{Token: AttachmentToken{999, 999}, Kind: AttachmentEventEnded}
-		}), newWorkerTestStream())
+		}), newSessionStream(t).conn)
 		require.True(t, adopted)
 		require.Equal(t, AttachmentToken{99, 42}, event.Token)
 	})
