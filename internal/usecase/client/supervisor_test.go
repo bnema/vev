@@ -261,13 +261,14 @@ func (c *supervisorTestConnector) awaitStart(t *testing.T) int {
 // on wake. A slow or parked subscriber therefore can never block the
 // publisher or busy-spin.
 type supervisorTestHub struct {
+	owner    *testing.T
 	mu       sync.Mutex
 	snapshot ports.BrokerSnapshot
 	subs     map[chan struct{}]struct{}
 }
 
-func newSupervisorTestHub() *supervisorTestHub {
-	return &supervisorTestHub{subs: make(map[chan struct{}]struct{})}
+func newSupervisorTestHub(t *testing.T) *supervisorTestHub {
+	return &supervisorTestHub{owner: t, subs: make(map[chan struct{}]struct{})}
 }
 
 func (h *supervisorTestHub) publish(snapshot ports.BrokerSnapshot) {
@@ -293,27 +294,30 @@ func (h *supervisorTestHub) subscribe(closeFn func()) ports.BrokerSubscription {
 	h.mu.Lock()
 	h.subs[changed] = struct{}{}
 	h.mu.Unlock()
-	return supervisorTestSubscription{changed: changed, closeFn: func() {
+	return newTestSubscription(h.owner, changed, func() {
 		h.mu.Lock()
 		delete(h.subs, changed)
 		h.mu.Unlock()
 		if closeFn != nil {
 			closeFn()
 		}
-	}}
+	})
 }
 
-type supervisorTestSubscription struct {
-	changed chan struct{}
-	closeFn func()
-}
-
-func (s supervisorTestSubscription) Changed() <-chan struct{} { return s.changed }
-
-func (s supervisorTestSubscription) Close() {
-	if s.closeFn != nil {
-		s.closeFn()
-	}
+// newTestSubscription builds a ports.BrokerSubscription mock over a channel. Its
+// expectations are all optional, so it is deliberately not registered for
+// AssertExpectations: the supervisor may still be creating it on a lingering
+// goroutine while the test cleanup runs.
+func newTestSubscription(t *testing.T, changed chan struct{}, closeFn func()) *portsmocks.MockBrokerSubscription {
+	m := &portsmocks.MockBrokerSubscription{}
+	m.Mock.Test(t)
+	m.EXPECT().Changed().Return((<-chan struct{})(changed)).Maybe()
+	m.EXPECT().Close().Run(func() {
+		if closeFn != nil {
+			closeFn()
+		}
+	}).Maybe()
+	return m
 }
 
 // supervisorTestService is one scripted BrokerService. Close is observable so a
@@ -351,7 +355,7 @@ type supervisorTestService struct {
 func newSupervisorTestService(t *testing.T, id ports.BrokerConnectionID, opts ...func(*portsmocks.MockBrokerNavigator)) *supervisorTestService {
 	s := &supervisorTestService{
 		id:        id,
-		hub:       newSupervisorTestHub(),
+		hub:       newSupervisorTestHub(t),
 		done:      make(chan struct{}),
 		closed:    make(chan struct{}),
 		subClosed: make(chan struct{}, 1),
@@ -1297,7 +1301,7 @@ func TestSupervisorDefensiveGenerationFenceRejectsSupersededAttempt(t *testing.T
 		stale := supervisorAttempt{
 			generation: current - 1,
 			service:    service.port,
-			sub:        supervisorTestSubscription{closeFn: func() { close(subClosed) }},
+			sub:        newTestSubscription(t, nil, func() { close(subClosed) }),
 		}
 		adopted, cause := sup.adoptAttempt(context.Background(), stale)
 		require.False(t, adopted, "a superseded generation must not be adopted")
@@ -1485,7 +1489,7 @@ func TestSupervisorNilSubscriptionIsTypedUnavailable(t *testing.T) {
 // non-blocking offer so a parked subscriber can never busy-spin the publisher.
 func TestSupervisorTestHubModelsSubscriptionContract(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		hub := newSupervisorTestHub()
+		hub := newSupervisorTestHub(t)
 		first := hub.subscribe(nil)
 		second := hub.subscribe(nil)
 		require.NotEqual(t, first.Changed(), second.Changed(), "each subscriber owns its own channel")

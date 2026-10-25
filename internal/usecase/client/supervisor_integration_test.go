@@ -10,11 +10,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/adapters/brokeripc"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 )
 
 // Real connector integration (Plan 001 P5.1a, GO-007). These tests wire the
@@ -25,10 +27,11 @@ import (
 
 const integrationEpoch = ports.BrokerEpoch(0x71)
 
-// integrationCore is the minimal admitted broker service one accepted
-// connection is bound to: a fixed-epoch publication and a coalescing
+// integrationCore is the state of the minimal admitted broker service one
+// accepted connection is bound to: a fixed-epoch publication and a coalescing
 // subscription, which is all the supervisor's readiness handshake needs.
 type integrationCore struct {
+	port    *portsmocks.MockBrokerCoreService
 	id      ports.BrokerConnectionID
 	epoch   ports.BrokerEpoch
 	changed chan struct{}
@@ -40,50 +43,55 @@ type integrationCore struct {
 	nextStream ports.BrokerStreamID
 }
 
-func (c *integrationCore) ConnectionID() ports.BrokerConnectionID { return c.id }
-func (c *integrationCore) Done() <-chan struct{}                  { return c.done }
-func (c *integrationCore) Err() error                             { return nil }
+// newIntegrationCore builds the core mock: overrides first, then the optional
+// defaults, with all state in the plain struct.
+func newIntegrationCore(t *testing.T, id ports.BrokerConnectionID, epoch ports.BrokerEpoch, opts ...func(*portsmocks.MockBrokerCoreService)) *integrationCore {
+	c := &integrationCore{
+		id:      id,
+		epoch:   epoch,
+		changed: make(chan struct{}),
+		done:    make(chan struct{}),
+		closed:  make(chan struct{}),
+	}
+	c.port = portsmocks.NewMockBrokerCoreService(t)
+	for _, opt := range opts {
+		opt(c.port)
+	}
+	c.port.EXPECT().ConnectionID().Return(c.id).Maybe()
+	c.port.EXPECT().Done().Return((<-chan struct{})(c.done)).Maybe()
+	c.port.EXPECT().Err().Return(nil).Maybe()
+	c.port.EXPECT().NextStreamID().RunAndReturn(c.allocateStream).Maybe()
+	c.port.EXPECT().Snapshot().Return(ports.BrokerSnapshot{Epoch: c.epoch, Revision: 1}).Maybe()
+	c.port.EXPECT().Subscribe().RunAndReturn(func() (ports.BrokerSubscription, error) {
+		// Not registered for AssertExpectations: it is created on the
+		// supervisor's goroutine and every expectation is optional.
+		sub := &portsmocks.MockBrokerSubscription{}
+		sub.Mock.Test(t)
+		sub.EXPECT().Changed().Return((<-chan struct{})(c.changed)).Maybe()
+		sub.EXPECT().Close().Return().Maybe()
+		return sub, nil
+	}).Maybe()
+	c.port.EXPECT().SubscribePreview(mock.Anything).Return(nil, errors.New("integration core does not support preview")).Maybe()
+	c.port.EXPECT().OpenEnvelopeStream(mock.Anything, mock.Anything).Return(nil, errors.New("integration core does not support streams")).Maybe()
+	c.port.EXPECT().CloseStream(mock.Anything, mock.Anything).Return(nil).Maybe()
+	c.port.EXPECT().AddHost(mock.Anything, mock.Anything, mock.Anything).Return(domain.RemoteRegistration{}, nil).Maybe()
+	c.port.EXPECT().RemoveHost(mock.Anything, mock.Anything).Return(false, nil).Maybe()
+	c.port.EXPECT().UpdateHostPolicy(mock.Anything, mock.Anything, mock.Anything).Return(domain.RemoteRegistration{}, nil).Maybe()
+	c.port.EXPECT().RequestReconcile(mock.Anything).Return().Maybe()
+	c.port.EXPECT().Close().RunAndReturn(c.close).Maybe()
+	return c
+}
 
-// NextStreamID mirrors the production allocator so the supervisor's single
+// allocateStream mirrors the production allocator so the supervisor's single
 // allocation seam is exercised over the real carriage.
-func (c *integrationCore) NextStreamID() (ports.BrokerStreamID, error) {
+func (c *integrationCore) allocateStream() (ports.BrokerStreamID, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.nextStream++
 	return c.nextStream, nil
 }
 
-func (c *integrationCore) Snapshot() ports.BrokerSnapshot {
-	return ports.BrokerSnapshot{Epoch: c.epoch, Revision: 1}
-}
-
-func (c *integrationCore) Subscribe() (ports.BrokerSubscription, error) {
-	return integrationSubscription{changed: c.changed}, nil
-}
-
-func (c *integrationCore) SubscribePreview(ports.BrokerPreviewRequest) (ports.BrokerPreviewSubscription, error) {
-	return nil, errors.New("integration core does not support preview")
-}
-
-func (c *integrationCore) OpenEnvelopeStream(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerEnvelopeStream, error) {
-	return nil, errors.New("integration core does not support streams")
-}
-
-func (c *integrationCore) CloseStream(ports.BrokerConnectionID, ports.BrokerStreamID) error {
-	return nil
-}
-func (c *integrationCore) AddHost(context.Context, string, ports.BrokerPolicy) (domain.RemoteRegistration, error) {
-	return domain.RemoteRegistration{}, nil
-}
-func (c *integrationCore) RemoveHost(context.Context, domain.RemoteRegistration) (bool, error) {
-	return false, nil
-}
-func (c *integrationCore) UpdateHostPolicy(context.Context, domain.RemoteRegistration, ports.BrokerPolicy) (domain.RemoteRegistration, error) {
-	return domain.RemoteRegistration{}, nil
-}
-func (c *integrationCore) RequestReconcile(string) {}
-
-func (c *integrationCore) Close() error {
+func (c *integrationCore) close() error {
 	c.once.Do(func() {
 		close(c.done)
 		close(c.closed)
@@ -91,16 +99,11 @@ func (c *integrationCore) Close() error {
 	return nil
 }
 
-// integrationSubscription is one idle coalescing subscription.
-type integrationSubscription struct{ changed chan struct{} }
-
-func (s integrationSubscription) Changed() <-chan struct{} { return s.changed }
-func (s integrationSubscription) Close()                   {}
-
 // integrationAuthority admits one connection per accepted carriage and records
 // every admitted core, so a test can observe the broker-side end of the
 // supervisor's connection lifetime.
 type integrationAuthority struct {
+	port  *portsmocks.MockBrokerAuthority
 	epoch ports.BrokerEpoch
 
 	mu    sync.Mutex
@@ -108,30 +111,27 @@ type integrationAuthority struct {
 	cores []*integrationCore
 }
 
-var _ ports.BrokerAuthority = (*integrationAuthority)(nil)
-
-func (a *integrationAuthority) AdmitClient(ctx context.Context) (ports.BrokerCoreService, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	a.mu.Lock()
-	a.next++
-	sequence := a.next
-	a.mu.Unlock()
-	var id ports.BrokerConnectionID
-	binary.BigEndian.PutUint64(id[:8], uint64(a.epoch))
-	binary.BigEndian.PutUint64(id[8:], sequence)
-	core := &integrationCore{
-		id:      id,
-		epoch:   a.epoch,
-		changed: make(chan struct{}),
-		done:    make(chan struct{}),
-		closed:  make(chan struct{}),
-	}
-	a.mu.Lock()
-	a.cores = append(a.cores, core)
-	a.mu.Unlock()
-	return core, nil
+func newIntegrationAuthority(t *testing.T, epoch ports.BrokerEpoch) *integrationAuthority {
+	a := &integrationAuthority{epoch: epoch}
+	a.port = portsmocks.NewMockBrokerAuthority(t)
+	a.port.EXPECT().AdmitClient(mock.Anything).RunAndReturn(func(ctx context.Context) (ports.BrokerCoreService, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		a.mu.Lock()
+		a.next++
+		sequence := a.next
+		a.mu.Unlock()
+		var id ports.BrokerConnectionID
+		binary.BigEndian.PutUint64(id[:8], uint64(a.epoch))
+		binary.BigEndian.PutUint64(id[8:], sequence)
+		core := newIntegrationCore(t, id, a.epoch)
+		a.mu.Lock()
+		a.cores = append(a.cores, core)
+		a.mu.Unlock()
+		return core.port, nil
+	}).Maybe()
+	return a
 }
 
 func (a *integrationAuthority) lastCore() *integrationCore {
@@ -151,8 +151,8 @@ func startIntegrationBroker(t *testing.T) (*integrationAuthority, ports.BrokerLi
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
 	path := brokeripc.SocketPath(filepath.Join(root, "vev"))
-	authority := &integrationAuthority{epoch: integrationEpoch}
-	listener, err := brokeripc.Listen(path, integrationEpoch, authority, brokeripc.Config{})
+	authority := newIntegrationAuthority(t, integrationEpoch)
+	listener, err := brokeripc.Listen(path, integrationEpoch, authority.port, brokeripc.Config{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = listener.Close() })
 	return authority, listener, path
