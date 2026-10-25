@@ -213,6 +213,15 @@ func (s *superviseServer) serve() {
 	})
 }
 
+// notifyReaped returns a channel closed when the supervisor reaped its first
+// lost child, so a test waits for the reap instead of polling Children.
+func (s *superviseServer) notifyReaped() <-chan struct{} {
+	reaped := make(chan struct{})
+	var once sync.Once
+	s.supervisor.afterReap = func() { once.Do(func() { close(reaped) }) }
+	return reaped
+}
+
 // acceptedCount reports how many typed connections the aggregate delivered.
 func (s *superviseServer) acceptedCount() int {
 	s.mu.Lock()

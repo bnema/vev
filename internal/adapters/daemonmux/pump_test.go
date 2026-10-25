@@ -144,25 +144,15 @@ func (c *carrierFixture) nextSent(t *testing.T) []byte {
 	}
 }
 
-// requireNoSent fails when the writer recorded an outbound frame within d.
-func (c *carrierFixture) requireNoSentSettled(t *testing.T, d time.Duration) {
+// requireNoSentSettled fails when the writer recorded an outbound frame once
+// every bubble goroutine is blocked.
+func (c *carrierFixture) requireNoSentSettled(t *testing.T) {
 	t.Helper()
 	synctest.Wait()
 	select {
 	case payload := <-c.sent:
 		t.Fatalf("carrierFixture: unexpected outbound frame %q", payload)
 	default:
-	}
-}
-
-// requireNoSent retains the bounded negative observation for typed-path tests
-// that cannot yet share the streamframe completion-channel pool across bubbles.
-func (c *carrierFixture) requireNoSent(t *testing.T, d time.Duration) {
-	t.Helper()
-	select {
-	case payload := <-c.sent:
-		t.Fatalf("unexpected outbound frame %q", payload)
-	case <-time.After(d):
 	}
 }
 
@@ -254,63 +244,6 @@ func takeSettled(t *testing.T, pump *Pump, id PhysicalStreamID) ([]byte, bool) {
 		}
 		return ok
 	})
-	return chunk, chunk != nil
-}
-
-// requireEngineEventually waits until the engine satisfies cond.
-func requireEngineEventually(t *testing.T, pump *Pump, cond func(*StreamEngine) bool, msgAndArgs ...any) {
-	t.Helper()
-	require.Eventually(t, func() bool { return cond(pump.Engine()) }, 5*time.Second, time.Millisecond, msgAndArgs...)
-}
-
-// requireStreamTerminalEventually waits until one stream has reached its
-// terminal state with Done closed, then returns that settled read.
-func requireStreamTerminalEventually(t *testing.T, pump *Pump, id PhysicalStreamID) StreamStatus {
-	t.Helper()
-	var status StreamStatus
-	require.Eventually(t, func() bool {
-		current, ok := pump.Engine().Status(id)
-		if !ok {
-			return false
-		}
-		status = current
-		return current.State == StreamTerminal && channelClosed(current.Done)
-	}, 5*time.Second, time.Millisecond, "stream %d did not reach terminal", id)
-	return status
-}
-
-// requireStreamClosingEventually waits until one undrained stream has settled
-// into closing with its preserved chunk still queued and charged and Done still
-// open, then returns that settled read. The transition is stable until the
-// chunk is drained, so the returned read cannot be a stale intermediate state.
-func requireStreamClosingEventually(t *testing.T, pump *Pump, id PhysicalStreamID) StreamStatus {
-	t.Helper()
-	var status StreamStatus
-	require.Eventually(t, func() bool {
-		current, ok := pump.Engine().Status(id)
-		if !ok {
-			return false
-		}
-		status = current
-		return current.State == StreamClosing &&
-			current.QueuedChunks == 1 &&
-			current.QueuedBytes == 1 &&
-			!channelClosed(current.Done)
-	}, 5*time.Second, time.Millisecond, "stream %d did not settle into closing with a preserved chunk", id)
-	return status
-}
-
-// takeEventually waits until one stream's inbound queue yields a chunk.
-func takeEventually(t *testing.T, pump *Pump, id PhysicalStreamID) ([]byte, bool) {
-	t.Helper()
-	var chunk []byte
-	require.Eventually(t, func() bool {
-		taken, ok := pump.Take(id)
-		if ok {
-			chunk = taken
-		}
-		return ok
-	}, 5*time.Second, time.Millisecond)
 	return chunk, chunk != nil
 }
 
@@ -537,7 +470,7 @@ func TestPumpBlockedWriterDoesNotBlockReader(t *testing.T) {
 		requireEngineSettled(t, pump, func(e *StreamEngine) bool { return e.AggregateBytes() == 3 })
 
 		// Nothing reaches the wire until the carrier releases the blocked write.
-		carrier.requireNoSentSettled(t, 50*time.Millisecond)
+		carrier.requireNoSentSettled(t)
 		carrier.release(hold)
 
 		message, err := DecodeServer(carrier.nextSent(t), testEnvelopeCeiling, testChunkCeiling)
@@ -627,7 +560,7 @@ func TestPumpResetIsolation(t *testing.T) {
 			// Exactly one Reset: a later frame for the settled stream is
 			// discarded, so no second frame is scheduled.
 			deliverClientFrame(t, carrier, Data{Physical: 1, Data: []byte("late")})
-			carrier.requireNoSentSettled(t, 50*time.Millisecond)
+			carrier.requireNoSentSettled(t)
 
 			require.False(t, pump.Engine().Closed())
 			require.False(t, channelClosed(pump.Done()))
@@ -904,7 +837,7 @@ func TestPumpSendDirection(t *testing.T) {
 			require.NoError(t, err)
 			_, ok := message.(Opened)
 			require.True(t, ok)
-			carrier.requireNoSentSettled(t, 20*time.Millisecond)
+			carrier.requireNoSentSettled(t)
 		})
 	})
 
@@ -1038,7 +971,7 @@ func TestPumpFlushCancellationMayDrop(t *testing.T) {
 		cancel()
 		requireSettled(t, func() bool { return channelClosed(pump.writerDone) })
 		carrier.release(hold)
-		carrier.requireNoSentSettled(t, 50*time.Millisecond)
+		carrier.requireNoSentSettled(t)
 	})
 }
 

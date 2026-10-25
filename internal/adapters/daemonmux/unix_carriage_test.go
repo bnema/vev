@@ -214,17 +214,14 @@ func TestUnixCarriageSupervisorTwoThenHundredTypedAdmissions(t *testing.T) {
 // unixDaemonPump builds a daemon-side pump over the server end of a real mux
 // carriage and returns the raw client end for direct frame injection, so a test
 // can drive deterministic inbound traffic over the actual socket.
-func unixDaemonPump(t *testing.T) (*Pump, RawFramedTransport) {
+func unixDaemonPump(t *testing.T) (*Pump, RawFramedTransport, admissions) {
 	t.Helper()
 	client, server := unixRawCarriagePair(t)
 	carrier, err := NewPreambleCarrier(server)
 	require.NoError(t, err)
 	require.NoError(t, carrier.Negotiate(DefaultMuxCeilings()))
-	pump, err := NewPump(carrier, DirectionClient, DefaultMuxCeilings())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = pump.Close() })
-	pump.Start(context.Background())
-	return pump, client
+	pump, admitted := newObservedPump(t, carrier)
+	return pump, client, admitted
 }
 
 // injectUnixClientFrame writes one client frame over the real Unix carriage.
@@ -247,13 +244,13 @@ func nextUnixServerFrame(t *testing.T, client RawFramedTransport) []byte {
 // its own bound while the sibling keeps receiving.
 // real I/O: Unix-domain socket carriage
 func TestUnixCarriageBlockedConsumerSiblingProgress(t *testing.T) {
-	pump, client := unixDaemonPump(t)
+	pump, client, admitted := unixDaemonPump(t)
 
 	const siblings = 2
 	for i := 1; i <= siblings; i++ {
 		injectUnixClientFrame(t, client, openFor(PhysicalStreamID(i)))
 	}
-	requireEngineEventually(t, pump, func(e *StreamEngine) bool { return e.Live() == siblings })
+	awaitAdmitted(t, admitted, siblings)
 	for i := 1; i <= siblings; i++ {
 		require.NoError(t, pump.Engine().Opened(Opened{Ref: testRef(PhysicalStreamID(i))}))
 	}
@@ -264,18 +261,14 @@ func TestUnixCarriageBlockedConsumerSiblingProgress(t *testing.T) {
 	for i := 0; i < full; i++ {
 		injectUnixClientFrame(t, client, Data{Physical: 1, Data: chunk})
 	}
-	requireEngineEventually(t, pump, func(e *StreamEngine) bool {
-		status, ok := e.Status(1)
-		return ok && status.QueuedChunks == full
-	})
+	awaitStatus(t, pump, 1, func(status StreamStatus) bool { return status.QueuedChunks == full }, "inbound window never filled")
 
 	// One more chunk exceeds the granted window; a sibling chunk still lands,
 	// so neither the reader nor the sibling was blocked.
 	injectUnixClientFrame(t, client, Data{Physical: 1, Data: chunk})
 	injectUnixClientFrame(t, client, Data{Physical: 2, Data: []byte("sibling")})
 
-	taken, ok := takeEventually(t, pump, 2)
-	require.True(t, ok)
+	taken := awaitTake(t, pump, 2)
 	require.Equal(t, []byte("sibling"), taken)
 
 	stalled := mustStatus(t, pump.Engine(), 1)
@@ -296,29 +289,25 @@ func TestUnixCarriageBlockedConsumerSiblingProgress(t *testing.T) {
 // leaves the physical connection and every sibling healthy.
 // real I/O: Unix-domain socket carriage
 func TestUnixCarriageResetIsolation(t *testing.T) {
-	pump, client := unixDaemonPump(t)
+	pump, client, admitted := unixDaemonPump(t)
 
 	for _, id := range []PhysicalStreamID{1, 2, 3} {
 		injectUnixClientFrame(t, client, openFor(id))
 	}
-	requireEngineEventually(t, pump, func(e *StreamEngine) bool { return e.Live() == 3 })
+	awaitAdmitted(t, admitted, 3)
 	for _, id := range []PhysicalStreamID{2, 3} {
 		require.NoError(t, pump.Engine().Opened(Opened{Ref: testRef(id)}))
 	}
 
 	// Stream 1 is still opening: inbound data is a stream-local state refusal.
 	injectUnixClientFrame(t, client, Data{Physical: 1, Data: []byte("early")})
-	requireEngineEventually(t, pump, func(e *StreamEngine) bool {
-		status, ok := e.Status(1)
-		return ok && status.State == StreamTerminal
-	})
+	awaitStatus(t, pump, 1, func(status StreamStatus) bool { return status.State == StreamTerminal }, "early data never terminalized the stream")
 	settled := mustStatus(t, pump.Engine(), 1)
 	require.ErrorContains(t, settled.Err, "invalid stream state")
 	require.Equal(t, domain.RemoteFailureInvalidResponse, settled.FailureKind)
 
 	injectUnixClientFrame(t, client, Data{Physical: 2, Data: []byte("sibling")})
-	taken, ok := takeEventually(t, pump, 2)
-	require.True(t, ok)
+	taken := awaitTake(t, pump, 2)
 	require.Equal(t, []byte("sibling"), taken)
 
 	reset := decodeReset(t, nextUnixServerFrame(t, client), DirectionServer)

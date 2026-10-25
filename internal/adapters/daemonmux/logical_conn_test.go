@@ -862,7 +862,7 @@ func TestLogicalCloseDiscardsQueuedInboundReleasesAccounting(t *testing.T) {
 			closedFrame, ok := message.(Close)
 			require.True(t, ok, "cycle %d: the peer frame is not a Close", i)
 			require.Equal(t, Close{Physical: id}, closedFrame)
-			carrier.requireNoSent(t, 20*time.Millisecond)
+			carrier.requireNoSentSettled(t)
 		}
 		require.False(t, pump.Engine().Closed())
 		require.False(t, channelClosed(pump.Done()))

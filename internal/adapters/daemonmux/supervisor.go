@@ -84,6 +84,11 @@ type ServerSupervisor struct {
 	done      chan struct{}
 	wg        sync.WaitGroup
 	closeOnce sync.Once
+
+	// afterReap, when non-nil, runs once a reaper has closed and forgotten its
+	// child. It is a test-only notification seam (never set in production) so
+	// a real-I/O test can wait for a reap without polling.
+	afterReap func()
 }
 
 // NewServerSupervisor returns a supervisor that publishes every accepted
@@ -302,6 +307,9 @@ func (s *ServerSupervisor) reap(child *supervisedPhysical) {
 	_ = s.aggregate.Remove(child)
 	_ = child.Close()
 	s.forget(child)
+	if s.afterReap != nil {
+		s.afterReap()
+	}
 }
 
 // supervisedPhysical is one owned accepted physical connection. It implements

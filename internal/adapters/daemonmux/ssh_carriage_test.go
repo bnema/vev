@@ -205,31 +205,23 @@ func sshMuxConnect(t *testing.T, binding ServerBinding, spec sshstdio.CommandSpe
 	return physical
 }
 
-// sshMuxReadPID waits for the helper to publish its process id.
+// sshMuxReadPID reads the process id the helper published. The helper writes it
+// before it serves the carriage, so it exists once Connect completed the physical
+// handshake with that helper.
 func sshMuxReadPID(t *testing.T, path string) int {
 	t.Helper()
-	pid := 0
-	require.Eventually(t, func() bool {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return false
-		}
-		value, err := strconv.Atoi(strings.TrimSpace(string(data)))
-		if err != nil {
-			return false
-		}
-		pid = value
-		return true
-	}, sshMuxCarriageDeadline, 2*time.Millisecond)
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	require.NoError(t, err)
 	return pid
 }
 
-// requireNoGoroutineLeak waits for the test process to return to its baseline
-// goroutine count once every carriage was torn down.
+// requireNoGoroutineLeak checks the test process is back at its baseline
+// goroutine count once every carriage was torn down and joined.
 func requireNoGoroutineLeak(t *testing.T, baseline int) {
 	t.Helper()
-	require.Eventually(t, func() bool { return runtime.NumGoroutine() <= baseline+4 }, 5*time.Second, 20*time.Millisecond,
-		"goroutines leaked: baseline %d, now %d", baseline, runtime.NumGoroutine())
+	require.LessOrEqual(t, runtime.NumGoroutine(), baseline+4, "goroutines leaked: baseline %d", baseline)
 }
 
 // TestSSHCarriageSupervisorTwoThenHundredTypedAdmissions drives the full daemon
@@ -312,8 +304,7 @@ func TestSSHCarriageSupervisorTwoThenHundredTypedAdmissions(t *testing.T) {
 	// Teardown terminates and reaps the one owned subprocess, and no worker
 	// outlives the carriage.
 	require.NoError(t, physical.Close())
-	require.Eventually(t, func() bool { return sshMuxProcessGone(pid) }, sshMuxCarriageDeadline, 5*time.Millisecond,
-		"the ssh carriage subprocess was never reaped")
+	require.True(t, sshMuxProcessGone(pid), "the ssh carriage subprocess was never reaped")
 	requireNoGoroutineLeak(t, baseline)
 }
 
@@ -372,9 +363,8 @@ func TestSSHCarriagePhysicalFailureFansOutAndIsIsolated(t *testing.T) {
 	require.Error(t, physicalA.Err())
 	require.NotEqual(t, domain.RemoteFailureNone, physicalA.FailureKind())
 	for i, stream := range lost {
-		require.Eventually(t, func() bool {
-			return channelClosed(stream.Done()) && stream.Err() != nil
-		}, sshMuxCarriageDeadline, time.Millisecond, "lost stream %d never received the physical failure", i+1)
+		awaitClosed(t, stream.Done(), sshMuxCarriageDeadline, "lost stream %d never received the physical failure", i+1)
+		require.Error(t, stream.Err(), "lost stream %d", i+1)
 	}
 
 	// The sibling physical carriage is unaffected.
@@ -390,8 +380,7 @@ func TestSSHCarriagePhysicalFailureFansOutAndIsIsolated(t *testing.T) {
 	require.Error(t, err)
 
 	// The failed subprocess is reaped, not left a zombie.
-	require.Eventually(t, func() bool { return sshMuxProcessGone(lostPID) }, sshMuxCarriageDeadline, 5*time.Millisecond,
-		"the failed ssh carriage subprocess was never reaped")
+	require.True(t, sshMuxProcessGone(lostPID), "the failed ssh carriage subprocess was never reaped")
 }
 
 // TestSSHCarriageSetupContextDetachedFromPhysicalLifetime proves the setup
@@ -535,17 +524,14 @@ func sshRawCarriagePair(t *testing.T) (RawFramedTransport, RawFramedTransport) {
 // carriage and returns the raw ssh client end for direct frame injection, so a
 // test can drive deterministic inbound traffic over the actual subprocess
 // pipes.
-func sshDaemonPump(t *testing.T) (*Pump, RawFramedTransport) {
+func sshDaemonPump(t *testing.T) (*Pump, RawFramedTransport, admissions) {
 	t.Helper()
 	client, daemon := sshRawCarriagePair(t)
 	carrier, err := NewPreambleCarrier(daemon)
 	require.NoError(t, err)
 	require.NoError(t, carrier.Negotiate(DefaultMuxCeilings()))
-	pump, err := NewPump(carrier, DirectionClient, DefaultMuxCeilings())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = pump.Close() })
-	pump.Start(context.Background())
-	return pump, client
+	pump, admitted := newObservedPump(t, carrier)
+	return pump, client, admitted
 }
 
 // injectSSHClientFrame writes one client frame over the real ssh carriage.
@@ -568,13 +554,13 @@ func nextSSHServerFrame(t *testing.T, client RawFramedTransport) []byte {
 // its own bound while the sibling keeps receiving.
 // real I/O: SSH subprocess and OS pipes
 func TestSSHCarriageBlockedConsumerSiblingProgress(t *testing.T) {
-	pump, client := sshDaemonPump(t)
+	pump, client, admitted := sshDaemonPump(t)
 
 	const siblings = 2
 	for i := 1; i <= siblings; i++ {
 		injectSSHClientFrame(t, client, openFor(PhysicalStreamID(i)))
 	}
-	requireEngineEventually(t, pump, func(e *StreamEngine) bool { return e.Live() == siblings })
+	awaitAdmitted(t, admitted, siblings)
 	for i := 1; i <= siblings; i++ {
 		require.NoError(t, pump.Engine().Opened(Opened{Ref: testRef(PhysicalStreamID(i))}))
 	}
@@ -585,18 +571,14 @@ func TestSSHCarriageBlockedConsumerSiblingProgress(t *testing.T) {
 	for i := 0; i < full; i++ {
 		injectSSHClientFrame(t, client, Data{Physical: 1, Data: chunk})
 	}
-	requireEngineEventually(t, pump, func(e *StreamEngine) bool {
-		status, ok := e.Status(1)
-		return ok && status.QueuedChunks == full
-	})
+	awaitStatus(t, pump, 1, func(status StreamStatus) bool { return status.QueuedChunks == full }, "inbound window never filled")
 
 	// One more chunk exceeds the granted window; a sibling chunk still lands,
 	// so neither the reader nor the sibling was blocked.
 	injectSSHClientFrame(t, client, Data{Physical: 1, Data: chunk})
 	injectSSHClientFrame(t, client, Data{Physical: 2, Data: []byte("sibling")})
 
-	taken, ok := takeEventually(t, pump, 2)
-	require.True(t, ok)
+	taken := awaitTake(t, pump, 2)
 	require.Equal(t, []byte("sibling"), taken)
 
 	stalled := mustStatus(t, pump.Engine(), 1)
@@ -617,29 +599,25 @@ func TestSSHCarriageBlockedConsumerSiblingProgress(t *testing.T) {
 // leaves the physical connection and every sibling healthy.
 // real I/O: SSH subprocess and OS pipes
 func TestSSHCarriageResetIsolation(t *testing.T) {
-	pump, client := sshDaemonPump(t)
+	pump, client, admitted := sshDaemonPump(t)
 
 	for _, id := range []PhysicalStreamID{1, 2, 3} {
 		injectSSHClientFrame(t, client, openFor(id))
 	}
-	requireEngineEventually(t, pump, func(e *StreamEngine) bool { return e.Live() == 3 })
+	awaitAdmitted(t, admitted, 3)
 	for _, id := range []PhysicalStreamID{2, 3} {
 		require.NoError(t, pump.Engine().Opened(Opened{Ref: testRef(id)}))
 	}
 
 	// Stream 1 is still opening: inbound data is a stream-local state refusal.
 	injectSSHClientFrame(t, client, Data{Physical: 1, Data: []byte("early")})
-	requireEngineEventually(t, pump, func(e *StreamEngine) bool {
-		status, ok := e.Status(1)
-		return ok && status.State == StreamTerminal
-	})
+	awaitStatus(t, pump, 1, func(status StreamStatus) bool { return status.State == StreamTerminal }, "early data never terminalized the stream")
 	settled := mustStatus(t, pump.Engine(), 1)
 	require.ErrorContains(t, settled.Err, "invalid stream state")
 	require.Equal(t, domain.RemoteFailureInvalidResponse, settled.FailureKind)
 
 	injectSSHClientFrame(t, client, Data{Physical: 2, Data: []byte("sibling")})
-	taken, ok := takeEventually(t, pump, 2)
-	require.True(t, ok)
+	taken := awaitTake(t, pump, 2)
 	require.Equal(t, []byte("sibling"), taken)
 
 	reset := decodeReset(t, nextSSHServerFrame(t, client), DirectionServer)

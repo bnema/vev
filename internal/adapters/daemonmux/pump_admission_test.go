@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -38,13 +37,13 @@ func TestPumpApplyOpenDuplicateIsolation(t *testing.T) {
 			require.False(t, channelClosed(after.Done))
 			require.Equal(t, watch, pump.Watch(1), "a duplicate open never rotated the watch channel")
 			require.Equal(t, 1, pump.scheduler.QueuedFrames(1), "the queued outbound frame survived")
-			carrier.requireNoSent(t, 50*time.Millisecond)
+			carrier.requireNoSentSettled(t)
 
 			pump.Start(context.Background())
 			message, err := DecodeServer(carrier.nextSent(t), testEnvelopeCeiling, testChunkCeiling)
 			require.NoError(t, err)
 			require.Equal(t, Data{Physical: 1, Data: []byte("out")}, message)
-			carrier.requireNoSent(t, 50*time.Millisecond)
+			carrier.requireNoSentSettled(t)
 		})
 	})
 
@@ -64,7 +63,7 @@ func TestPumpApplyOpenDuplicateIsolation(t *testing.T) {
 			require.Equal(t, StreamTerminal, status.State, "a replayed open never revives a retired stream")
 			require.NoError(t, status.Err)
 			require.Zero(t, pump.Engine().Live())
-			carrier.requireNoSent(t, 50*time.Millisecond)
+			carrier.requireNoSentSettled(t)
 		})
 	})
 
@@ -80,7 +79,7 @@ func TestPumpApplyOpenDuplicateIsolation(t *testing.T) {
 			_, tracked := pump.Engine().Status(1)
 			require.False(t, tracked, "a replayed identity is never recorded")
 			require.Equal(t, 1, pump.Engine().Live())
-			carrier.requireNoSent(t, 50*time.Millisecond)
+			carrier.requireNoSentSettled(t)
 		})
 	})
 }
@@ -122,7 +121,7 @@ func TestPumpFreshOpenRefusedSendsTypedRefused(t *testing.T) {
 		require.False(t, channelClosed(mustStatus(t, pump.Engine(), 1).Done))
 		require.False(t, pump.Engine().Closed())
 		require.False(t, channelClosed(pump.Done()))
-		carrier.requireNoSent(t, 50*time.Millisecond)
+		carrier.requireNoSentSettled(t)
 	})
 }
 
