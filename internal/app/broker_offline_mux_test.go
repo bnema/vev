@@ -639,7 +639,7 @@ func TestBrokerServeUnixRouteRoundTrip(t *testing.T) {
 // socket path plus an idempotent stop.
 func startMuxBrokerServe(t *testing.T) (string, func()) {
 	t.Helper()
-	deps, ready := testBrokerServeDeps(newSandboxClock())
+	deps, ready := testBrokerServeDeps(idleSandboxClock(t))
 	ctx, cancel := context.WithCancel(context.Background())
 	done := runSandbox(ctx, brokerServeOptions{}, deps)
 	socketPath := awaitSandboxReady(t, ready, done)

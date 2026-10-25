@@ -1047,7 +1047,7 @@ func TestLifecycleOwnershipOutlivesMaintenanceWriter(t *testing.T) {
 	}
 	require.NoError(t, catalogue.Create(domain.CatalogueRecord{Name: "work", IncarnationID: domain.IncarnationID{1}}))
 	repository := snapshot.NewRepository(filepath.Join(stateDir, "snapshots"))
-	shutdownClock := newLifecycleShutdownClock(t)
+	shutdownClock, _ := newLifecycleShutdownClock(t)
 	maintenanceRepository := &lifecycleBlockingMaintenanceRepository{
 		SnapshotRepository: repository,
 		entered:            make(chan struct{}),
@@ -1191,7 +1191,7 @@ func TestLifecycleOwnershipOutlivesRestorationWriter(t *testing.T) {
 	releaseRestore := func() { releaseOnce.Do(func() { close(blocking.release) }) }
 	t.Cleanup(releaseRestore)
 
-	shutdownClock := newLifecycleShutdownClock(t)
+	shutdownClock, shutdownTimers := newLifecycleShutdownClock(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	listenerReady := make(chan struct{})
@@ -1226,7 +1226,7 @@ func TestLifecycleOwnershipOutlivesRestorationWriter(t *testing.T) {
 	require.Equal(t, checkpointed, blocking.repairedName(), "restoration must target the checkpointed session")
 
 	cancel()
-	shutdownClock.nextTimer(t).fire()
+	shutdownTimers.nextTimer(t).fire()
 	select {
 	case <-callbackReturned:
 		t.Fatal("Serve callback returned after shutdown deadline while restoration was blocked")
@@ -1329,7 +1329,7 @@ func runBlockedSnapshotWriterShutdown(t *testing.T) blockedSnapshotWriterShutdow
 	t.Helper()
 	runtimeDir := filepath.Join(t.TempDir(), "runtime")
 	stateDir := filepath.Join(t.TempDir(), "state")
-	shutdownClock := newLifecycleShutdownClock(t)
+	shutdownClock, shutdownTimers := newLifecycleShutdownClock(t)
 	repository := newLifecycleBlockingRepository()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -1370,7 +1370,7 @@ func runBlockedSnapshotWriterShutdown(t *testing.T) blockedSnapshotWriterShutdow
 	cancel()
 	awaitLifecycleStage(t, listenerClosed, "listener close")
 
-	shutdownClock.nextTimer(t).fire()
+	shutdownTimers.nextTimer(t).fire()
 	select {
 	case <-callbackReturned:
 		t.Fatal("Serve callback returned after checkpoint timeout while snapshot writer was blocked")
@@ -1415,70 +1415,8 @@ func (r *lifecycleBlockingRepository) Publish(context.Context, ports.SnapshotPub
 	return nil
 }
 
-type lifecycleShutdownClock struct {
-	t      *testing.T
-	base   ports.Clock
-	timers chan *lifecycleManualTimer
-}
-
-func newLifecycleShutdownClock(t *testing.T) *lifecycleShutdownClock {
-	t.Helper()
-	return &lifecycleShutdownClock{t: t, base: clock.New(), timers: make(chan *lifecycleManualTimer, 4)}
-}
-
-func (c *lifecycleShutdownClock) Now() time.Time { return c.base.Now() }
-func (c *lifecycleShutdownClock) NewTimer(delay time.Duration) ports.Timer {
-	if delay != daemon.SnapshotShutdownTimeout() {
-		return c.base.NewTimer(delay)
-	}
-	timer := &lifecycleManualTimer{t: c.t, ch: make(chan time.Time, 1)}
-	select {
-	case c.timers <- timer:
-	default:
-		c.t.Errorf("unexpected additional snapshot shutdown timer with delay %s", delay)
-		timer.fire()
-	}
-	return timer
-}
-
-func (c *lifecycleShutdownClock) nextTimer(t *testing.T) *lifecycleManualTimer {
-	t.Helper()
-	select {
-	case timer := <-c.timers:
-		return timer
-	case <-time.After(3 * time.Second):
-		t.Fatal("timed out waiting for shutdown deadline timer")
-		return nil
-	}
-}
-
-type lifecycleManualTimer struct {
-	t       *testing.T
-	ch      chan time.Time
-	stopped atomic.Bool
-}
-
-func (t *lifecycleManualTimer) C() <-chan time.Time { return t.ch }
-func (t *lifecycleManualTimer) Reset(delay time.Duration) bool {
-	if delay != daemon.SnapshotShutdownTimeout() {
-		t.t.Errorf("snapshot shutdown timer reset with delay %s, want %s", delay, daemon.SnapshotShutdownTimeout())
-	}
-	t.stopped.Store(false)
-	return false
-}
-func (t *lifecycleManualTimer) Stop() bool { return !t.stopped.Swap(true) }
-func (t *lifecycleManualTimer) fire() {
-	if t.stopped.Load() {
-		return
-	}
-	select {
-	case t.ch <- time.Now():
-	default:
-	}
-}
-
 func TestLifecycleManualTimerRepeatedFireIsNonBlocking(t *testing.T) {
-	timer := &lifecycleManualTimer{t: t, ch: make(chan time.Time, 1)}
+	_, timer := newLifecycleTimerMock(t)
 	timer.fire()
 
 	returned := make(chan struct{})

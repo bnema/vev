@@ -104,7 +104,7 @@ func TestProductionBrokerFirstHostAdd(t *testing.T) {
 	require.NoError(t, os.WriteFile(productionBrokerConfigPath(), raw, 0600))
 	var registered domain.RemoteRegistration
 	for i := 0; i < 2; i++ {
-		deps, ready := testBrokerServeDeps(newSandboxClock())
+		deps, ready := testBrokerServeDeps(idleSandboxClock(t))
 		ctx, cancel := context.WithCancel(context.Background())
 		done := runSandbox(ctx, brokerServeOptions{}, deps)
 		socket := awaitSandboxReady(t, ready, done)

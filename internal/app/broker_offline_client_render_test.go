@@ -240,8 +240,8 @@ func TestBrokerClientConnectingNoticeIsDelayed(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			connecting := client.State{Presentation: client.PresentConnecting, Connectivity: client.ConnectivityReady, Generation: 1, SlowConnecting: tt.slow}
 			terminal, state := newTerminalMock(t, domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
-			clock := newSandboxClock()
-			presentation := &brokerClientPresentation{terminal: terminal, picker: offlineRenderPicker(t), clock: clock}
+			clk, clock := newSandboxClockMock(t)
+			presentation := &brokerClientPresentation{terminal: terminal, picker: offlineRenderPicker(t), clock: clk}
 			for i, step := range tt.steps {
 				clock.Advance(step)
 				if tt.reset && i == len(tt.steps)-1 {
@@ -260,8 +260,8 @@ func TestBrokerClientConnectingNoticeIsDelayed(t *testing.T) {
 // notice becomes due, and a fresh timer after a transition ends.
 func TestBrokerClientSpinnerTimer(t *testing.T) {
 	terminal, state := newTerminalMock(t, domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
-	clock := newSandboxClock()
-	presentation := &brokerClientPresentation{terminal: terminal, picker: offlineRenderPicker(t), clock: clock}
+	clk, clock := newSandboxClockMock(t)
+	presentation := &brokerClientPresentation{terminal: terminal, picker: offlineRenderPicker(t), clock: clk}
 	connecting := client.State{Presentation: client.PresentConnecting, Connectivity: client.ConnectivityReady, Generation: 1}
 
 	presentation.Render(client.State{Presentation: client.PresentPicker, Connectivity: client.ConnectivityReady, Generation: 1})
