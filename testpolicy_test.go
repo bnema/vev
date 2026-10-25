@@ -29,6 +29,19 @@ import (
 // of AGENTS.md on every *_test.go file in the module. It uses only the
 // standard library: go/ast for the syntactic rules and go/types (fed by the
 // export data reported by `go list -export`) for the double detection.
+//
+// Limits of rule 4 (hand-written doubles):
+//   - generic interfaces and generic types are skipped;
+//   - only mocked interfaces of the package under test and of its direct
+//     imports are considered;
+//   - packages are type-checked with the host GOOS and build tags, so files
+//     for other platforms or tags are only syntax-checked (rules 1-3), never
+//     type-checked for doubles.
+//
+// Rules 1-3 are syntactic: time functions are matched on the resolved import
+// name of "time" (calls and plain value uses), dot-imports of "time" and
+// "testing/synctest" are rejected, and rule 1 ignores selectors on packages
+// other than testify's require and assert.
 
 const (
 	policyHint = "see AGENTS.md sections \"Test doubles\" and \"Time and concurrency\""
@@ -85,9 +98,6 @@ func policyExcludedPath(rel string) bool {
 		if seg == ".worktrees" || seg == "vendor" || seg == "testdata" {
 			return true
 		}
-	}
-	if strings.HasSuffix(rel, "_mock_test.go") {
-		return true
 	}
 	for _, dir := range excludedMockDirs {
 		if strings.HasPrefix(rel, dir) {
@@ -163,6 +173,31 @@ func importName(file *ast.File, path, def string) string {
 	return ""
 }
 
+// importedPackages maps each named import of file to its path, using the last
+// path element as the default name. Blank and dot imports are omitted.
+func importedPackages(file *ast.File) map[string]string {
+	out := make(map[string]string)
+	for _, spec := range file.Imports {
+		p, err := strconv.Unquote(spec.Path.Value)
+		if err != nil {
+			continue
+		}
+		name := p[strings.LastIndex(p, "/")+1:]
+		if spec.Name != nil {
+			name = spec.Name.Name
+		}
+		if name == "_" || name == "." {
+			continue
+		}
+		out[name] = p
+	}
+	return out
+}
+
+func isTestifyAssertPath(p string) bool {
+	return p == "github.com/stretchr/testify/require" || p == "github.com/stretchr/testify/assert"
+}
+
 // checkPolicySyntax applies rules 1-3 to one parsed file.
 func checkPolicySyntax(fset *token.FileSet, file *ast.File) []policyViolation {
 	timeName := importName(file, "time", "time")
@@ -177,9 +212,10 @@ func checkPolicySyntax(fset *token.FileSet, file *ast.File) []policyViolation {
 		}
 	}
 
-	isPkgCall := func(call *ast.CallExpr, pkg string) (string, bool) {
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok || pkg == "" || pkg == "_" || pkg == "." {
+	imported := importedPackages(file)
+
+	isPkgSel := func(sel *ast.SelectorExpr, pkg string) (string, bool) {
+		if pkg == "" || pkg == "_" || pkg == "." {
 			return "", false
 		}
 		id, ok := sel.X.(*ast.Ident)
@@ -189,9 +225,27 @@ func checkPolicySyntax(fset *token.FileSet, file *ast.File) []policyViolation {
 		return sel.Sel.Name, true
 	}
 
+	isPkgCall := func(call *ast.CallExpr, pkg string) (string, bool) {
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return "", false
+		}
+		return isPkgSel(sel, pkg)
+	}
+
 	var out []policyViolation
 	add := func(rule string, pos token.Pos, format string, args ...any) {
 		out = append(out, policyViolation{rule: rule, pos: fset.Position(pos), msg: fmt.Sprintf(format, args...)})
+	}
+
+	for _, spec := range file.Imports {
+		p, err := strconv.Unquote(spec.Path.Value)
+		if err != nil || spec.Name == nil || spec.Name.Name != "." {
+			continue
+		}
+		if p == "time" || p == "testing/synctest" {
+			add(ruleNoSleep, spec.Pos(), "dot-import of %q hides time and bubble use from the policy; use a named import", p)
+		}
 	}
 
 	type scope struct {
@@ -201,25 +255,36 @@ func checkPolicySyntax(fset *token.FileSet, file *ast.File) []policyViolation {
 	var walk func(node ast.Node, sc scope)
 	walk = func(node ast.Node, sc scope) {
 		ast.Inspect(node, func(n ast.Node) bool {
+			if sel, ok := n.(*ast.SelectorExpr); ok {
+				if pollingSelectors[sel.Sel.Name] {
+					other := false
+					if id, ok := sel.X.(*ast.Ident); ok {
+						if path, isPkg := imported[id.Name]; isPkg && !isTestifyAssertPath(path) {
+							other = true
+						}
+					}
+					if !other {
+						add(ruleNoPolling, sel.Pos(), "%s is a polling assertion; use synctest.Test with synctest.Wait", sel.Sel.Name)
+					}
+				}
+				if name, ok := isPkgSel(sel, timeName); ok {
+					switch {
+					case name == "Sleep":
+						line := fset.Position(sel.Pos()).Line
+						if !sc.bubble && !sleepDirectiveLines[line] && !sleepDirectiveLines[line-1] {
+							add(ruleNoSleep, sel.Pos(), "time.Sleep outside a synctest bubble (add a `//testpolicy:sleep <reason>` directive only for fake-time helpers)")
+						}
+					case realtimeFuncs[name]:
+						if !sc.bubble && !sc.realtime {
+							add(ruleNoRealtime, sel.Pos(), "time.%s outside a synctest bubble (mark the func `// real I/O: <reason>` or `//testpolicy:realtime <reason>`)", name)
+						}
+					}
+				}
+				return true
+			}
 			call, ok := n.(*ast.CallExpr)
 			if !ok {
 				return true
-			}
-			if sel, ok := call.Fun.(*ast.SelectorExpr); ok && pollingSelectors[sel.Sel.Name] {
-				add(ruleNoPolling, call.Pos(), "%s is a polling assertion; use synctest.Test with synctest.Wait", sel.Sel.Name)
-			}
-			if name, ok := isPkgCall(call, timeName); ok {
-				switch {
-				case name == "Sleep":
-					line := fset.Position(call.Pos()).Line
-					if !sc.bubble && !sleepDirectiveLines[line] && !sleepDirectiveLines[line-1] {
-						add(ruleNoSleep, call.Pos(), "time.Sleep outside a synctest bubble (add a `//testpolicy:sleep <reason>` directive only for fake-time helpers)")
-					}
-				case realtimeFuncs[name]:
-					if !sc.bubble && !sc.realtime {
-						add(ruleNoRealtime, call.Pos(), "time.%s outside a synctest bubble (mark the func `// real I/O: <reason>` or `//testpolicy:realtime <reason>`)", name)
-					}
-				}
 			}
 			if name, ok := isPkgCall(call, synctestName); ok && name == "Test" {
 				walk(call.Fun, sc)
@@ -334,6 +399,12 @@ func TestTestPolicyNegativeFixtures(t *testing.T) {
 		{"realtime directive without reason", "//testpolicy:realtime\nfunc pollUntil() { time.NewTicker(1) }", []string{ruleNoRealtime}},
 		{"timer in benchmark", "func BenchmarkX(b *testing.B) { <-time.After(1) }", nil},
 		{"timer in fuzz and example", "func FuzzX(f *testing.F) { time.Tick(1) }\nfunc ExampleX() { time.Tick(1) }", nil},
+		{"time.After as value", "func h() { f := time.After; _ = f }", []string{ruleNoRealtime}},
+		{"time.Sleep as value", "func h() { run(time.Sleep) }\nfunc run(func(time.Duration)) {}", []string{ruleNoSleep}},
+		{"time.After value in bubble", "func TestX(t *testing.T) { synctest.Test(t, func(t *testing.T) { f := time.After; _ = f }) }", nil},
+		{"polling on other package", "func h() { _ = testing.Eventually }", nil},
+		{"polling on non-package receiver", "func h(r interface{ Eventually() }) { r.Eventually() }", []string{ruleNoPolling}},
+		{"polling via assert package", "func h() { _ = require.Never }", []string{ruleNoPolling}},
 		{"sleep not allowed by real I/O", "// real I/O: sockets\nfunc TestX(t *testing.T) { time.Sleep(1) }", []string{ruleNoSleep}},
 	}
 	for _, tt := range tests {
@@ -369,10 +440,42 @@ func TestTestPolicyNegativeFixtures(t *testing.T) {
 		}
 	})
 
+	t.Run("dot imports", func(t *testing.T) {
+		src := "package p\nimport (\n\t. \"time\"\n\t. \"testing/synctest\"\n)\n"
+		fset := token.NewFileSet()
+		file, err := parsePolicyFile(fset, "fixture_test.go", src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		vs := checkPolicySyntax(fset, file)
+		if len(vs) != 2 || vs[0].rule != ruleNoSleep || vs[1].rule != ruleNoSleep {
+			t.Fatalf("violations = %v, want two %s violations", vs, ruleNoSleep)
+		}
+	})
+
+	t.Run("hand-written mock-named test file is scanned", func(t *testing.T) {
+		src := "package p\nimport \"time\"\nfunc h() { time.Sleep(1) }\n"
+		if policyExcludedPath("internal/app/foo_mock_test.go") {
+			t.Fatal("foo_mock_test.go must not be excluded by name")
+		}
+		fset := token.NewFileSet()
+		file, err := parsePolicyFile(fset, "foo_mock_test.go", src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if isGeneratedFile(file) {
+			t.Fatal("file without generated header reported as generated")
+		}
+		vs := checkPolicySyntax(fset, file)
+		if len(vs) != 1 || vs[0].rule != ruleNoSleep {
+			t.Fatalf("violations = %v, want one sleep violation", vs)
+		}
+	})
+
 	t.Run("excluded paths", func(t *testing.T) {
 		for path, want := range map[string]bool{
 			"internal/app/x_test.go":                 false,
-			"internal/app/lifecycle_mock_test.go":    true,
+			"internal/app/lifecycle_mock_test.go":    false,
 			"internal/ports/mocks/x_test.go":         true,
 			"internal/protocol/wire/mocks/x_test.go": true,
 			".worktrees/feat/internal/app/x_test.go": true,
