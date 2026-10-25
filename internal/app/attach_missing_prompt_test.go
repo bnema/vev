@@ -322,6 +322,7 @@ func TestConfirmMissingSessionCreate(t *testing.T) {
 // consuming an answer nobody was asked for. The input blocks forever, so a
 // prompt that reads it would only return on context expiry.
 // real I/O: the console is an os.Pipe and the output an on-disk file, which do not block durably in a bubble.
+// real I/O: os.Pipe console files.
 func TestConfirmMissingSessionCreateFailureAttaches(t *testing.T) {
 	closedOut, err := os.CreateTemp(t.TempDir(), "vev-console")
 	require.NoError(t, err)
@@ -360,6 +361,7 @@ func TestConfirmMissingSessionCreateFailureAttaches(t *testing.T) {
 // before it blocks on the answer, or the user waits in front of a blank
 // console and the question only shows up after the client repaints.
 // real I/O: the console is a pair of os.Pipe files driven through the real terminal adapter.
+// real I/O: os.Pipe console files.
 func TestConfirmMissingSessionCreateFlushesQuestion(t *testing.T) {
 	withAttachInteractiveConsole(t, true)
 	consoleIn, answers, err := os.Pipe()
@@ -421,6 +423,7 @@ func readAttachPrompt(t *testing.T, console *os.File) string {
 
 // TestTerminalIsInteractive covers the production probe on both sides of the
 // console check: a real terminal file and the streams that are not consoles.
+// real I/O: a real PTY, os.Pipe console files.
 func TestTerminalIsInteractive(t *testing.T) {
 	require.False(t, terminalIsInteractive(nil), "a missing terminal cannot prompt")
 	pty := openAttachPtySlave(t)

@@ -210,6 +210,7 @@ func TestProductionBrokerServeRejectsUnsafeRoot(t *testing.T) {
 	require.NoFileExists(t, filepath.Join(layout.Runtime, "lifecycle.lock"))
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestBrokerServeRoundTrip(t *testing.T) {
 	emptyProductionBrokerLayout(t, "")
 	policy := brokerTestPolicy()
@@ -320,6 +321,7 @@ func waitForSandboxShutdown(t *testing.T, clk *sandboxClockState, done <-chan er
 	}
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestBrokerServeIdleShutdownOnEmptyConfig(t *testing.T) {
 	layout := emptyProductionBrokerLayout(t, "")
 	clock, clk := newSandboxClockMock(t)
@@ -345,6 +347,7 @@ func requireOwnerLockReleased(t *testing.T, runtimeDir string) {
 	require.NoError(t, owner.Release())
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestBrokerServeCancelCleanup(t *testing.T) {
 	layout := emptyProductionBrokerLayout(t, "")
 	clock, _ := newSandboxClockMock(t)
@@ -383,6 +386,7 @@ func newWedgedListener(t *testing.T, err error, addr string) (*portsmocks.MockBr
 // TestBrokerServeShutsDownOnUnexpectedAcceptFailure proves an unexpected
 // terminal accept failure commits shutdown and drains the listener, instead of
 // leaving a bound broker whose socket can no longer admit work.
+// real I/O: real unix-socket broker/daemon stack.
 func TestBrokerServeShutsDownOnUnexpectedAcceptFailure(t *testing.T) {
 	layout := emptyProductionBrokerLayout(t, "")
 	clock, _ := newSandboxClockMock(t)
@@ -408,6 +412,7 @@ func TestBrokerServeShutsDownOnUnexpectedAcceptFailure(t *testing.T) {
 
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestBrokerServeRefusesDuplicateOwnership(t *testing.T) {
 	emptyProductionBrokerLayout(t, "")
 	clock, _ := newSandboxClockMock(t)

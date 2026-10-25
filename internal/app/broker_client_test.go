@@ -808,6 +808,7 @@ func TestTerminalCompositionUsesTheBrokerConnector(t *testing.T) {
 // Name equal to the exact target's session name, ExactTarget set) is accepted
 // and answered with a committed Welcome. It fails if the strict Hello contract
 // and the worker disagree about the name.
+// real I/O: real unix-socket broker/daemon stack.
 func TestTerminalExactAttachAcceptedByRealDaemon(t *testing.T) {
 	fixture := startOfflineClientFixture(t)
 	ctx, cancel := context.WithTimeout(context.Background(), brokerTestWait)
@@ -854,6 +855,7 @@ func TestTerminalExactAttachAcceptedByRealDaemon(t *testing.T) {
 // notice, opens no stream, and never invents a creation or a same-name
 // fallback. It pins the honest refusal so a future broker-side local catalogue
 // is the only thing that can make this navigation succeed.
+// real I/O: real unix-socket broker/daemon stack.
 func TestTerminalCompositionExactAttachReportsMissingLocalInventory(t *testing.T) {
 	fixture := startOfflineClientFixture(t)
 	ctx, cancel := context.WithTimeout(context.Background(), brokerTestWait)

@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// real I/O: a real PTY, os.Pipe console files.
 func TestInteractiveObservationPublishesPhysicalWriterTransaction(t *testing.T) {
 	inputReader, inputWriter, err := os.Pipe()
 	require.NoError(t, err)

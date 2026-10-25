@@ -31,6 +31,10 @@ type brokerServiceState struct {
 	// Nil refuses every open as a closed admission.
 	openStream func(ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error)
 
+	// openedSignal receives one signal (coalesced) per admitted OpenStream, so a
+	// test waits for an admission instead of polling the recorded requests.
+	openedSignal chan struct{}
+
 	done      chan struct{}
 	doneOnce  sync.Once
 	closed    bool
@@ -136,7 +140,7 @@ func (s *brokerServiceState) streamHello(t *testing.T) protocol.Hello {
 func newBrokerServiceMock(t *testing.T, snapshot ports.BrokerSnapshot, opts ...func(*portsmocks.MockBrokerService, *brokerServiceState)) (*portsmocks.MockBrokerService, *brokerServiceState) {
 	t.Helper()
 	service := portsmocks.NewMockBrokerService(t)
-	state := &brokerServiceState{connectionID: ports.BrokerConnectionID{4}, done: make(chan struct{})}
+	state := &brokerServiceState{connectionID: ports.BrokerConnectionID{4}, done: make(chan struct{}), openedSignal: make(chan struct{}, 1)}
 	for _, opt := range opts {
 		opt(service, state)
 	}
@@ -180,6 +184,10 @@ func newBrokerServiceMock(t *testing.T, snapshot ports.BrokerSnapshot, opts ...f
 		state.opened = append(state.opened, request)
 		open := state.openStream
 		state.mu.Unlock()
+		select {
+		case state.openedSignal <- struct{}{}:
+		default:
+		}
 		if open == nil {
 			return nil, ports.BrokerAdmissionClosed
 		}

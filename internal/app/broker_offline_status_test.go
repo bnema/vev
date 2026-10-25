@@ -344,6 +344,7 @@ func TestBrokerStatusEnsureHonorsCancellation(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestProbeBrokerStatusClassifiesAbsenceAndIncompatibility(t *testing.T) {
 	layout := emptyProductionBrokerLayout(t, "")
 	socketPath := brokeripc.SocketPath(layout.Runtime)
@@ -384,6 +385,7 @@ func TestProbeBrokerStatusClassifiesAbsenceAndIncompatibility(t *testing.T) {
 	})
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestProbeBrokerStatusSilentRegistrationIsBounded(t *testing.T) {
 	layout := emptyProductionBrokerLayout(t, "")
 	socketPath := brokeripc.SocketPath(layout.Runtime)

@@ -94,6 +94,7 @@ func TestCanonicalBrokerRoutesSelectProductionHelpers(t *testing.T) {
 
 // The real production composition starts with no remote import. The first IPC
 // add must succeed and the same running registry must retain it across restart.
+// real I/O: real unix-socket broker/daemon stack.
 func TestProductionBrokerFirstHostAdd(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", shortTempDir(t, "vevroute"))
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
@@ -122,6 +123,7 @@ func TestProductionBrokerFirstHostAdd(t *testing.T) {
 	}
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestBrokerDynamicConnectorDialsDurableRouteWithoutConfigEntry(t *testing.T) {
 	policy := brokerTestPolicy()
 	fixture := newBrokerMuxFixture(t, policy)

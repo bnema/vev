@@ -254,6 +254,7 @@ func awaitUITerminalMarker(t *testing.T, terminal *uiterm.Terminal, marker strin
 // broker fixture persists a named session but never an ephemeral one: the
 // durable catalogue holds exactly the named record after both lifecycles, so
 // the ephemeral session survives only while its daemon does.
+// real I/O: real unix-socket broker/daemon stack.
 func TestOfflineEphemeralSessionIsNotPersistedViaBroker(t *testing.T) {
 	fixture := startPersistentOfflineClientFixture(t, "/bin/sh",
 		[]string{"-c", "sleep 0.1; printf ephemeral-ready; trap : TERM; while :; do read line || exit; done"}, true)
@@ -302,6 +303,7 @@ func TestOfflineEphemeralSessionIsNotPersistedViaBroker(t *testing.T) {
 	}
 }
 
+// real I/O: real unix-socket broker/daemon stack, a real PTY.
 func TestOfflineClientTerminalReachesSessionThroughBrokerIPC(t *testing.T) {
 	fixture := startOfflineClientFixture(t)
 	ctx, cancel := context.WithCancel(t.Context())
@@ -328,6 +330,7 @@ func TestOfflineClientTerminalReachesSessionThroughBrokerIPC(t *testing.T) {
 // runUIDriverClient tests in ui_driver_client_test.go; the harness is the same
 // runUIDriverClient call production uses, so it is not re-tested here.
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestOfflineBrokerSharedTransportKeepsAttachmentsIndependent(t *testing.T) {
 	fixture := startOfflineClientFixture(t)
 	ctx, cancel := context.WithTimeout(context.Background(), brokerTestWait)
@@ -415,6 +418,7 @@ func TestOfflineBrokerSharedTransportKeepsAttachmentsIndependent(t *testing.T) {
 	}
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestOfflineBrokerPhysicalLossSettlesEverySharedStream(t *testing.T) {
 	fixture := startOfflineClientFixture(t)
 	ctx, cancel := context.WithTimeout(context.Background(), brokerTestWait)
@@ -539,6 +543,7 @@ func receiveOfflineMessage(t *testing.T, connection ports.BrokerLogicalConnectio
 	return nil
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestOfflineClientBrowserReachesSessionThroughBrokerIPC(t *testing.T) {
 	fixture := startOfflineClientFixture(t)
 	ctx, cancel := context.WithCancel(t.Context())

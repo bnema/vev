@@ -318,6 +318,7 @@ func mustHelloBytes() []byte {
 	return raw
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestIntegration_MalformedCommandPreservesVersionAndRequestID(t *testing.T) {
 	versionMismatch, err := sessionwire.EncodeClientMessage(protocol.CommandRequest{
 		Version: protocol.Version + 1, RequestID: 42, Slug: "list-sessions",
@@ -545,6 +546,7 @@ func displayShellFixture(t *testing.T) string {
 	return path
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestIntegration_AttachEnvironmentRefreshesFuturePTYChildren(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	dir, _ := startDaemon(t)
@@ -579,6 +581,7 @@ func TestIntegration_AttachEnvironmentRefreshesFuturePTYChildren(t *testing.T) {
 	assertChildEnvironment(t, tr2, p2, sz, "first", firstShell, "/run/second", "wayland-second")
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestIntegration_TwoAttachmentsReceiveSharedMutationPTYOutput(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	dir, _ := startDaemon(t)
@@ -622,6 +625,7 @@ func TestIntegration_TwoAttachmentsReceiveSharedMutationPTYOutput(t *testing.T) 
 	awaitText(t, p1, sz, sharedOutput)
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestIntegration_AttachFirstOutput(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	dir, _ := startDaemon(t, daemon.WithShell("/bin/sh", []string{"-c", "printf HELLO; sleep 30"}))
@@ -632,6 +636,7 @@ func TestIntegration_AttachFirstOutput(t *testing.T) {
 	awaitText(t, p, sz, "HELLO")
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestIntegration_InputRoundtrip(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	dir, _ := startDaemon(t, daemon.WithShell("/bin/cat", nil))
@@ -643,6 +648,7 @@ func TestIntegration_InputRoundtrip(t *testing.T) {
 	awaitText(t, p, sz, "PINGPONG")
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestIntegration_CommandPaletteCreatesTab(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	dir, _ := startDaemon(t, daemon.WithShell("/bin/sh", []string{"-c", "printf READY; sleep 30"}))
@@ -662,6 +668,7 @@ func TestIntegration_CommandPaletteCreatesTab(t *testing.T) {
 	require.Contains(t, text, " 1 (sh)  2 (sh) ")
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestIntegration_CommandPaletteRenamesEphemeralSession(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	dir, _ := startDaemon(t, daemon.WithShell("/bin/sh", []string{"-c", "printf READY; sleep 30"}))
@@ -695,6 +702,7 @@ func TestIntegration_CommandPaletteRenamesEphemeralSession(t *testing.T) {
 	require.False(t, sessions.Sessions[0].Ephemeral)
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestIntegration_AltCWithoutPaletteDoesNotCreateTab(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	dir, _ := startDaemon(t, daemon.WithShell("/bin/sh", []string{"-c", "printf READY; sleep 30"}))
@@ -708,6 +716,7 @@ func TestIntegration_AltCWithoutPaletteDoesNotCreateTab(t *testing.T) {
 	assertNoTextAfterInput(t, p, sz, " 1  2 ")
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestIntegration_EphemeralSurvivesDetachAndReattaches(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	dir, served := startDaemon(t, daemon.WithShell("/bin/sh", []string{"-c", "printf MARKER; sleep 30"}))
@@ -736,6 +745,7 @@ func TestIntegration_EphemeralSurvivesDetachAndReattaches(t *testing.T) {
 	}
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestIntegration_EphemeralNotListedAfterDaemonRestart(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	stateRoot, runtimeRoot := t.TempDir(), t.TempDir()
@@ -771,6 +781,7 @@ func TestIntegration_EphemeralNotListedAfterDaemonRestart(t *testing.T) {
 	}
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestIntegration_KillDaemonPreservesMultipleNamedSessions(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	stateDir := filepath.Join(t.TempDir(), "state")
@@ -834,6 +845,7 @@ func TestIntegration_KillDaemonPreservesMultipleNamedSessions(t *testing.T) {
 	}
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestIntegration_NamedSurvivesReattach(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	dir, served := startDaemon(t, daemon.WithShell("/bin/sh", []string{"-c", "printf MARKER; sleep 30"}))
@@ -865,6 +877,7 @@ func TestIntegration_NamedSurvivesReattach(t *testing.T) {
 // A named session's final live removal is a durable purge, so the re-attached
 // name carries a fresh persisted incarnation rather than resuming the deleted
 // one.
+// real I/O: real unix-socket broker/daemon stack.
 func TestIntegration_NamedSessionLastRemovalKeepsDaemonServing(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	stateDir := filepath.Join(t.TempDir(), "state")
@@ -892,8 +905,10 @@ func TestIntegration_NamedSessionLastRemovalKeepsDaemonServing(t *testing.T) {
 	// shutdown in the P4.1 model.
 	require.NoError(t, killNamedSession(dir, "work"))
 	awaitDetached(t, p1, protocol.ReasonSessionKilled)
-	require.Eventually(t, func() bool { return len(listRemoteSessions(t, dir).Sessions) == 0 },
-		5*time.Second, 10*time.Millisecond, "session was not removed")
+	// The daemon is reached only through a listing request and publishes no
+	// event, so this polls.
+	require.True(t, pollUntil(5*time.Second, func() bool { return len(listRemoteSessions(t, dir).Sessions) == 0 }),
+		"session was not removed")
 	select {
 	case err := <-served:
 		t.Fatalf("Serve stopped after the last session was removed: %v", err)
@@ -934,6 +949,7 @@ func TestIntegration_NamedSessionLastRemovalKeepsDaemonServing(t *testing.T) {
 // session as its only registry entry, which preserves it as stopped authority;
 // the daemon under test then resumes it over a real socket with the production
 // catalogue/recovery/snapshot options and serves a fresh operation.
+// real I/O: real unix-socket broker/daemon stack.
 func TestIntegration_NamedSessionRestoresPersistedIdentity(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	stateDir := filepath.Join(t.TempDir(), "state")
@@ -965,10 +981,12 @@ func TestIntegration_NamedSessionRestoresPersistedIdentity(t *testing.T) {
 	conn, p := attach(t, dir, protocol.IntentAttach, name, sz)
 	require.NoError(t, conn.SendClient(protocol.Input{Data: []byte("revived\n")}))
 	awaitText(t, p, sz, "revived")
-	require.Eventually(t, func() bool {
+	// The daemon is reached only through a listing request and publishes no
+	// event, so this polls.
+	require.True(t, pollUntil(5*time.Second, func() bool {
 		sessions := listRemoteSessions(t, dir).Sessions
 		return len(sessions) == 1 && sessions[0].State == protocol.SessionUp
-	}, 5*time.Second, 10*time.Millisecond, "named session was not restored")
+	}), "named session was not restored")
 
 	restored, ok, err := opened.Catalogue.Record(name)
 	require.NoError(t, err)
@@ -993,6 +1011,7 @@ func TestIntegration_NamedSessionRestoresPersistedIdentity(t *testing.T) {
 	}
 }
 
+// real I/O: real flock lifecycle locks.
 func TestMultipleClientsOneLifecycleOwner(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "runtime")
 	owner, err := lifecycle.TryAcquire(dir)
@@ -1048,6 +1067,7 @@ func TestMultipleClientsOneLifecycleOwner(t *testing.T) {
 	require.Zero(t, spawns.Load())
 }
 
+// real I/O: real unix-socket broker/daemon stack, a real PTY, real flock lifecycle locks.
 func TestLifecycleOwnershipOutlivesMaintenanceWriter(t *testing.T) {
 	runtimeDir := filepath.Join(t.TempDir(), "runtime")
 	stateDir := filepath.Join(t.TempDir(), "state")
@@ -1122,6 +1142,7 @@ func TestLifecycleOwnershipOutlivesMaintenanceWriter(t *testing.T) {
 	require.NoError(t, owner.Release())
 }
 
+// real I/O: real flock lifecycle locks.
 func TestLifecycleOwnershipOutlivesSnapshotWriter(t *testing.T) {
 	result := runBlockedSnapshotWriterShutdown(t)
 	assertLifecycleStagePending(t, result.callbackReturned, "Serve callback return while snapshot writer is blocked")
@@ -1147,6 +1168,7 @@ func TestLifecycleCallbackWaitsForEveryWriter(t *testing.T) {
 	require.NoError(t, awaitLifecycleResult(t, result.wrapperReturned, "lifecycle wrapper return"))
 }
 
+// real I/O: real flock lifecycle locks.
 func TestFinalCheckpointTimeoutKeepsOwner(t *testing.T) {
 	result := runBlockedSnapshotWriterShutdown(t)
 	assertLifecycleResultPending(t, result.wrapperReturned, "ownership release after checkpoint timeout with writer alive")
@@ -1161,6 +1183,7 @@ func TestFinalCheckpointTimeoutKeepsOwner(t *testing.T) {
 // records. Lifecycle ownership must therefore outlive it: releasing the flock
 // while a restoration repository call is still running would let a second
 // daemon mutate the same durable state.
+// real I/O: real unix-socket broker/daemon stack, a real PTY, real flock lifecycle locks.
 func TestLifecycleOwnershipOutlivesRestorationWriter(t *testing.T) {
 	stateDir := filepath.Join(t.TempDir(), "state")
 	repository := snapshot.NewRepository(filepath.Join(stateDir, "snapshots"))
@@ -1272,10 +1295,11 @@ func publishRestorableCheckpoint(t *testing.T, stateDir string, repository *snap
 
 	tr, _ := attach(t, runtimeDir, protocol.IntentNew, name, domain.Size{Cols: 80, Rows: 24})
 	require.NoError(t, tr.SendClient(protocol.Input{Data: []byte("checkpoint me\n")}))
-	require.Eventually(t, func() bool {
+	// The checkpoint lands in the on-disk catalogue, which publishes no event.
+	require.True(t, pollUntil(5*time.Second, func() bool {
 		record, ok, _ := opened.Catalogue.Record(name)
 		return ok && record.Committed != nil && record.DegradedReason == ""
-	}, 5*time.Second, 10*time.Millisecond, "session never committed a checkpoint")
+	}), "session never committed a checkpoint")
 	require.NoError(t, tr.Close())
 
 	cancel()
@@ -1341,10 +1365,12 @@ func runBlockedSnapshotWriterShutdown(t *testing.T) blockedSnapshotWriterShutdow
 	require.NoError(t, tr.SendClient(protocol.Input{Data: []byte("dirty state\n")}))
 	awaitLifecycleStage(t, writer.entered, "snapshot publication")
 	require.NoError(t, tr.Close())
-	require.Eventually(t, func() bool {
+	// The daemon is reached only through a listing request and publishes no
+	// event, so this polls.
+	require.True(t, pollUntil(time.Second, func() bool {
 		sessions := listRemoteSessions(t, runtimeDir)
 		return len(sessions.Sessions) == 1 && !sessions.Sessions[0].Attached
-	}, time.Second, 10*time.Millisecond)
+	}), "the detached session was never listed as unattached")
 	cancel()
 	awaitLifecycleStage(t, listenerClosed, "listener close")
 
@@ -1389,6 +1415,7 @@ func TestLifecycleManualTimerRepeatedFireIsNonBlocking(t *testing.T) {
 	})
 }
 
+// real I/O: real unix-socket broker/daemon stack, a real PTY, real flock lifecycle locks.
 func TestLifecycleSocketCloseCatalogueRace(t *testing.T) {
 	runtimeDir := filepath.Join(t.TempDir(), "runtime")
 	stateDir := filepath.Join(t.TempDir(), "state")
@@ -1571,6 +1598,7 @@ func assertNewDaemonStartupPending(t *testing.T, durableOpen, listen <-chan stru
 // daemon serving, and the same process accepts fresh named and ephemeral
 // sessions that start PTYs, forward input, and open a tab through the ordinary
 // command palette. Only the distinct explicit daemon stop ends it.
+// real I/O: real unix-socket broker/daemon stack, a real PTY.
 func TestIntegration_KillSessionsPurgesSessionsAndKeepsDaemon(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	dir, served := startDaemon(t, daemon.WithShell("/bin/cat", nil))
@@ -1592,8 +1620,10 @@ func TestIntegration_KillSessionsPurgesSessionsAndKeepsDaemon(t *testing.T) {
 		t.Fatalf("KillAll stopped Serve: %v", err)
 	default:
 	}
-	require.Eventually(t, func() bool { return len(listRemoteSessions(t, dir).Sessions) == 0 },
-		5*time.Second, 10*time.Millisecond, "kill-all did not purge every session")
+	// The daemon is reached only through a listing request and publishes no
+	// event, so this polls.
+	require.True(t, pollUntil(5*time.Second, func() bool { return len(listRemoteSessions(t, dir).Sessions) == 0 }),
+		"kill-all did not purge every session")
 
 	// Reuse: a fresh named session starts its PTY and forwards input.
 	third, thirdPump := attach(t, dir, protocol.IntentNew, "again", sz)
@@ -1608,14 +1638,16 @@ func TestIntegration_KillSessionsPurgesSessionsAndKeepsDaemon(t *testing.T) {
 	require.NoError(t, third.SendClient(protocol.Input{Data: []byte("\x1b ")}))
 	awaitText(t, thirdPump, sz, "Commands")
 	require.NoError(t, third.SendClient(protocol.Input{Data: []byte("CNT\r")}))
-	require.Eventually(t, func() bool {
+	// The daemon is reached only through a listing request and publishes no
+	// event, so this polls.
+	require.True(t, pollUntil(5*time.Second, func() bool {
 		for _, info := range listRemoteSessions(t, dir).Sessions {
 			if info.Name == "again" {
 				return info.Tabs == 2
 			}
 		}
 		return false
-	}, 5*time.Second, 10*time.Millisecond, "a tab created after the purge was not published")
+	}), "a tab created after the purge was not published")
 
 	_ = first.Close()
 	require.NoError(t, third.Close())

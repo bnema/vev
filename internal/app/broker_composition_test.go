@@ -85,6 +85,7 @@ func startProductionBrokerFixture(t *testing.T) (ports.BrokerService, context.Co
 	return service, ctx
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestProductionBrokerCompositionLocalAndMutableRemote(t *testing.T) {
 	service, ctx := startProductionBrokerFixture(t)
 	sub, err := service.Subscribe()
@@ -126,6 +127,7 @@ func TestProductionBrokerCompositionLocalAndMutableRemote(t *testing.T) {
 // Both production remote transports are reached through mutable AddHost,
 // never through a broker.json fixture route. SSH is replaced by an owned test
 // shim; the remote mux helper and daemon are real subprocesses.
+// real I/O: real unix-socket broker/daemon stack.
 func TestProductionBrokerRemoteMuxTransports(t *testing.T) {
 	for _, tc := range []struct {
 		name, helper string

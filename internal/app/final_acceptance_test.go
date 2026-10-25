@@ -65,6 +65,7 @@ func awaitAcceptanceCommandResult(t *testing.T, tr ports.ClientConnection, p *ty
 	return awaitAcceptanceCommand(t, p, requestID)
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestAcceptanceTwoLocalAttachmentsKeepViewsOverTransports(t *testing.T) {
 	size := domain.Size{Cols: 80, Rows: 24}
 	dir, _ := startDaemon(t, daemon.WithShell("/bin/cat", nil))
@@ -131,6 +132,7 @@ func TestAcceptanceTwoLocalAttachmentsKeepViewsOverTransports(t *testing.T) {
 	awaitText(t, secondPump, size, "PEER_SURVIVES")
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestAcceptanceAttachedCommandUsesItsConnectionOnly(t *testing.T) {
 	size := domain.Size{Cols: 80, Rows: 24}
 	dir, _ := startDaemon(t, daemon.WithShell("/bin/cat", nil))

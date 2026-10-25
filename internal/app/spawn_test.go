@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"sync"
@@ -59,14 +60,22 @@ func TestMain(m *testing.M) {
 				os.Exit(2)
 			}
 			if releaseFile := os.Getenv(spawnTestReleaseFileEnv); releaseFile != "" {
-				deadline := time.Now().Add(5 * time.Second)
-				for {
-					if _, err := os.Stat(releaseFile); err == nil {
-						break
-					} else if !errors.Is(err, os.ErrNotExist) || !time.Now().Before(deadline) {
-						os.Exit(2)
+				// The release marker is a file appearing on disk, which publishes
+				// no event, so the helper polls for it.
+				released := false
+				failed := false
+				pollUntil(5*time.Second, func() bool {
+					_, err := os.Stat(releaseFile)
+					switch {
+					case err == nil:
+						released = true
+					case !errors.Is(err, os.ErrNotExist):
+						failed = true
 					}
-					time.Sleep(10 * time.Millisecond)
+					return released || failed
+				})
+				if !released {
+					os.Exit(2)
 				}
 			}
 			os.Exit(0)
@@ -83,14 +92,17 @@ func TestMain(m *testing.M) {
 			if err := writeProcessRecord(path); err != nil {
 				os.Exit(2)
 			}
-			for {
-				time.Sleep(time.Hour)
-			}
+			// Live until killed: a registered signal keeps the runtime from
+			// declaring the blocked main goroutine a deadlock, and SIGTERM still
+			// terminates the process.
+			signal.Notify(make(chan os.Signal, 1), syscall.SIGUSR2)
+			select {}
 		}
 	}
 	os.Exit(m.Run())
 }
 
+// real I/O: real subprocesses.
 func TestRealSpawnWaitsForLauncherExitAndDoesNotPropagateTrace(t *testing.T) {
 	dir := t.TempDir()
 	childFile := filepath.Join(dir, "daemon.pid")
@@ -161,38 +173,42 @@ func TestRealSpawnWaitsForLauncherExitAndDoesNotPropagateTrace(t *testing.T) {
 
 func waitForProcessRecord(t *testing.T, path string) int {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		data, err := os.ReadFile(path)
-		if err == nil {
-			pid, err := strconv.Atoi(string(data))
-			if err != nil {
-				t.Fatalf("parse process record %s: %v", filepath.Base(path), err)
-			}
-			return pid
-		}
-		if !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("read process record %s: %v", filepath.Base(path), err)
-		}
-		time.Sleep(10 * time.Millisecond)
+	var data []byte
+	var readErr error
+	// A process record appearing on disk publishes no event, so this polls.
+	if !pollUntil(2*time.Second, func() bool {
+		data, readErr = os.ReadFile(path)
+		return readErr == nil || !errors.Is(readErr, os.ErrNotExist)
+	}) {
+		t.Fatalf("process did not write %s", filepath.Base(path))
 	}
-	t.Fatalf("process did not write %s", filepath.Base(path))
-	return 0
+	if readErr != nil {
+		t.Fatalf("read process record %s: %v", filepath.Base(path), readErr)
+	}
+	pid, err := strconv.Atoi(string(data))
+	if err != nil {
+		t.Fatalf("parse process record %s: %v", filepath.Base(path), err)
+	}
+	return pid
 }
 
 func waitForProcessExit(pid int, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
+	var probeErr error
+	// A process disappearing publishes no event to a non-parent, so this polls.
+	if !pollUntil(timeout, func() bool {
 		err := syscall.Kill(pid, 0)
 		if errors.Is(err, syscall.ESRCH) {
-			return nil
+			return true
 		}
 		if err != nil && !errors.Is(err, syscall.EPERM) {
-			return err
+			probeErr = err
+			return true
 		}
-		time.Sleep(10 * time.Millisecond)
+		return false
+	}) {
+		return fmt.Errorf("process %d did not exit within %s", pid, timeout)
 	}
-	return fmt.Errorf("process %d did not exit within %s", pid, timeout)
+	return probeErr
 }
 
 func writeProcessRecord(path string) error {
@@ -210,16 +226,14 @@ func blockBrokerLauncherHelper(record, release string) {
 	if err := writeProcessRecord(record); err != nil {
 		os.Exit(2)
 	}
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		_, statErr := os.Stat(release)
-		if statErr == nil {
-			break
-		}
-		if !errors.Is(statErr, os.ErrNotExist) {
-			os.Exit(2)
-		}
-		time.Sleep(10 * time.Millisecond)
+	// The release marker is a file appearing on disk, which publishes no event.
+	var statErr error
+	pollUntil(30*time.Second, func() bool {
+		_, statErr = os.Stat(release)
+		return statErr == nil || !errors.Is(statErr, os.ErrNotExist)
+	})
+	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+		os.Exit(2)
 	}
 	os.Exit(0)
 }
@@ -242,6 +256,7 @@ func terminateProcessFromFile(path string) error {
 	return waitForProcessExit(pid, 2*time.Second)
 }
 
+// real I/O: real flock lifecycle locks.
 func TestAcquireSpawnLockSingleWinnerUnderRace(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "vev")
 	const racers = 16
@@ -284,6 +299,7 @@ func TestAcquireSpawnLockSingleWinnerUnderRace(t *testing.T) {
 	release()
 }
 
+// real I/O: real flock lifecycle locks.
 func TestAcquireSpawnLockTakesOverStaleLock(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "vev")
 	if err := os.Mkdir(dir, 0o700); err != nil {

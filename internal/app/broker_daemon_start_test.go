@@ -434,6 +434,7 @@ func TestDaemonStartDoesNotSpawnOnNonAbsenceFailure(t *testing.T) {
 // would take it, and the carriage becomes dialable once that "spawner" finishes.
 // The starter therefore records zero spawns of its own, every caller converges
 // on the published carriage, and no caller ever holds the lock itself.
+// real I/O: real flock lifecycle locks.
 func TestDaemonStartConcurrentRequestsShareOneElection(t *testing.T) {
 	isolateSandboxEnv(t)
 	dir, carriage := testDaemonCarriage(t)
@@ -472,13 +473,20 @@ func TestDaemonStartConcurrentRequestsShareOneElection(t *testing.T) {
 		}()
 	}
 	// Publish the daemon the held election is starting, as its spawner does.
+	published := make(chan struct{})
 	go func() {
 		<-start
 		scripted.markRunning()
+		close(published)
 	}()
 	close(start)
 	// The held election ends once the carriage answers.
-	require.Eventually(t, func() bool { return scripted.isRunning() }, brokerTestWait, time.Millisecond)
+	select {
+	case <-published:
+	case <-time.After(brokerTestWait):
+		t.Fatal("the scripted daemon never published its carriage")
+	}
+	require.True(t, scripted.isRunning())
 	release()
 	wg.Wait()
 
@@ -565,6 +573,7 @@ func TestDaemonStartPropagatesTheWholeTarget(t *testing.T) {
 // TestDaemonStartNeverFallsBackToASessionDial proves structurally that the
 // start path owns no session carriage: it never dials the daemon's public
 // session socket and never wraps a session transport.
+// real I/O: real unix-socket broker/daemon stack, real flock lifecycle locks.
 func TestDaemonStartNeverFallsBackToASessionDial(t *testing.T) {
 	sources := loadAppSources(t, false)
 	body, ok := sources["broker_daemon_start.go"]

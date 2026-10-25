@@ -622,6 +622,7 @@ func TestBrokerMuxDialStalledBootstrapUsesSetupTimeout(t *testing.T) {
 
 // TestBrokerServeUnixRouteRoundTrip proves the transport selector also handles
 // the explicit unix route variant, not just the legacy path string.
+// real I/O: real unix-socket broker/daemon stack.
 func TestBrokerServeUnixRouteRoundTrip(t *testing.T) {
 	newMuxTestEnv(t)
 	fixture := newBrokerMuxFixture(t, brokerTestPolicy())
@@ -727,19 +728,18 @@ func readFileString(t *testing.T, path string) string {
 
 func readPID(t *testing.T, path string) int {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		raw, err := os.ReadFile(path)
-		if err == nil {
-			pid, convErr := strconv.Atoi(strings.TrimSpace(string(raw)))
-			require.NoError(t, convErr)
-			return pid
-		}
-		if !time.Now().Before(deadline) {
-			t.Fatalf("read pid file %s: %v", path, err)
-		}
-		time.Sleep(10 * time.Millisecond)
+	var raw []byte
+	var readErr error
+	// A pid file appearing on disk publishes no event, so this polls.
+	if !pollUntil(3*time.Second, func() bool {
+		raw, readErr = os.ReadFile(path)
+		return readErr == nil
+	}) {
+		t.Fatalf("read pid file %s: %v", path, readErr)
 	}
+	pid, convErr := strconv.Atoi(strings.TrimSpace(string(raw)))
+	require.NoError(t, convErr)
+	return pid
 }
 
 func indexOf(values []string, want string) int {

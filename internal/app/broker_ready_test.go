@@ -792,6 +792,7 @@ func TestBrokerReadyCancellationIsExitFiveAndClosesEverything(t *testing.T) {
 // TestBrokerReadyEndpointSecurityClassificationTable pins the endpoint check the
 // probe performs before any dial: absence is retryable, and a foreign path or an
 // uninspectable path is a terminal security failure.
+// real I/O: real unix-socket broker/daemon stack.
 func TestBrokerReadyEndpointSecurityClassificationTable(t *testing.T) {
 	t.Parallel()
 

@@ -210,6 +210,7 @@ func TestProductionBrokerConnectorIsLazy(t *testing.T) {
 // contract of the shared JSONL composition: a broker that can never be reached
 // neither prevents the discovery response nor ends the service, and the driver
 // keeps answering capture while it is stuck in the picker.
+// real I/O: a real PTY.
 func TestUIDriverClientReadyOnBrokerFailureKeepsServing(t *testing.T) {
 	startCtx := t.Context()
 	terminal, err := uiterm.New(startCtx, domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}, "")
@@ -282,6 +283,7 @@ func TestUIDriverClientRejectsMissingCompositionInputs(t *testing.T) {
 // TestUIDriverSandboxHarnessUsesItsOwnConnector pins the sandbox boundary: the
 // hidden harness reaches sessions only through the broker IPC connector of its
 // own offline root, and never through the production connect-or-spawn.
+// real I/O: real unix-socket broker/daemon stack.
 func TestUIDriverSandboxHarnessUsesItsOwnConnector(t *testing.T) {
 	productionConnects := 0
 	previousConnect := connectProductionClientBroker
@@ -306,6 +308,7 @@ func TestUIDriverSandboxHarnessUsesItsOwnConnector(t *testing.T) {
 // TestUIDriverSandboxHarnessPickerOpensNothing pins the sandbox picker start: no
 // initial navigation at all, so the harness reaches ready without creating a
 // session or attaching anything.
+// real I/O: real unix-socket broker/daemon stack.
 func TestUIDriverSandboxHarnessPickerOpensNothing(t *testing.T) {
 	fixture := startUIDriverBrokerFixture(t)
 	run := fixture.StartPickerDriver(t)
@@ -322,6 +325,7 @@ func TestUIDriverSandboxHarnessPickerOpensNothing(t *testing.T) {
 // TestUIDriverClientKeepsSharedDaemonOnEOF pins the EOF contract: closing a
 // driver's JSONL stream ends only that run. The daemon and the broker stay alive,
 // so a second driver reaches the same session afterwards.
+// real I/O: real unix-socket broker/daemon stack.
 func TestUIDriverClientKeepsSharedDaemonOnEOF(t *testing.T) {
 	fixture := startUIDriverBrokerFixture(t)
 	first := fixture.StartDriver(t)
@@ -342,6 +346,7 @@ func TestUIDriverClientKeepsSharedDaemonOnEOF(t *testing.T) {
 
 // TestUIDriverFixtureUsesIsolatedProductionBroker pins the fixture isolation:
 // the driver reaches the broker within its private production XDG roots.
+// real I/O: real unix-socket broker/daemon stack.
 func TestUIDriverFixtureUsesIsolatedProductionBroker(t *testing.T) {
 	fixture := startUIDriverBrokerFixture(t)
 	require.DirExists(t, filepath.Join(fixture.prodRuntime, "vev", "broker"))

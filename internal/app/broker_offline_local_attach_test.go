@@ -195,6 +195,7 @@ func awaitWelcome(t *testing.T, stream ports.BrokerLogicalConnection) protocol.W
 // TestBrokerLocalProbeRealCatalogueEnablesExactAttach proves the broker-owned
 // local probe reads a real daemon's catalogue and that the catalogue it
 // publishes is exactly what makes an exact terminal attach resolvable.
+// real I/O: real unix-socket broker/daemon stack, a real PTY.
 func TestBrokerLocalProbeRealCatalogueEnablesExactAttach(t *testing.T) {
 	fixture := startRealLocalDaemon(t)
 	probe := fixture.probe(t)
@@ -265,6 +266,7 @@ func TestBrokerLocalProbeRealCatalogueEnablesExactAttach(t *testing.T) {
 
 // TestBrokerLocalProbeAbsentDaemonStaysUnavailable proves that without daemon
 // identity, production observation stays unknown and never dials or starts a daemon.
+// real I/O: real unix-socket broker/daemon stack.
 func TestBrokerLocalProbeAbsentDaemonStaysUnavailable(t *testing.T) {
 	layout := emptyProductionBrokerLayout(t, "")
 	stateDir := filepath.Dir(layout.Root)
