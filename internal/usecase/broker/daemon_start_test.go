@@ -3,6 +3,7 @@ package broker
 import (
 	"errors"
 	"testing"
+	"testing/synctest"
 
 	"github.com/stretchr/testify/require"
 
@@ -39,17 +40,20 @@ func TestClassifyDaemonDialFailure(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := ClassifyDaemonDialFailure(daemonStartTarget(tt.mode, DaemonLaunchAuthority), tt.dialErr, tt.absent)
-			switch {
-			case tt.wantOK:
-				require.NoError(t, err)
-			case tt.wantSame:
-				require.Same(t, tt.dialErr, err)
-			case tt.wantCode != 0:
-				requireBrokerCode(t, err, tt.wantCode)
-			default:
-				require.Error(t, err)
-			}
+			synctest.Test(t, func(t *testing.T) {
+				err := ClassifyDaemonDialFailure(daemonStartTarget(tt.mode, DaemonLaunchAuthority), tt.dialErr, tt.absent)
+				switch {
+				case tt.wantOK:
+					require.NoError(t, err)
+				case tt.wantSame:
+					require.Same(t, tt.dialErr, err)
+				case tt.wantCode != 0:
+					requireBrokerCode(t, err, tt.wantCode)
+				default:
+					require.Error(t, err)
+				}
+
+			})
 		})
 	}
 }
@@ -66,17 +70,23 @@ func TestAuthorizeDaemonLaunch(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := AuthorizeDaemonLaunch(tt.target)
-			if tt.wantOK {
-				require.NoError(t, err)
-				return
-			}
-			requireBrokerCode(t, err, ports.BrokerErrorConflictingPolicy)
+			synctest.Test(t, func(t *testing.T) {
+				err := AuthorizeDaemonLaunch(tt.target)
+				if tt.wantOK {
+					require.NoError(t, err)
+					return
+				}
+				requireBrokerCode(t, err, ports.BrokerErrorConflictingPolicy)
+
+			})
 		})
 	}
 }
 
 func TestRequireLocalDaemonTarget(t *testing.T) {
-	require.NoError(t, RequireLocalDaemonTarget(ports.BrokerDialTarget{Fence: ports.BrokerEndpointFence{Local: true}}))
-	requireBrokerCode(t, RequireLocalDaemonTarget(ports.BrokerDialTarget{}), ports.BrokerErrorConflictingPolicy)
+	synctest.Test(t, func(t *testing.T) {
+		require.NoError(t, RequireLocalDaemonTarget(ports.BrokerDialTarget{Fence: ports.BrokerEndpointFence{Local: true}}))
+		requireBrokerCode(t, RequireLocalDaemonTarget(ports.BrokerDialTarget{}), ports.BrokerErrorConflictingPolicy)
+
+	})
 }

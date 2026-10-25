@@ -29,6 +29,7 @@ func newDurableMutableRegistry(t *testing.T, epoch ports.BrokerEpoch, store port
 		ObservationDisabled: true,
 	})
 	require.NoError(t, err)
+	t.Cleanup(func() { registry.store.close() })
 	registry.jitter = identityJitter
 	return registry
 }
@@ -44,6 +45,7 @@ func openDurableStore(t *testing.T, dir string, fault func(string) error) *broke
 // TestRegistryMutableMembershipDurableRestart proves a committed add, update,
 // and remove all survive a restart through the real store, and that the
 // remove/re-add fence is minted fresh by the mutation path rather than restored.
+// real I/O: filesystem
 func TestRegistryMutableMembershipDurableRestart(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "broker")
 	const endpoint = "user@arch:22"
@@ -170,6 +172,7 @@ func TestRegistryMutableMembershipDurableRestart(t *testing.T) {
 // the store CAS. Nothing is persisted, nothing is published, and a restart still
 // loads valid membership. The routing validator accepts the target, so this is
 // exactly the membership the store alone would have committed.
+// real I/O: filesystem
 func TestRegistryReplaceHostsRefusesUnpublishableMembershipBeforeCAS(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "broker")
 	valid := ports.BrokerHostRecord{Registration: registration(t, "user@arch:22", 1), Pinned: true, Policy: poolPolicy()}
@@ -179,6 +182,7 @@ func TestRegistryReplaceHostsRefusesUnpublishableMembershipBeforeCAS(t *testing.
 
 	registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, store), nil, newManualClock(t, time.Unix(100, 0)).mock, nil, RegistryConfig{ObservationDisabled: true})
 	require.NoError(t, err)
+	t.Cleanup(func() { registry.store.close() })
 	defer registry.settle()
 	authority := registry.authority
 	before := registry.Snapshot()
@@ -215,6 +219,7 @@ func TestRegistryReplaceHostsRefusesUnpublishableMembershipBeforeCAS(t *testing.
 	reopened := openDurableStore(t, dir, nil)
 	restarted, err := NewRegistryWithConfig(2, hostStoreFixture(t, reopened), nil, newManualClock(t, time.Unix(200, 0)).mock, nil, RegistryConfig{ObservationDisabled: true})
 	require.NoError(t, err)
+	t.Cleanup(func() { restarted.store.close() })
 	defer restarted.settle()
 	require.Equal(t, authority, restarted.authority)
 	restored := restarted.Snapshot()
@@ -229,6 +234,7 @@ func TestRegistryReplaceHostsRefusesUnpublishableMembershipBeforeCAS(t *testing.
 // leaves the store poisoned until it is reopened and authority is reloaded.
 // Reopening reveals that the mutation did commit, which is exactly why the
 // registry may not report it either way.
+// real I/O: filesystem
 func TestRegistryMutableOutcomeUnknownRequiresReopen(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "broker")
 	fault := errors.New("power loss")

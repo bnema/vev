@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
@@ -105,6 +106,7 @@ func newMutableRegistry(t *testing.T, store any, clock *manualClock, generator f
 		ObservationDisabled:  false,
 	})
 	require.NoError(t, err)
+	t.Cleanup(func() { registry.store.close() })
 	registry.jitter = identityJitter
 	return registry, probe
 }
@@ -176,82 +178,88 @@ func currentObservation() ports.BrokerDaemonObservation {
 // each addition advances the revision by exactly one, and the registry's copy
 // still equals what the store committed.
 func TestRegistryMutableConcurrentAddsLoseNoUpdate(t *testing.T) {
-	const adds = 32
-	store := newMembershipStore()
-	registry, _ := newMutableRegistry(t, store, newManualClock(t, time.Unix(100, 0)), (&incarnationSequencer{}).generate)
-	start := registry.authority.Revision
+	synctest.Test(t, func(t *testing.T) {
+		const adds = 32
+		store := newMembershipStore()
+		registry, _ := newMutableRegistry(t, store, newManualClock(t, time.Unix(100, 0)), (&incarnationSequencer{}).generate)
+		start := registry.authority.Revision
 
-	endpoints := make([]string, adds)
-	for i := range endpoints {
-		endpoints[i] = fmt.Sprintf("host-%d.test", i)
-	}
+		endpoints := make([]string, adds)
+		for i := range endpoints {
+			endpoints[i] = fmt.Sprintf("host-%d.test", i)
+		}
 
-	var wg sync.WaitGroup
-	errs := make([]error, adds)
-	regs := make([]domain.RemoteRegistration, adds)
-	startGate := make(chan struct{})
-	for i, endpoint := range endpoints {
-		wg.Add(1)
-		go func(i int, endpoint string) {
-			defer wg.Done()
-			<-startGate
-			regs[i], errs[i] = registry.AddHost(context.Background(), endpoint, poolPolicy())
-		}(i, endpoint)
-	}
-	close(startGate)
-	wg.Wait()
+		var wg sync.WaitGroup
+		errs := make([]error, adds)
+		regs := make([]domain.RemoteRegistration, adds)
+		startGate := make(chan struct{})
+		for i, endpoint := range endpoints {
+			wg.Add(1)
+			go func(i int, endpoint string) {
+				defer wg.Done()
+				<-startGate
+				regs[i], errs[i] = registry.AddHost(context.Background(), endpoint, poolPolicy())
+			}(i, endpoint)
+		}
+		close(startGate)
+		wg.Wait()
 
-	for i, err := range errs {
-		require.NoErrorf(t, err, "concurrent add %q", endpoints[i])
-	}
-	require.Equal(t, adds, store.casCalls(), "every admitted add must reach the store CAS")
-	require.Equal(t, start+adds, registry.authority.Revision, "each add advances the revision exactly once")
-	require.Len(t, registry.authority.Hosts, adds)
-	require.Equal(t, registry.authority, store.durableAuthority())
+		for i, err := range errs {
+			require.NoErrorf(t, err, "concurrent add %q", endpoints[i])
+		}
+		require.Equal(t, adds, store.casCalls(), "every admitted add must reach the store CAS")
+		require.Equal(t, start+adds, registry.authority.Revision, "each add advances the revision exactly once")
+		require.Len(t, registry.authority.Hosts, adds)
+		require.Equal(t, registry.authority, store.durableAuthority())
 
-	// Admission order is the lock order, not the launch order, so the
-	// publication order is compared against the returned identities by endpoint.
-	returned := make(map[string]domain.RemoteRegistration, adds)
-	for i, endpoint := range endpoints {
-		require.False(t, regs[i].IsZero(), "an admitted add returns its minted identity")
-		require.Equal(t, endpoint, regs[i].Endpoint)
-		require.Equal(t, domain.RemoteGeneration(1), regs[i].Generation)
-		returned[endpoint] = regs[i]
-	}
-	require.Len(t, returned, adds, "every concurrent add minted a distinct identity")
+		// Admission order is the lock order, not the launch order, so the
+		// publication order is compared against the returned identities by endpoint.
+		returned := make(map[string]domain.RemoteRegistration, adds)
+		for i, endpoint := range endpoints {
+			require.False(t, regs[i].IsZero(), "an admitted add returns its minted identity")
+			require.Equal(t, endpoint, regs[i].Endpoint)
+			require.Equal(t, domain.RemoteGeneration(1), regs[i].Generation)
+			returned[endpoint] = regs[i]
+		}
+		require.Len(t, returned, adds, "every concurrent add minted a distinct identity")
 
-	seen := make(map[string]domain.RemoteRegistration, adds)
-	for _, record := range registry.authority.Hosts {
-		require.NotContains(t, seen, record.Registration.Endpoint, "no endpoint may be added twice")
-		require.Equal(t, returned[record.Registration.Endpoint], record.Registration)
-		seen[record.Registration.Endpoint] = record.Registration
-		require.Equal(t, poolPolicy(), record.Policy)
-		require.True(t, record.Pinned)
-	}
-	require.Len(t, seen, adds)
+		seen := make(map[string]domain.RemoteRegistration, adds)
+		for _, record := range registry.authority.Hosts {
+			require.NotContains(t, seen, record.Registration.Endpoint, "no endpoint may be added twice")
+			require.Equal(t, returned[record.Registration.Endpoint], record.Registration)
+			seen[record.Registration.Endpoint] = record.Registration
+			require.Equal(t, poolPolicy(), record.Policy)
+			require.True(t, record.Pinned)
+		}
+		require.Len(t, seen, adds)
 
-	snapshot := registry.Snapshot()
-	require.Len(t, snapshot.Daemons, adds)
-	require.NoError(t, snapshot.Validate())
-	for _, endpoint := range endpoints {
-		host, ok := snapshot.Find(endpoint)
-		require.True(t, ok, "a concurrently added endpoint must be published")
-		require.Equal(t, seen[endpoint], host.Registration)
-		require.Equal(t, domain.RemoteAvailabilityUnknown, host.Availability)
-	}
+		snapshot := registry.Snapshot()
+		require.Len(t, snapshot.Daemons, adds)
+		require.NoError(t, snapshot.Validate())
+		for _, endpoint := range endpoints {
+			host, ok := snapshot.Find(endpoint)
+			require.True(t, ok, "a concurrently added endpoint must be published")
+			require.Equal(t, seen[endpoint], host.Registration)
+			require.Equal(t, domain.RemoteAvailabilityUnknown, host.Availability)
+		}
+
+	})
 }
 
 // TestRegistryMembershipModeRejectsUnknownMode proves the run mode is a closed
 // set: an out-of-range mode is refused at construction, before any store call,
 // so a caller can never run a registry whose mutation policy is undefined.
 func TestRegistryMembershipModeRejectsUnknownMode(t *testing.T) {
-	// The mock has no expectations: any store call during construction fails
-	// the test, so a refusal must happen before the durable store is touched.
-	store := portsmocks.NewMockBrokerHostStore(t)
-	registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, store), newTestProbe(1), newManualClock(t, time.Unix(100, 0)).mock, nil,
-		RegistryConfig{MembershipMode: MembershipMode(9)})
-	require.ErrorContains(t, err, "invalid membership mode")
-	require.Nil(t, registry)
+	synctest.Test(t, func(t *testing.T) {
+		// The mock has no expectations: any store call during construction fails
+		// the test, so a refusal must happen before the durable store is touched.
+		store := portsmocks.NewMockBrokerHostStore(t)
+		registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, store), newTestProbe(1), newManualClock(t, time.Unix(100, 0)).mock, nil,
+			RegistryConfig{MembershipMode: MembershipMode(9)})
+		require.ErrorContains(t, err, "invalid membership mode")
+		require.Nil(t, registry)
+
+	})
 }
 
 // TestRegistryImmutableMembershipRefusesEveryMutation pins the default: a
@@ -265,6 +273,7 @@ func TestRegistryImmutableMembershipRefusesEveryMutation(t *testing.T) {
 	store.EXPECT().LoadHosts().Return(ports.BrokerHosts{Revision: 3, Hosts: []ports.BrokerHostRecord{pinnedRecord(reg, poolPolicy())}}, nil).Once()
 	registry, err := NewRegistry(1, hostStoreFixture(t, store), newTestProbe(1), newManualClock(t, time.Unix(100, 0)).mock, nil)
 	require.NoError(t, err)
+	t.Cleanup(func() { registry.store.close() })
 	authority := registry.authority
 	before := registry.Snapshot()
 
@@ -299,10 +308,13 @@ func TestRegistryImmutableMembershipRefusesEveryMutation(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			require.ErrorIs(t, tc.run(registry), ports.ErrBrokerMembershipImmutable)
-			require.Equal(t, authority, registry.authority)
-			require.Equal(t, before, registry.Snapshot())
-			require.Empty(t, membershipFences(registry))
+			synctest.Test(t, func(t *testing.T) {
+				require.ErrorIs(t, tc.run(registry), ports.ErrBrokerMembershipImmutable)
+				require.Equal(t, authority, registry.authority)
+				require.Equal(t, before, registry.Snapshot())
+				require.Empty(t, membershipFences(registry))
+
+			})
 		})
 	}
 
@@ -320,59 +332,65 @@ func TestRegistryImmutableMembershipRefusesEveryMutation(t *testing.T) {
 // same-policy addition pins the existing record without changing its identity,
 // and that even that no-op CAS-verifies durable authority.
 func TestRegistryMutableAddPinsDuplicatePreservingIdentity(t *testing.T) {
-	seq := &incarnationSequencer{}
-	store := newMembershipStore(ports.BrokerHostRecord{Registration: registration(t, "alpha.test", 1), Learned: true, Policy: poolPolicy(), Route: canonicalRoute(poolPolicy(), "alpha.test")})
-	registry, _ := newMutableRegistry(t, store, newManualClock(t, time.Unix(100, 0)), seq.generate)
-	reg := registration(t, "alpha.test", 1)
+	synctest.Test(t, func(t *testing.T) {
+		seq := &incarnationSequencer{}
+		store := newMembershipStore(ports.BrokerHostRecord{Registration: registration(t, "alpha.test", 1), Learned: true, Policy: poolPolicy(), Route: canonicalRoute(poolPolicy(), "alpha.test")})
+		registry, _ := newMutableRegistry(t, store, newManualClock(t, time.Unix(100, 0)), seq.generate)
+		reg := registration(t, "alpha.test", 1)
 
-	got, err := registry.AddHost(context.Background(), reg.Endpoint, poolPolicy())
-	require.NoError(t, err)
-	require.Equal(t, reg, got, "a duplicate add preserves the registration identity")
-	require.Equal(t, 1, store.casCalls())
-	require.Len(t, registry.authority.Hosts, 1)
-	record := registry.authority.Hosts[0]
-	require.Equal(t, reg, record.Registration)
-	require.Equal(t, poolPolicy(), record.Policy)
-	require.True(t, record.Pinned, "the duplicate add pins the learned registration")
-	require.True(t, record.Learned, "pinning never discards learned provenance")
-	require.Equal(t, uint64(2), registry.authority.Revision)
-	require.Equal(t, registry.authority, store.durableAuthority())
-	require.Equal(t, 0, seq.generated(), "pinning mints no identity")
+		got, err := registry.AddHost(context.Background(), reg.Endpoint, poolPolicy())
+		require.NoError(t, err)
+		require.Equal(t, reg, got, "a duplicate add preserves the registration identity")
+		require.Equal(t, 1, store.casCalls())
+		require.Len(t, registry.authority.Hosts, 1)
+		record := registry.authority.Hosts[0]
+		require.Equal(t, reg, record.Registration)
+		require.Equal(t, poolPolicy(), record.Policy)
+		require.True(t, record.Pinned, "the duplicate add pins the learned registration")
+		require.True(t, record.Learned, "pinning never discards learned provenance")
+		require.Equal(t, uint64(2), registry.authority.Revision)
+		require.Equal(t, registry.authority, store.durableAuthority())
+		require.Equal(t, 0, seq.generated(), "pinning mints no identity")
 
-	host, ok := registry.Snapshot().Find(reg.Endpoint)
-	require.True(t, ok)
-	require.Equal(t, reg, host.Registration)
-	require.Equal(t, domain.RemoteAvailabilityUnknown, host.Availability)
+		host, ok := registry.Snapshot().Find(reg.Endpoint)
+		require.True(t, ok)
+		require.Equal(t, reg, host.Registration)
+		require.Equal(t, domain.RemoteAvailabilityUnknown, host.Availability)
 
-	// A second duplicate is a no-op that still CAS-verifies: authority moves
-	// durably, the projection does not republish, and identity is unchanged.
-	before := registry.Snapshot()
-	again, err := registry.AddHost(context.Background(), reg.Endpoint, poolPolicy())
-	require.NoError(t, err)
-	require.Equal(t, reg, again)
-	require.Equal(t, 2, store.casCalls())
-	require.Equal(t, uint64(3), registry.authority.Revision)
-	require.Equal(t, registry.authority, store.durableAuthority())
-	require.Equal(t, before, registry.Snapshot())
+		// A second duplicate is a no-op that still CAS-verifies: authority moves
+		// durably, the projection does not republish, and identity is unchanged.
+		before := registry.Snapshot()
+		again, err := registry.AddHost(context.Background(), reg.Endpoint, poolPolicy())
+		require.NoError(t, err)
+		require.Equal(t, reg, again)
+		require.Equal(t, 2, store.casCalls())
+		require.Equal(t, uint64(3), registry.authority.Revision)
+		require.Equal(t, registry.authority, store.durableAuthority())
+		require.Equal(t, before, registry.Snapshot())
+
+	})
 }
 
 // TestRegistryMutableAddConflictingPolicyConflicts proves a conflicting policy
 // is a definite conflict: it is refused before the store CAS, and it mints no
 // identity.
 func TestRegistryMutableAddConflictingPolicyConflicts(t *testing.T) {
-	seq := &incarnationSequencer{}
-	reg := registration(t, "alpha.test", 1)
-	store := newMembershipStore(pinnedRecord(reg, poolPolicy()))
-	registry, _ := newMutableRegistry(t, store, newManualClock(t, time.Unix(100, 0)), seq.generate)
-	authority := registry.authority
-	before := registry.Snapshot()
+	synctest.Test(t, func(t *testing.T) {
+		seq := &incarnationSequencer{}
+		reg := registration(t, "alpha.test", 1)
+		store := newMembershipStore(pinnedRecord(reg, poolPolicy()))
+		registry, _ := newMutableRegistry(t, store, newManualClock(t, time.Unix(100, 0)), seq.generate)
+		authority := registry.authority
+		before := registry.Snapshot()
 
-	_, err := registry.AddHost(context.Background(), reg.Endpoint, policyWithTrust("other-trust"))
-	require.ErrorIs(t, err, ports.ErrBrokerHostConflict)
-	require.Equal(t, 0, store.casCalls(), "a conflict is refused before the CAS")
-	require.Equal(t, authority, registry.authority)
-	require.Equal(t, before, registry.Snapshot())
-	require.Equal(t, 0, seq.generated())
+		_, err := registry.AddHost(context.Background(), reg.Endpoint, policyWithTrust("other-trust"))
+		require.ErrorIs(t, err, ports.ErrBrokerHostConflict)
+		require.Equal(t, 0, store.casCalls(), "a conflict is refused before the CAS")
+		require.Equal(t, authority, registry.authority)
+		require.Equal(t, before, registry.Snapshot())
+		require.Equal(t, 0, seq.generated())
+
+	})
 }
 
 // TestRegistryMutableAddEntropyFailureLeavesAuthorityUnchanged pins the entropy
@@ -388,16 +406,19 @@ func TestRegistryMutableAddEntropyFailureLeavesAuthorityUnchanged(t *testing.T) 
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			store := newMembershipStore()
-			registry, _ := newMutableRegistry(t, store, newManualClock(t, time.Unix(100, 0)), tc.generator)
-			authority := registry.authority
-			before := registry.Snapshot()
+			synctest.Test(t, func(t *testing.T) {
+				store := newMembershipStore()
+				registry, _ := newMutableRegistry(t, store, newManualClock(t, time.Unix(100, 0)), tc.generator)
+				authority := registry.authority
+				before := registry.Snapshot()
 
-			_, err := registry.AddHost(context.Background(), "alpha.test", poolPolicy())
-			require.ErrorContains(t, err, tc.want)
-			require.Equal(t, 0, store.casCalls())
-			require.Equal(t, authority, registry.authority)
-			require.Equal(t, before, registry.Snapshot())
+				_, err := registry.AddHost(context.Background(), "alpha.test", poolPolicy())
+				require.ErrorContains(t, err, tc.want)
+				require.Equal(t, 0, store.casCalls())
+				require.Equal(t, authority, registry.authority)
+				require.Equal(t, before, registry.Snapshot())
+
+			})
 		})
 	}
 }
@@ -423,13 +444,16 @@ func TestRegistryMutableRemoveExactStaleAndAbsent(t *testing.T) {
 		"stale incarnation": staleIncarnation,
 	} {
 		t.Run(name, func(t *testing.T) {
-			removed, err := registry.RemoveHost(context.Background(), expected)
-			require.ErrorIs(t, err, ports.ErrBrokerHostConflict)
-			require.False(t, removed)
-			require.Equal(t, 0, store.casCalls(), "a mismatch is refused before the CAS")
-			require.Equal(t, authority, registry.authority)
-			require.Equal(t, before, registry.Snapshot())
-			require.Empty(t, membershipFences(registry))
+			synctest.Test(t, func(t *testing.T) {
+				removed, err := registry.RemoveHost(context.Background(), expected)
+				require.ErrorIs(t, err, ports.ErrBrokerHostConflict)
+				require.False(t, removed)
+				require.Equal(t, 0, store.casCalls(), "a mismatch is refused before the CAS")
+				require.Equal(t, authority, registry.authority)
+				require.Equal(t, before, registry.Snapshot())
+				require.Empty(t, membershipFences(registry))
+
+			})
 		})
 	}
 
@@ -465,21 +489,24 @@ func TestRegistryMutableRemoveExactStaleAndAbsent(t *testing.T) {
 // report a conflict instead of a hollow success, because the loaded revision was
 // never verified.
 func TestRegistryMutableNoOpRemoveVerifiesCAS(t *testing.T) {
-	alpha := registration(t, "alpha.test", 1)
-	store := newMembershipStore(pinnedRecord(alpha, poolPolicy()))
-	registry, _ := newMutableRegistry(t, store, newManualClock(t, time.Unix(100, 0)), (&incarnationSequencer{}).generate)
-	authority := registry.authority
-	before := registry.Snapshot()
+	synctest.Test(t, func(t *testing.T) {
+		alpha := registration(t, "alpha.test", 1)
+		store := newMembershipStore(pinnedRecord(alpha, poolPolicy()))
+		registry, _ := newMutableRegistry(t, store, newManualClock(t, time.Unix(100, 0)), (&incarnationSequencer{}).generate)
+		authority := registry.authority
+		before := registry.Snapshot()
 
-	// An illicit second mutator moves durable authority behind the registry.
-	require.NoError(t, store.testStore.replaceHosts(authority.Revision, []ports.BrokerHostRecord{pinnedRecord(alpha, poolPolicy())}))
+		// An illicit second mutator moves durable authority behind the registry.
+		require.NoError(t, store.testStore.replaceHosts(authority.Revision, []ports.BrokerHostRecord{pinnedRecord(alpha, poolPolicy())}))
 
-	removed, err := registry.RemoveHost(context.Background(), registration(t, "gamma.test", 3))
-	require.ErrorIs(t, err, ports.ErrBrokerHostConflict)
-	require.False(t, removed)
-	require.Equal(t, 1, store.casCalls())
-	require.Equal(t, authority, registry.authority)
-	require.Equal(t, before, registry.Snapshot())
+		removed, err := registry.RemoveHost(context.Background(), registration(t, "gamma.test", 3))
+		require.ErrorIs(t, err, ports.ErrBrokerHostConflict)
+		require.False(t, removed)
+		require.Equal(t, 1, store.casCalls())
+		require.Equal(t, authority, registry.authority)
+		require.Equal(t, before, registry.Snapshot())
+
+	})
 }
 
 // TestRegistryMutableRemoveReAddGetsFreshIncarnation pins the ABA fence at the
@@ -487,35 +514,38 @@ func TestRegistryMutableNoOpRemoveVerifiesCAS(t *testing.T) {
 // incarnation with a fresh generation series, and the retired registration is
 // fenced rather than revived.
 func TestRegistryMutableRemoveReAddGetsFreshIncarnation(t *testing.T) {
-	seq := &incarnationSequencer{}
-	store := newMembershipStore()
-	registry, _ := newMutableRegistry(t, store, newManualClock(t, time.Unix(100, 0)), seq.generate)
+	synctest.Test(t, func(t *testing.T) {
+		seq := &incarnationSequencer{}
+		store := newMembershipStore()
+		registry, _ := newMutableRegistry(t, store, newManualClock(t, time.Unix(100, 0)), seq.generate)
 
-	first, err := registry.AddHost(context.Background(), "alpha.test", poolPolicy())
-	require.NoError(t, err)
-	require.Equal(t, 1, seq.generated())
+		first, err := registry.AddHost(context.Background(), "alpha.test", poolPolicy())
+		require.NoError(t, err)
+		require.Equal(t, 1, seq.generated())
 
-	removed, err := registry.RemoveHost(context.Background(), first)
-	require.NoError(t, err)
-	require.True(t, removed)
+		removed, err := registry.RemoveHost(context.Background(), first)
+		require.NoError(t, err)
+		require.True(t, removed)
 
-	second, err := registry.AddHost(context.Background(), "alpha.test", poolPolicy())
-	require.NoError(t, err)
-	require.Equal(t, 2, seq.generated())
-	require.False(t, first.Equal(second), "a re-add must not reuse the retired registration")
-	require.NotEqual(t, first.Incarnation, second.Incarnation)
-	require.Equal(t, domain.RemoteGeneration(1), second.Generation)
-	require.Len(t, registry.authority.Hosts, 1)
-	require.Equal(t, second, registry.authority.Hosts[0].Registration)
-	require.Equal(t, registry.authority, store.durableAuthority())
+		second, err := registry.AddHost(context.Background(), "alpha.test", poolPolicy())
+		require.NoError(t, err)
+		require.Equal(t, 2, seq.generated())
+		require.False(t, first.Equal(second), "a re-add must not reuse the retired registration")
+		require.NotEqual(t, first.Incarnation, second.Incarnation)
+		require.Equal(t, domain.RemoteGeneration(1), second.Generation)
+		require.Len(t, registry.authority.Hosts, 1)
+		require.Equal(t, second, registry.authority.Hosts[0].Registration)
+		require.Equal(t, registry.authority, store.durableAuthority())
 
-	snapshot := registry.Snapshot()
-	require.Len(t, snapshot.Daemons, 1)
-	require.Equal(t, second, snapshot.Daemons[0].Registration)
-	require.Empty(t, snapshot.Removed, "a live endpoint is never published as a tombstone")
-	host, ok := snapshot.Find(second.Endpoint)
-	require.True(t, ok)
-	require.Equal(t, domain.RemoteAvailabilityUnknown, host.Availability)
+		snapshot := registry.Snapshot()
+		require.Len(t, snapshot.Daemons, 1)
+		require.Equal(t, second, snapshot.Daemons[0].Registration)
+		require.Empty(t, snapshot.Removed, "a live endpoint is never published as a tombstone")
+		host, ok := snapshot.Find(second.Endpoint)
+		require.True(t, ok)
+		require.Equal(t, domain.RemoteAvailabilityUnknown, host.Availability)
+
+	})
 }
 
 // TestRegistryMutableUpdatePolicyIncrementsGenerationOnce pins the policy
@@ -523,84 +553,93 @@ func TestRegistryMutableRemoveReAddGetsFreshIncarnation(t *testing.T) {
 // is the only thing that does; an unmatchable expectation is a definite conflict
 // refused before the CAS.
 func TestRegistryMutableUpdatePolicyIncrementsGenerationOnce(t *testing.T) {
-	alpha := registration(t, "alpha.test", 1)
-	store := newMembershipStore(pinnedRecord(alpha, poolPolicy()))
-	registry, _ := newMutableRegistry(t, store, newManualClock(t, time.Unix(100, 0)), (&incarnationSequencer{}).generate)
+	synctest.Test(t, func(t *testing.T) {
+		alpha := registration(t, "alpha.test", 1)
+		store := newMembershipStore(pinnedRecord(alpha, poolPolicy()))
+		registry, _ := newMutableRegistry(t, store, newManualClock(t, time.Unix(100, 0)), (&incarnationSequencer{}).generate)
 
-	// Not found and a stale expectation are definite conflicts, refused before
-	// the store is touched.
-	authority := registry.authority
-	before := registry.Snapshot()
-	_, err := registry.UpdateHostPolicy(context.Background(), registration(t, "gamma.test", 3), policyWithTrust("other-trust"))
-	require.ErrorIs(t, err, ports.ErrBrokerHostConflict)
-	stale := alpha
-	stale.Generation++
-	_, err = registry.UpdateHostPolicy(context.Background(), stale, policyWithTrust("other-trust"))
-	require.ErrorIs(t, err, ports.ErrBrokerHostConflict)
-	require.Equal(t, 0, store.casCalls())
-	require.Equal(t, authority, registry.authority)
-	require.Equal(t, before, registry.Snapshot())
+		// Not found and a stale expectation are definite conflicts, refused before
+		// the store is touched.
+		authority := registry.authority
+		before := registry.Snapshot()
+		_, err := registry.UpdateHostPolicy(context.Background(), registration(t, "gamma.test", 3), policyWithTrust("other-trust"))
+		require.ErrorIs(t, err, ports.ErrBrokerHostConflict)
+		stale := alpha
+		stale.Generation++
+		_, err = registry.UpdateHostPolicy(context.Background(), stale, policyWithTrust("other-trust"))
+		require.ErrorIs(t, err, ports.ErrBrokerHostConflict)
+		require.Equal(t, 0, store.casCalls())
+		require.Equal(t, authority, registry.authority)
+		require.Equal(t, before, registry.Snapshot())
 
-	updated, err := registry.UpdateHostPolicy(context.Background(), alpha, policyWithTrust("other-trust"))
-	require.NoError(t, err)
-	require.Equal(t, alpha.Generation+1, updated.Generation, "a policy change advances the generation exactly once")
-	require.Equal(t, alpha.Incarnation, updated.Incarnation, "a policy change never touches the incarnation")
-	require.Equal(t, 1, store.casCalls())
-	require.Equal(t, uint64(2), registry.authority.Revision)
-	require.Equal(t, registry.authority, store.durableAuthority())
-	require.Equal(t, []ports.BrokerHostRecord{pinnedRecord(updated, policyWithTrust("other-trust"))}, store.durableAuthority().Hosts)
+		updated, err := registry.UpdateHostPolicy(context.Background(), alpha, policyWithTrust("other-trust"))
+		require.NoError(t, err)
+		require.Equal(t, alpha.Generation+1, updated.Generation, "a policy change advances the generation exactly once")
+		require.Equal(t, alpha.Incarnation, updated.Incarnation, "a policy change never touches the incarnation")
+		require.Equal(t, 1, store.casCalls())
+		require.Equal(t, uint64(2), registry.authority.Revision)
+		require.Equal(t, registry.authority, store.durableAuthority())
+		require.Equal(t, []ports.BrokerHostRecord{pinnedRecord(updated, policyWithTrust("other-trust"))}, store.durableAuthority().Hosts)
 
-	host, ok := registry.Snapshot().Find(alpha.Endpoint)
-	require.True(t, ok)
-	require.Equal(t, updated, host.Registration)
-	require.Equal(t, policyWithTrust("other-trust"), host.Policy)
-	require.Equal(t, domain.RemoteAvailabilityUnknown, host.Availability)
+		host, ok := registry.Snapshot().Find(alpha.Endpoint)
+		require.True(t, ok)
+		require.Equal(t, updated, host.Registration)
+		require.Equal(t, policyWithTrust("other-trust"), host.Policy)
+		require.Equal(t, domain.RemoteAvailabilityUnknown, host.Availability)
+
+	})
 }
 
 // TestRegistryMutableUpdateEqualPolicyPreservesIdentityAndVerifiesCAS proves an
 // equal-policy update is an identity-preserving no-op that still CAS-verifies
 // durable authority.
 func TestRegistryMutableUpdateEqualPolicyPreservesIdentityAndVerifiesCAS(t *testing.T) {
-	alpha := registration(t, "alpha.test", 1)
-	store := newMembershipStore(pinnedRecord(alpha, poolPolicy()))
-	registry, _ := newMutableRegistry(t, store, newManualClock(t, time.Unix(100, 0)), (&incarnationSequencer{}).generate)
-	before := registry.Snapshot()
+	synctest.Test(t, func(t *testing.T) {
+		alpha := registration(t, "alpha.test", 1)
+		store := newMembershipStore(pinnedRecord(alpha, poolPolicy()))
+		registry, _ := newMutableRegistry(t, store, newManualClock(t, time.Unix(100, 0)), (&incarnationSequencer{}).generate)
+		before := registry.Snapshot()
 
-	got, err := registry.UpdateHostPolicy(context.Background(), alpha, poolPolicy())
-	require.NoError(t, err)
-	require.Equal(t, alpha, got, "an equal policy preserves the registration identity")
-	require.Equal(t, 1, store.casCalls())
-	require.Equal(t, uint64(2), registry.authority.Revision)
-	require.Equal(t, registry.authority, store.durableAuthority())
-	require.Equal(t, before, registry.Snapshot(), "an unchanged policy republishes nothing")
+		got, err := registry.UpdateHostPolicy(context.Background(), alpha, poolPolicy())
+		require.NoError(t, err)
+		require.Equal(t, alpha, got, "an equal policy preserves the registration identity")
+		require.Equal(t, 1, store.casCalls())
+		require.Equal(t, uint64(2), registry.authority.Revision)
+		require.Equal(t, registry.authority, store.durableAuthority())
+		require.Equal(t, before, registry.Snapshot(), "an unchanged policy republishes nothing")
 
-	// The no-op still verified the loaded revision: a revision moved behind the
-	// registry turns the same call into a definite conflict.
-	require.NoError(t, store.testStore.replaceHosts(registry.authority.Revision, []ports.BrokerHostRecord{pinnedRecord(alpha, poolPolicy())}))
-	authority := registry.authority
-	_, err = registry.UpdateHostPolicy(context.Background(), alpha, poolPolicy())
-	require.ErrorIs(t, err, ports.ErrBrokerHostConflict)
-	require.Equal(t, 2, store.casCalls())
-	require.Equal(t, authority, registry.authority)
-	require.Equal(t, before, registry.Snapshot())
+		// The no-op still verified the loaded revision: a revision moved behind the
+		// registry turns the same call into a definite conflict.
+		require.NoError(t, store.testStore.replaceHosts(registry.authority.Revision, []ports.BrokerHostRecord{pinnedRecord(alpha, poolPolicy())}))
+		authority := registry.authority
+		_, err = registry.UpdateHostPolicy(context.Background(), alpha, poolPolicy())
+		require.ErrorIs(t, err, ports.ErrBrokerHostConflict)
+		require.Equal(t, 2, store.casCalls())
+		require.Equal(t, authority, registry.authority)
+		require.Equal(t, before, registry.Snapshot())
+
+	})
 }
 
 // TestRegistryMutableUpdatePolicyOverflowRefused pins the generation series: a
 // policy change at the last generation fails closed instead of wrapping to zero,
 // which would re-trust an already queued observation.
 func TestRegistryMutableUpdatePolicyOverflowRefused(t *testing.T) {
-	alpha := registration(t, "alpha.test", 1)
-	alpha.Generation = ^domain.RemoteGeneration(0)
-	store := newMembershipStore(pinnedRecord(alpha, poolPolicy()))
-	registry, _ := newMutableRegistry(t, store, newManualClock(t, time.Unix(100, 0)), (&incarnationSequencer{}).generate)
-	authority := registry.authority
-	before := registry.Snapshot()
+	synctest.Test(t, func(t *testing.T) {
+		alpha := registration(t, "alpha.test", 1)
+		alpha.Generation = ^domain.RemoteGeneration(0)
+		store := newMembershipStore(pinnedRecord(alpha, poolPolicy()))
+		registry, _ := newMutableRegistry(t, store, newManualClock(t, time.Unix(100, 0)), (&incarnationSequencer{}).generate)
+		authority := registry.authority
+		before := registry.Snapshot()
 
-	_, err := registry.UpdateHostPolicy(context.Background(), alpha, policyWithTrust("other-trust"))
-	require.ErrorIs(t, err, ports.ErrBrokerRevisionExhausted)
-	require.Equal(t, 0, store.casCalls())
-	require.Equal(t, authority, registry.authority)
-	require.Equal(t, before, registry.Snapshot())
+		_, err := registry.UpdateHostPolicy(context.Background(), alpha, policyWithTrust("other-trust"))
+		require.ErrorIs(t, err, ports.ErrBrokerRevisionExhausted)
+		require.Equal(t, 0, store.casCalls())
+		require.Equal(t, authority, registry.authority)
+		require.Equal(t, before, registry.Snapshot())
+
+	})
 }
 
 // TestRegistryMutableProbeCompletionFencedByChangedGeneration proves a
@@ -630,15 +669,18 @@ func TestRegistryMutableProbeCompletionFencedByChangedGeneration(t *testing.T) {
 		{"retired registration with the current token", probeResult{endpoint: regA.Endpoint, registration: regA, attempt: retired.token + 1, at: clock.Now(), snapshot: staleObservation()}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			registry.apply(tc.result)
-			require.Equal(t, before, registry.Snapshot())
-			host, ok := registry.Snapshot().Find(regA.Endpoint)
-			require.True(t, ok)
-			require.Equal(t, regB, host.Registration)
-			require.Equal(t, domain.RemoteAvailabilityUnknown, host.Availability)
-			require.Empty(t, host.Identity)
-			require.True(t, host.LastSuccess.IsZero())
-			require.Zero(t, attemptFor(registry, regA.Endpoint), "a stale completion never admits an attempt")
+			synctest.Test(t, func(t *testing.T) {
+				registry.apply(tc.result)
+				require.Equal(t, before, registry.Snapshot())
+				host, ok := registry.Snapshot().Find(regA.Endpoint)
+				require.True(t, ok)
+				require.Equal(t, regB, host.Registration)
+				require.Equal(t, domain.RemoteAvailabilityUnknown, host.Availability)
+				require.Empty(t, host.Identity)
+				require.True(t, host.LastSuccess.IsZero())
+				require.Zero(t, attemptFor(registry, regA.Endpoint), "a stale completion never admits an attempt")
+
+			})
 		})
 	}
 }
@@ -648,35 +690,38 @@ func TestRegistryMutableProbeCompletionFencedByChangedGeneration(t *testing.T) {
 // current attempt is in flight, so it neither clears the in-flight slot nor
 // publishes under the retired registration.
 func TestRegistryMutableStaleCompletionDoesNotClearLiveAttempt(t *testing.T) {
-	clock := newManualClock(t, time.Unix(100, 0))
-	registry, _ := newMutableRegistry(t, newMembershipStore(), clock, (&incarnationSequencer{}).generate)
-	regA, err := registry.AddHost(context.Background(), "alpha.test", poolPolicy())
-	require.NoError(t, err)
-	retired := admitMembershipAttempt(t, registry, regA.Endpoint)
-	regB, err := registry.UpdateHostPolicy(context.Background(), regA, policyWithTrust("other-trust"))
-	require.NoError(t, err)
+	synctest.Test(t, func(t *testing.T) {
+		clock := newManualClock(t, time.Unix(100, 0))
+		registry, _ := newMutableRegistry(t, newMembershipStore(), clock, (&incarnationSequencer{}).generate)
+		regA, err := registry.AddHost(context.Background(), "alpha.test", poolPolicy())
+		require.NoError(t, err)
+		retired := admitMembershipAttempt(t, registry, regA.Endpoint)
+		regB, err := registry.UpdateHostPolicy(context.Background(), regA, policyWithTrust("other-trust"))
+		require.NoError(t, err)
 
-	live := admitMembershipAttempt(t, registry, regB.Endpoint)
-	before := registry.Snapshot()
-	for _, result := range []probeResult{
-		{endpoint: regB.Endpoint, registration: regA, attempt: retired.token, at: clock.Now(), snapshot: staleObservation()},
-		{endpoint: regB.Endpoint, registration: regB, attempt: retired.token, at: clock.Now(), snapshot: staleObservation()},
-		{endpoint: regB.Endpoint, registration: regA, attempt: live.token, at: clock.Now(), snapshot: staleObservation()},
-	} {
-		registry.apply(result)
-	}
-	require.Equal(t, live.token, attemptFor(registry, regB.Endpoint), "a stale completion must not clear the live attempt")
-	require.NoError(t, live.ctx.Err(), "a stale completion must not retire the live attempt")
-	require.Equal(t, before, registry.Snapshot())
+		live := admitMembershipAttempt(t, registry, regB.Endpoint)
+		before := registry.Snapshot()
+		for _, result := range []probeResult{
+			{endpoint: regB.Endpoint, registration: regA, attempt: retired.token, at: clock.Now(), snapshot: staleObservation()},
+			{endpoint: regB.Endpoint, registration: regB, attempt: retired.token, at: clock.Now(), snapshot: staleObservation()},
+			{endpoint: regB.Endpoint, registration: regA, attempt: live.token, at: clock.Now(), snapshot: staleObservation()},
+		} {
+			registry.apply(result)
+		}
+		require.Equal(t, live.token, attemptFor(registry, regB.Endpoint), "a stale completion must not clear the live attempt")
+		require.NoError(t, live.ctx.Err(), "a stale completion must not retire the live attempt")
+		require.Equal(t, before, registry.Snapshot())
 
-	// The live attempt still completes normally and publishes its own result.
-	registry.apply(probeResult{endpoint: regB.Endpoint, registration: regB, attempt: live.token, at: clock.Now(), snapshot: currentObservation()})
-	require.ErrorIs(t, live.ctx.Err(), context.Canceled)
-	host, ok := registry.Snapshot().Find(regB.Endpoint)
-	require.True(t, ok)
-	require.Equal(t, regB, host.Registration)
-	require.Equal(t, ports.BrokerDaemonIdentity("current-daemon"), host.Identity)
-	require.Equal(t, domain.RemoteAvailabilityReachable, host.Availability)
+		// The live attempt still completes normally and publishes its own result.
+		registry.apply(probeResult{endpoint: regB.Endpoint, registration: regB, attempt: live.token, at: clock.Now(), snapshot: currentObservation()})
+		require.ErrorIs(t, live.ctx.Err(), context.Canceled)
+		host, ok := registry.Snapshot().Find(regB.Endpoint)
+		require.True(t, ok)
+		require.Equal(t, regB, host.Registration)
+		require.Equal(t, ports.BrokerDaemonIdentity("current-daemon"), host.Identity)
+		require.Equal(t, domain.RemoteAvailabilityReachable, host.Availability)
+
+	})
 }
 
 // TestRegistryMutableStaleProbeCannotReviveRemovedRegistration proves the
@@ -684,36 +729,39 @@ func TestRegistryMutableStaleCompletionDoesNotClearLiveAttempt(t *testing.T) {
 // the endpoint was re-added under a fresh incarnation, and the re-add supersedes
 // rather than revives the retirement.
 func TestRegistryMutableStaleProbeCannotReviveRemovedRegistration(t *testing.T) {
-	clock := newManualClock(t, time.Unix(100, 0))
-	seq := &incarnationSequencer{}
-	registry, _ := newMutableRegistry(t, newMembershipStore(), clock, seq.generate)
-	regA, err := registry.AddHost(context.Background(), "alpha.test", poolPolicy())
-	require.NoError(t, err)
-	retired := admitMembershipAttempt(t, registry, regA.Endpoint)
+	synctest.Test(t, func(t *testing.T) {
+		clock := newManualClock(t, time.Unix(100, 0))
+		seq := &incarnationSequencer{}
+		registry, _ := newMutableRegistry(t, newMembershipStore(), clock, seq.generate)
+		regA, err := registry.AddHost(context.Background(), "alpha.test", poolPolicy())
+		require.NoError(t, err)
+		retired := admitMembershipAttempt(t, registry, regA.Endpoint)
 
-	removed, err := registry.RemoveHost(context.Background(), regA)
-	require.NoError(t, err)
-	require.True(t, removed)
-	require.ErrorIs(t, retired.ctx.Err(), context.Canceled)
-	afterRemove := registry.Snapshot()
-	require.Len(t, afterRemove.Removed, 1)
-	require.Equal(t, regA, afterRemove.Removed[0].Registration)
+		removed, err := registry.RemoveHost(context.Background(), regA)
+		require.NoError(t, err)
+		require.True(t, removed)
+		require.ErrorIs(t, retired.ctx.Err(), context.Canceled)
+		afterRemove := registry.Snapshot()
+		require.Len(t, afterRemove.Removed, 1)
+		require.Equal(t, regA, afterRemove.Removed[0].Registration)
 
-	regB, err := registry.AddHost(context.Background(), "alpha.test", poolPolicy())
-	require.NoError(t, err)
-	require.NotEqual(t, regA.Incarnation, regB.Incarnation)
-	before := registry.Snapshot()
-	require.Len(t, before.Daemons, 1)
-	require.Empty(t, before.Removed)
+		regB, err := registry.AddHost(context.Background(), "alpha.test", poolPolicy())
+		require.NoError(t, err)
+		require.NotEqual(t, regA.Incarnation, regB.Incarnation)
+		before := registry.Snapshot()
+		require.Len(t, before.Daemons, 1)
+		require.Empty(t, before.Removed)
 
-	registry.apply(probeResult{endpoint: regA.Endpoint, registration: regA, attempt: retired.token, at: clock.Now(), snapshot: staleObservation()})
-	require.Equal(t, before, registry.Snapshot())
-	host, ok := registry.Snapshot().Find(regA.Endpoint)
-	require.True(t, ok)
-	require.Equal(t, regB, host.Registration)
-	require.Equal(t, domain.RemoteAvailabilityUnknown, host.Availability)
-	require.Empty(t, host.Identity)
-	require.Zero(t, attemptFor(registry, regA.Endpoint))
+		registry.apply(probeResult{endpoint: regA.Endpoint, registration: regA, attempt: retired.token, at: clock.Now(), snapshot: staleObservation()})
+		require.Equal(t, before, registry.Snapshot())
+		host, ok := registry.Snapshot().Find(regA.Endpoint)
+		require.True(t, ok)
+		require.Equal(t, regB, host.Registration)
+		require.Equal(t, domain.RemoteAvailabilityUnknown, host.Availability)
+		require.Empty(t, host.Identity)
+		require.Zero(t, attemptFor(registry, regA.Endpoint))
+
+	})
 }
 
 // TestRegistryMutablePolicyChangeRetiresInflightProbe drives the same fence
@@ -721,36 +769,39 @@ func TestRegistryMutableStaleProbeCannotReviveRemovedRegistration(t *testing.T) 
 // promptly, a fresh attempt observes the new registration, and the retired
 // answer can never surface as the new generation's observation.
 func TestRegistryMutablePolicyChangeRetiresInflightProbe(t *testing.T) {
-	registry, probe := newMutableRegistry(t, newMembershipStore(), newManualClock(t, time.Unix(100, 0)), (&incarnationSequencer{}).generate)
-	regA, err := registry.AddHost(context.Background(), "alpha.test", poolPolicy())
-	require.NoError(t, err)
-	startRegistry(t, registry)
+	synctest.Test(t, func(t *testing.T) {
+		registry, probe := newMutableRegistry(t, newMembershipStore(), newManualClock(t, time.Unix(100, 0)), (&incarnationSequencer{}).generate)
+		regA, err := registry.AddHost(context.Background(), "alpha.test", poolPolicy())
+		require.NoError(t, err)
+		startRegistry(t, registry)
 
-	first := receiveCall(t, probe)
-	require.Equal(t, regA, first.registration)
+		first := receiveCall(t, probe)
+		require.Equal(t, regA, first.registration)
 
-	regB, err := registry.UpdateHostPolicy(context.Background(), regA, policyWithTrust("other-trust"))
-	require.NoError(t, err)
-	require.Equal(t, regA.Generation+1, regB.Generation)
-	select {
-	case <-probe.canceled:
-	case <-time.After(time.Second):
-		t.Fatal("a policy change must retire the in-flight probe")
-	}
+		regB, err := registry.UpdateHostPolicy(context.Background(), regA, policyWithTrust("other-trust"))
+		require.NoError(t, err)
+		require.Equal(t, regA.Generation+1, regB.Generation)
+		select {
+		case <-probe.canceled:
+		case <-time.After(time.Second):
+			t.Fatal("a policy change must retire the in-flight probe")
+		}
 
-	second := receiveCall(t, probe)
-	require.Equal(t, regB, second.registration, "the replacement generation is observed")
+		second := receiveCall(t, probe)
+		require.Equal(t, regB, second.registration, "the replacement generation is observed")
 
-	// The retired answer arrives after its attempt was retired; only the new
-	// generation's answer may become the published observation.
-	first.result <- probeAnswer{snapshot: staleObservation()}
-	second.result <- probeAnswer{snapshot: currentObservation()}
-	host := waitHost(t, registry, regB.Endpoint, func(host ports.BrokerDaemonObservation) bool {
-		return host.Identity == ports.BrokerDaemonIdentity("current-daemon")
+		// The retired answer arrives after its attempt was retired; only the new
+		// generation's answer may become the published observation.
+		first.result <- probeAnswer{snapshot: staleObservation()}
+		second.result <- probeAnswer{snapshot: currentObservation()}
+		host := waitHost(t, registry, regB.Endpoint, func(host ports.BrokerDaemonObservation) bool {
+			return host.Identity == ports.BrokerDaemonIdentity("current-daemon")
+		})
+		require.Equal(t, regB, host.Registration)
+		require.Equal(t, domain.RemoteAvailabilityReachable, host.Availability)
+		requireHostStableWithin(t, registry, regB.Endpoint, host, 50*time.Millisecond)
+
 	})
-	require.Equal(t, regB, host.Registration)
-	require.Equal(t, domain.RemoteAvailabilityReachable, host.Availability)
-	requireHostStableWithin(t, registry, regB.Endpoint, host, 50*time.Millisecond)
 }
 
 // membershipFixture seeds the state a failed mutation must leave untouched: two
@@ -843,29 +894,32 @@ func runMembershipStoreFailures(t *testing.T, storeErr error) {
 	}
 	for _, op := range ops {
 		t.Run(op.name, func(t *testing.T) {
-			fixture := newMembershipFixture(t)
-			fixture.store.failCAS(storeErr)
+			synctest.Test(t, func(t *testing.T) {
+				fixture := newMembershipFixture(t)
+				fixture.store.failCAS(storeErr)
 
-			removed, err := op.run(fixture)
-			require.Error(t, err)
-			// A commit that never happened is never reported as a removal, even
-			// for the one operation whose success is a boolean: a caller that
-			// trusted removed=true from a failed commit would drop live authority.
-			require.False(t, removed, "a failed commit must never report a removal")
-			var unknown ports.BrokerStoreOutcomeUnknownError
-			if errors.As(storeErr, &unknown) {
-				require.ErrorAs(t, err, &unknown, "an indeterminate outcome stays classifiable through the registry")
-			} else {
-				require.ErrorIs(t, err, storeErr)
-				require.False(t, errors.As(err, &unknown), "a definite failure is not an unknown outcome")
-			}
+				removed, err := op.run(fixture)
+				require.Error(t, err)
+				// A commit that never happened is never reported as a removal, even
+				// for the one operation whose success is a boolean: a caller that
+				// trusted removed=true from a failed commit would drop live authority.
+				require.False(t, removed, "a failed commit must never report a removal")
+				var unknown ports.BrokerStoreOutcomeUnknownError
+				if errors.As(storeErr, &unknown) {
+					require.ErrorAs(t, err, &unknown, "an indeterminate outcome stays classifiable through the registry")
+				} else {
+					require.ErrorIs(t, err, storeErr)
+					require.False(t, errors.As(err, &unknown), "a definite failure is not an unknown outcome")
+				}
 
-			require.Equal(t, fixture.authority, fixture.registry.authority, "authority must not move")
-			require.Equal(t, fixture.before, fixture.registry.Snapshot(), "projection must not move")
-			require.Equal(t, fixture.attempt.token, attemptFor(fixture.registry, fixture.alpha.Endpoint), "the in-flight attempt must survive")
-			require.NoError(t, fixture.attempt.ctx.Err(), "a failed store call must not retire the attempt")
-			require.Equal(t, fixture.fences, membershipFences(fixture.registry), "tombstones must not move")
-			require.Equal(t, fixture.casBefore+1, fixture.store.casCalls(), "the mutation reached the store CAS")
+				require.Equal(t, fixture.authority, fixture.registry.authority, "authority must not move")
+				require.Equal(t, fixture.before, fixture.registry.Snapshot(), "projection must not move")
+				require.Equal(t, fixture.attempt.token, attemptFor(fixture.registry, fixture.alpha.Endpoint), "the in-flight attempt must survive")
+				require.NoError(t, fixture.attempt.ctx.Err(), "a failed store call must not retire the attempt")
+				require.Equal(t, fixture.fences, membershipFences(fixture.registry), "tombstones must not move")
+				require.Equal(t, fixture.casBefore+1, fixture.store.casCalls(), "the mutation reached the store CAS")
+
+			})
 		})
 	}
 }

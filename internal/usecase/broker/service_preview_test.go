@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	renderer "github.com/bnema/vev-vt"
@@ -126,6 +127,7 @@ func newPreviewFixture(t *testing.T, target domain.RemoteSessionTarget) *preview
 	clock := newManualClock(t, time.Unix(0, 0))
 	registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, newTestStore()), nil, clock.mock, nil, RegistryConfig{ObservationDisabled: true})
 	require.NoError(t, err)
+	t.Cleanup(func() { registry.store.close() })
 	authority, _, _, _ := composeTestAuthority(t, 1, registry, connector.Connect, clock)
 	authority.codec = testSessionCodec{}
 	service, err := authority.AdmitClient(context.Background())
@@ -171,10 +173,15 @@ func (f *previewFixture) awaitPublication() ports.BrokerPreviewPublication {
 // advanceUntilOpen drives the manual clock until the reopen backoff fires.
 func (f *previewFixture) advanceUntilOpen(step time.Duration) {
 	f.t.Helper()
-	require.Eventually(f.t, func() bool {
+	synctest.Wait()
+	// Advance a bounded backoff budget in exact fake-clock steps.
+	for elapsed := time.Duration(0); elapsed <= previewReopenMax; elapsed += step {
+		if len(f.connector.opened) > 0 {
+			return
+		}
 		f.clock.Advance(step)
-		return len(f.connector.opened) > 0
-	}, 5*time.Second, time.Millisecond)
+	}
+	require.NotEmpty(f.t, f.connector.opened)
 }
 
 func awaitClosed(t *testing.T, conn *previewWatchConn) {
@@ -193,70 +200,79 @@ func TestServicePreviewStreamIDsDoNotConsumeClientIDs(t *testing.T) {
 			name = "preview first"
 		}
 		t.Run(name, func(t *testing.T) {
-			f := newPreviewFixture(t, previewTarget(0x11, "tab-alpha"))
-			service := f.service.(*Service)
-			openClient := func(want ports.BrokerStreamID) {
-				t.Helper()
-				id, err := service.NextStreamID()
-				require.NoError(t, err)
-				require.Equal(t, want, id)
-				stream, err := service.OpenEnvelopeStream(context.Background(), poolRequest(service.ConnectionID(), uint64(id)))
-				require.NoError(t, err)
-				t.Cleanup(func() { require.NoError(t, stream.Close()) })
-			}
-			if !previewFirst {
-				openClient(1)
-			}
-			for range 3 {
-				req, err := service.previewStreamRequest(ports.BrokerPreviewRoute{Local: true, Policy: poolPolicy()})
-				require.NoError(t, err)
-				stream, err := service.pool.OpenStream(context.Background(), req)
-				require.NoError(t, err)
-				require.NoError(t, stream.Close())
-			}
-			if previewFirst {
-				openClient(1)
-			} else {
-				openClient(2)
-			}
+			synctest.Test(t, func(t *testing.T) {
+				f := newPreviewFixture(t, previewTarget(0x11, "tab-alpha"))
+				service := f.service.(*Service)
+				openClient := func(want ports.BrokerStreamID) {
+					t.Helper()
+					id, err := service.NextStreamID()
+					require.NoError(t, err)
+					require.Equal(t, want, id)
+					stream, err := service.OpenEnvelopeStream(context.Background(), poolRequest(service.ConnectionID(), uint64(id)))
+					require.NoError(t, err)
+					t.Cleanup(func() { require.NoError(t, stream.Close()) })
+				}
+				if !previewFirst {
+					openClient(1)
+				}
+				for range 3 {
+					req, err := service.previewStreamRequest(ports.BrokerPreviewRoute{Local: true, Policy: poolPolicy()})
+					require.NoError(t, err)
+					stream, err := service.pool.OpenStream(context.Background(), req)
+					require.NoError(t, err)
+					require.NoError(t, stream.Close())
+				}
+				if previewFirst {
+					openClient(1)
+				} else {
+					openClient(2)
+				}
+
+			})
 		})
 	}
 }
 
 func TestServicePreviewKeepsOneStreamAcrossFrames(t *testing.T) {
-	target := previewTarget(0x11, "tab-alpha")
-	f := newPreviewFixture(t, target)
-	conn, watch := f.awaitOpen()
-	require.Equal(t, previewLocalInterval, watch.MinInterval, "the broker picks the local rate")
-	require.Equal(t, target, watch.Request.Target)
-	require.NoError(t, protocol.ValidateRemotePreviewWatch(watch))
+	synctest.Test(t, func(t *testing.T) {
+		target := previewTarget(0x11, "tab-alpha")
+		f := newPreviewFixture(t, target)
+		conn, watch := f.awaitOpen()
+		require.Equal(t, previewLocalInterval, watch.MinInterval, "the broker picks the local rate")
+		require.Equal(t, target, watch.Request.Target)
+		require.NoError(t, protocol.ValidateRemotePreviewWatch(watch))
 
-	for revision := range uint64(3) {
-		frame := previewAnswer(0x11, "tab-alpha", 2, 1)
-		frame.Revision = revision + 1
-		conn.push(frame)
-		publication := f.awaitPublication()
-		require.NoError(t, publication.Err)
-		require.Equal(t, frame.Revision, publication.Preview.Revision)
-	}
-	require.Empty(t, f.connector.opened, "every frame arrives on the one watch stream")
+		for revision := range uint64(3) {
+			frame := previewAnswer(0x11, "tab-alpha", 2, 1)
+			frame.Revision = revision + 1
+			conn.push(frame)
+			publication := f.awaitPublication()
+			require.NoError(t, publication.Err)
+			require.Equal(t, frame.Revision, publication.Preview.Revision)
+		}
+		require.Empty(t, f.connector.opened, "every frame arrives on the one watch stream")
+
+	})
 }
 
 func TestServicePreviewFirstFrameDeadlinePublishesUnavailableAndKeepsWaiting(t *testing.T) {
-	f := newPreviewFixture(t, previewTarget(0x11, "tab-alpha"))
-	conn, _ := f.awaitOpen()
-	require.Eventually(t, func() bool {
-		f.clock.Advance(previewFirstFrameLimit)
-		return len(f.sub.Changed()) > 0
-	}, 5*time.Second, time.Millisecond)
-	publication := f.awaitPublication()
-	var brokerErr ports.BrokerError
-	require.ErrorAs(t, publication.Err, &brokerErr)
-	require.Equal(t, ports.BrokerErrorUnavailable, brokerErr.Code)
+	synctest.Test(t, func(t *testing.T) {
+		f := newPreviewFixture(t, previewTarget(0x11, "tab-alpha"))
+		conn, _ := f.awaitOpen()
+		requireQuiescent(t, func() bool {
+			f.clock.Advance(previewFirstFrameLimit)
+			return len(f.sub.Changed()) > 0
+		}, 5*time.Second, time.Millisecond)
+		publication := f.awaitPublication()
+		var brokerErr ports.BrokerError
+		require.ErrorAs(t, publication.Err, &brokerErr)
+		require.Equal(t, ports.BrokerErrorUnavailable, brokerErr.Code)
 
-	conn.push(previewAnswer(0x11, "tab-alpha", 2, 1))
-	require.NoError(t, f.awaitPublication().Err, "a slow stream still delivers once it answers")
-	require.Empty(t, f.connector.opened)
+		conn.push(previewAnswer(0x11, "tab-alpha", 2, 1))
+		require.NoError(t, f.awaitPublication().Err, "a slow stream still delivers once it answers")
+		require.Empty(t, f.connector.opened)
+
+	})
 }
 
 func TestServicePreviewFailureReopensWithBackoff(t *testing.T) {
@@ -272,50 +288,59 @@ func TestServicePreviewFailureReopensWithBackoff(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newPreviewFixture(t, previewTarget(0x11, "tab-alpha"))
-			first, _ := f.awaitOpen()
-			tc.fail(first)
-			publication := f.awaitPublication()
-			require.Error(t, publication.Err)
-			require.Equal(t, protocol.RemotePreview{}, publication.Preview, "a failure never publishes foreign content")
-			awaitClosed(t, first)
+			synctest.Test(t, func(t *testing.T) {
+				f := newPreviewFixture(t, previewTarget(0x11, "tab-alpha"))
+				first, _ := f.awaitOpen()
+				tc.fail(first)
+				publication := f.awaitPublication()
+				require.Error(t, publication.Err)
+				require.Equal(t, protocol.RemotePreview{}, publication.Preview, "a failure never publishes foreign content")
+				awaitClosed(t, first)
 
-			f.advanceUntilOpen(previewReopenMin)
-			second, _ := f.awaitOpen()
-			require.NotEqual(t, first.stream, second.stream, "a reopen allocates a new stream identity")
-			second.push(previewAnswer(0x11, "tab-alpha", 2, 1))
-			require.NoError(t, f.awaitPublication().Err)
+				f.advanceUntilOpen(previewReopenMin)
+				second, _ := f.awaitOpen()
+				require.NotEqual(t, first.stream, second.stream, "a reopen allocates a new stream identity")
+				second.push(previewAnswer(0x11, "tab-alpha", 2, 1))
+				require.NoError(t, f.awaitPublication().Err)
+
+			})
 		})
 	}
 }
 
 func TestServicePreviewBackoffDoublesUntilCap(t *testing.T) {
-	f := newPreviewFixture(t, previewTarget(0x11, "tab-alpha"))
-	conn, _ := f.awaitOpen()
-	want := []time.Duration{previewReopenMin, 2 * previewReopenMin, 4 * previewReopenMin}
-	for _, delay := range want {
-		conn.fail(errors.New("stream lost"))
-		f.awaitPublication()
-		awaitClosed(t, conn)
-		start := f.clock.Now()
-		f.advanceUntilOpen(previewReopenMin / 5)
-		require.GreaterOrEqual(t, f.clock.Now().Sub(start), delay)
-		conn, _ = f.awaitOpen()
-	}
+	synctest.Test(t, func(t *testing.T) {
+		f := newPreviewFixture(t, previewTarget(0x11, "tab-alpha"))
+		conn, _ := f.awaitOpen()
+		want := []time.Duration{previewReopenMin, 2 * previewReopenMin, 4 * previewReopenMin}
+		for _, delay := range want {
+			conn.fail(errors.New("stream lost"))
+			f.awaitPublication()
+			awaitClosed(t, conn)
+			start := f.clock.Now()
+			f.advanceUntilOpen(previewReopenMin / 5)
+			require.GreaterOrEqual(t, f.clock.Now().Sub(start), delay)
+			conn, _ = f.awaitOpen()
+		}
+
+	})
 }
 
 func TestServicePreviewNoSuchTargetStopsRecovery(t *testing.T) {
-	f := newPreviewFixture(t, previewTarget(0x11, "tab-alpha"))
-	conn, _ := f.awaitOpen()
-	conn.push(protocol.RemotePreview{Version: protocol.RemotePreviewSchemaVersion, Status: protocol.RemotePreviewNoSuchTarget})
-	publication := f.awaitPublication()
-	require.NoError(t, publication.Err)
-	require.Equal(t, protocol.RemotePreviewNoSuchTarget, publication.Preview.Status)
-	awaitClosed(t, conn)
-	require.Never(t, func() bool {
-		f.clock.Advance(previewReopenMax)
-		return len(f.connector.opened) > 0
-	}, 100*time.Millisecond, 5*time.Millisecond, "a dead target is never reopened")
+	synctest.Test(t, func(t *testing.T) {
+		f := newPreviewFixture(t, previewTarget(0x11, "tab-alpha"))
+		conn, _ := f.awaitOpen()
+		conn.push(protocol.RemotePreview{Version: protocol.RemotePreviewSchemaVersion, Status: protocol.RemotePreviewNoSuchTarget})
+		publication := f.awaitPublication()
+		require.NoError(t, publication.Err)
+		require.Equal(t, protocol.RemotePreviewNoSuchTarget, publication.Preview.Status)
+		awaitClosed(t, conn)
+		require.Never(t, func() bool {
+			f.clock.Advance(previewReopenMax)
+			return len(f.connector.opened) > 0
+		}, 100*time.Millisecond, 5*time.Millisecond, "a dead target is never reopened")
+
+	})
 }
 
 func TestServicePreviewCloseClosesTheStream(t *testing.T) {
@@ -333,13 +358,16 @@ func TestServicePreviewCloseClosesTheStream(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newPreviewFixture(t, previewTarget(0x11, "tab-alpha"))
-			conn, _ := f.awaitOpen()
-			conn.push(previewAnswer(0x11, "tab-alpha", 2, 1))
-			f.awaitPublication()
-			tc.close(f)
-			awaitClosed(t, conn)
-			require.NotPanics(t, func() { _ = f.sub.Latest() }, "Latest stays observable after Close")
+			synctest.Test(t, func(t *testing.T) {
+				f := newPreviewFixture(t, previewTarget(0x11, "tab-alpha"))
+				conn, _ := f.awaitOpen()
+				conn.push(previewAnswer(0x11, "tab-alpha", 2, 1))
+				f.awaitPublication()
+				tc.close(f)
+				awaitClosed(t, conn)
+				require.NotPanics(t, func() { _ = f.sub.Latest() }, "Latest stays observable after Close")
+
+			})
 		})
 	}
 }
@@ -373,10 +401,13 @@ func TestServicePreviewRouteValidation(t *testing.T) {
 	f := newPreviewFixture(t, previewTarget(0x11, "tab-alpha"))
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			request := previewRequestFor(f.service, 5, previewTarget(0x11, "tab-alpha"))
-			tc.mutate(&request)
-			_, err := f.service.SubscribePreview(request)
-			require.ErrorIs(t, err, ports.BrokerAdmissionInvalid)
+			synctest.Test(t, func(t *testing.T) {
+				request := previewRequestFor(f.service, 5, previewTarget(0x11, "tab-alpha"))
+				tc.mutate(&request)
+				_, err := f.service.SubscribePreview(request)
+				require.ErrorIs(t, err, ports.BrokerAdmissionInvalid)
+
+			})
 		})
 	}
 	stale := previewRequestFor(f.service, 1, previewTarget(0x11, "tab-alpha"))
