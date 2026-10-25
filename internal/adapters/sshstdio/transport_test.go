@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/bnema/vev/internal/adapters/sessionwire"
@@ -68,6 +69,7 @@ func TestBuildCommandForRemoteCommandQuotesEveryWord(t *testing.T) {
 	}
 }
 
+// real I/O: in-memory pipe transport whose synchronous Send borrows streamframe's pooled result channel, which cannot be used inside a synctest bubble.
 func TestCloseInterruptsBlockedSend(t *testing.T) {
 	writer := &blockedWriter{started: make(chan struct{}), released: make(chan struct{})}
 	transport := NewTransport(nil, writer, nil)
@@ -104,6 +106,7 @@ func (w *blockedWriter) Close() error {
 	return nil
 }
 
+// real I/O: in-memory pipe transport whose synchronous Send borrows streamframe's pooled result channel, which cannot be used inside a synctest bubble.
 func TestTransportRoundTripAndVersionMismatchFrame(t *testing.T) {
 	clientRead, serverWrite := io.Pipe()
 	serverRead, clientWrite := io.Pipe()
@@ -171,13 +174,17 @@ func TestTransportRoundTripAndVersionMismatchFrame(t *testing.T) {
 }
 
 func TestTransportRejectsZeroLengthFrame(t *testing.T) {
-	tr := NewTransport(strings.NewReader("\x00\x00\x00\x00"), io.Discard, nil)
-	_, err := tr.Recv()
-	if !errors.Is(err, ErrZeroLengthFrame) {
-		t.Fatalf("Recv error = %v, want ErrZeroLengthFrame", err)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		tr := NewTransport(strings.NewReader("\x00\x00\x00\x00"), io.Discard, nil)
+		defer func() { _ = tr.Close() }()
+		_, err := tr.Recv()
+		if !errors.Is(err, ErrZeroLengthFrame) {
+			t.Fatalf("Recv error = %v, want ErrZeroLengthFrame", err)
+		}
+	})
 }
 
+// real I/O: in-memory pipe transport whose synchronous Send borrows streamframe's pooled result channel, which cannot be used inside a synctest bubble.
 func TestTransportUsesCanonicalFrameMaximum(t *testing.T) {
 	boundaryPayload := make([]byte, wire.AbsoluteEnvelopeLimit-1)
 	boundaryWire := &bytes.Buffer{}
@@ -216,15 +223,19 @@ func TestTransportUsesCanonicalFrameMaximum(t *testing.T) {
 }
 
 func TestRecvMapsUnexpectedEOFDuringHeaderToSSHExit(t *testing.T) {
-	sshErr := errors.New("ssh exited with status 255")
-	tr := newTransport(strings.NewReader("\x00"), io.Discard, nil, func() error { return sshErr })
+	synctest.Test(t, func(t *testing.T) {
+		sshErr := errors.New("ssh exited with status 255")
+		tr := newTransport(strings.NewReader("\x00"), io.Discard, nil, func() error { return sshErr })
+		defer func() { _ = tr.Close() }()
 
-	_, err := tr.Recv()
-	if !errors.Is(err, sshErr) {
-		t.Fatalf("Recv error = %v, want %v", err, sshErr)
-	}
+		_, err := tr.Recv()
+		if !errors.Is(err, sshErr) {
+			t.Fatalf("Recv error = %v, want %v", err, sshErr)
+		}
+	})
 }
 
+// real I/O: spawns real subprocesses.
 func TestRecvReportsSSHExitWhenProcessClosesBeforeFrame(t *testing.T) {
 	cmd := exec.CommandContext(context.Background(), "sh", "-c", "echo connection refused >&2; exit 255")
 	stdin, err := cmd.StdinPipe()
@@ -255,6 +266,7 @@ func TestRecvReportsSSHExitWhenProcessClosesBeforeFrame(t *testing.T) {
 	}
 }
 
+// real I/O: spawns real subprocesses.
 func TestProcessCloserLogsNonCleanExitStderr(t *testing.T) {
 	cmd := exec.Command("sh", "-c", "echo remote failure >&2; exit 7")
 	stdin, err := cmd.StdinPipe()
@@ -284,6 +296,7 @@ func TestProcessCloserLogsNonCleanExitStderr(t *testing.T) {
 	}
 }
 
+// real I/O: spawns real subprocesses.
 func TestProcessCloser(t *testing.T) {
 	tests := []struct {
 		name      string

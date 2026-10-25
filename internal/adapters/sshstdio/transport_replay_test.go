@@ -9,6 +9,7 @@ import (
 	"github.com/bnema/vev/internal/testutil/replaytest"
 )
 
+// real I/O: in-memory pipe transport whose synchronous Send borrows streamframe's pooled result channel, which cannot be used inside a synctest bubble.
 func TestTransportReplay(t *testing.T) {
 	replaytest.Run(t, func(t *testing.T, envelopes []wire.Envelope) []wire.Envelope {
 		clientRead, serverWrite := io.Pipe()

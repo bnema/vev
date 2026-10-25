@@ -434,8 +434,9 @@ func TestQUICServerCannotOpenStreams(t *testing.T) {
 // real I/O: opens real QUIC UDP sockets.
 func TestQUICDelayedExtraStreamEnforced(t *testing.T) {
 	server, client := dialTestPairWithConfig(t, Config{MaxIncomingStreams: 2})
-	// Land the violation long after the handshake has settled.
-	<-time.After(200 * time.Millisecond)
+	// Land the violation only once the handshake has completed on both sides.
+	<-server.conn.HandshakeComplete()
+	<-client.conn.HandshakeComplete()
 	openCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	extra, err := client.conn.OpenStreamSync(openCtx)
