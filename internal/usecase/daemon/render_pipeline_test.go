@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -106,34 +107,36 @@ func TestCapturePaneRenderStateCollapsedRetainsDamage(t *testing.T) {
 }
 
 func TestPaintACKBlockedDoesNotDestructivelyCapture(t *testing.T) {
-	pty, release := newBlockingPTY(t)
-	t.Cleanup(release)
-	d, sess, _, sends := newManualSessionWithPTYs(t, pty)
-	ac := sess.snapshotAttachments()[0]
-	// Resolve the initial attachment view before filling the output window; a
-	// first target repair is an epoch boundary by design.
-	require.NotNil(t, sess.tabForAttachment(ac))
-	ac.sendMu.Lock()
-	ac.output.next = ac.output.maxOutstanding
-	ac.output.acked = 0
-	ac.output.syncCapacityLocked()
-	ac.sendMu.Unlock()
-	p := sess.tabs[0].focusedPane()
-	p.mu.Lock()
-	p.screen.ClearDamage()
-	p.screen.Write([]byte("blocked"))
-	p.mu.Unlock()
+	synctest.Test(t, func(t *testing.T) {
+		pty, release := newBlockingPTY(t)
+		t.Cleanup(release)
+		d, sess, _, sends := newManualSessionWithPTYs(t, pty)
+		ac := sess.snapshotAttachments()[0]
+		// Resolve the initial attachment view before filling the output window; a
+		// first target repair is an epoch boundary by design.
+		require.NotNil(t, sess.tabForAttachment(ac))
+		ac.sendMu.Lock()
+		ac.output.next = ac.output.maxOutstanding
+		ac.output.acked = 0
+		ac.output.syncCapacityLocked()
+		ac.sendMu.Unlock()
+		p := sess.tabs[0].focusedPane()
+		p.mu.Lock()
+		p.screen.ClearDamage()
+		p.screen.Write([]byte("blocked"))
+		p.mu.Unlock()
 
-	d.paint(sess, ac, false, nil)
+		d.paint(sess, ac, false, nil)
 
-	p.mu.Lock()
-	require.NotEmpty(t, p.screen.Damage())
-	p.mu.Unlock()
-	select {
-	case frame := <-sends:
-		t.Fatalf("ACK-blocked paint sent %#v", frame)
-	default:
-	}
+		p.mu.Lock()
+		require.NotEmpty(t, p.screen.Damage())
+		p.mu.Unlock()
+		select {
+		case frame := <-sends:
+			t.Fatalf("ACK-blocked paint sent %#v", frame)
+		default:
+		}
+	})
 }
 
 func TestComposeFrameUsesCapturedValuesAfterOwnersMutate(t *testing.T) {
@@ -206,97 +209,101 @@ func TestCursorCandidateDoesNotPublishDuringPreparation(t *testing.T) {
 }
 
 func TestPublishFrameFailedSendDoesNotPublishCursorOrOutputState(t *testing.T) {
-	d, sess, ac, sends := newManualSessionWithPTYs(t)
-	healthy := ac.transport()
-	beforeCursor := cursorOut{valid: true, row: 1, col: 2, style: 1, hasStyle: true}
-	ac.output.lastCursor = beforeCursor
-	ac.replaceTransport(newFailingConnection(t))
-	state := cacheState("failed", 1)
-	state.attachment = ac
-	composed := composeFrame(state, ac.render.cache, ac.render.spare)
-	composed.cursor = cursorOut{row: 3, col: 4, style: 2, hasStyle: true}
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, ac, sends := newManualSessionWithPTYs(t)
+		healthy := ac.transport()
+		beforeCursor := cursorOut{valid: true, row: 1, col: 2, style: 1, hasStyle: true}
+		ac.output.lastCursor = beforeCursor
+		ac.replaceTransport(newFailingConnection(t))
+		state := cacheState("failed", 1)
+		state.attachment = ac
+		composed := composeFrame(state, ac.render.cache, ac.render.spare)
+		composed.cursor = cursorOut{row: 3, col: 4, style: 2, hasStyle: true}
 
-	ac.sendMu.Lock()
-	require.True(t, d.publishCapturedFrameForTest(sess, ac, &state, composed))
+		ac.sendMu.Lock()
+		require.True(t, d.publishCapturedFrameForTest(sess, ac, &state, composed))
 
-	require.Equal(t, beforeCursor, ac.output.lastCursor)
-	require.Zero(t, ac.output.next)
-	probe, err := ac.output.renderer.Prepare(composed.frame, nil, false)
-	require.NoError(t, err)
-	require.NotEmpty(t, probe.Bytes(), "failed output must not commit the renderer shadow")
+		require.Equal(t, beforeCursor, ac.output.lastCursor)
+		require.Zero(t, ac.output.next)
+		probe, err := ac.output.renderer.Prepare(composed.frame, nil, false)
+		require.NoError(t, err)
+		require.NotEmpty(t, probe.Bytes(), "failed output must not commit the renderer shadow")
 
-	sess.mu.Lock()
-	sess.registerAttachmentLocked(ac)
-	sess.mu.Unlock()
-	ac.setSession(sess)
-	ac.replaceTransport(healthy)
-	state.attachment = ac
-	ac.sendMu.Lock()
-	require.True(t, d.publishCapturedFrameForTest(sess, ac, &state, composed))
-	require.Equal(t, cursorOut{valid: true, row: 3, col: 4, style: 2, hasStyle: true}, ac.output.lastCursor)
-	require.Equal(t, uint64(1), ac.output.next)
-	out := unmarshalTestOutput(t, (<-sends).Payload)
-	require.Zero(t, out.Base)
-	require.Equal(t, uint64(1), out.New)
+		sess.mu.Lock()
+		sess.registerAttachmentLocked(ac)
+		sess.mu.Unlock()
+		ac.setSession(sess)
+		ac.replaceTransport(healthy)
+		state.attachment = ac
+		ac.sendMu.Lock()
+		require.True(t, d.publishCapturedFrameForTest(sess, ac, &state, composed))
+		require.Equal(t, cursorOut{valid: true, row: 3, col: 4, style: 2, hasStyle: true}, ac.output.lastCursor)
+		require.Equal(t, uint64(1), ac.output.next)
+		out := unmarshalTestOutput(t, (<-sends).Payload)
+		require.Zero(t, out.Base)
+		require.Equal(t, uint64(1), out.New)
+	})
 }
 
 func TestPublishFrameNoByteSuccessCommitsTransactionWithoutStateFrame(t *testing.T) {
-	d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
-	state := cacheState("steady", 1)
-	state.attachment = ac
-	state.route.Target = protocol.ExactSessionTarget{LifecycleID: sess.incarnation, SessionName: sess.name}
-	state.view.tabID = domain.TabStableID(sess.tabs[0].stableID)
-	state.view.revision = ac.viewSnapshot().revision
-	initial := composeFrame(state, ac.render.cache, ac.render.spare)
-	ac.sendMu.Lock()
-	require.True(t, d.publishCapturedFrameForTest(sess, ac, &state, initial))
-	<-sends
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
+		state := cacheState("steady", 1)
+		state.attachment = ac
+		state.route.Target = protocol.ExactSessionTarget{LifecycleID: sess.incarnation, SessionName: sess.name}
+		state.view.tabID = domain.TabStableID(sess.tabs[0].stableID)
+		state.view.revision = ac.viewSnapshot().revision
+		initial := composeFrame(state, ac.render.cache, ac.render.spare)
+		ac.sendMu.Lock()
+		require.True(t, d.publishCapturedFrameForTest(sess, ac, &state, initial))
+		<-sends
 
-	p := newPane("collapsed", nil, domain.Size{Cols: 1, Rows: 1})
-	p.mu.Lock()
-	p.screen.ClearDamage()
-	p.screen.Write([]byte("x"))
-	capture := p.screen.CaptureDamage()
-	p.mu.Unlock()
+		p := newPane("collapsed", nil, domain.Size{Cols: 1, Rows: 1})
+		p.mu.Lock()
+		p.screen.ClearDamage()
+		p.screen.Write([]byte("x"))
+		capture := p.screen.CaptureDamage()
+		p.mu.Unlock()
 
-	beforeNext := ac.output.next
-	beforeCursor := ac.output.lastCursor
-	state.receipts = []damageReceipt{{pane: p, generation: capture.Generation}}
-	noByte := composedRenderFrame{
-		frame:  initial.frame,
-		cursor: initial.cursor,
-		cache:  initial.cache,
-	}
-	noByte.cache.layoutFingerprint = "no-byte-committed"
-	ac.sendMu.Lock()
-	require.True(t, d.publishCapturedFrameForTest(sess, ac, &state, noByte))
+		beforeNext := ac.output.next
+		beforeCursor := ac.output.lastCursor
+		state.receipts = []damageReceipt{{pane: p, generation: capture.Generation}}
+		noByte := composedRenderFrame{
+			frame:  initial.frame,
+			cursor: initial.cursor,
+			cache:  initial.cache,
+		}
+		noByte.cache.layoutFingerprint = "no-byte-committed"
+		ac.sendMu.Lock()
+		require.True(t, d.publishCapturedFrameForTest(sess, ac, &state, noByte))
 
-	require.Equal(t, beforeNext, ac.output.next)
-	require.Equal(t, beforeCursor, ac.output.lastCursor)
-	require.Equal(t, "no-byte-committed", ac.render.cache.layoutFingerprint)
-	p.mu.Lock()
-	require.Empty(t, p.screen.Damage())
-	p.mu.Unlock()
-	select {
-	case frame := <-sends:
-		t.Fatalf("no-byte transaction sent state frame %#v", frame)
-	default:
-	}
+		require.Equal(t, beforeNext, ac.output.next)
+		require.Equal(t, beforeCursor, ac.output.lastCursor)
+		require.Equal(t, "no-byte-committed", ac.render.cache.layoutFingerprint)
+		p.mu.Lock()
+		require.Empty(t, p.screen.Damage())
+		p.mu.Unlock()
+		select {
+		case frame := <-sends:
+			t.Fatalf("no-byte transaction sent state frame %#v", frame)
+		default:
+		}
 
-	state.focusedPaneID = "pane-2"
-	state.panes[0].stableID = "pane-2"
-	ac.sendMu.Lock()
-	require.True(t, d.publishCapturedFrameForTest(sess, ac, &state, noByte))
-	var frame wire.Envelope
-	select {
-	case frame = <-sends:
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for UI view update")
-	}
-	require.Equal(t, "UIViewUpdate", envelopeMessageName(t, frame.Payload))
-	update, ok := decodeServerMessage(t, frame).(protocol.UIViewUpdate)
-	require.True(t, ok)
-	require.Equal(t, state.focusedPaneID, update.Context.FocusedPaneID)
+		state.focusedPaneID = "pane-2"
+		state.panes[0].stableID = "pane-2"
+		ac.sendMu.Lock()
+		require.True(t, d.publishCapturedFrameForTest(sess, ac, &state, noByte))
+		var frame wire.Envelope
+		select {
+		case frame = <-sends:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for UI view update")
+		}
+		require.Equal(t, "UIViewUpdate", envelopeMessageName(t, frame.Payload))
+		update, ok := decodeServerMessage(t, frame).(protocol.UIViewUpdate)
+		require.True(t, ok)
+		require.Equal(t, state.focusedPaneID, update.Context.FocusedPaneID)
+	})
 }
 
 func TestComposeEmitExactReplayTiledFloatingBarsOverlayAndCursor(t *testing.T) {
@@ -375,31 +382,33 @@ func TestComposeEmitExactReplaySafeAndUnsafeScroll(t *testing.T) {
 		{name: "unsafe partial width", placement: layout.Placement{ID: "p", Content: domain.Rect{X: 2, Width: 2, Height: 3}}, initial: []string{"AA", "BB", "CC"}, scrolled: []string{"BB", "CC", "N "}, damage: []renderer.Damage{{Kind: renderer.DamageText, X: 2, Y: 0, Width: 2, Height: 3}}, wantBytes: "\x1b[2;3HBB\x1b[3;3HCC\x1b[4;3HN \x1b[0m"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			makeState := func(rows []string, damage []renderer.Damage, reset bool) capturedRenderState {
-				f := renderer.NewFrame(tt.placement.Content.Width, tt.placement.Content.Height)
-				for y, text := range rows {
-					for x, r := range text {
-						f.Set(x, y, renderer.Cell{Rune: r, Style: renderer.DefaultStyle()})
+			synctest.Test(t, func(t *testing.T) {
+				makeState := func(rows []string, damage []renderer.Damage, reset bool) capturedRenderState {
+					f := renderer.NewFrame(tt.placement.Content.Width, tt.placement.Content.Height)
+					for y, text := range rows {
+						for x, r := range text {
+							f.Set(x, y, renderer.Cell{Rune: r, Style: renderer.DefaultStyle()})
+						}
 					}
+					return capturedRenderState{reset: reset, layout: capturedTabLayout{area: domain.Rect{Width: 4, Height: 3}, valid: true, focus: "p", placements: []layout.Placement{tt.placement}}, panes: []capturedPaneRenderState{{id: "p", frame: f, placement: tt.placement, focused: true, damage: damage}}, cursor: capturedCursorInputs{visible: false}}
 				}
-				return capturedRenderState{reset: reset, layout: capturedTabLayout{area: domain.Rect{Width: 4, Height: 3}, valid: true, focus: "p", placements: []layout.Placement{tt.placement}}, panes: []capturedPaneRenderState{{id: "p", frame: f, placement: tt.placement, focused: true, damage: damage}}, cursor: capturedCursorInputs{visible: false}}
-			}
-			stream := newOutputStateStream()
-			first := composeFrame(makeState(tt.initial, []renderer.Damage{renderer.FullRedraw()}, true), composeCacheInput{})
-			firstBytes, err := stream.render(first.frame, first.damage, first.reset)
-			require.NoError(t, err)
-			client := vt.NewScreen(4, 5)
-			client.Write(firstBytes)
+				stream := newOutputStateStream()
+				first := composeFrame(makeState(tt.initial, []renderer.Damage{renderer.FullRedraw()}, true), composeCacheInput{})
+				firstBytes, err := stream.render(first.frame, first.damage, first.reset)
+				require.NoError(t, err)
+				client := vt.NewScreen(4, 5)
+				client.Write(firstBytes)
 
-			second := composeFrame(makeState(tt.scrolled, tt.damage, false), first.cache)
-			secondBytes, err := stream.render(second.frame, second.damage, second.reset)
-			require.NoError(t, err)
-			require.Equal(t, tt.wantBytes, string(secondBytes))
-			client.Write(secondBytes)
-			require.Equal(t, frameRows(second.frame), frameRows(client))
-			again, err := stream.renderer.Draw(second.frame, nil)
-			require.NoError(t, err)
-			require.Empty(t, again, "renderer shadow must equal replayed terminal state")
+				second := composeFrame(makeState(tt.scrolled, tt.damage, false), first.cache)
+				secondBytes, err := stream.render(second.frame, second.damage, second.reset)
+				require.NoError(t, err)
+				require.Equal(t, tt.wantBytes, string(secondBytes))
+				client.Write(secondBytes)
+				require.Equal(t, frameRows(second.frame), frameRows(client))
+				again, err := stream.renderer.Draw(second.frame, nil)
+				require.NoError(t, err)
+				require.Empty(t, again, "renderer shadow must equal replayed terminal state")
+			})
 		})
 	}
 }
@@ -420,14 +429,16 @@ func TestComposeCapturedOverlaysUsesCachedModalRoles(t *testing.T) {
 		{name: "focused", focused: true, border: active},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			state := capturedRenderState{
-				styles:   themeui.Styles{PickerBase: interior, BorderMuted: muted, BorderActive: active},
-				overlays: capturedOverlayRenderState{prompt: capturedModal{active: true, title: modal.Title, presentation: presentation, inner: renderer.NewFrame(1, 1), focused: tt.focused}},
-			}
-			frame, _ := composeCapturedOverlays(state, renderer.NewFrame(10, 8), nil)
-			bounds := presentation.Bounds
-			require.True(t, frame.At(bounds.X, bounds.Y).Style.Equal(tt.border), "border uses cached focused role")
-			require.True(t, frame.At(bounds.X+2, bounds.Y+2).Style.Equal(interior), "unrendered modal interior uses cached chrome role")
+			synctest.Test(t, func(t *testing.T) {
+				state := capturedRenderState{
+					styles:   themeui.Styles{PickerBase: interior, BorderMuted: muted, BorderActive: active},
+					overlays: capturedOverlayRenderState{prompt: capturedModal{active: true, title: modal.Title, presentation: presentation, inner: renderer.NewFrame(1, 1), focused: tt.focused}},
+				}
+				frame, _ := composeCapturedOverlays(state, renderer.NewFrame(10, 8), nil)
+				bounds := presentation.Bounds
+				require.True(t, frame.At(bounds.X, bounds.Y).Style.Equal(tt.border), "border uses cached focused role")
+				require.True(t, frame.At(bounds.X+2, bounds.Y+2).Style.Equal(interior), "unrendered modal interior uses cached chrome role")
+			})
 		})
 	}
 }
@@ -498,8 +509,10 @@ func TestComposeFrameModalBackdropDimsCompleteFrameIncludingToasts(t *testing.T)
 		"toast":        {toast.X, toast.Y},
 	} {
 		t.Run(name, func(t *testing.T) {
-			x, y := point[0], point[1]
-			require.Equal(t, dimmer.Dim(base.frame.At(x, y).Style).Canonical(), composed.frame.At(x, y).Style.Canonical())
+			synctest.Test(t, func(t *testing.T) {
+				x, y := point[0], point[1]
+				require.Equal(t, dimmer.Dim(base.frame.At(x, y).Style).Canonical(), composed.frame.At(x, y).Style.Canonical())
+			})
 		})
 	}
 	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, composed.damage)
@@ -548,8 +561,10 @@ func TestComposeFrameFloatingBackdropDimsCompleteFrameIncludingToasts(t *testing
 		"toast":      {toast.X, toast.Y},
 	} {
 		t.Run(name, func(t *testing.T) {
-			x, y := point[0], point[1]
-			require.Equal(t, dimmer.Dim(toastOnly.frame.At(x, y).Style).Canonical(), composed.frame.At(x, y).Style.Canonical())
+			synctest.Test(t, func(t *testing.T) {
+				x, y := point[0], point[1]
+				require.Equal(t, dimmer.Dim(toastOnly.frame.At(x, y).Style).Canonical(), composed.frame.At(x, y).Style.Canonical())
+			})
 		})
 	}
 	require.Equal(t, captureTestFrame(toastOnly.cache.frame), captureTestFrame(composed.cache.frame), "floating decoration must not enter the reusable base cache")
@@ -576,29 +591,31 @@ func TestComposeCapturedOverlaysMatchesKeyboardPriority(t *testing.T) {
 		{name: "prompt above palette", lower: "palette", higher: "prompt"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			state := capturedRenderState{theme: theme, styles: themeui.Styles{PickerBase: renderer.DefaultStyle()}}
-			setModal := func(name string, modal capturedModal) {
-				switch name {
-				case "copy search":
-					state.overlays.copySearch = modal
-				case "notices":
-					state.overlays.noticesOverlay = modal
-				case "palette":
-					state.overlays.palette = modal
-				case "prompt":
-					state.overlays.prompt = modal
+			synctest.Test(t, func(t *testing.T) {
+				state := capturedRenderState{theme: theme, styles: themeui.Styles{PickerBase: renderer.DefaultStyle()}}
+				setModal := func(name string, modal capturedModal) {
+					switch name {
+					case "copy search":
+						state.overlays.copySearch = modal
+					case "notices":
+						state.overlays.noticesOverlay = modal
+					case "palette":
+						state.overlays.palette = modal
+					case "prompt":
+						state.overlays.prompt = modal
+					}
 				}
-			}
-			setModal(tt.lower, modalAt(1, 'L', lowerStyle))
-			setModal(tt.higher, modalAt(3, 'H', higherStyle))
+				setModal(tt.lower, modalAt(1, 'L', lowerStyle))
+				setModal(tt.higher, modalAt(3, 'H', higherStyle))
 
-			frame, damage := composeCapturedOverlays(state, renderer.NewFrame(5, 3), nil)
+				frame, damage := composeCapturedOverlays(state, renderer.NewFrame(5, 3), nil)
 
-			require.Equal(t, 'L', frame.At(1, 1).Rune)
-			require.Equal(t, themeui.NewDimmer(theme).Dim(lowerStyle).Canonical(), frame.At(1, 1).Style.Canonical(), "the lower-priority modal is part of the higher modal backdrop")
-			require.Equal(t, 'H', frame.At(3, 1).Rune)
-			require.Equal(t, higherStyle, frame.At(3, 1).Style, "the keyboard owner remains visually topmost")
-			require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, damage)
+				require.Equal(t, 'L', frame.At(1, 1).Rune)
+				require.Equal(t, themeui.NewDimmer(theme).Dim(lowerStyle).Canonical(), frame.At(1, 1).Style.Canonical(), "the lower-priority modal is part of the higher modal backdrop")
+				require.Equal(t, 'H', frame.At(3, 1).Rune)
+				require.Equal(t, higherStyle, frame.At(3, 1).Style, "the keyboard owner remains visually topmost")
+				require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, damage)
+			})
 		})
 	}
 }
@@ -628,9 +645,11 @@ func TestCaptureOverlayLayersRendersEveryModelToResolvedInner(t *testing.T) {
 		"prompt":      state.overlays.prompt,
 	} {
 		t.Run(name, func(t *testing.T) {
-			require.True(t, modal.active)
-			require.Equal(t, ui.PresentationDrawer, modal.presentation.Mode)
-			require.Equal(t, rectSize(modal.presentation.Inner), domain.Size{Cols: modal.inner.Width, Rows: modal.inner.Height})
+			synctest.Test(t, func(t *testing.T) {
+				require.True(t, modal.active)
+				require.Equal(t, ui.PresentationDrawer, modal.presentation.Mode)
+				require.Equal(t, rectSize(modal.presentation.Inner), domain.Size{Cols: modal.inner.Width, Rows: modal.inner.Height})
+			})
 		})
 	}
 }
@@ -684,25 +703,27 @@ func TestNoticeStylesFromMapsWarnToDedicatedRoleDistinctFromInfo(t *testing.T) {
 }
 
 func TestPublishFrameSkipsTransportSendWhenAttachmentEffectFenceRejects(t *testing.T) {
-	d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
-	token := sess.captureAttachmentCapability(ac, ac.transport())
-	effect, admitted := ac.beginAttachmentEffect(token)
-	require.True(t, admitted)
-	ac.lifecycle.mu.Lock()
-	ac.lifecycle.capability.transport = transportSnapshot{}
-	ac.lifecycle.mu.Unlock()
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
+		token := sess.captureAttachmentCapability(ac, ac.transport())
+		effect, admitted := ac.beginAttachmentEffect(token)
+		require.True(t, admitted)
+		ac.lifecycle.mu.Lock()
+		ac.lifecycle.capability.transport = transportSnapshot{}
+		ac.lifecycle.mu.Unlock()
 
-	state := cacheState("stale", 1)
-	state.attachment = ac
-	composed := composeFrame(state, composeCacheInput{})
-	ac.sendMu.Lock()
-	require.True(t, d.publishCapturedFrameForTest(sess, ac, &state, composed, &runtimeMarkBatch{attachmentEffect: effect}))
-	d.attachmentCleanupWg.Wait()
+		state := cacheState("stale", 1)
+		state.attachment = ac
+		composed := composeFrame(state, composeCacheInput{})
+		ac.sendMu.Lock()
+		require.True(t, d.publishCapturedFrameForTest(sess, ac, &state, composed, &runtimeMarkBatch{attachmentEffect: effect}))
+		d.attachmentCleanupWg.Wait()
 
-	require.Zero(t, ac.output.next, "rejected transport effect must not commit output state")
-	select {
-	case frame := <-sends:
-		t.Fatalf("rejected transport effect was sent: %s", envelopeMessageName(t, frame.Payload))
-	default:
-	}
+		require.Zero(t, ac.output.next, "rejected transport effect must not commit output state")
+		select {
+		case frame := <-sends:
+			t.Fatalf("rejected transport effect was sent: %s", envelopeMessageName(t, frame.Payload))
+		default:
+		}
+	})
 }

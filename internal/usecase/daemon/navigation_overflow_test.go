@@ -3,6 +3,7 @@ package daemon
 import (
 	"sync"
 	"testing"
+	"testing/synctest"
 
 	"github.com/stretchr/testify/require"
 
@@ -37,7 +38,9 @@ func TestResolveOverflowObeysAxisConfigurationAndWalls(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.want, resolveOverflow(tt.dir, tt.cfg, tt.position, tt.count))
+			synctest.Test(t, func(t *testing.T) {
+				require.Equal(t, tt.want, resolveOverflow(tt.dir, tt.cfg, tt.position, tt.count))
+			})
 		})
 	}
 }
@@ -70,103 +73,107 @@ func TestKeyboardHorizontalOverflowLandsOnFacingEdge(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d, sess, ac, _ := newManualSessionWithPTYs(t, nil, nil)
-			sess.mu.Lock()
-			selectTestAttachmentTabLocked(sess, tt.start)
-			target := sess.tabs[tt.wantActive]
-			source := sess.tabs[tt.start]
-			sess.mu.Unlock()
-			target.mu.Lock()
-			target.size = domain.Size{Cols: 41, Rows: 10}
-			target.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}, Focus: "pane-1"}
-			target.panes["pane-2"] = newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 10})
-			target.mu.Unlock()
-			d.ApplyConfig(domain.Config{Nav: domain.NavConfig{OverflowTabs: true}})
+			synctest.Test(t, func(t *testing.T) {
+				d, sess, ac, _ := newManualSessionWithPTYs(t, nil, nil)
+				sess.mu.Lock()
+				selectTestAttachmentTabLocked(sess, tt.start)
+				target := sess.tabs[tt.wantActive]
+				source := sess.tabs[tt.start]
+				sess.mu.Unlock()
+				target.mu.Lock()
+				target.size = domain.Size{Cols: 41, Rows: 10}
+				target.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}, Focus: "pane-1"}
+				target.panes["pane-2"] = newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 10})
+				target.mu.Unlock()
+				d.ApplyConfig(domain.Config{Nav: domain.NavConfig{OverflowTabs: true}})
 
-			daemonKeyHandler{d: d, ac: ac}.Action(tt.action, nil)
+				daemonKeyHandler{d: d, ac: ac}.Action(tt.action, nil)
 
-			require.Equal(t, tt.wantActive, testAttachmentTabIndex(sess))
-			target.mu.Lock()
-			require.Equal(t, tt.wantFocus, target.tree.Focus)
-			target.mu.Unlock()
-			require.NotSame(t, source, testAttachmentTab(sess))
+				require.Equal(t, tt.wantActive, testAttachmentTabIndex(sess))
+				target.mu.Lock()
+				require.Equal(t, tt.wantFocus, target.tree.Focus)
+				target.mu.Unlock()
+				require.NotSame(t, source, testAttachmentTab(sess))
+			})
 		})
 	}
 }
 
 func TestKeyboardVerticalOverflowSwitchesOnlyAcrossAlphabeticalLiveSessions(t *testing.T) {
-	d, alpha, ac, _ := newManualSessionWithPTYs(t, nil, nil)
-	alpha.mu.Lock()
-	alpha.name = "alpha"
-	alpha.mu.Unlock()
+	synctest.Test(t, func(t *testing.T) {
+		d, alpha, ac, _ := newManualSessionWithPTYs(t, nil, nil)
+		alpha.mu.Lock()
+		alpha.name = "alpha"
+		alpha.mu.Unlock()
 
-	newSession := func(id, name string, active int, focus layout.PaneID) *session {
-		tabs := []*tab{newTab(nil, domain.Size{Cols: 41, Rows: 10}), newTab(nil, domain.Size{Cols: 41, Rows: 10})}
-		target := tabs[active]
-		target.mu.Lock()
-		target.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}, Focus: focus}
-		target.panes["pane-2"] = newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 10})
-		target.mu.Unlock()
-		return &session{sessionCore: sessionCore{id: domain.SessionID(id), name: name, incarnation: newTestLifecycle(t)}, ctx: t.Context(), cancel: func() {}, tabs: tabs}
-	}
-	charlie := newSession("live-charlie", "charlie", 1, "pane-2")
-	echo := newSession("live-echo", "echo", 1, "pane-2")
-
-	// Deliberately register the live sessions out of alphabetical order. The
-	// stopped name sorts between alpha and charlie but must never be resumed.
-	d.mu.Lock()
-	delete(d.sessions, alpha.id)
-	d.sessions[echo.id] = echo
-	d.sessions[alpha.id] = alpha
-	d.sessions[charlie.id] = charlie
-	d.inactive["bravo"] = inactiveSession{name: "bravo", cwd: "/tmp/bravo"}
-	d.mu.Unlock()
-	d.ApplyConfig(domain.Config{Nav: domain.NavConfig{OverflowSessions: true}})
-	handler := daemonKeyHandler{d: d, ac: ac}
-
-	moves := []struct {
-		name   string
-		action keys.Action
-		want   *session
-	}{
-		{name: "down to charlie", action: keys.ActionFocusPaneDown, want: charlie},
-		{name: "down to echo", action: keys.ActionFocusPaneDown, want: echo},
-		{name: "down wall", action: keys.ActionFocusPaneDown, want: echo},
-		{name: "up to charlie", action: keys.ActionFocusPaneUp, want: charlie},
-		{name: "up to alpha", action: keys.ActionFocusPaneUp, want: alpha},
-		{name: "up wall", action: keys.ActionFocusPaneUp, want: alpha},
-	}
-	for _, move := range moves {
-		t.Run(move.name, func(t *testing.T) {
-			handler.Action(move.action, nil)
-			require.Same(t, move.want, ac.currentSession())
-		})
-	}
-
-	for _, target := range []*session{charlie, echo} {
-		require.Equal(t, 0, testAttachmentTabIndex(target), "new attachment starts at the deterministic first tab")
-		target.tabs[1].mu.Lock()
-		require.Equal(t, layout.PaneID("pane-2"), target.tabs[1].tree.Focus, "switch preserves the target pane focus")
-		target.tabs[1].mu.Unlock()
-	}
-	d.mu.Lock()
-	_, stopped := d.inactive["bravo"]
-	var bravoLive bool
-	for _, candidate := range d.sessions {
-		if candidate == nil {
-			continue
+		newSession := func(id, name string, active int, focus layout.PaneID) *session {
+			tabs := []*tab{newTab(nil, domain.Size{Cols: 41, Rows: 10}), newTab(nil, domain.Size{Cols: 41, Rows: 10})}
+			target := tabs[active]
+			target.mu.Lock()
+			target.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}, Focus: focus}
+			target.panes["pane-2"] = newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 10})
+			target.mu.Unlock()
+			return &session{sessionCore: sessionCore{id: domain.SessionID(id), name: name, incarnation: newTestLifecycle(t)}, ctx: t.Context(), cancel: func() {}, tabs: tabs}
 		}
-		candidate.mu.Lock()
-		bravoLive = bravoLive || candidate.name == "bravo"
-		candidate.mu.Unlock()
-	}
-	d.mu.Unlock()
-	alpha.mu.Lock()
-	attached := alpha.snapshotAttachmentsLocked()
-	alpha.mu.Unlock()
-	require.True(t, stopped, "vertical overflow leaves the stopped session stopped")
-	require.False(t, bravoLive, "the stopped session is absent from the live registry")
-	require.Contains(t, attached, ac, "the source session owns the genuinely attached client after returning")
+		charlie := newSession("live-charlie", "charlie", 1, "pane-2")
+		echo := newSession("live-echo", "echo", 1, "pane-2")
+
+		// Deliberately register the live sessions out of alphabetical order. The
+		// stopped name sorts between alpha and charlie but must never be resumed.
+		d.mu.Lock()
+		delete(d.sessions, alpha.id)
+		d.sessions[echo.id] = echo
+		d.sessions[alpha.id] = alpha
+		d.sessions[charlie.id] = charlie
+		d.inactive["bravo"] = inactiveSession{name: "bravo", cwd: "/tmp/bravo"}
+		d.mu.Unlock()
+		d.ApplyConfig(domain.Config{Nav: domain.NavConfig{OverflowSessions: true}})
+		handler := daemonKeyHandler{d: d, ac: ac}
+
+		moves := []struct {
+			name   string
+			action keys.Action
+			want   *session
+		}{
+			{name: "down to charlie", action: keys.ActionFocusPaneDown, want: charlie},
+			{name: "down to echo", action: keys.ActionFocusPaneDown, want: echo},
+			{name: "down wall", action: keys.ActionFocusPaneDown, want: echo},
+			{name: "up to charlie", action: keys.ActionFocusPaneUp, want: charlie},
+			{name: "up to alpha", action: keys.ActionFocusPaneUp, want: alpha},
+			{name: "up wall", action: keys.ActionFocusPaneUp, want: alpha},
+		}
+		for _, move := range moves {
+			// The moves are sequential steps over shared state, so they run as steps
+			// of one bubble rather than as independent subtests.
+			handler.Action(move.action, nil)
+			require.Same(t, move.want, ac.currentSession(), move.name)
+		}
+
+		for _, target := range []*session{charlie, echo} {
+			require.Equal(t, 0, testAttachmentTabIndex(target), "new attachment starts at the deterministic first tab")
+			target.tabs[1].mu.Lock()
+			require.Equal(t, layout.PaneID("pane-2"), target.tabs[1].tree.Focus, "switch preserves the target pane focus")
+			target.tabs[1].mu.Unlock()
+		}
+		d.mu.Lock()
+		_, stopped := d.inactive["bravo"]
+		var bravoLive bool
+		for _, candidate := range d.sessions {
+			if candidate == nil {
+				continue
+			}
+			candidate.mu.Lock()
+			bravoLive = bravoLive || candidate.name == "bravo"
+			candidate.mu.Unlock()
+		}
+		d.mu.Unlock()
+		alpha.mu.Lock()
+		attached := alpha.snapshotAttachmentsLocked()
+		alpha.mu.Unlock()
+		require.True(t, stopped, "vertical overflow leaves the stopped session stopped")
+		require.False(t, bravoLive, "the stopped session is absent from the live registry")
+		require.Contains(t, attached, ac, "the source session owns the genuinely attached client after returning")
+	})
 }
 
 func TestKeyboardVerticalOverflowRefusesVisibleFloatingSource(t *testing.T) {
@@ -278,76 +285,78 @@ func TestVerticalOverflowTreatsDisplacedSourceClientAsNoNeighbor(t *testing.T) {
 }
 
 func TestVerticalOverflowIsRaceFreeDuringSessionRename(t *testing.T) {
-	d, alpha, ac, sends := newManualSessionWithPTYs(t, nil)
-	// This race test generates many full views and semantic route updates.
-	// Keep its test client reading rather than filling the bounded transport.
-	stop, drained := make(chan struct{}), make(chan struct{})
-	go func() {
-		defer close(drained)
-		for {
-			select {
-			case <-sends:
-			case <-stop:
-				return
+	synctest.Test(t, func(t *testing.T) {
+		d, alpha, ac, sends := newManualSessionWithPTYs(t, nil)
+		// This race test generates many full views and semantic route updates.
+		// Keep its test client reading rather than filling the bounded transport.
+		stop, drained := make(chan struct{}), make(chan struct{})
+		go func() {
+			defer close(drained)
+			for {
+				select {
+				case <-sends:
+				case <-stop:
+					return
+				}
 			}
-		}
-	}()
-	defer func() { close(stop); <-drained }()
-	alpha.mu.Lock()
-	alpha.name = "alpha"
-	alpha.mu.Unlock()
-	charlie := &session{sessionCore: sessionCore{id: "live-charlie", name: "charlie", incarnation: newTestLifecycle(t)}, ctx: t.Context(), cancel: func() {}, tabs: []*tab{newTab(nil, domain.Size{Cols: 41, Rows: 10})}}
-	echo := &session{sessionCore: sessionCore{id: "live-echo", name: "echo", incarnation: newTestLifecycle(t)}, ctx: t.Context(), cancel: func() {}, tabs: []*tab{newTab(nil, domain.Size{Cols: 41, Rows: 10})}}
-	d.mu.Lock()
-	d.sessions[echo.id] = echo
-	d.sessions[charlie.id] = charlie
-	d.mu.Unlock()
-	d.ApplyConfig(domain.Config{Nav: domain.NavConfig{OverflowSessions: true}})
+		}()
+		defer func() { close(stop); <-drained }()
+		alpha.mu.Lock()
+		alpha.name = "alpha"
+		alpha.mu.Unlock()
+		charlie := &session{sessionCore: sessionCore{id: "live-charlie", name: "charlie", incarnation: newTestLifecycle(t)}, ctx: t.Context(), cancel: func() {}, tabs: []*tab{newTab(nil, domain.Size{Cols: 41, Rows: 10})}}
+		echo := &session{sessionCore: sessionCore{id: "live-echo", name: "echo", incarnation: newTestLifecycle(t)}, ctx: t.Context(), cancel: func() {}, tabs: []*tab{newTab(nil, domain.Size{Cols: 41, Rows: 10})}}
+		d.mu.Lock()
+		d.sessions[echo.id] = echo
+		d.sessions[charlie.id] = charlie
+		d.mu.Unlock()
+		d.ApplyConfig(domain.Config{Nav: domain.NavConfig{OverflowSessions: true}})
 
-	start := make(chan struct{})
-	renameErrors := make(chan error, 40)
-	var wg sync.WaitGroup
-	wg.Go(func() {
-		<-start
-		for i := range 40 {
-			name := "charlie"
-			if i%2 == 0 {
-				name = "delta"
+		start := make(chan struct{})
+		renameErrors := make(chan error, 40)
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			<-start
+			for i := range 40 {
+				name := "charlie"
+				if i%2 == 0 {
+					name = "delta"
+				}
+				if err := d.renameSession(charlie, name); err != nil {
+					renameErrors <- err
+				}
 			}
-			if err := d.renameSession(charlie, name); err != nil {
-				renameErrors <- err
-			}
+		})
+
+		close(start)
+		handler := daemonKeyHandler{d: d, ac: ac}
+		for range 20 {
+			handler.Action(keys.ActionFocusPaneDown, nil)
+			handler.Action(keys.ActionFocusPaneUp, nil)
 		}
+		wg.Wait()
+		close(renameErrors)
+		for err := range renameErrors {
+			require.NoError(t, err)
+		}
+
+		current := ac.currentSession()
+		owners := make([]*session, 0, 1)
+		d.mu.Lock()
+		for _, candidate := range d.sessions {
+			if candidate == nil {
+				continue
+			}
+			candidate.mu.Lock()
+			if attachmentRegisteredLocked(candidate, ac) {
+				owners = append(owners, candidate)
+			}
+			candidate.mu.Unlock()
+		}
+		d.mu.Unlock()
+		require.Len(t, owners, 1)
+		require.Same(t, current, owners[0])
 	})
-
-	close(start)
-	handler := daemonKeyHandler{d: d, ac: ac}
-	for range 20 {
-		handler.Action(keys.ActionFocusPaneDown, nil)
-		handler.Action(keys.ActionFocusPaneUp, nil)
-	}
-	wg.Wait()
-	close(renameErrors)
-	for err := range renameErrors {
-		require.NoError(t, err)
-	}
-
-	current := ac.currentSession()
-	owners := make([]*session, 0, 1)
-	d.mu.Lock()
-	for _, candidate := range d.sessions {
-		if candidate == nil {
-			continue
-		}
-		candidate.mu.Lock()
-		if attachmentRegisteredLocked(candidate, ac) {
-			owners = append(owners, candidate)
-		}
-		candidate.mu.Unlock()
-	}
-	d.mu.Unlock()
-	require.Len(t, owners, 1)
-	require.Same(t, current, owners[0])
 }
 
 func TestKeyboardHorizontalOverflowRespectsDefaultsWallsFailedEntryAndFloating(t *testing.T) {
@@ -372,12 +381,14 @@ func TestKeyboardHorizontalOverflowRespectsDefaultsWallsFailedEntryAndFloating(t
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d, sess, ac, _ := newManualSessionWithPTYs(t, nil, nil)
-			tt.setup(d, sess)
+			synctest.Test(t, func(t *testing.T) {
+				d, sess, ac, _ := newManualSessionWithPTYs(t, nil, nil)
+				tt.setup(d, sess)
 
-			daemonKeyHandler{d: d, ac: ac}.Action(tt.dir, nil)
+				daemonKeyHandler{d: d, ac: ac}.Action(tt.dir, nil)
 
-			require.Equal(t, 0, testAttachmentTabIndex(sess))
+				require.Equal(t, 0, testAttachmentTabIndex(sess))
+			})
 		})
 	}
 }

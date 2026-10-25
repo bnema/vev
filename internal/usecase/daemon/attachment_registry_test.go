@@ -3,6 +3,7 @@ package daemon
 import (
 	"sync"
 	"testing"
+	"testing/synctest"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/stretchr/testify/require"
@@ -153,40 +154,42 @@ func TestAttachmentRegistryViewMutationIsSerialized(t *testing.T) {
 }
 
 func TestAttachmentRegistryConcurrentRegistrationSnapshotIsStable(t *testing.T) {
-	sess := registryTestSession()
-	attachments := []*attachedClient{
-		registryTestAttachment(3),
-		registryTestAttachment(1),
-		registryTestAttachment(2),
-	}
-	start := make(chan struct{})
-	var wg sync.WaitGroup
-	for _, ac := range attachments {
-		wg.Add(1)
-		go func(ac *attachedClient) {
-			defer wg.Done()
-			<-start
-			sess.registerAttachment(ac)
-		}(ac)
-	}
-	close(start)
-	wg.Wait()
+	synctest.Test(t, func(t *testing.T) {
+		sess := registryTestSession()
+		attachments := []*attachedClient{
+			registryTestAttachment(3),
+			registryTestAttachment(1),
+			registryTestAttachment(2),
+		}
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for _, ac := range attachments {
+			wg.Add(1)
+			go func(ac *attachedClient) {
+				defer wg.Done()
+				<-start
+				sess.registerAttachment(ac)
+			}(ac)
+		}
+		close(start)
+		wg.Wait()
 
-	got := sess.snapshotAttachments()
-	if len(got) != len(attachments) {
-		t.Fatalf("attachment count = %d, want %d", len(got), len(attachments))
-	}
-	for i, want := range []byte{1, 2, 3} {
-		if got[i].clientID[0] != want {
-			t.Fatalf("snapshot[%d] id = %d, want %d", i, got[i].clientID[0], want)
+		got := sess.snapshotAttachments()
+		if len(got) != len(attachments) {
+			t.Fatalf("attachment count = %d, want %d", len(got), len(attachments))
 		}
-	}
-	ordered := sess.repairAttachmentViewsForTest()
-	for i, want := range []byte{1, 2, 3} {
-		if ordered[i].clientID[0] != want {
-			t.Fatalf("ordered attachment[%d] id = %d, want %d", i, ordered[i].clientID[0], want)
+		for i, want := range []byte{1, 2, 3} {
+			if got[i].clientID[0] != want {
+				t.Fatalf("snapshot[%d] id = %d, want %d", i, got[i].clientID[0], want)
+			}
 		}
-	}
+		ordered := sess.repairAttachmentViewsForTest()
+		for i, want := range []byte{1, 2, 3} {
+			if ordered[i].clientID[0] != want {
+				t.Fatalf("ordered attachment[%d] id = %d, want %d", i, ordered[i].clientID[0], want)
+			}
+		}
+	})
 }
 
 func (s *session) repairAttachmentViewsForTest() []*attachedClient {

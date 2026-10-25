@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"testing"
+	"testing/synctest"
 
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/command"
@@ -42,14 +43,16 @@ func TestAttachmentStatusUsesClientPublishedAttention(t *testing.T) {
 }
 
 func TestRecentRouteSnapshotRepaintsWithoutDeferredIdentity(t *testing.T) {
-	d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
-	token := sess.captureAttachmentCapability(ac, ac.transport())
-	ac.installTestAttachmentCapability(token)
-	ac.setRouteSnapshot(protocol.RecentRouteSnapshot{Generation: 1})
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
+		token := sess.captureAttachmentCapability(ac, ac.transport())
+		ac.installTestAttachmentCapability(token)
+		ac.setRouteSnapshot(protocol.RecentRouteSnapshot{Generation: 1})
 
-	require.False(t, d.handleAttachmentClientFrame(token, mustClientEnvelope(protocol.RecentRouteSnapshot{Generation: 2})))
+		require.False(t, d.handleAttachmentClientFrame(token, mustClientEnvelope(protocol.RecentRouteSnapshot{Generation: 2})))
 
-	awaitFrame(t, sends, "Output")
+		requireFrame(t, sends, "Output")
+	})
 }
 
 func TestAttachmentRouteSnapshotCopiesPublishedEntries(t *testing.T) {
@@ -92,36 +95,38 @@ func TestPaletteJumpRecentSessionTargetsHistoryRank(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d, source, ac, _ := newManualSessionWithPTYs(t, nil)
-			transport, transportLog := newTrackedConnection(t)
-			ac.replaceTransport(transport)
-			rc := d.attachCoordinator(source, nil, ac, true)
-			token := source.captureAttachmentCapability(ac, transport)
-			token.lease = rc.attachmentLease(ac)
-			ac.installTestAttachmentCapability(token)
-			effect, admitted := ac.beginAttachmentEffect(token)
-			require.True(t, admitted)
-			defer effect.End()
+			synctest.Test(t, func(t *testing.T) {
+				d, source, ac, _ := newManualSessionWithPTYs(t, nil)
+				transport, transportLog := newTrackedConnection(t)
+				ac.replaceTransport(transport)
+				rc := d.attachCoordinator(source, nil, ac, true)
+				token := source.captureAttachmentCapability(ac, transport)
+				token.lease = rc.attachmentLease(ac)
+				ac.installTestAttachmentCapability(token)
+				effect, admitted := ac.beginAttachmentEffect(token)
+				require.True(t, admitted)
+				defer effect.End()
 
-			exec := paletteExec{d: d, sess: source, attachment: source, ac: ac, routeSnapshot: tt.snapshot, effect: effect}
-			err := exec.JumpRecentSession(tt.rank)
-			if tt.wantErr != nil {
-				require.ErrorIs(t, err, tt.wantErr)
-				return
-			}
-			require.NoError(t, err)
-
-			var action protocol.RouteNavigationAction
-			found := false
-			for _, frame := range transportLog.Sends() {
-				if decoded, ok := decodeServerMessage(t, frame).(protocol.RouteNavigationAction); ok {
-					action, found = decoded, true
+				exec := paletteExec{d: d, sess: source, attachment: source, ac: ac, routeSnapshot: tt.snapshot, effect: effect}
+				err := exec.JumpRecentSession(tt.rank)
+				if tt.wantErr != nil {
+					require.ErrorIs(t, err, tt.wantErr)
+					return
 				}
-			}
-			require.True(t, found)
-			require.Equal(t, protocol.RouteNavigationAction{SnapshotGeneration: 4, Key: tt.wantKey, Generation: tt.wantGen}, action)
-			hints := recentRouteHints(tt.snapshot, nil)
-			require.Equal(t, action.Key, hints.Recent[tt.rank-1].Key, "hint and jump share the rank mapping")
+				require.NoError(t, err)
+
+				var action protocol.RouteNavigationAction
+				found := false
+				for _, frame := range transportLog.Sends() {
+					if decoded, ok := decodeServerMessage(t, frame).(protocol.RouteNavigationAction); ok {
+						action, found = decoded, true
+					}
+				}
+				require.True(t, found)
+				require.Equal(t, protocol.RouteNavigationAction{SnapshotGeneration: 4, Key: tt.wantKey, Generation: tt.wantGen}, action)
+				hints := recentRouteHints(tt.snapshot, nil)
+				require.Equal(t, action.Key, hints.Recent[tt.rank-1].Key, "hint and jump share the rank mapping")
+			})
 		})
 	}
 }
@@ -162,20 +167,22 @@ func TestStatusHistoryShowsVisitedAndRingingRoutes(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d, sess, ac, _ := newManualSessionWithPTYs(t, nil)
-			ac.setRouteSnapshot(protocol.RecentRouteSnapshot{Generation: 2, Entries: tt.entries})
+			synctest.Test(t, func(t *testing.T) {
+				d, sess, ac, _ := newManualSessionWithPTYs(t, nil)
+				ac.setRouteSnapshot(protocol.RecentRouteSnapshot{Generation: 2, Entries: tt.entries})
 
-			state := d.barStateForAttachmentPaletteHintsFor(sess, ac, "", nil, protocol.RecentRouteSnapshot{})
+				state := d.barStateForAttachmentPaletteHintsFor(sess, ac, "", nil, protocol.RecentRouteSnapshot{})
 
-			var names []string
-			for _, entry := range state.mru {
-				names = append(names, entry.name)
-				if entry.name == "build" || entry.name == "deploy@remote" {
-					require.True(t, entry.attention, "%s must draw its bell", entry.name)
+				var names []string
+				for _, entry := range state.mru {
+					names = append(names, entry.name)
+					if entry.name == "build" || entry.name == "deploy@remote" {
+						require.True(t, entry.attention, "%s must draw its bell", entry.name)
+					}
 				}
-			}
-			require.Equal(t, tt.want, names)
-			require.Equal(t, len(tt.want), len(recentRouteHints(ac.routeSnapshotCopy(), nil).Recent))
+				require.Equal(t, tt.want, names)
+				require.Equal(t, len(tt.want), len(recentRouteHints(ac.routeSnapshotCopy(), nil).Recent))
+			})
 		})
 	}
 }
@@ -204,32 +211,34 @@ func TestCtrlDigitSwitchesToRecentHistoryRank(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d, source, ac, _ := newManualSessionWithPTYs(t, nil)
-			transport, transportLog := newTrackedConnection(t)
-			ac.replaceTransport(transport)
-			rc := d.attachCoordinator(source, nil, ac, true)
-			token := source.captureAttachmentCapability(ac, transport)
-			token.lease = rc.attachmentLease(ac)
-			ac.installTestAttachmentCapability(token)
-			ac.setRouteSnapshot(snapshot)
-			ac.keys.SetKittyKeyboard(!tt.legacy)
-			effect, admitted := ac.beginAttachmentEffect(token)
-			require.True(t, admitted)
-			defer effect.End()
+			synctest.Test(t, func(t *testing.T) {
+				d, source, ac, _ := newManualSessionWithPTYs(t, nil)
+				transport, transportLog := newTrackedConnection(t)
+				ac.replaceTransport(transport)
+				rc := d.attachCoordinator(source, nil, ac, true)
+				token := source.captureAttachmentCapability(ac, transport)
+				token.lease = rc.attachmentLease(ac)
+				ac.installTestAttachmentCapability(token)
+				ac.setRouteSnapshot(snapshot)
+				ac.keys.SetKittyKeyboard(!tt.legacy)
+				effect, admitted := ac.beginAttachmentEffect(token)
+				require.True(t, admitted)
+				defer effect.End()
 
-			d.handleInputForAttachment(effect, []byte(tt.input))
+				d.handleInputForAttachment(effect, []byte(tt.input))
 
-			var actions []protocol.RouteNavigationAction
-			for _, frame := range transportLog.Sends() {
-				if decoded, ok := decodeServerMessage(t, frame).(protocol.RouteNavigationAction); ok {
-					actions = append(actions, decoded)
+				var actions []protocol.RouteNavigationAction
+				for _, frame := range transportLog.Sends() {
+					if decoded, ok := decodeServerMessage(t, frame).(protocol.RouteNavigationAction); ok {
+						actions = append(actions, decoded)
+					}
 				}
-			}
-			if tt.none {
-				require.Empty(t, actions)
-				return
-			}
-			require.Equal(t, []protocol.RouteNavigationAction{{SnapshotGeneration: 4, Key: tt.wantKey, Generation: tt.wantGen}}, actions)
+				if tt.none {
+					require.Empty(t, actions)
+					return
+				}
+				require.Equal(t, []protocol.RouteNavigationAction{{SnapshotGeneration: 4, Key: tt.wantKey, Generation: tt.wantGen}}, actions)
+			})
 		})
 	}
 }

@@ -3,6 +3,7 @@ package daemon
 import (
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
@@ -74,118 +75,122 @@ func TestNavigationHandoffsDropReplacedInitiatorWithoutMutation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d, source, old, _, releases := newManualTabSession(t, 2)
-			defer releaseAll(releases)
-			d.ptys = newFactorySeq(t)
-			target := &session{sessionCore: sessionCore{id: "target", name: "target", incarnation: domain.SessionLifecycleID{1}}, ctx: source.ctx, cancel: func() {}, tabs: []*tab{
-				newTab(nil, domain.Size{Cols: 80, Rows: 23}),
-				newTab(nil, domain.Size{Cols: 80, Rows: 23}),
-			}}
-			d.mu.Lock()
-			d.sessions[target.id] = target
-			d.mu.Unlock()
+			synctest.Test(t, func(t *testing.T) {
+				d, source, old, _, releases := newManualTabSession(t, 2)
+				defer releaseAll(releases)
+				d.ptys = newFactorySeq(t)
+				target := &session{sessionCore: sessionCore{id: "target", name: "target", incarnation: domain.SessionLifecycleID{1}}, ctx: source.ctx, cancel: func() {}, tabs: []*tab{
+					newTab(nil, domain.Size{Cols: 80, Rows: 23}),
+					newTab(nil, domain.Size{Cols: 80, Rows: 23}),
+				}}
+				d.mu.Lock()
+				d.sessions[target.id] = target
+				d.mu.Unlock()
 
-			rc := d.attachCoordinator(source, nil, old, true)
-			token := source.captureAttachmentCapability(old, old.transport())
-			token.lease = rc.attachmentLease(old)
-			old.installTestAttachmentCapability(token)
-			effect, admitted := old.beginAttachmentEffect(token)
-			require.True(t, admitted)
+				rc := d.attachCoordinator(source, nil, old, true)
+				token := source.captureAttachmentCapability(old, old.transport())
+				token.lease = rc.attachmentLease(old)
+				old.installTestAttachmentCapability(token)
+				effect, admitted := old.beginAttachmentEffect(token)
+				require.True(t, admitted)
 
-			admissionEnded := make(chan struct{})
-			releaseAction := make(chan struct{})
-			var admissionEndedOnce sync.Once
-			d.afterActionAttachmentEffectEnded = func(action string) {
-				if action == tt.releasedAction {
-					admissionEndedOnce.Do(func() { close(admissionEnded) })
-					<-releaseAction
+				admissionEnded := make(chan struct{})
+				releaseAction := make(chan struct{})
+				var admissionEndedOnce sync.Once
+				d.afterActionAttachmentEffectEnded = func(action string) {
+					if action == tt.releasedAction {
+						admissionEndedOnce.Do(func() { close(admissionEnded) })
+						<-releaseAction
+					}
 				}
-			}
-			actionDone := make(chan error, 1)
-			go func() { actionDone <- tt.run(d, source, target, old, effect) }()
-			select {
-			case <-admissionEnded:
-			case <-time.After(time.Second):
-				t.Fatal("handoff did not release its role ticket")
-			}
+				actionDone := make(chan error, 1)
+				go func() { actionDone <- tt.run(d, source, target, old, effect) }()
+				select {
+				case <-admissionEnded:
+				case <-time.After(time.Second):
+					t.Fatal("handoff did not release its role ticket")
+				}
 
-			replacement, err := d.transitionAttachment(attachmentTransitionRequest{
-				source: source, target: source, next: old,
+				replacement, err := d.transitionAttachment(attachmentTransitionRequest{
+					source: source, target: source, next: old,
 
-				expectedTransport: old.transportSnapshot(), ready: true,
+					expectedTransport: old.transportSnapshot(), ready: true,
+				})
+				require.NoError(t, err)
+				close(releaseAction)
+				actionErr := <-actionDone
+				if tt.wantErr {
+					require.Error(t, actionErr)
+				} else {
+					require.NoError(t, actionErr)
+				}
+
+				require.Same(t, source, old.currentSession())
+				source.mu.Lock()
+				require.Contains(t, source.snapshotAttachmentsLocked(), old)
+				source.mu.Unlock()
+				target.mu.Lock()
+				require.Empty(t, target.snapshotAttachmentsLocked(), "stale handoff attached to the target")
+				require.Zero(t, testAttachmentTabIndexLocked(target), "stale handoff changed target tab focus")
+				target.mu.Unlock()
+				if tt.check != nil {
+					tt.check(t, d, source, target)
+				}
+				d.deferAttachmentTransitionCleanups(replacement)
 			})
-			require.NoError(t, err)
-			close(releaseAction)
-			actionErr := <-actionDone
-			if tt.wantErr {
-				require.Error(t, actionErr)
-			} else {
-				require.NoError(t, actionErr)
-			}
-
-			require.Same(t, source, old.currentSession())
-			source.mu.Lock()
-			require.Contains(t, source.snapshotAttachmentsLocked(), old)
-			source.mu.Unlock()
-			target.mu.Lock()
-			require.Empty(t, target.snapshotAttachmentsLocked(), "stale handoff attached to the target")
-			require.Zero(t, testAttachmentTabIndexLocked(target), "stale handoff changed target tab focus")
-			target.mu.Unlock()
-			if tt.check != nil {
-				tt.check(t, d, source, target)
-			}
-			d.deferAttachmentTransitionCleanups(replacement)
 		})
 	}
 }
 
 func TestStoppedSessionHandoffDoesNotResumeAfterInitiatorReplacement(t *testing.T) {
-	d, source, old, _ := newManualSessionWithPTYs(t, nil)
-	d.mu.Lock()
-	d.inactive["stopped"] = inactiveSession{name: "stopped", cwd: "/tmp", createdAt: 7, incarnation: domain.IncarnationID{3}, state: protocol.SessionDown}
-	d.mu.Unlock()
+	synctest.Test(t, func(t *testing.T) {
+		d, source, old, _ := newManualSessionWithPTYs(t, nil)
+		d.mu.Lock()
+		d.inactive["stopped"] = inactiveSession{name: "stopped", cwd: "/tmp", createdAt: 7, incarnation: domain.IncarnationID{3}, state: protocol.SessionDown}
+		d.mu.Unlock()
 
-	rc := d.attachCoordinator(source, nil, old, true)
-	token := source.captureAttachmentCapability(old, old.transport())
-	token.lease = rc.attachmentLease(old)
-	old.installTestAttachmentCapability(token)
-	effect, admitted := old.beginAttachmentEffect(token)
-	require.True(t, admitted)
+		rc := d.attachCoordinator(source, nil, old, true)
+		token := source.captureAttachmentCapability(old, old.transport())
+		token.lease = rc.attachmentLease(old)
+		old.installTestAttachmentCapability(token)
+		effect, admitted := old.beginAttachmentEffect(token)
+		require.True(t, admitted)
 
-	ended := make(chan struct{})
-	release := make(chan struct{})
-	var endedOnce sync.Once
-	d.afterActionAttachmentEffectEnded = func(action string) {
-		if action == "detach" {
-			endedOnce.Do(func() { close(ended) })
-			<-release
+		ended := make(chan struct{})
+		release := make(chan struct{})
+		var endedOnce sync.Once
+		d.afterActionAttachmentEffectEnded = func(action string) {
+			if action == "detach" {
+				endedOnce.Do(func() { close(ended) })
+				<-release
+			}
 		}
-	}
-	expectedCreatedAt := int64(7)
-	done := make(chan error, 1)
-	go func() {
-		done <- d.switchToTargetForAttachment(effect, picker.Target{Name: "stopped", Stopped: true, ExpectedCreatedAt: &expectedCreatedAt}, sessionHandoffGuard{}, "picker-stopped")
-	}()
-	select {
-	case <-ended:
-	case <-time.After(time.Second):
-		t.Fatal("stopped-session handoff did not release its role ticket")
-	}
+		expectedCreatedAt := int64(7)
+		done := make(chan error, 1)
+		go func() {
+			done <- d.switchToTargetForAttachment(effect, picker.Target{Name: "stopped", Stopped: true, ExpectedCreatedAt: &expectedCreatedAt}, sessionHandoffGuard{}, "picker-stopped")
+		}()
+		select {
+		case <-ended:
+		case <-time.After(time.Second):
+			t.Fatal("stopped-session handoff did not release its role ticket")
+		}
 
-	next := &attachedClient{tr: newQuietConnection(t), output: newOutputStateStream(), geometry: domain.Geometry{Size: old.geometry.Size}}
-	next.initOverlays()
-	replacement, err := d.transitionAttachment(attachmentTransitionRequest{
-		target: source, next: next, expectedTransport: next.transportSnapshot(), ready: true,
+		next := &attachedClient{tr: newQuietConnection(t), output: newOutputStateStream(), geometry: domain.Geometry{Size: old.geometry.Size}}
+		next.initOverlays()
+		replacement, err := d.transitionAttachment(attachmentTransitionRequest{
+			target: source, next: next, expectedTransport: next.transportSnapshot(), ready: true,
+		})
+		require.NoError(t, err)
+		close(release)
+		require.NoError(t, <-done)
+
+		d.mu.Lock()
+		_, stillStopped := d.inactive["stopped"]
+		resumed := d.findByNameLocked("stopped")
+		d.mu.Unlock()
+		require.True(t, stillStopped)
+		require.Nil(t, resumed)
+		d.deferAttachmentTransitionCleanups(replacement)
 	})
-	require.NoError(t, err)
-	close(release)
-	require.NoError(t, <-done)
-
-	d.mu.Lock()
-	_, stillStopped := d.inactive["stopped"]
-	resumed := d.findByNameLocked("stopped")
-	d.mu.Unlock()
-	require.True(t, stillStopped)
-	require.Nil(t, resumed)
-	d.deferAttachmentTransitionCleanups(replacement)
 }

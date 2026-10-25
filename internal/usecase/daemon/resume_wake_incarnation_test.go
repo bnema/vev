@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"testing"
+	"testing/synctest"
 
 	"github.com/stretchr/testify/require"
 
@@ -14,97 +15,101 @@ import (
 // identity alone must not let the old wake paint the new transport before its
 // Welcome frame.
 func TestParkedResumeRejectsDispatchedWakeFromPriorAttachment(t *testing.T) {
-	pty, releasePTY := newBlockingPTY(t)
-	defer releasePTY()
-	d := newTestDaemon(t, newFactorySeq(t, pty), newStubClock(t))
+	synctest.Test(t, func(t *testing.T) {
+		pty, releasePTY := newBlockingPTY(t)
+		defer releasePTY()
+		d := newTestDaemon(t, newFactorySeq(t, pty), newStubClock(t))
 
-	oldTransport := newQuietConnection(t)
-	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTransport)
-	require.NoError(t, err)
-	token := ac.resumeToken
-	rc := sess.renderCoordinator()
-	require.NotNil(t, rc)
-	require.True(t, rc.markAttachmentReady(rc.attachmentLease(ac)))
+		oldTransport := newQuietConnection(t)
+		sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTransport)
+		require.NoError(t, err)
+		token := ac.resumeToken
+		rc := sess.renderCoordinator()
+		require.NotNil(t, rc)
+		require.True(t, rc.markAttachmentReady(rc.attachmentLease(ac)))
 
-	// Pause after dispatch but before the coordinator's normal wake callback
-	// reaches paint/sendMu. This is the precise stale-wake window.
-	originalWake := rc.opts.wake
-	wakeDispatched := make(chan struct{})
-	releaseWake := make(chan struct{})
-	rc.opts.wake = func(w renderWake) {
-		close(wakeDispatched)
-		<-releaseWake
-		originalWake(w)
-	}
-	wakeDone := make(chan struct{})
-	go func() {
-		d.invalidateRenderNow(sess, ac, true, "resume-wake-test")
-		close(wakeDone)
-	}()
-	<-wakeDispatched
+		// Pause after dispatch but before the coordinator's normal wake callback
+		// reaches paint/sendMu. This is the precise stale-wake window.
+		originalWake := rc.opts.wake
+		wakeDispatched := make(chan struct{})
+		releaseWake := make(chan struct{})
+		rc.opts.wake = func(w renderWake) {
+			close(wakeDispatched)
+			<-releaseWake
+			originalWake(w)
+		}
+		wakeDone := make(chan struct{})
+		go func() {
+			d.invalidateRenderNow(sess, ac, true, "resume-wake-test")
+			close(wakeDone)
+		}()
+		<-wakeDispatched
 
-	d.clientGone(sess, ac, oldTransport, false)
-	newTransport, newTransportLog := newTrackedConnection(t)
-	resumedSess, resumedAC, ok, err := d.resumeParked(helloResumeCapable(protocol.IntentResume, sess.name, token), newTransport, domain.Size{Cols: 80, Rows: 24})
-	require.NoError(t, err)
-	require.True(t, ok)
-	require.Same(t, sess, resumedSess)
-	require.Same(t, ac, resumedAC)
+		d.clientGone(sess, ac, oldTransport, false)
+		newTransport, newTransportLog := newTrackedConnection(t)
+		resumedSess, resumedAC, ok, err := d.resumeParked(helloResumeCapable(protocol.IntentResume, sess.name, token), newTransport, domain.Size{Cols: 80, Rows: 24})
+		require.NoError(t, err)
+		require.True(t, ok)
+		require.Same(t, sess, resumedSess)
+		require.Same(t, ac, resumedAC)
 
-	close(releaseWake)
-	<-wakeDone
-	require.Empty(t, newTransportLog.Sends(), "a stale pre-resume wake must not emit Output before Welcome")
-	ac.sendMu.Lock()
-	staleWakeComposed := ac.render.cache.valid
-	ac.sendMu.Unlock()
-	require.False(t, staleWakeComposed, "a stale wake must not mutate the resumed attachment shadow")
+		close(releaseWake)
+		<-wakeDone
+		require.Empty(t, newTransportLog.Sends(), "a stale pre-resume wake must not emit Output before Welcome")
+		ac.sendMu.Lock()
+		staleWakeComposed := ac.render.cache.valid
+		ac.sendMu.Unlock()
+		require.False(t, staleWakeComposed, "a stale wake must not mutate the resumed attachment shadow")
 
-	// The new attachment incarnation accepts the required paint only after its
-	// replacement transport has completed Welcome.
-	rc.opts.wake = originalWake
-	require.True(t, rc.markAttachmentReady(rc.attachmentLease(ac)))
-	d.firstPaint(sess, ac)
-	require.NotEmpty(t, newTransportLog.Sends())
+		// The new attachment incarnation accepts the required paint only after its
+		// replacement transport has completed Welcome.
+		rc.opts.wake = originalWake
+		require.True(t, rc.markAttachmentReady(rc.attachmentLease(ac)))
+		d.firstPaint(sess, ac)
+		require.NotEmpty(t, newTransportLog.Sends())
+	})
 }
 
 func TestSameAttachmentRebindRejectsQueuedWakeAndFansOutFreshGeneration(t *testing.T) {
-	d, sess, ac, sends := newManualSessionWithPTYs(t, newQuietPTY(t))
-	rc := d.attachCoordinator(sess, nil, ac, true)
-	oldLease := rc.attachmentLease(ac)
-	require.NotNil(t, oldLease)
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, ac, sends := newManualSessionWithPTYs(t, newQuietPTY(t))
+		rc := d.attachCoordinator(sess, nil, ac, true)
+		oldLease := rc.attachmentLease(ac)
+		require.NotNil(t, oldLease)
 
-	originalWake := rc.opts.wake
-	wakeDispatched := make(chan struct{})
-	releaseWake := make(chan struct{})
-	rc.opts.wake = func(w renderWake) {
-		close(wakeDispatched)
-		<-releaseWake
-		originalWake(w)
-	}
-	wakeDone := make(chan struct{})
-	go func() {
-		d.invalidateRenderNow(sess, ac, true, "same-attachment-rebind")
-		close(wakeDone)
-	}()
-	<-wakeDispatched
+		originalWake := rc.opts.wake
+		wakeDispatched := make(chan struct{})
+		releaseWake := make(chan struct{})
+		rc.opts.wake = func(w renderWake) {
+			close(wakeDispatched)
+			<-releaseWake
+			originalWake(w)
+		}
+		wakeDone := make(chan struct{})
+		go func() {
+			d.invalidateRenderNow(sess, ac, true, "same-attachment-rebind")
+			close(wakeDone)
+		}()
+		<-wakeDispatched
 
-	oldGeneration := ac.lifecycle.generationValue()
-	result, err := d.transitionAttachment(attachmentTransitionRequest{
-		source: sess, target: sess, next: ac,
+		oldGeneration := ac.lifecycle.generationValue()
+		result, err := d.transitionAttachment(attachmentTransitionRequest{
+			source: sess, target: sess, next: ac,
 
-		expectedTransport: ac.transportSnapshot(), ready: true,
+			expectedTransport: ac.transportSnapshot(), ready: true,
+		})
+		require.NoError(t, err)
+		d.deferAttachmentTransitionCleanups(result)
+		require.Greater(t, ac.lifecycle.generationValue(), oldGeneration)
+		freshLease := rc.attachmentLease(ac)
+		require.NotSame(t, oldLease, freshLease)
+
+		close(releaseWake)
+		<-wakeDone
+		require.Empty(t, sends, "a queued wake from the prior generation must not paint the rebound transport")
+
+		rc.opts.wake = originalWake
+		d.invalidateRenderNow(sess, ac, true, "fresh-generation-fanout")
+		require.Greater(t, len(sends), 0, "the current generation must receive fanout output")
 	})
-	require.NoError(t, err)
-	d.deferAttachmentTransitionCleanups(result)
-	require.Greater(t, ac.lifecycle.generationValue(), oldGeneration)
-	freshLease := rc.attachmentLease(ac)
-	require.NotSame(t, oldLease, freshLease)
-
-	close(releaseWake)
-	<-wakeDone
-	require.Empty(t, sends, "a queued wake from the prior generation must not paint the rebound transport")
-
-	rc.opts.wake = originalWake
-	d.invalidateRenderNow(sess, ac, true, "fresh-generation-fanout")
-	require.Greater(t, len(sends), 0, "the current generation must receive fanout output")
 }

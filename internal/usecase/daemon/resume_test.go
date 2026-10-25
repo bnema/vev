@@ -36,198 +36,210 @@ func helloResumeCapable(intent uint8, name string, token uint64) protocol.Hello 
 }
 
 func TestTokenlessResumeIsRejectedBeforeNameRouting(t *testing.T) {
-	d := newTestDaemon(t, nil, newStubClock(t))
-	tr, _ := newCapturingTransport(t)
-	_, _, err := d.route(helloResumeCapable(protocol.IntentResume, "work", 0), tr)
-	var protocolErr *protoErr
-	require.ErrorAs(t, err, &protocolErr)
-	require.Equal(t, protocol.ErrNoSuchSession, protocolErr.code)
-	d.mu.Lock()
-	sessionCount := len(d.sessions)
-	d.mu.Unlock()
-	require.Zero(t, sessionCount)
+	synctest.Test(t, func(t *testing.T) {
+		d := newTestDaemon(t, nil, newStubClock(t))
+		tr, _ := newCapturingTransport(t)
+		_, _, err := d.route(helloResumeCapable(protocol.IntentResume, "work", 0), tr)
+		var protocolErr *protoErr
+		require.ErrorAs(t, err, &protocolErr)
+		require.Equal(t, protocol.ErrNoSuchSession, protocolErr.code)
+		d.mu.Lock()
+		sessionCount := len(d.sessions)
+		d.mu.Unlock()
+		require.Zero(t, sessionCount)
+	})
 }
 
 func TestResumeRejectsMismatchedRemoteTargetBeforeOwnershipMutation(t *testing.T) {
-	pty, release := newBlockingPTY(t)
-	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
-	oldTransport := newQuietConnection(t)
-	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTransport)
-	require.NoError(t, err)
-	token := ac.resumeToken
+	synctest.Test(t, func(t *testing.T) {
+		pty, release := newBlockingPTY(t)
+		defer release()
+		d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
+		oldTransport := newQuietConnection(t)
+		sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTransport)
+		require.NoError(t, err)
+		token := ac.resumeToken
 
-	target := domain.RemoteSessionTarget{
-		LifecycleID: sess.incarnation, SessionName: sess.name, LiveTabID: "missing-tab",
-	}
-	resume := helloResumeCapable(protocol.IntentResume, "work", token)
-	resume.SessionTarget = ptrSessionAttachTarget(protocol.SessionAttachTargetFromRemote(target))
-	resume.EnvironmentPolicy = protocol.EnvironmentPolicyDaemonOwned
-	_, _, err = d.route(resume, newQuietConnection(t))
-	var protocolErr *protoErr
-	require.ErrorAs(t, err, &protocolErr)
-	require.Equal(t, protocol.ErrNoSuchTarget, protocolErr.code)
-	require.Same(t, oldTransport, ac.transport())
-	d.mu.Lock()
-	_, parked := d.resume.parked[token]
-	d.mu.Unlock()
-	require.False(t, parked, "mismatched target must not park the live attachment")
+		target := domain.RemoteSessionTarget{
+			LifecycleID: sess.incarnation, SessionName: sess.name, LiveTabID: "missing-tab",
+		}
+		resume := helloResumeCapable(protocol.IntentResume, "work", token)
+		resume.SessionTarget = ptrSessionAttachTarget(protocol.SessionAttachTargetFromRemote(target))
+		resume.EnvironmentPolicy = protocol.EnvironmentPolicyDaemonOwned
+		_, _, err = d.route(resume, newQuietConnection(t))
+		var protocolErr *protoErr
+		require.ErrorAs(t, err, &protocolErr)
+		require.Equal(t, protocol.ErrNoSuchTarget, protocolErr.code)
+		require.Same(t, oldTransport, ac.transport())
+		d.mu.Lock()
+		_, parked := d.resume.parked[token]
+		d.mu.Unlock()
+		require.False(t, parked, "mismatched target must not park the live attachment")
 
-	require.NoError(t, d.killSession(sess, protocol.ReasonSessionKilled, true))
+		require.NoError(t, d.killSession(sess, protocol.ReasonSessionKilled, true))
+	})
 }
 
 func TestParkedResumeRejectsMismatchedRemoteTargetBeforeClaim(t *testing.T) {
-	pty, release := newBlockingPTY(t)
-	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
-	oldTransport := newQuietConnection(t)
-	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTransport)
-	require.NoError(t, err)
-	token := ac.resumeToken
-	d.clientGone(sess, ac, oldTransport, false)
+	synctest.Test(t, func(t *testing.T) {
+		pty, release := newBlockingPTY(t)
+		defer release()
+		d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
+		oldTransport := newQuietConnection(t)
+		sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTransport)
+		require.NoError(t, err)
+		token := ac.resumeToken
+		d.clientGone(sess, ac, oldTransport, false)
 
-	target := domain.RemoteSessionTarget{
-		LifecycleID: sess.incarnation, SessionName: sess.name, LiveTabID: "missing-tab",
-	}
-	resume := helloResumeCapable(protocol.IntentResume, "work", token)
-	resume.SessionTarget = ptrSessionAttachTarget(protocol.SessionAttachTargetFromRemote(target))
-	resume.EnvironmentPolicy = protocol.EnvironmentPolicyDaemonOwned
-	_, _, err = d.route(resume, newQuietConnection(t))
-	var protocolErr *protoErr
-	require.ErrorAs(t, err, &protocolErr)
-	require.Equal(t, protocol.ErrNoSuchTarget, protocolErr.code)
-	d.mu.Lock()
-	parked := d.resume.parked[token]
-	claimed := parked != nil && parked.claimed
-	d.mu.Unlock()
-	require.NotNil(t, parked)
-	require.False(t, claimed, "mismatched target must not claim the parked attachment")
+		target := domain.RemoteSessionTarget{
+			LifecycleID: sess.incarnation, SessionName: sess.name, LiveTabID: "missing-tab",
+		}
+		resume := helloResumeCapable(protocol.IntentResume, "work", token)
+		resume.SessionTarget = ptrSessionAttachTarget(protocol.SessionAttachTargetFromRemote(target))
+		resume.EnvironmentPolicy = protocol.EnvironmentPolicyDaemonOwned
+		_, _, err = d.route(resume, newQuietConnection(t))
+		var protocolErr *protoErr
+		require.ErrorAs(t, err, &protocolErr)
+		require.Equal(t, protocol.ErrNoSuchTarget, protocolErr.code)
+		d.mu.Lock()
+		parked := d.resume.parked[token]
+		claimed := parked != nil && parked.claimed
+		d.mu.Unlock()
+		require.NotNil(t, parked)
+		require.False(t, claimed, "mismatched target must not claim the parked attachment")
 
-	require.NoError(t, d.killSession(sess, protocol.ReasonSessionKilled, true))
+		require.NoError(t, d.killSession(sess, protocol.ReasonSessionKilled, true))
+	})
 }
 
 func TestFailedResumeRearmsParkExpiryAfterClaimTimerFires(t *testing.T) {
-	clock, clockTimers := newSignalClock(t, 8)
-	pty, release := newBlockingPTY(t)
-	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), clock)
+	synctest.Test(t, func(t *testing.T) {
+		clock, clockTimers := newSignalClock(t, 8)
+		pty, release := newBlockingPTY(t)
+		defer release()
+		d := newTestDaemon(t, newFactory(t, pty), clock)
 
-	oldTransport := newQuietConnection(t)
-	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTransport)
-	require.NoError(t, err)
-	token := ac.resumeToken
-	d.clientGone(sess, ac, oldTransport, false)
-	parkTimer := <-clockTimers
-	d.mu.Lock()
-	parked := d.resume.parked[token]
-	d.mu.Unlock()
-	require.NotNil(t, parked)
+		oldTransport := newQuietConnection(t)
+		sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTransport)
+		require.NoError(t, err)
+		token := ac.resumeToken
+		d.clientGone(sess, ac, oldTransport, false)
+		parkTimer := <-clockTimers
+		d.mu.Lock()
+		parked := d.resume.parked[token]
+		d.mu.Unlock()
+		require.NotNil(t, parked)
 
-	resumed, resumedAC, ok, err := d.resumeParked(helloResumeCapable(protocol.IntentResume, "work", token), newQuietConnection(t), defaultSize)
-	require.NoError(t, err)
-	require.True(t, ok)
-	require.Same(t, sess, resumed)
-	require.Same(t, ac, resumedAC)
+		resumed, resumedAC, ok, err := d.resumeParked(helloResumeCapable(protocol.IntentResume, "work", token), newQuietConnection(t), defaultSize)
+		require.NoError(t, err)
+		require.True(t, ok)
+		require.Same(t, sess, resumed)
+		require.Same(t, ac, resumedAC)
 
-	// Drive the original fake timer after the claim. The old entry remains
-	// claimable only until abort; abort must install a fresh expiry rather than
-	// restoring a credential whose timer has already fired.
-	parkTimer.ch <- time.Time{}
-	d.expireParked(token, parked)
-	require.True(t, d.abortResumeClaim(ac))
-	rearmedTimer := <-clockTimers
-	require.NotSame(t, parkTimer, rearmedTimer)
-	d.mu.Lock()
-	rearmed := d.resume.parked[token]
-	claimed := rearmed != nil && rearmed.claimed
-	d.mu.Unlock()
-	require.NotNil(t, rearmed)
-	require.False(t, claimed)
-	rearmedTimer.ch <- time.Time{}
-	d.expireParked(token, rearmed)
-	d.mu.Lock()
-	_, retained := d.resume.parked[token]
-	d.mu.Unlock()
-	require.False(t, retained, "rearmed credential must still expire")
+		// Drive the original fake timer after the claim. The old entry remains
+		// claimable only until abort; abort must install a fresh expiry rather than
+		// restoring a credential whose timer has already fired.
+		parkTimer.ch <- time.Time{}
+		d.expireParked(token, parked)
+		require.True(t, d.abortResumeClaim(ac))
+		rearmedTimer := <-clockTimers
+		require.NotSame(t, parkTimer, rearmedTimer)
+		d.mu.Lock()
+		rearmed := d.resume.parked[token]
+		claimed := rearmed != nil && rearmed.claimed
+		d.mu.Unlock()
+		require.NotNil(t, rearmed)
+		require.False(t, claimed)
+		rearmedTimer.ch <- time.Time{}
+		d.expireParked(token, rearmed)
+		d.mu.Lock()
+		_, retained := d.resume.parked[token]
+		d.mu.Unlock()
+		require.False(t, retained, "rearmed credential must still expire")
 
-	require.NoError(t, d.killSession(sess, protocol.ReasonSessionKilled, false))
-	d.sessWg.Wait()
+		require.NoError(t, d.killSession(sess, protocol.ReasonSessionKilled, false))
+		d.sessWg.Wait()
+	})
 }
 
 func TestNamedLinkLossParks(t *testing.T) {
-	pty, release := newBlockingPTY(t)
-	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
+	synctest.Test(t, func(t *testing.T) {
+		pty, release := newBlockingPTY(t)
+		defer release()
+		d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 
-	tr, _, _ := newConn(t, mustHello(protocol.IntentAttach, "unused", domain.Size{}))
-	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), tr)
-	require.NoError(t, err)
-	token := ac.resumeToken
-	require.NotZero(t, token)
+		tr, _, _ := newConn(t, mustHello(protocol.IntentAttach, "unused", domain.Size{}))
+		sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), tr)
+		require.NoError(t, err)
+		token := ac.resumeToken
+		require.NotZero(t, token)
 
-	d.clientGone(sess, ac, ac.transport(), false)
-	require.Equal(t, 1, sessionCount(d), "named session survives parked link loss")
-	require.Empty(t, sess.snapshotAttachments())
-	d.mu.Lock()
-	_, parked := d.resume.parked[token]
-	d.mu.Unlock()
-	require.True(t, parked, "named resume-capable link loss is parked")
+		d.clientGone(sess, ac, ac.transport(), false)
+		require.Equal(t, 1, sessionCount(d), "named session survives parked link loss")
+		require.Empty(t, sess.snapshotAttachments())
+		d.mu.Lock()
+		_, parked := d.resume.parked[token]
+		d.mu.Unlock()
+		require.True(t, parked, "named resume-capable link loss is parked")
+	})
 }
 
 func TestBoundedSendTimeoutCannotTargetResumedTransport(t *testing.T) {
-	pty, release := newBlockingPTY(t)
-	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
-	oldTransport := newQuietConnection(t)
-	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "bounded-send-resume", 0), oldTransport)
-	require.NoError(t, err)
-	token := ac.resumeToken
-	d.clientGone(sess, ac, oldTransport, false)
+	synctest.Test(t, func(t *testing.T) {
+		pty, release := newBlockingPTY(t)
+		defer release()
+		d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
+		oldTransport := newQuietConnection(t)
+		sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "bounded-send-resume", 0), oldTransport)
+		require.NoError(t, err)
+		token := ac.resumeToken
+		d.clientGone(sess, ac, oldTransport, false)
 
-	clock, clockTimers := newSignalClock(t, 1)
-	d.clock = clock
-	ac.sendMu.Lock()
-	expected := ac.transportSnapshot()
-	orphanDone := make(chan struct{})
-	type boundedResult struct {
-		transport ports.ServerConnection
-		err       error
-	}
-	result := make(chan boundedResult, 1)
-	go func() {
-		transport, sendErr := d.boundedSendWithTimeout(time.Second, expected.transport, func() error {
-			defer close(orphanDone)
-			return ac.sendExpectedTransport(expected, serverDetached(protocol.ReasonDetach))
-		})
-		result <- boundedResult{transport: transport, err: sendErr}
-	}()
+		clock, clockTimers := newSignalClock(t, 1)
+		d.clock = clock
+		ac.sendMu.Lock()
+		expected := ac.transportSnapshot()
+		orphanDone := make(chan struct{})
+		type boundedResult struct {
+			transport ports.ServerConnection
+			err       error
+		}
+		result := make(chan boundedResult, 1)
+		go func() {
+			transport, sendErr := d.boundedSendWithTimeout(time.Second, expected.transport, func() error {
+				defer close(orphanDone)
+				return ac.sendExpectedTransport(expected, serverDetached(protocol.ReasonDetach))
+			})
+			result <- boundedResult{transport: transport, err: sendErr}
+		}()
 
-	// The worker is parked behind sendMu, so it has not observed a transport.
-	// Expire its deadline before resuming this same attachment with a new link.
-	timer := <-clockTimers
-	timer.ch <- time.Time{}
-	got := <-result
-	require.ErrorIs(t, got.err, errSendTimedOut)
-	require.Same(t, oldTransport, got.transport)
-	require.NoError(t, ac.closeCapturedTransport(got.transport))
+		// The worker is parked behind sendMu, so it has not observed a transport.
+		// Expire its deadline before resuming this same attachment with a new link.
+		timer := <-clockTimers
+		timer.ch <- time.Time{}
+		got := <-result
+		require.ErrorIs(t, got.err, errSendTimedOut)
+		require.Same(t, oldTransport, got.transport)
+		require.NoError(t, ac.closeCapturedTransport(got.transport))
 
-	newTransport, newTransportLog := newTrackedConnection(t)
-	d.mu.Lock()
-	resumedSess, resumedAC, ok, err := d.resumeParkedLocked(
-		helloResumeCapable(protocol.IntentResume, sess.name, token),
-		newTransport,
-		domain.Size{Cols: 80, Rows: 24},
-	)
-	d.mu.Unlock()
-	require.NoError(t, err)
-	require.True(t, ok)
-	require.Same(t, sess, resumedSess)
-	require.Same(t, ac, resumedAC)
+		newTransport, newTransportLog := newTrackedConnection(t)
+		d.mu.Lock()
+		resumedSess, resumedAC, ok, err := d.resumeParkedLocked(
+			helloResumeCapable(protocol.IntentResume, sess.name, token),
+			newTransport,
+			domain.Size{Cols: 80, Rows: 24},
+		)
+		d.mu.Unlock()
+		require.NoError(t, err)
+		require.True(t, ok)
+		require.Same(t, sess, resumedSess)
+		require.Same(t, ac, resumedAC)
 
-	ac.sendMu.Unlock()
-	<-orphanDone
-	require.Empty(t, newTransportLog.Sends(), "orphaned send must not write to the resumed transport")
-	require.False(t, newTransportLog.Closed(), "orphaned send must not close the resumed transport")
+		ac.sendMu.Unlock()
+		<-orphanDone
+		require.Empty(t, newTransportLog.Sends(), "orphaned send must not write to the resumed transport")
+		require.False(t, newTransportLog.Closed(), "orphaned send must not close the resumed transport")
+	})
 }
 
 func TestDetachedNotificationTimeoutClosesCapturedTransportOnce(t *testing.T) {
@@ -257,113 +269,117 @@ func TestDetachedNotificationTimeoutClosesCapturedTransportOnce(t *testing.T) {
 }
 
 func TestHandleHelloResumeDefersFreshOutputUntilWelcome(t *testing.T) {
-	pty, releasePTY := newBlockingPTY(t)
-	defer releasePTY()
-	clock := newCoordinatorMockClock(t, 4)
-	d := newTestDaemon(t, newFactorySeq(t, pty), clock.clock)
-	oldTransport := newQuietConnection(t)
-	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "resume-welcome-gate", 0), oldTransport)
-	require.NoError(t, err)
-	token := ac.resumeToken
-	d.clientGone(sess, ac, oldTransport, false)
+	synctest.Test(t, func(t *testing.T) {
+		pty, releasePTY := newBlockingPTY(t)
+		defer releasePTY()
+		clock := newCoordinatorMockClock(t, 4)
+		d := newTestDaemon(t, newFactorySeq(t, pty), clock.clock)
+		oldTransport := newQuietConnection(t)
+		sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "resume-welcome-gate", 0), oldTransport)
+		require.NoError(t, err)
+		token := ac.resumeToken
+		d.clientGone(sess, ac, oldTransport, false)
 
-	tr := newWelcomeBlockingTransport(t)
-	done := make(chan struct{})
-	resumeHello := helloResumeCapable(protocol.IntentResume, sess.name, token)
-	go func() {
-		d.handleHelloFrame(tr.tr, mustClientEnvelope(resumeHello))
-		close(done)
-	}()
+		tr := newWelcomeBlockingTransport(t)
+		done := make(chan struct{})
+		resumeHello := helloResumeCapable(protocol.IntentResume, sess.name, token)
+		go func() {
+			d.handleHelloFrame(tr.tr, mustClientEnvelope(resumeHello))
+			close(done)
+		}()
 
-	<-tr.welcomeEntered
-	handshakeTimer := awaitHandshakeTimer(t, clock)
-	welcome := <-tr.sends
-	require.Equal(t, "Welcome", envelopeMessageName(t, welcome.Payload))
-	sess.mu.Lock()
-	resumed := sess.snapshotAttachmentsLocked()[0]
-	sess.mu.Unlock()
-	require.Same(t, ac, resumed)
+		<-tr.welcomeEntered
+		handshakeTimer := awaitHandshakeTimer(t, clock)
+		welcome := <-tr.sends
+		require.Equal(t, "Welcome", envelopeMessageName(t, welcome.Payload))
+		sess.mu.Lock()
+		resumed := sess.snapshotAttachmentsLocked()[0]
+		sess.mu.Unlock()
+		require.Same(t, ac, resumed)
 
-	d.invalidateRender(sess, resumed, true, "resume-welcome-gate-test")
-	timer := awaitLatestCoordinatorTimer(t, clock)
-	rc := sess.renderCoordinator()
-	rc.mu.Lock()
-	workerDone := rc.normalLane.token.done
-	rc.mu.Unlock()
-	require.NotNil(t, workerDone)
-	timer.ch <- time.Time{}
-	awaitTestCompletion(t, workerDone, "coordinator deadline worker did not complete")
-	requireNoCoordinatorOutputFrame(t, tr.sends)
+		d.invalidateRender(sess, resumed, true, "resume-welcome-gate-test")
+		timer := awaitLatestCoordinatorTimer(t, clock)
+		rc := sess.renderCoordinator()
+		rc.mu.Lock()
+		workerDone := rc.normalLane.token.done
+		rc.mu.Unlock()
+		require.NotNil(t, workerDone)
+		timer.ch <- time.Time{}
+		requireReceived(t, workerDone, "coordinator deadline worker did not complete")
+		requireNoCoordinatorOutputFrame(t, tr.sends)
 
-	tr.release()
-	output := awaitFrame(t, tr.sends, "Output")
-	first := unmarshalTestOutput(t, output.Payload)
-	require.Zero(t, first.Base)
-	tr.finish()
-	<-done
-	awaitTestCompletion(t, handshakeTimer.stopped, "handshake timer was not canceled after publication")
-	requireNoCoordinatorOutputFrame(t, tr.sends)
+		tr.release()
+		output := requireFrame(t, tr.sends, "Output")
+		first := unmarshalTestOutput(t, output.Payload)
+		require.Zero(t, first.Base)
+		tr.finish()
+		<-done
+		requireReceived(t, handshakeTimer.stopped, "handshake timer was not canceled after publication")
+		requireNoCoordinatorOutputFrame(t, tr.sends)
+	})
 }
 
 func TestEphemeralLinkLossParksAndResumes(t *testing.T) {
-	pty, release := newBlockingPTY(t)
-	defer release()
-	d := newTestDaemon(t, newFactorySeq(t, pty), newStubClock(t))
+	synctest.Test(t, func(t *testing.T) {
+		pty, release := newBlockingPTY(t)
+		defer release()
+		d := newTestDaemon(t, newFactorySeq(t, pty), newStubClock(t))
 
-	tr := newQuietConnection(t)
-	initial := helloResumeCapable(protocol.IntentEphemeral, "", 0)
-	initial.Size = domain.Size{Cols: 120, Rows: 40}
-	sess, ac, err := d.route(initial, tr)
-	require.NoError(t, err)
-	require.True(t, sess.ephemeral)
-	token := ac.resumeToken
-	require.NotZero(t, token, "ephemeral sessions receive resume tokens")
+		tr := newQuietConnection(t)
+		initial := helloResumeCapable(protocol.IntentEphemeral, "", 0)
+		initial.Size = domain.Size{Cols: 120, Rows: 40}
+		sess, ac, err := d.route(initial, tr)
+		require.NoError(t, err)
+		require.True(t, sess.ephemeral)
+		token := ac.resumeToken
+		require.NotZero(t, token, "ephemeral sessions receive resume tokens")
 
-	peerHello := helloResumeCapable(protocol.IntentAttach, sess.name, 0)
-	peerHello.ClientID = [16]byte{9}
-	peerHello.Size = domain.Size{Cols: 100, Rows: 30}
-	peer := newQuietConnection(t)
-	_, peerAC, err := d.route(peerHello, peer)
-	require.NoError(t, err)
-	require.Same(t, sess, peerAC.currentSession())
-	d.firstPaint(sess, peerAC)
-	tb := sess.tabs[0]
-	tb.mu.Lock()
-	beforeParkingSize := tb.size
-	tb.mu.Unlock()
-	require.Equal(t, domain.Size{Cols: 100, Rows: 28}, beforeParkingSize, "the later attachment claim should be current before parking")
+		peerHello := helloResumeCapable(protocol.IntentAttach, sess.name, 0)
+		peerHello.ClientID = [16]byte{9}
+		peerHello.Size = domain.Size{Cols: 100, Rows: 30}
+		peer := newQuietConnection(t)
+		_, peerAC, err := d.route(peerHello, peer)
+		require.NoError(t, err)
+		require.Same(t, sess, peerAC.currentSession())
+		d.firstPaint(sess, peerAC)
+		tb := sess.tabs[0]
+		tb.mu.Lock()
+		beforeParkingSize := tb.size
+		tb.mu.Unlock()
+		require.Equal(t, domain.Size{Cols: 100, Rows: 28}, beforeParkingSize, "the later attachment claim should be current before parking")
 
-	d.clientGone(sess, ac, ac.transport(), false)
-	require.Equal(t, 1, sessionCount(d), "ephemeral link loss keeps session alive")
-	attachments := sess.snapshotAttachments()
-	var peerRegistered bool
-	for _, candidate := range attachments {
-		require.NotSame(t, ac, candidate, "parked attachment remained registered")
-		if candidate == peerAC {
-			peerRegistered = true
+		d.clientGone(sess, ac, ac.transport(), false)
+		require.Equal(t, 1, sessionCount(d), "ephemeral link loss keeps session alive")
+		attachments := sess.snapshotAttachments()
+		var peerRegistered bool
+		for _, candidate := range attachments {
+			require.NotSame(t, ac, candidate, "parked attachment remained registered")
+			if candidate == peerAC {
+				peerRegistered = true
+			}
 		}
-	}
-	require.True(t, peerRegistered, "the live peer attachment was removed while parking")
-	d.mu.Lock()
-	_, parked := d.resume.parked[token]
-	d.mu.Unlock()
-	require.True(t, parked, "ephemeral resume-capable link loss is parked")
+		require.True(t, peerRegistered, "the live peer attachment was removed while parking")
+		d.mu.Lock()
+		_, parked := d.resume.parked[token]
+		d.mu.Unlock()
+		require.True(t, parked, "ephemeral resume-capable link loss is parked")
 
-	resumeHello := helloResumeCapable(protocol.IntentResume, sess.name, token)
-	resumeHello.Size = domain.Size{Cols: 80, Rows: 24}
-	newTr := newQuietConnection(t)
-	resumedSess, resumedAC, err := d.route(resumeHello, newTr)
-	require.NoError(t, err)
-	require.Same(t, sess, resumedSess)
-	require.Same(t, ac, resumedAC)
-	require.NotEqual(t, token, resumedAC.resumeToken, "resume rotates token")
-	require.True(t, slices.Contains(sess.snapshotAttachments(), resumedAC))
-	d.firstPaint(sess, resumedAC)
-	require.Equal(t, domain.Size{Cols: 100, Rows: 30}, peerAC.sizeSnapshot())
-	tb.mu.Lock()
-	resumedSize := tb.size
-	tb.mu.Unlock()
-	require.Equal(t, domain.Size{Cols: 80, Rows: 22}, resumedSize, "resume must make its new size the latest geometry claim")
+		resumeHello := helloResumeCapable(protocol.IntentResume, sess.name, token)
+		resumeHello.Size = domain.Size{Cols: 80, Rows: 24}
+		newTr := newQuietConnection(t)
+		resumedSess, resumedAC, err := d.route(resumeHello, newTr)
+		require.NoError(t, err)
+		require.Same(t, sess, resumedSess)
+		require.Same(t, ac, resumedAC)
+		require.NotEqual(t, token, resumedAC.resumeToken, "resume rotates token")
+		require.True(t, slices.Contains(sess.snapshotAttachments(), resumedAC))
+		d.firstPaint(sess, resumedAC)
+		require.Equal(t, domain.Size{Cols: 100, Rows: 30}, peerAC.sizeSnapshot())
+		tb.mu.Lock()
+		resumedSize := tb.size
+		tb.mu.Unlock()
+		require.Equal(t, domain.Size{Cols: 80, Rows: 22}, resumedSize, "resume must make its new size the latest geometry claim")
+	})
 }
 
 // TestResumeParkedTokenReplacedDuringWaitFailsClosed covers the lifecycle race
@@ -371,70 +387,72 @@ func TestEphemeralLinkLossParksAndResumes(t *testing.T) {
 // the attachment send lock. The nonzero token must fail closed instead of
 // falling through to ordinary attach/create routing.
 func TestResumeParkedTokenReplacedDuringWaitFailsClosed(t *testing.T) {
-	pty, release := newBlockingPTY(t)
-	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
+	synctest.Test(t, func(t *testing.T) {
+		pty, release := newBlockingPTY(t)
+		defer release()
+		d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 
-	oldTr := newQuietConnection(t)
-	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTr)
-	require.NoError(t, err)
-	token := ac.resumeToken
-	require.NotZero(t, token)
-	d.clientGone(sess, ac, oldTr, false)
-	require.Empty(t, sess.snapshotAttachments())
-	d.mu.Lock()
-	parked := d.resume.parked[token]
-	sessionsBefore := len(d.sessions)
-	d.mu.Unlock()
-	require.NotNil(t, parked)
+		oldTr := newQuietConnection(t)
+		sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTr)
+		require.NoError(t, err)
+		token := ac.resumeToken
+		require.NotZero(t, token)
+		d.clientGone(sess, ac, oldTr, false)
+		require.Empty(t, sess.snapshotAttachments())
+		d.mu.Lock()
+		parked := d.resume.parked[token]
+		sessionsBefore := len(d.sessions)
+		d.mu.Unlock()
+		require.NotNil(t, parked)
 
-	reachedLookup := make(chan struct{})
-	releaseLookup := make(chan struct{})
-	var releaseOnce sync.Once
-	t.Cleanup(func() { releaseOnce.Do(func() { close(releaseLookup) }) })
-	d.beforeResumeParkedSendMu = func() {
-		close(reachedLookup)
-		<-releaseLookup
-	}
+		reachedLookup := make(chan struct{})
+		releaseLookup := make(chan struct{})
+		var releaseOnce sync.Once
+		t.Cleanup(func() { releaseOnce.Do(func() { close(releaseLookup) }) })
+		d.beforeResumeParkedSendMu = func() {
+			close(reachedLookup)
+			<-releaseLookup
+		}
 
-	resumeTr, resumeTrLog := newTrackedConnection(t)
-	type routeResult struct {
-		sess *session
-		ac   *attachedClient
-		err  error
-	}
-	result := make(chan routeResult, 1)
-	go func() {
-		routedSess, routedAC, routeErr := d.route(helloResumeCapable(protocol.IntentResume, "work", token), resumeTr)
-		result <- routeResult{sess: routedSess, ac: routedAC, err: routeErr}
-	}()
-	awaitTestCompletion(t, reachedLookup, "resumeParked did not pause after the parked lookup")
+		resumeTr, resumeTrLog := newTrackedConnection(t)
+		type routeResult struct {
+			sess *session
+			ac   *attachedClient
+			err  error
+		}
+		result := make(chan routeResult, 1)
+		go func() {
+			routedSess, routedAC, routeErr := d.route(helloResumeCapable(protocol.IntentResume, "work", token), resumeTr)
+			result <- routeResult{sess: routedSess, ac: routedAC, err: routeErr}
+		}()
+		requireReceived(t, reachedLookup, "resumeParked did not pause after the parked lookup")
 
-	d.mu.Lock()
-	require.Same(t, parked, d.resume.parked[token], "fixture: token must still be parked at the seam")
-	d.removeParkedLocked(token, parked)
-	require.Nil(t, d.resume.parked[token])
-	require.Same(t, sess, d.sessions[sess.id], "fixture: named session must remain registered")
-	d.mu.Unlock()
+		d.mu.Lock()
+		require.Same(t, parked, d.resume.parked[token], "fixture: token must still be parked at the seam")
+		d.removeParkedLocked(token, parked)
+		require.Nil(t, d.resume.parked[token])
+		require.Same(t, sess, d.sessions[sess.id], "fixture: named session must remain registered")
+		d.mu.Unlock()
 
-	releaseOnce.Do(func() { close(releaseLookup) })
-	got := awaitTestValue(t, result, "IntentResume did not finish after parked token replacement")
+		releaseOnce.Do(func() { close(releaseLookup) })
+		got := requireReceived(t, result, "IntentResume did not finish after parked token replacement")
 
-	require.Error(t, got.err)
-	require.Nil(t, got.sess)
-	require.Nil(t, got.ac)
-	var pe *protoErr
-	require.ErrorAs(t, got.err, &pe)
-	require.Equal(t, protocol.ErrNoSuchSession, pe.code)
-	require.Contains(t, pe.Error(), "resume token is no longer valid")
-	require.Empty(t, sess.snapshotAttachments(), "lifecycle-race resume must not take over the named session")
-	require.Empty(t, resumeTrLog.Sends(), "failed resume must not complete a Welcome handshake")
-	d.mu.Lock()
-	_, stillParked := d.resume.parked[token]
-	sessionsAfter := len(d.sessions)
-	d.mu.Unlock()
-	require.False(t, stillParked, "consumed token must stay invalid")
-	require.Equal(t, sessionsBefore, sessionsAfter, "lifecycle-race resume must not create a session")
+		require.Error(t, got.err)
+		require.Nil(t, got.sess)
+		require.Nil(t, got.ac)
+		var pe *protoErr
+		require.ErrorAs(t, got.err, &pe)
+		require.Equal(t, protocol.ErrNoSuchSession, pe.code)
+		require.Contains(t, pe.Error(), "resume token is no longer valid")
+		require.Empty(t, sess.snapshotAttachments(), "lifecycle-race resume must not take over the named session")
+		require.Empty(t, resumeTrLog.Sends(), "failed resume must not complete a Welcome handshake")
+		d.mu.Lock()
+		_, stillParked := d.resume.parked[token]
+		sessionsAfter := len(d.sessions)
+		d.mu.Unlock()
+		require.False(t, stillParked, "consumed token must stay invalid")
+		require.Equal(t, sessionsBefore, sessionsAfter, "lifecycle-race resume must not create a session")
+	})
 }
 
 // TestResumeLiveAttachmentParkedResumeRaceFailsClosed covers the live-recovery
@@ -443,72 +461,74 @@ func TestResumeParkedTokenReplacedDuringWaitFailsClosed(t *testing.T) {
 // surface as fail-closed ErrNoSuchSession, never as a raw ErrInternal leak to
 // handleHello.
 func TestResumeLiveAttachmentParkedResumeRaceFailsClosed(t *testing.T) {
-	pty, release := newBlockingPTY(t)
-	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
+	synctest.Test(t, func(t *testing.T) {
+		pty, release := newBlockingPTY(t)
+		defer release()
+		d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 
-	oldTr := newQuietConnection(t)
-	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTr)
-	require.NoError(t, err)
-	token := ac.resumeToken
-	require.NotZero(t, token)
-	require.True(t, slices.Contains(sess.snapshotAttachments(), ac))
-	d.mu.Lock()
-	_, parkedAtStart := d.resume.parked[token]
-	sessionsBefore := len(d.sessions)
-	d.mu.Unlock()
-	require.False(t, parkedAtStart, "fixture: live attachment must not be parked yet")
+		oldTr := newQuietConnection(t)
+		sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTr)
+		require.NoError(t, err)
+		token := ac.resumeToken
+		require.NotZero(t, token)
+		require.True(t, slices.Contains(sess.snapshotAttachments(), ac))
+		d.mu.Lock()
+		_, parkedAtStart := d.resume.parked[token]
+		sessionsBefore := len(d.sessions)
+		d.mu.Unlock()
+		require.False(t, parkedAtStart, "fixture: live attachment must not be parked yet")
 
-	reachedLookup := make(chan struct{})
-	releaseLookup := make(chan struct{})
-	var releaseOnce sync.Once
-	t.Cleanup(func() { releaseOnce.Do(func() { close(releaseLookup) }) })
-	d.beforeResumeParkedSendMu = func() {
-		close(reachedLookup)
-		<-releaseLookup
-	}
+		reachedLookup := make(chan struct{})
+		releaseLookup := make(chan struct{})
+		var releaseOnce sync.Once
+		t.Cleanup(func() { releaseOnce.Do(func() { close(releaseLookup) }) })
+		d.beforeResumeParkedSendMu = func() {
+			close(reachedLookup)
+			<-releaseLookup
+		}
 
-	resumeTr, resumeTrLog := newTrackedConnection(t)
-	type routeResult struct {
-		sess *session
-		ac   *attachedClient
-		err  error
-	}
-	result := make(chan routeResult, 1)
-	go func() {
-		routedSess, routedAC, routeErr := d.route(helloResumeCapable(protocol.IntentResume, "work", token), resumeTr)
-		result <- routeResult{sess: routedSess, ac: routedAC, err: routeErr}
-	}()
-	awaitTestCompletion(t, reachedLookup, "live resume did not pause inside resumeParked after parking")
+		resumeTr, resumeTrLog := newTrackedConnection(t)
+		type routeResult struct {
+			sess *session
+			ac   *attachedClient
+			err  error
+		}
+		result := make(chan routeResult, 1)
+		go func() {
+			routedSess, routedAC, routeErr := d.route(helloResumeCapable(protocol.IntentResume, "work", token), resumeTr)
+			result <- routeResult{sess: routedSess, ac: routedAC, err: routeErr}
+		}()
+		requireReceived(t, reachedLookup, "live resume did not pause inside resumeParked after parking")
 
-	d.mu.Lock()
-	parked := d.resume.parked[token]
-	require.NotNil(t, parked, "fixture: live recovery must have parked before the sendMu seam")
-	require.Same(t, ac, parked.ac)
-	d.removeParkedLocked(token, parked)
-	require.Nil(t, d.resume.parked[token])
-	require.Same(t, sess, d.sessions[sess.id], "fixture: named session must remain registered")
-	d.mu.Unlock()
+		d.mu.Lock()
+		parked := d.resume.parked[token]
+		require.NotNil(t, parked, "fixture: live recovery must have parked before the sendMu seam")
+		require.Same(t, ac, parked.ac)
+		d.removeParkedLocked(token, parked)
+		require.Nil(t, d.resume.parked[token])
+		require.Same(t, sess, d.sessions[sess.id], "fixture: named session must remain registered")
+		d.mu.Unlock()
 
-	releaseOnce.Do(func() { close(releaseLookup) })
-	got := awaitTestValue(t, result, "live IntentResume did not finish after competing resume consumed the token")
+		releaseOnce.Do(func() { close(releaseLookup) })
+		got := requireReceived(t, result, "live IntentResume did not finish after competing resume consumed the token")
 
-	require.Error(t, got.err)
-	require.Nil(t, got.sess)
-	require.Nil(t, got.ac)
-	require.False(t, errors.Is(got.err, errResumeTokenLifecycleRace), "raw lifecycle sentinel must not reach route callers")
-	var pe *protoErr
-	require.ErrorAs(t, got.err, &pe)
-	require.Equal(t, protocol.ErrNoSuchSession, pe.code)
-	require.Contains(t, pe.Error(), "resume token is no longer valid")
-	require.Empty(t, sess.snapshotAttachments(), "losing live resume must not take over the named session")
-	require.Empty(t, resumeTrLog.Sends(), "failed live resume must not complete a Welcome handshake")
-	d.mu.Lock()
-	_, stillParked := d.resume.parked[token]
-	sessionsAfter := len(d.sessions)
-	d.mu.Unlock()
-	require.False(t, stillParked, "consumed token must stay invalid")
-	require.Equal(t, sessionsBefore, sessionsAfter, "losing live resume must not create a session")
+		require.Error(t, got.err)
+		require.Nil(t, got.sess)
+		require.Nil(t, got.ac)
+		require.False(t, errors.Is(got.err, errResumeTokenLifecycleRace), "raw lifecycle sentinel must not reach route callers")
+		var pe *protoErr
+		require.ErrorAs(t, got.err, &pe)
+		require.Equal(t, protocol.ErrNoSuchSession, pe.code)
+		require.Contains(t, pe.Error(), "resume token is no longer valid")
+		require.Empty(t, sess.snapshotAttachments(), "losing live resume must not take over the named session")
+		require.Empty(t, resumeTrLog.Sends(), "failed live resume must not complete a Welcome handshake")
+		d.mu.Lock()
+		_, stillParked := d.resume.parked[token]
+		sessionsAfter := len(d.sessions)
+		d.mu.Unlock()
+		require.False(t, stillParked, "consumed token must stay invalid")
+		require.Equal(t, sessionsBefore, sessionsAfter, "losing live resume must not create a session")
+	})
 }
 
 // TestResumeActiveTokenBeforeParkRecoversSameAttachment covers the laptop-sleep
@@ -516,98 +536,100 @@ func TestResumeLiveAttachmentParkedResumeRaceFailsClosed(t *testing.T) {
 // transport teardown has parked it. Same client must recover; unknown and
 // mismatched credentials stay fail-closed.
 func TestResumeDuringTeardownBeforeParkRecoversSameAttachment(t *testing.T) {
-	pty, release := newBlockingPTY(t)
-	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
+	synctest.Test(t, func(t *testing.T) {
+		pty, release := newBlockingPTY(t)
+		defer release()
+		d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 
-	oldTr, oldTrLog := newTrackedConnection(t)
-	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTr)
-	require.NoError(t, err)
-	token := ac.resumeToken
-	require.NotZero(t, token)
-	require.True(t, slices.Contains(sess.snapshotAttachments(), ac))
+		oldTr, oldTrLog := newTrackedConnection(t)
+		sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTr)
+		require.NoError(t, err)
+		token := ac.resumeToken
+		require.NotZero(t, token)
+		require.True(t, slices.Contains(sess.snapshotAttachments(), ac))
 
-	reachedGap := make(chan struct{})
-	releaseGap := make(chan struct{})
-	var releaseOnce sync.Once
-	t.Cleanup(func() { releaseOnce.Do(func() { close(releaseGap) }) })
-	d.afterClientGoneDetach = func() {
-		close(reachedGap)
-		<-releaseGap
-	}
+		reachedGap := make(chan struct{})
+		releaseGap := make(chan struct{})
+		var releaseOnce sync.Once
+		t.Cleanup(func() { releaseOnce.Do(func() { close(releaseGap) }) })
+		d.afterClientGoneDetach = func() {
+			close(reachedGap)
+			<-releaseGap
+		}
 
-	goneDone := make(chan struct{})
-	go func() {
+		goneDone := make(chan struct{})
+		go func() {
+			d.clientGone(sess, ac, oldTr, false)
+			close(goneDone)
+		}()
+		requireReceived(t, reachedGap, "teardown did not pause after detach before park")
+
+		require.Empty(t, sess.snapshotAttachments(), "fixture: detach must have cleared the live owner")
+		d.mu.Lock()
+		parkingInGap := d.resume.parking[token]
+		_, parkedInGap := d.resume.parked[token]
+		d.mu.Unlock()
+		require.NotNil(t, parkingInGap, "fixture: parking marker must precede detach publication")
+		require.Same(t, ac, parkingInGap.ac)
+		require.Same(t, sess, parkingInGap.sess)
+		require.False(t, parkedInGap, "fixture: park must not have published yet")
+
+		_, _, err = d.route(helloResumeCapable(protocol.IntentResume, "work", 0xdecafbad), newQuietConnection(t))
+		require.Error(t, err)
+		var unknownErr *protoErr
+		require.ErrorAs(t, err, &unknownErr)
+		require.Equal(t, protocol.ErrNoSuchSession, unknownErr.code)
+		require.Contains(t, unknownErr.Error(), "resume token is no longer valid")
+
+		wrongClient := helloResumeCapable(protocol.IntentResume, "work", token)
+		wrongClient.ClientID = [16]byte{9, 9, 9, 9}
+		_, _, err = d.route(wrongClient, newQuietConnection(t))
+		require.Error(t, err)
+		var mismatchErr *protoErr
+		require.ErrorAs(t, err, &mismatchErr)
+		require.Equal(t, protocol.ErrNoSuchSession, mismatchErr.code)
+		require.Contains(t, mismatchErr.Error(), "resume token is no longer valid")
+
+		newTr, newTrLog := newTrackedConnection(t)
+		type routeResult struct {
+			sess *session
+			ac   *attachedClient
+			err  error
+		}
+		waiterArmed := make(chan struct{})
+		d.afterParkingWaitArmed = func() { close(waiterArmed) }
+		result := make(chan routeResult, 1)
+		go func() {
+			routedSess, routedAC, routeErr := d.route(helloResumeCapable(protocol.IntentResume, "work", token), newTr)
+			result <- routeResult{sess: routedSess, ac: routedAC, err: routeErr}
+		}()
+		requireReceived(t, waiterArmed, "resume waiter did not arm on parking marker before park")
+
+		releaseOnce.Do(func() { close(releaseGap) })
+		requireReceived(t, goneDone, "teardown did not finish after park release")
+		got := requireReceived(t, result, "IntentResume did not finish after teardown-before-park gap")
+
+		require.NoError(t, got.err, "same-client token must recover across detach-before-park")
+		require.Same(t, sess, got.sess)
+		require.Same(t, ac, got.ac)
+		require.True(t, slices.Contains(sess.snapshotAttachments(), ac))
+		require.Same(t, newTr, ac.transport())
+		require.NotEqual(t, token, ac.resumeToken, "successful resume rotates the credential")
+		require.True(t, d.commitResumeClaim(ac), "successful resume must consume its parked credential")
+		require.True(t, oldTrLog.Closed(), "teardown/resume must retire the old transport")
+		require.False(t, newTrLog.Closed(), "rebound transport must survive")
+		d.mu.Lock()
+		_, oldTokenParked := d.resume.parked[token]
+		_, stillParking := d.resume.parking[token]
+		d.mu.Unlock()
+		require.False(t, oldTokenParked, "consumed credential must not remain resumeable")
+		require.False(t, stillParking, "parking marker must be consumed after park/resume")
+
 		d.clientGone(sess, ac, oldTr, false)
-		close(goneDone)
-	}()
-	awaitTestCompletion(t, reachedGap, "teardown did not pause after detach before park")
-
-	require.Empty(t, sess.snapshotAttachments(), "fixture: detach must have cleared the live owner")
-	d.mu.Lock()
-	parkingInGap := d.resume.parking[token]
-	_, parkedInGap := d.resume.parked[token]
-	d.mu.Unlock()
-	require.NotNil(t, parkingInGap, "fixture: parking marker must precede detach publication")
-	require.Same(t, ac, parkingInGap.ac)
-	require.Same(t, sess, parkingInGap.sess)
-	require.False(t, parkedInGap, "fixture: park must not have published yet")
-
-	_, _, err = d.route(helloResumeCapable(protocol.IntentResume, "work", 0xdecafbad), newQuietConnection(t))
-	require.Error(t, err)
-	var unknownErr *protoErr
-	require.ErrorAs(t, err, &unknownErr)
-	require.Equal(t, protocol.ErrNoSuchSession, unknownErr.code)
-	require.Contains(t, unknownErr.Error(), "resume token is no longer valid")
-
-	wrongClient := helloResumeCapable(protocol.IntentResume, "work", token)
-	wrongClient.ClientID = [16]byte{9, 9, 9, 9}
-	_, _, err = d.route(wrongClient, newQuietConnection(t))
-	require.Error(t, err)
-	var mismatchErr *protoErr
-	require.ErrorAs(t, err, &mismatchErr)
-	require.Equal(t, protocol.ErrNoSuchSession, mismatchErr.code)
-	require.Contains(t, mismatchErr.Error(), "resume token is no longer valid")
-
-	newTr, newTrLog := newTrackedConnection(t)
-	type routeResult struct {
-		sess *session
-		ac   *attachedClient
-		err  error
-	}
-	waiterArmed := make(chan struct{})
-	d.afterParkingWaitArmed = func() { close(waiterArmed) }
-	result := make(chan routeResult, 1)
-	go func() {
-		routedSess, routedAC, routeErr := d.route(helloResumeCapable(protocol.IntentResume, "work", token), newTr)
-		result <- routeResult{sess: routedSess, ac: routedAC, err: routeErr}
-	}()
-	awaitTestCompletion(t, waiterArmed, "resume waiter did not arm on parking marker before park")
-
-	releaseOnce.Do(func() { close(releaseGap) })
-	awaitTestCompletion(t, goneDone, "teardown did not finish after park release")
-	got := awaitTestValue(t, result, "IntentResume did not finish after teardown-before-park gap")
-
-	require.NoError(t, got.err, "same-client token must recover across detach-before-park")
-	require.Same(t, sess, got.sess)
-	require.Same(t, ac, got.ac)
-	require.True(t, slices.Contains(sess.snapshotAttachments(), ac))
-	require.Same(t, newTr, ac.transport())
-	require.NotEqual(t, token, ac.resumeToken, "successful resume rotates the credential")
-	require.True(t, d.commitResumeClaim(ac), "successful resume must consume its parked credential")
-	require.True(t, oldTrLog.Closed(), "teardown/resume must retire the old transport")
-	require.False(t, newTrLog.Closed(), "rebound transport must survive")
-	d.mu.Lock()
-	_, oldTokenParked := d.resume.parked[token]
-	_, stillParking := d.resume.parking[token]
-	d.mu.Unlock()
-	require.False(t, oldTokenParked, "consumed credential must not remain resumeable")
-	require.False(t, stillParking, "parking marker must be consumed after park/resume")
-
-	d.clientGone(sess, ac, oldTr, false)
-	require.True(t, slices.Contains(sess.snapshotAttachments(), ac), "stale old-link cleanup must not detach the rebound attachment")
-	require.Same(t, newTr, ac.transport())
-	require.False(t, newTrLog.Closed())
+		require.True(t, slices.Contains(sess.snapshotAttachments(), ac), "stale old-link cleanup must not detach the rebound attachment")
+		require.Same(t, newTr, ac.transport())
+		require.False(t, newTrLog.Closed())
+	})
 }
 
 // TestConcurrentLiveResumesWaitParkingMarkerBeforePark covers two same-token
@@ -615,197 +637,201 @@ func TestResumeDuringTeardownBeforeParkRecoversSameAttachment(t *testing.T) {
 // before parkAttachment. The parking marker must already be published so the
 // loser waits instead of treating the credential as unknown across that gap.
 func TestConcurrentLiveResumesWaitParkingMarkerBeforePark(t *testing.T) {
-	pty, release := newBlockingPTY(t)
-	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
+	synctest.Test(t, func(t *testing.T) {
+		pty, release := newBlockingPTY(t)
+		defer release()
+		d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 
-	oldTr, oldTrLog := newTrackedConnection(t)
-	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTr)
-	require.NoError(t, err)
-	token := ac.resumeToken
-	require.NotZero(t, token)
-	require.True(t, slices.Contains(sess.snapshotAttachments(), ac))
+		oldTr, oldTrLog := newTrackedConnection(t)
+		sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTr)
+		require.NoError(t, err)
+		token := ac.resumeToken
+		require.NotZero(t, token)
+		require.True(t, slices.Contains(sess.snapshotAttachments(), ac))
 
-	reachedGap := make(chan struct{})
-	releaseGap := make(chan struct{})
-	var releaseOnce sync.Once
-	t.Cleanup(func() { releaseOnce.Do(func() { close(releaseGap) }) })
-	d.afterResumeLiveDetach = func() {
-		close(reachedGap)
-		<-releaseGap
-	}
+		reachedGap := make(chan struct{})
+		releaseGap := make(chan struct{})
+		var releaseOnce sync.Once
+		t.Cleanup(func() { releaseOnce.Do(func() { close(releaseGap) }) })
+		d.afterResumeLiveDetach = func() {
+			close(reachedGap)
+			<-releaseGap
+		}
 
-	type routeResult struct {
-		sess *session
-		ac   *attachedClient
-		err  error
-	}
-	firstTr, firstTrLog := newTrackedConnection(t)
-	firstResult := make(chan routeResult, 1)
-	go func() {
-		routedSess, routedAC, routeErr := d.route(helloResumeCapable(protocol.IntentResume, "work", token), firstTr)
-		firstResult <- routeResult{sess: routedSess, ac: routedAC, err: routeErr}
-	}()
-	awaitTestCompletion(t, reachedGap, "first live resume did not pause after detach before park")
+		type routeResult struct {
+			sess *session
+			ac   *attachedClient
+			err  error
+		}
+		firstTr, firstTrLog := newTrackedConnection(t)
+		firstResult := make(chan routeResult, 1)
+		go func() {
+			routedSess, routedAC, routeErr := d.route(helloResumeCapable(protocol.IntentResume, "work", token), firstTr)
+			firstResult <- routeResult{sess: routedSess, ac: routedAC, err: routeErr}
+		}()
+		requireReceived(t, reachedGap, "first live resume did not pause after detach before park")
 
-	require.Empty(t, sess.snapshotAttachments(), "fixture: winning resume must have cleared the live owner")
-	d.mu.Lock()
-	parkingInGap := d.resume.parking[token]
-	_, parkedInGap := d.resume.parked[token]
-	d.mu.Unlock()
-	require.NotNil(t, parkingInGap, "fixture: parking marker must precede detach for concurrent resumes")
-	require.Same(t, ac, parkingInGap.ac)
-	require.False(t, parkedInGap, "fixture: park must not have published yet")
+		require.Empty(t, sess.snapshotAttachments(), "fixture: winning resume must have cleared the live owner")
+		d.mu.Lock()
+		parkingInGap := d.resume.parking[token]
+		_, parkedInGap := d.resume.parked[token]
+		d.mu.Unlock()
+		require.NotNil(t, parkingInGap, "fixture: parking marker must precede detach for concurrent resumes")
+		require.Same(t, ac, parkingInGap.ac)
+		require.False(t, parkedInGap, "fixture: park must not have published yet")
 
-	_, _, err = d.route(helloResumeCapable(protocol.IntentResume, "work", 0xdecafbad), newQuietConnection(t))
-	require.Error(t, err)
-	var unknownErr *protoErr
-	require.ErrorAs(t, err, &unknownErr)
-	require.Equal(t, protocol.ErrNoSuchSession, unknownErr.code)
+		_, _, err = d.route(helloResumeCapable(protocol.IntentResume, "work", 0xdecafbad), newQuietConnection(t))
+		require.Error(t, err)
+		var unknownErr *protoErr
+		require.ErrorAs(t, err, &unknownErr)
+		require.Equal(t, protocol.ErrNoSuchSession, unknownErr.code)
 
-	secondTr, secondTrLog := newTrackedConnection(t)
-	secondWaiting := make(chan struct{})
-	d.afterParkingWaitArmed = func() {
-		close(secondWaiting)
-	}
-	secondResult := make(chan routeResult, 1)
-	go func() {
-		routedSess, routedAC, routeErr := d.route(helloResumeCapable(protocol.IntentResume, "work", token), secondTr)
-		secondResult <- routeResult{sess: routedSess, ac: routedAC, err: routeErr}
-	}()
-	awaitTestCompletion(t, secondWaiting, "second live resume did not arm parking wait")
+		secondTr, secondTrLog := newTrackedConnection(t)
+		secondWaiting := make(chan struct{})
+		d.afterParkingWaitArmed = func() {
+			close(secondWaiting)
+		}
+		secondResult := make(chan routeResult, 1)
+		go func() {
+			routedSess, routedAC, routeErr := d.route(helloResumeCapable(protocol.IntentResume, "work", token), secondTr)
+			secondResult <- routeResult{sess: routedSess, ac: routedAC, err: routeErr}
+		}()
+		requireReceived(t, secondWaiting, "second live resume did not arm parking wait")
 
-	releaseOnce.Do(func() { close(releaseGap) })
-	first := awaitTestValue(t, firstResult, "first concurrent IntentResume did not finish")
-	second := awaitTestValue(t, secondResult, "second concurrent IntentResume did not finish")
+		releaseOnce.Do(func() { close(releaseGap) })
+		first := requireReceived(t, firstResult, "first concurrent IntentResume did not finish")
+		second := requireReceived(t, secondResult, "second concurrent IntentResume did not finish")
 
-	var winner, loser routeResult
-	var winnerTr *mockServerConnection
-	var winnerLog, loserLog *connLog
-	switch {
-	case first.err == nil && second.err != nil:
-		winner, loser = first, second
-		winnerTr = firstTr
-		winnerLog, loserLog = firstTrLog, secondTrLog
-	case second.err == nil && first.err != nil:
-		winner, loser = second, first
-		winnerTr = secondTr
-		winnerLog, loserLog = secondTrLog, firstTrLog
-	default:
-		t.Fatalf("expected exactly one concurrent resume to succeed; first=%v second=%v", first.err, second.err)
-	}
+		var winner, loser routeResult
+		var winnerTr *mockServerConnection
+		var winnerLog, loserLog *connLog
+		switch {
+		case first.err == nil && second.err != nil:
+			winner, loser = first, second
+			winnerTr = firstTr
+			winnerLog, loserLog = firstTrLog, secondTrLog
+		case second.err == nil && first.err != nil:
+			winner, loser = second, first
+			winnerTr = secondTr
+			winnerLog, loserLog = secondTrLog, firstTrLog
+		default:
+			t.Fatalf("expected exactly one concurrent resume to succeed; first=%v second=%v", first.err, second.err)
+		}
 
-	require.Same(t, sess, winner.sess)
-	require.Same(t, ac, winner.ac)
-	require.True(t, slices.Contains(sess.snapshotAttachments(), ac))
-	require.Same(t, winnerTr, ac.transport())
-	require.NotEqual(t, token, ac.resumeToken, "successful resume rotates the credential")
-	require.True(t, oldTrLog.Closed(), "winning resume must retire the old transport")
-	require.False(t, winnerLog.Closed(), "winning rebound transport must survive")
+		require.Same(t, sess, winner.sess)
+		require.Same(t, ac, winner.ac)
+		require.True(t, slices.Contains(sess.snapshotAttachments(), ac))
+		require.Same(t, winnerTr, ac.transport())
+		require.NotEqual(t, token, ac.resumeToken, "successful resume rotates the credential")
+		require.True(t, oldTrLog.Closed(), "winning resume must retire the old transport")
+		require.False(t, winnerLog.Closed(), "winning rebound transport must survive")
 
-	var loserErr *protoErr
-	require.ErrorAs(t, loser.err, &loserErr)
-	require.Equal(t, protocol.ErrNoSuchSession, loserErr.code)
-	require.Contains(t, loserErr.Error(), "resume token is no longer valid")
-	require.True(t, loserLog.Closed() || len(loserLog.Sends()) == 0, "losing resume must not complete Welcome")
+		var loserErr *protoErr
+		require.ErrorAs(t, loser.err, &loserErr)
+		require.Equal(t, protocol.ErrNoSuchSession, loserErr.code)
+		require.Contains(t, loserErr.Error(), "resume token is no longer valid")
+		require.True(t, loserLog.Closed() || len(loserLog.Sends()) == 0, "losing resume must not complete Welcome")
 
-	require.True(t, d.commitResumeClaim(ac), "successful concurrent resume must consume its parked credential")
-	d.mu.Lock()
-	_, oldTokenParked := d.resume.parked[token]
-	_, stillParking := d.resume.parking[token]
-	d.mu.Unlock()
-	require.False(t, oldTokenParked, "consumed credential must not remain resumeable")
-	require.False(t, stillParking, "parking marker must be consumed after park/resume")
+		require.True(t, d.commitResumeClaim(ac), "successful concurrent resume must consume its parked credential")
+		d.mu.Lock()
+		_, oldTokenParked := d.resume.parked[token]
+		_, stillParking := d.resume.parking[token]
+		d.mu.Unlock()
+		require.False(t, oldTokenParked, "consumed credential must not remain resumeable")
+		require.False(t, stillParking, "parking marker must be consumed after park/resume")
 
-	d.clientGone(sess, ac, oldTr, false)
-	require.True(t, slices.Contains(sess.snapshotAttachments(), ac), "stale old-link cleanup must not detach the rebound attachment")
-	require.Same(t, winnerTr, ac.transport())
-	require.False(t, winnerLog.Closed())
+		d.clientGone(sess, ac, oldTr, false)
+		require.True(t, slices.Contains(sess.snapshotAttachments(), ac), "stale old-link cleanup must not detach the rebound attachment")
+		require.Same(t, winnerTr, ac.transport())
+		require.False(t, winnerLog.Closed())
+	})
 }
 
 func TestExplicitDetachClearsOrphanedSameAttachmentParkingMarker(t *testing.T) {
-	workPTY, releaseWork := newBlockingPTY(t)
-	defer releaseWork()
-	otherPTY, releaseOther := newBlockingPTY(t)
-	defer releaseOther()
-	// Separate PTYs keep the other session alive while work detaches.
-	d := newTestDaemon(t, newFactorySeq(t, workPTY, otherPTY), newStubClock(t))
+	synctest.Test(t, func(t *testing.T) {
+		workPTY, releaseWork := newBlockingPTY(t)
+		defer releaseWork()
+		otherPTY, releaseOther := newBlockingPTY(t)
+		defer releaseOther()
+		// Separate PTYs keep the other session alive while work detaches.
+		d := newTestDaemon(t, newFactorySeq(t, workPTY, otherPTY), newStubClock(t))
 
-	oldTr := newQuietConnection(t)
-	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTr)
-	require.NoError(t, err)
-	token := ac.resumeToken
-	require.NotZero(t, token)
+		oldTr := newQuietConnection(t)
+		sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTr)
+		require.NoError(t, err)
+		token := ac.resumeToken
+		require.NotZero(t, token)
 
-	otherTr := newQuietConnection(t)
-	otherSess, otherAC, err := d.route(helloResumeCapable(protocol.IntentNew, "other", 0), otherTr)
-	require.NoError(t, err)
-	otherToken := d.markParkingInFlight(otherSess, otherAC)
-	require.NotZero(t, otherToken)
-	require.NotEqual(t, token, otherToken)
+		otherTr := newQuietConnection(t)
+		otherSess, otherAC, err := d.route(helloResumeCapable(protocol.IntentNew, "other", 0), otherTr)
+		require.NoError(t, err)
+		otherToken := d.markParkingInFlight(otherSess, otherAC)
+		require.NotZero(t, otherToken)
+		require.NotEqual(t, token, otherToken)
 
-	// Pre-mark as a same-attachment non-explicit teardown would before detach.
-	require.Equal(t, token, d.markParkingInFlight(sess, ac))
-	d.mu.Lock()
-	orphaned := d.resume.parking[token]
-	otherMarker := d.resume.parking[otherToken]
-	d.mu.Unlock()
-	require.NotNil(t, orphaned, "fixture: non-explicit teardown must publish the parking marker")
-	require.Same(t, ac, orphaned.ac)
-	require.NotNil(t, otherMarker, "fixture: other attachment marker must remain published")
-	require.Same(t, otherAC, otherMarker.ac)
+		// Pre-mark as a same-attachment non-explicit teardown would before detach.
+		require.Equal(t, token, d.markParkingInFlight(sess, ac))
+		d.mu.Lock()
+		orphaned := d.resume.parking[token]
+		otherMarker := d.resume.parking[otherToken]
+		d.mu.Unlock()
+		require.NotNil(t, orphaned, "fixture: non-explicit teardown must publish the parking marker")
+		require.Same(t, ac, orphaned.ac)
+		require.NotNil(t, otherMarker, "fixture: other attachment marker must remain published")
+		require.Same(t, otherAC, otherMarker.ac)
 
-	waiterArmed := make(chan struct{})
-	d.afterParkingWaitArmed = func() { close(waiterArmed) }
-	waiterDone := make(chan bool, 1)
-	go func() {
-		waiterDone <- d.waitParkingInFlight(helloResumeCapable(protocol.IntentResume, "work", token))
-	}()
-	awaitTestCompletion(t, waiterArmed, "parking waiter did not arm on the orphaned marker")
+		waiterArmed := make(chan struct{})
+		d.afterParkingWaitArmed = func() { close(waiterArmed) }
+		waiterDone := make(chan bool, 1)
+		go func() {
+			waiterDone <- d.waitParkingInFlight(helloResumeCapable(protocol.IntentResume, "work", token))
+		}()
+		requireReceived(t, waiterArmed, "parking waiter did not arm on the orphaned marker")
 
-	d.clientGone(sess, ac, oldTr, true)
-	require.Empty(t, sess.snapshotAttachments(), "explicit detach must clear the live owner")
+		d.clientGone(sess, ac, oldTr, true)
+		require.Empty(t, sess.snapshotAttachments(), "explicit detach must clear the live owner")
 
-	waited := awaitTestValue(t, waiterDone, "parking waiter stayed blocked after explicit detach")
-	require.True(t, waited, "waiter must observe the same-attachment marker before it is cleared")
+		waited := requireReceived(t, waiterDone, "parking waiter stayed blocked after explicit detach")
+		require.True(t, waited, "waiter must observe the same-attachment marker before it is cleared")
 
-	d.mu.Lock()
-	_, stillParking := d.resume.parking[token]
-	otherAfter := d.resume.parking[otherToken]
-	d.mu.Unlock()
-	require.False(t, stillParking, "explicit winner must clear the same attachment's orphaned marker")
-	require.NotNil(t, otherAfter, "explicit winner must not clear another attachment's marker")
-	require.Same(t, otherAC, otherAfter.ac)
+		d.mu.Lock()
+		_, stillParking := d.resume.parking[token]
+		otherAfter := d.resume.parking[otherToken]
+		d.mu.Unlock()
+		require.False(t, stillParking, "explicit winner must clear the same attachment's orphaned marker")
+		require.NotNil(t, otherAfter, "explicit winner must not clear another attachment's marker")
+		require.Same(t, otherAC, otherAfter.ac)
 
-	_, _, err = d.route(helloResumeCapable(protocol.IntentResume, "work", 0xdecafbad), newQuietConnection(t))
-	require.Error(t, err)
-	var unknownErr *protoErr
-	require.ErrorAs(t, err, &unknownErr)
-	require.Equal(t, protocol.ErrNoSuchSession, unknownErr.code)
-	require.Contains(t, unknownErr.Error(), "resume token is no longer valid")
+		_, _, err = d.route(helloResumeCapable(protocol.IntentResume, "work", 0xdecafbad), newQuietConnection(t))
+		require.Error(t, err)
+		var unknownErr *protoErr
+		require.ErrorAs(t, err, &unknownErr)
+		require.Equal(t, protocol.ErrNoSuchSession, unknownErr.code)
+		require.Contains(t, unknownErr.Error(), "resume token is no longer valid")
 
-	_, _, err = d.route(helloResumeCapable(protocol.IntentResume, "work", token), newQuietConnection(t))
-	require.Error(t, err)
-	var retiredErr *protoErr
-	require.ErrorAs(t, err, &retiredErr)
-	require.Equal(t, protocol.ErrNoSuchSession, retiredErr.code)
-	require.Contains(t, retiredErr.Error(), "resume token is no longer valid")
+		_, _, err = d.route(helloResumeCapable(protocol.IntentResume, "work", token), newQuietConnection(t))
+		require.Error(t, err)
+		var retiredErr *protoErr
+		require.ErrorAs(t, err, &retiredErr)
+		require.Equal(t, protocol.ErrNoSuchSession, retiredErr.code)
+		require.Contains(t, retiredErr.Error(), "resume token is no longer valid")
 
-	// A later parked lifecycle for another attachment must survive a clear
-	// scoped to the retired attachment identity.
-	require.True(t, d.parkAttachment(otherSess, otherAC))
-	d.mu.Lock()
-	parkedOther := d.resume.parked[otherToken]
-	_, otherStillParking := d.resume.parking[otherToken]
-	d.mu.Unlock()
-	require.NotNil(t, parkedOther, "subsequent park must publish the other attachment")
-	require.False(t, otherStillParking, "park consumes the other attachment's in-flight marker")
+		// A later parked lifecycle for another attachment must survive a clear
+		// scoped to the retired attachment identity.
+		require.True(t, d.parkAttachment(otherSess, otherAC))
+		d.mu.Lock()
+		parkedOther := d.resume.parked[otherToken]
+		_, otherStillParking := d.resume.parking[otherToken]
+		d.mu.Unlock()
+		require.NotNil(t, parkedOther, "subsequent park must publish the other attachment")
+		require.False(t, otherStillParking, "park consumes the other attachment's in-flight marker")
 
-	d.clearParkingInFlight(otherToken, ac)
-	d.mu.Lock()
-	parkedAfterMismatchedClear := d.resume.parked[otherToken]
-	d.mu.Unlock()
-	require.Same(t, parkedOther, parkedAfterMismatchedClear, "mismatched clear must not drop a subsequent parked lifecycle")
+		d.clearParkingInFlight(otherToken, ac)
+		d.mu.Lock()
+		parkedAfterMismatchedClear := d.resume.parked[otherToken]
+		d.mu.Unlock()
+		require.Same(t, parkedOther, parkedAfterMismatchedClear, "mismatched clear must not drop a subsequent parked lifecycle")
+	})
 }
 
 // TestLiveResumeRejectsLateMarkerAfterTerminalCleanupWins covers the race where
@@ -840,6 +866,64 @@ func TestLiveResumeRejectsLateMarkerAfterTerminalCleanupWins(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				pty, release := newBlockingPTY(t)
+				defer release()
+				d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
+
+				oldTr := newQuietConnection(t)
+				sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTr)
+				require.NoError(t, err)
+				token := ac.resumeToken
+				require.NotZero(t, token)
+				require.True(t, slices.Contains(sess.snapshotAttachments(), ac))
+
+				validated := make(chan struct{})
+				releaseMark := make(chan struct{})
+				var releaseOnce sync.Once
+				t.Cleanup(func() { releaseOnce.Do(func() { close(releaseMark) }) })
+				d.beforeMarkParkingInFlight = func() {
+					close(validated)
+					<-releaseMark
+				}
+
+				type routeResult struct {
+					err error
+				}
+				result := make(chan routeResult, 1)
+				go func() {
+					_, _, routeErr := d.route(helloResumeCapable(protocol.IntentResume, "work", token), newQuietConnection(t))
+					result <- routeResult{err: routeErr}
+				}()
+				requireReceived(t, validated, "live resume did not pause after credential validation before mark")
+
+				tc.win(t, d, sess, ac, oldTr, token)
+
+				d.mu.Lock()
+				_, parkingBeforeRelease := d.resume.parking[token]
+				d.mu.Unlock()
+				require.False(t, parkingBeforeRelease, "terminal cleanup must not leave a parking marker before late mark resumes")
+
+				releaseOnce.Do(func() { close(releaseMark) })
+				got := requireReceived(t, result, "live IntentResume stayed blocked after terminal cleanup won before mark")
+				require.Error(t, got.err)
+				var pe *protoErr
+				require.ErrorAs(t, got.err, &pe)
+				require.Equal(t, protocol.ErrNoSuchSession, pe.code)
+				require.Contains(t, pe.Error(), "resume token is no longer valid")
+
+				d.mu.Lock()
+				_, stillParking := d.resume.parking[token]
+				_, stillParked := d.resume.parked[token]
+				d.mu.Unlock()
+				require.False(t, stillParking, "late markParkingInFlight must not recreate a parking marker after terminal cleanup")
+				require.False(t, stillParked, "terminal cleanup must not leave a parked credential")
+			})
+		})
+	}
+
+	t.Run("direct_park_after_detach_without_marker", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
 			pty, release := newBlockingPTY(t)
 			defer release()
 			d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
@@ -849,79 +933,25 @@ func TestLiveResumeRejectsLateMarkerAfterTerminalCleanupWins(t *testing.T) {
 			require.NoError(t, err)
 			token := ac.resumeToken
 			require.NotZero(t, token)
-			require.True(t, slices.Contains(sess.snapshotAttachments(), ac))
 
-			validated := make(chan struct{})
-			releaseMark := make(chan struct{})
-			var releaseOnce sync.Once
-			t.Cleanup(func() { releaseOnce.Do(func() { close(releaseMark) }) })
-			d.beforeMarkParkingInFlight = func() {
-				close(validated)
-				<-releaseMark
-			}
-
-			type routeResult struct {
-				err error
-			}
-			result := make(chan routeResult, 1)
-			go func() {
-				_, _, routeErr := d.route(helloResumeCapable(protocol.IntentResume, "work", token), newQuietConnection(t))
-				result <- routeResult{err: routeErr}
-			}()
-			awaitTestCompletion(t, validated, "live resume did not pause after credential validation before mark")
-
-			tc.win(t, d, sess, ac, oldTr, token)
+			require.True(t, d.detachIfCurrentTransport(sess, ac, ac.transportSnapshot()))
+			require.Empty(t, sess.snapshotAttachments())
+			require.Zero(t, d.markParkingInFlight(sess, ac), "detached active attachment must not publish a late marker")
 
 			d.mu.Lock()
-			_, parkingBeforeRelease := d.resume.parking[token]
+			_, parkingBeforePark := d.resume.parking[token]
 			d.mu.Unlock()
-			require.False(t, parkingBeforeRelease, "terminal cleanup must not leave a parking marker before late mark resumes")
+			require.False(t, parkingBeforePark)
 
-			releaseOnce.Do(func() { close(releaseMark) })
-			got := awaitTestValue(t, result, "live IntentResume stayed blocked after terminal cleanup won before mark")
-			require.Error(t, got.err)
-			var pe *protoErr
-			require.ErrorAs(t, got.err, &pe)
-			require.Equal(t, protocol.ErrNoSuchSession, pe.code)
-			require.Contains(t, pe.Error(), "resume token is no longer valid")
-
+			require.True(t, d.parkAttachment(sess, ac), "direct parkAttachment after detach must still park without recreating an in-flight marker")
 			d.mu.Lock()
+			parked := d.resume.parked[token]
 			_, stillParking := d.resume.parking[token]
-			_, stillParked := d.resume.parked[token]
 			d.mu.Unlock()
-			require.False(t, stillParking, "late markParkingInFlight must not recreate a parking marker after terminal cleanup")
-			require.False(t, stillParked, "terminal cleanup must not leave a parked credential")
+			require.NotNil(t, parked)
+			require.Same(t, ac, parked.ac)
+			require.False(t, stillParking, "park must not leave an in-flight marker")
 		})
-	}
-
-	t.Run("direct_park_after_detach_without_marker", func(t *testing.T) {
-		pty, release := newBlockingPTY(t)
-		defer release()
-		d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
-
-		oldTr := newQuietConnection(t)
-		sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTr)
-		require.NoError(t, err)
-		token := ac.resumeToken
-		require.NotZero(t, token)
-
-		require.True(t, d.detachIfCurrentTransport(sess, ac, ac.transportSnapshot()))
-		require.Empty(t, sess.snapshotAttachments())
-		require.Zero(t, d.markParkingInFlight(sess, ac), "detached active attachment must not publish a late marker")
-
-		d.mu.Lock()
-		_, parkingBeforePark := d.resume.parking[token]
-		d.mu.Unlock()
-		require.False(t, parkingBeforePark)
-
-		require.True(t, d.parkAttachment(sess, ac), "direct parkAttachment after detach must still park without recreating an in-flight marker")
-		d.mu.Lock()
-		parked := d.resume.parked[token]
-		_, stillParking := d.resume.parking[token]
-		d.mu.Unlock()
-		require.NotNil(t, parked)
-		require.Same(t, ac, parked.ac)
-		require.False(t, stillParking, "park must not leave an in-flight marker")
 	})
 }
 
@@ -929,372 +959,394 @@ func TestLiveResumeRejectsLateMarkerAfterTerminalCleanupWins(t *testing.T) {
 // when the attachment is no longer the exact registered owner, while
 // still advertising for both live roles.
 func TestStaleClientGoneAfterTransportCheckDoesNotDetachReboundAttachment(t *testing.T) {
-	pty, release := newBlockingPTY(t)
-	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
+	synctest.Test(t, func(t *testing.T) {
+		pty, release := newBlockingPTY(t)
+		defer release()
+		d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 
-	oldTr, oldTrLog := newTrackedConnection(t)
-	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTr)
-	require.NoError(t, err)
-	token := ac.resumeToken
-	require.NotZero(t, token)
+		oldTr, oldTrLog := newTrackedConnection(t)
+		sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTr)
+		require.NoError(t, err)
+		token := ac.resumeToken
+		require.NotZero(t, token)
 
-	passedPrecheck := make(chan struct{})
-	releaseDetach := make(chan struct{})
-	var releaseOnce sync.Once
-	t.Cleanup(func() { releaseOnce.Do(func() { close(releaseDetach) }) })
-	d.beforeClientGoneDetach = func() {
-		close(passedPrecheck)
-		<-releaseDetach
-	}
+		passedPrecheck := make(chan struct{})
+		releaseDetach := make(chan struct{})
+		var releaseOnce sync.Once
+		t.Cleanup(func() { releaseOnce.Do(func() { close(releaseDetach) }) })
+		d.beforeClientGoneDetach = func() {
+			close(passedPrecheck)
+			<-releaseDetach
+		}
 
-	goneDone := make(chan struct{})
-	go func() {
-		d.clientGone(sess, ac, oldTr, false)
-		close(goneDone)
-	}()
-	awaitTestCompletion(t, passedPrecheck, "stale clientGone did not reach the post-precheck seam")
+		goneDone := make(chan struct{})
+		go func() {
+			d.clientGone(sess, ac, oldTr, false)
+			close(goneDone)
+		}()
+		requireReceived(t, passedPrecheck, "stale clientGone did not reach the post-precheck seam")
 
-	newTr, newTrLog := newTrackedConnection(t)
-	resumedSess, resumedAC, err := d.route(helloResumeCapable(protocol.IntentResume, "work", token), newTr)
-	require.NoError(t, err)
-	require.Same(t, sess, resumedSess)
-	require.Same(t, ac, resumedAC)
-	require.Same(t, newTr, ac.transport())
+		newTr, newTrLog := newTrackedConnection(t)
+		resumedSess, resumedAC, err := d.route(helloResumeCapable(protocol.IntentResume, "work", token), newTr)
+		require.NoError(t, err)
+		require.Same(t, sess, resumedSess)
+		require.Same(t, ac, resumedAC)
+		require.Same(t, newTr, ac.transport())
 
-	releaseOnce.Do(func() { close(releaseDetach) })
-	awaitTestCompletion(t, goneDone, "stale clientGone did not finish after resume rebound")
+		releaseOnce.Do(func() { close(releaseDetach) })
+		requireReceived(t, goneDone, "stale clientGone did not finish after resume rebound")
 
-	require.True(t, slices.Contains(sess.snapshotAttachments(), ac), "stale cleanup must not detach the rebound attachment")
-	require.Same(t, newTr, ac.transport())
-	require.False(t, newTrLog.Closed(), "rebound transport must survive stale old-link cleanup")
-	require.True(t, oldTrLog.Closed(), "live resume retires the captured old transport")
+		require.True(t, slices.Contains(sess.snapshotAttachments(), ac), "stale cleanup must not detach the rebound attachment")
+		require.Same(t, newTr, ac.transport())
+		require.False(t, newTrLog.Closed(), "rebound transport must survive stale old-link cleanup")
+		require.True(t, oldTrLog.Closed(), "live resume retires the captured old transport")
+	})
 }
 
 // TestResumeLiveAttachmentParkFailureRetiresOldTransport covers shutdown racing
 // park after live detach: the old link must still be revoked/closed exactly once
 // and the session must not keep a half-detached owner.
 func TestResumeLiveAttachmentParkFailureRetiresOldTransport(t *testing.T) {
-	pty, release := newBlockingPTY(t)
-	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
+	synctest.Test(t, func(t *testing.T) {
+		pty, release := newBlockingPTY(t)
+		defer release()
+		d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 
-	oldTr, oldTrLog := newTrackedConnection(t)
-	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTr)
-	require.NoError(t, err)
-	token := ac.resumeToken
-	require.NotZero(t, token)
+		oldTr, oldTrLog := newTrackedConnection(t)
+		sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTr)
+		require.NoError(t, err)
+		token := ac.resumeToken
+		require.NotZero(t, token)
 
-	d.afterDetachAttachmentEffectsFrozen = func() {
+		d.afterDetachAttachmentEffectsFrozen = func() {
+			d.mu.Lock()
+			d.closing = true
+			d.mu.Unlock()
+		}
+
+		_, _, err = d.route(helloResumeCapable(protocol.IntentResume, "work", token), newQuietConnection(t))
+		require.Error(t, err)
+		var pe *protoErr
+		require.ErrorAs(t, err, &pe)
+		require.Equal(t, protocol.ErrServerShutdown, pe.code)
+		require.Empty(t, sess.snapshotAttachments(), "failed live park must leave the session without an owner")
+		require.Nil(t, ac.transport(), "failed live park must revoke the captured old transport")
+		require.True(t, oldTrLog.Closed(), "failed live park must close the captured old transport")
 		d.mu.Lock()
-		d.closing = true
+		_, parked := d.resume.parked[token]
 		d.mu.Unlock()
-	}
-
-	_, _, err = d.route(helloResumeCapable(protocol.IntentResume, "work", token), newQuietConnection(t))
-	require.Error(t, err)
-	var pe *protoErr
-	require.ErrorAs(t, err, &pe)
-	require.Equal(t, protocol.ErrServerShutdown, pe.code)
-	require.Empty(t, sess.snapshotAttachments(), "failed live park must leave the session without an owner")
-	require.Nil(t, ac.transport(), "failed live park must revoke the captured old transport")
-	require.True(t, oldTrLog.Closed(), "failed live park must close the captured old transport")
-	d.mu.Lock()
-	_, parked := d.resume.parked[token]
-	d.mu.Unlock()
-	require.False(t, parked, "failed live park must not publish a resume credential")
+		require.False(t, parked, "failed live park must not publish a resume credential")
+	})
 }
 
 func TestResumeRebindsRotatesAndDoesNotOpenPTY(t *testing.T) {
-	pty, release := newBlockingPTY(t)
-	defer release()
-	d := newTestDaemon(t, newFactorySeq(t, pty), newStubClock(t))
+	synctest.Test(t, func(t *testing.T) {
+		pty, release := newBlockingPTY(t)
+		defer release()
+		d := newTestDaemon(t, newFactorySeq(t, pty), newStubClock(t))
 
-	tr, _, _ := newConn(t, mustHello(protocol.IntentAttach, "unused", domain.Size{}))
-	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), tr)
-	require.NoError(t, err)
-	oldToken := ac.resumeToken
-	d.clientGone(sess, ac, ac.transport(), false)
+		tr, _, _ := newConn(t, mustHello(protocol.IntentAttach, "unused", domain.Size{}))
+		sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), tr)
+		require.NoError(t, err)
+		oldToken := ac.resumeToken
+		d.clientGone(sess, ac, ac.transport(), false)
 
-	tr2, _, _ := newConn(t, mustHello(protocol.IntentAttach, "unused", domain.Size{}))
-	resumedSess, resumedAC, err := d.route(helloResumeCapable(protocol.IntentResume, "work", oldToken), tr2)
-	require.NoError(t, err)
-	require.Same(t, sess, resumedSess)
-	require.Same(t, ac, resumedAC)
-	require.NotEqual(t, oldToken, resumedAC.resumeToken, "resume rotates token")
-	require.True(t, slices.Contains(sess.snapshotAttachments(), resumedAC))
+		tr2, _, _ := newConn(t, mustHello(protocol.IntentAttach, "unused", domain.Size{}))
+		resumedSess, resumedAC, err := d.route(helloResumeCapable(protocol.IntentResume, "work", oldToken), tr2)
+		require.NoError(t, err)
+		require.Same(t, sess, resumedSess)
+		require.Same(t, ac, resumedAC)
+		require.NotEqual(t, oldToken, resumedAC.resumeToken, "resume rotates token")
+		require.True(t, slices.Contains(sess.snapshotAttachments(), resumedAC))
+	})
 }
 
 func TestOutputAckLagAloneDoesNotForceFullStateRepaint(t *testing.T) {
-	ac := &attachedClient{output: newOutputStateStream()}
-	ac.output.next = 3
-	epoch := ac.output.currentEpoch()
-	ac.ackOutputState(epoch, 3)
-	ac.ackOutputState(epoch, 2)
-	ac.ackOutputState(epoch, 4)
-	require.Equal(t, uint64(3), ac.output.acked, "stale or future ACKs must not move output state incorrectly")
+	synctest.Test(t, func(t *testing.T) {
+		ac := &attachedClient{output: newOutputStateStream()}
+		ac.output.next = 3
+		epoch := ac.output.currentEpoch()
+		ac.ackOutputState(epoch, 3)
+		ac.ackOutputState(epoch, 2)
+		ac.ackOutputState(epoch, 4)
+		require.Equal(t, uint64(3), ac.output.acked, "stale or future ACKs must not move output state incorrectly")
 
-	ac.sendMu.Lock()
-	ac.output.next = 5
-	reset := false
-	require.False(t, reset, "reliable output ack lag alone must not force dependency-free full repaint")
+		ac.sendMu.Lock()
+		ac.output.next = 5
+		reset := false
+		require.False(t, reset, "reliable output ack lag alone must not force dependency-free full repaint")
 
-	f := outputStateFrame(ac.output, []byte("incremental while reliable backlog drains"), reset, 0)
-	ac.sendMu.Unlock()
-	out := unmarshalTestOutput(t, f.Payload)
-	require.Equal(t, uint64(5), out.Base, "output should remain incremental unless an explicit reset is requested")
-	require.Equal(t, uint64(6), out.New)
+		f := outputStateFrame(ac.output, []byte("incremental while reliable backlog drains"), reset, 0)
+		ac.sendMu.Unlock()
+		out := unmarshalTestOutput(t, f.Payload)
+		require.Equal(t, uint64(5), out.Base, "output should remain incremental unless an explicit reset is requested")
+		require.Equal(t, uint64(6), out.New)
 
-	ac.sendMu.Lock()
-	reset = true
-	require.True(t, reset, "explicit reset should still force full repaint")
-	full := outputStateFrame(ac.output, []byte("explicit full repaint"), reset, 0)
-	ac.sendMu.Unlock()
-	fullOut := unmarshalTestOutput(t, full.Payload)
-	require.Equal(t, uint64(0), fullOut.Base)
-	require.Equal(t, uint64(7), fullOut.New)
+		ac.sendMu.Lock()
+		reset = true
+		require.True(t, reset, "explicit reset should still force full repaint")
+		full := outputStateFrame(ac.output, []byte("explicit full repaint"), reset, 0)
+		ac.sendMu.Unlock()
+		fullOut := unmarshalTestOutput(t, full.Payload)
+		require.Equal(t, uint64(0), fullOut.Base)
+		require.Equal(t, uint64(7), fullOut.New)
+	})
 }
 
 func TestResumeClientIDMismatchDoesNotConsumeParkedToken(t *testing.T) {
-	pty, release := newBlockingPTY(t)
-	defer release()
-	d := newTestDaemon(t, newFactorySeq(t, pty), newStubClock(t))
+	synctest.Test(t, func(t *testing.T) {
+		pty, release := newBlockingPTY(t)
+		defer release()
+		d := newTestDaemon(t, newFactorySeq(t, pty), newStubClock(t))
 
-	tr, _, _ := newConn(t, mustHello(protocol.IntentAttach, "unused", domain.Size{}))
-	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), tr)
-	require.NoError(t, err)
-	token := ac.resumeToken
-	d.clientGone(sess, ac, ac.transport(), false)
+		tr, _, _ := newConn(t, mustHello(protocol.IntentAttach, "unused", domain.Size{}))
+		sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), tr)
+		require.NoError(t, err)
+		token := ac.resumeToken
+		d.clientGone(sess, ac, ac.transport(), false)
 
-	wrongClient := helloResumeCapable(protocol.IntentResume, "work", token)
-	wrongClient.ClientID = [16]byte{9, 9, 9, 9}
-	_, _, ok, err := d.resumeParked(wrongClient, newQuietConnection(t), domain.Size{Cols: 80, Rows: 24})
-	d.mu.Lock()
-	_, stillParked := d.resume.parked[token]
-	d.mu.Unlock()
-	require.Error(t, err)
-	require.False(t, ok)
-	require.True(t, stillParked, "mismatched client must not consume parked token")
-	require.Equal(t, token, ac.resumeToken)
-	require.True(t, ac.parked)
+		wrongClient := helloResumeCapable(protocol.IntentResume, "work", token)
+		wrongClient.ClientID = [16]byte{9, 9, 9, 9}
+		_, _, ok, err := d.resumeParked(wrongClient, newQuietConnection(t), domain.Size{Cols: 80, Rows: 24})
+		d.mu.Lock()
+		_, stillParked := d.resume.parked[token]
+		d.mu.Unlock()
+		require.Error(t, err)
+		require.False(t, ok)
+		require.True(t, stillParked, "mismatched client must not consume parked token")
+		require.Equal(t, token, ac.resumeToken)
+		require.True(t, ac.parked)
 
-	tr2, _, _ := newConn(t, mustHello(protocol.IntentAttach, "unused", domain.Size{}))
-	resumedSess, resumedAC, err := d.route(helloResumeCapable(protocol.IntentResume, "work", token), tr2)
-	require.NoError(t, err)
-	require.Same(t, sess, resumedSess)
-	require.Same(t, ac, resumedAC)
+		tr2, _, _ := newConn(t, mustHello(protocol.IntentAttach, "unused", domain.Size{}))
+		resumedSess, resumedAC, err := d.route(helloResumeCapable(protocol.IntentResume, "work", token), tr2)
+		require.NoError(t, err)
+		require.Same(t, sess, resumedSess)
+		require.Same(t, ac, resumedAC)
+	})
 }
 
 func TestResumeCloseCapturedOldTransportDoesNotCloseReboundTransport(t *testing.T) {
-	pty, release := newBlockingPTY(t)
-	defer release()
-	d := newTestDaemon(t, newFactorySeq(t, pty), newStubClock(t))
+	synctest.Test(t, func(t *testing.T) {
+		pty, release := newBlockingPTY(t)
+		defer release()
+		d := newTestDaemon(t, newFactorySeq(t, pty), newStubClock(t))
 
-	oldTr, oldTrLog := newTrackedConnection(t)
-	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTr)
-	require.NoError(t, err)
-	token := ac.resumeToken
-	require.True(t, sess.detachIfCurrent(ac))
-	require.True(t, d.parkAttachment(sess, ac))
-	generation := ac.lifecycle.generationValue()
+		oldTr, oldTrLog := newTrackedConnection(t)
+		sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTr)
+		require.NoError(t, err)
+		token := ac.resumeToken
+		require.True(t, sess.detachIfCurrent(ac))
+		require.True(t, d.parkAttachment(sess, ac))
+		generation := ac.lifecycle.generationValue()
 
-	newTr, newTrLog := newTrackedConnection(t)
-	resumedSess, resumedAC, ok, err := d.resumeParked(helloResumeCapable(protocol.IntentResume, "work", token), newTr, domain.Size{Cols: 80, Rows: 24})
-	require.NoError(t, err)
-	require.True(t, ok)
-	require.Same(t, sess, resumedSess)
-	require.Same(t, ac, resumedAC)
-	require.Greater(t, ac.lifecycle.generationValue(), generation, "resume must publish active ownership through the attachment transition")
+		newTr, newTrLog := newTrackedConnection(t)
+		resumedSess, resumedAC, ok, err := d.resumeParked(helloResumeCapable(protocol.IntentResume, "work", token), newTr, domain.Size{Cols: 80, Rows: 24})
+		require.NoError(t, err)
+		require.True(t, ok)
+		require.Same(t, sess, resumedSess)
+		require.Same(t, ac, resumedAC)
+		require.Greater(t, ac.lifecycle.generationValue(), generation, "resume must publish active ownership through the attachment transition")
 
-	_ = ac.closeCapturedTransport(oldTr)
-	require.True(t, oldTrLog.Closed(), "old transport is closed")
-	require.False(t, newTrLog.Closed(), "newly rebound transport is not closed by old cleanup")
-	require.Same(t, newTr, ac.transport())
+		_ = ac.closeCapturedTransport(oldTr)
+		require.True(t, oldTrLog.Closed(), "old transport is closed")
+		require.False(t, newTrLog.Closed(), "newly rebound transport is not closed by old cleanup")
+		require.Same(t, newTr, ac.transport())
+	})
 }
 
 func TestResumeRebasesFullOutputWindowBeforeFirstPaint(t *testing.T) {
-	pty, release := newBlockingPTY(t)
-	defer release()
-	d := newTestDaemon(t, newFactorySeq(t, pty), newStubClock(t))
-	oldTr := newQuietConnection(t)
-	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTr)
-	require.NoError(t, err)
-	ac.output.next = maxUnackedOutputStates
-	token := ac.resumeToken
-	require.True(t, sess.detachIfCurrent(ac))
-	require.True(t, d.parkAttachment(sess, ac))
+	synctest.Test(t, func(t *testing.T) {
+		pty, release := newBlockingPTY(t)
+		defer release()
+		d := newTestDaemon(t, newFactorySeq(t, pty), newStubClock(t))
+		oldTr := newQuietConnection(t)
+		sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTr)
+		require.NoError(t, err)
+		ac.output.next = maxUnackedOutputStates
+		token := ac.resumeToken
+		require.True(t, sess.detachIfCurrent(ac))
+		require.True(t, d.parkAttachment(sess, ac))
 
-	newTr, newTrLog := newTrackedConnection(t)
-	resumedSess, resumedAC, err := d.route(helloResumeCapable(protocol.IntentResume, "work", token), newTr)
-	require.NoError(t, err)
-	require.Same(t, ac, resumedAC)
-	d.paint(resumedSess, resumedAC, true, nil)
+		newTr, newTrLog := newTrackedConnection(t)
+		resumedSess, resumedAC, err := d.route(helloResumeCapable(protocol.IntentResume, "work", token), newTr)
+		require.NoError(t, err)
+		require.Same(t, ac, resumedAC)
+		d.paint(resumedSess, resumedAC, true, nil)
 
-	sends := testFramesOfType(newTrLog.Sends(), "Output")
-	require.Len(t, sends, 1)
-	first := unmarshalTestOutput(t, sends[0].Payload)
-	require.Zero(t, first.Base)
-	require.Equal(t, uint64(1), first.New)
-	resumedAC.ackOutputState(first.Epoch, first.New)
+		sends := testFramesOfType(newTrLog.Sends(), "Output")
+		require.Len(t, sends, 1)
+		first := unmarshalTestOutput(t, sends[0].Payload)
+		require.Zero(t, first.Base)
+		require.Equal(t, uint64(1), first.New)
+		resumedAC.ackOutputState(first.Epoch, first.New)
 
-	resumedSess.tabs[0].focusedPane().screen.Write([]byte("A"))
-	d.paint(resumedSess, resumedAC, false, nil)
-	sends = testFramesOfType(newTrLog.Sends(), "Output")
-	require.Len(t, sends, 2)
-	second := unmarshalTestOutput(t, sends[1].Payload)
-	require.Equal(t, first.New, second.Base)
+		resumedSess.tabs[0].focusedPane().screen.Write([]byte("A"))
+		d.paint(resumedSess, resumedAC, false, nil)
+		sends = testFramesOfType(newTrLog.Sends(), "Output")
+		require.Len(t, sends, 2)
+		second := unmarshalTestOutput(t, sends[1].Payload)
+		require.Equal(t, first.New, second.Base)
+	})
 }
 
 func TestParkingReleasesPaneCapturesBeforeHeadlessCloseAndResume(t *testing.T) {
-	pty, release := newBlockingPTY(t)
-	defer release()
-	d := newTestDaemon(t, newFactorySeq(t, pty), newStubClock(t))
-	oldTransport := newQuietConnection(t)
-	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTransport)
-	require.NoError(t, err)
+	synctest.Test(t, func(t *testing.T) {
+		pty, release := newBlockingPTY(t)
+		defer release()
+		d := newTestDaemon(t, newFactorySeq(t, pty), newStubClock(t))
+		oldTransport := newQuietConnection(t)
+		sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTransport)
+		require.NoError(t, err)
 
-	tb := sess.tabs[0]
-	survivor := tb.panes["pane-1"]
-	closed := newPane("pane-2", nil, domain.Size{Cols: 40, Rows: 23})
-	tb.mu.Lock()
-	tb.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}, Focus: "pane-1"}
-	tb.panes[closed.id] = closed
-	tb.bumpLayoutGenerationLocked()
-	tb.mu.Unlock()
-	sess.geometry.applyTabLayout(d, sess, tb)
-	survivor.screen.Write([]byte("survivor"))
-	closed.screen.Write([]byte("closed"))
-	d.paint(sess, ac, true, nil)
+		tb := sess.tabs[0]
+		survivor := tb.panes["pane-1"]
+		closed := newPane("pane-2", nil, domain.Size{Cols: 40, Rows: 23})
+		tb.mu.Lock()
+		tb.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}, Focus: "pane-1"}
+		tb.panes[closed.id] = closed
+		tb.bumpLayoutGenerationLocked()
+		tb.mu.Unlock()
+		sess.geometry.applyTabLayout(d, sess, tb)
+		survivor.screen.Write([]byte("survivor"))
+		closed.screen.Write([]byte("closed"))
+		d.paint(sess, ac, true, nil)
 
-	ac.sendMu.Lock()
-	require.Contains(t, ac.render.panes, closed, "fixture must render and capture the pane before parking")
-	ac.sendMu.Unlock()
-	token := ac.resumeToken
-	require.True(t, sess.detachIfCurrent(ac))
-	require.True(t, d.parkAttachment(sess, ac))
+		ac.sendMu.Lock()
+		require.Contains(t, ac.render.panes, closed, "fixture must render and capture the pane before parking")
+		ac.sendMu.Unlock()
+		token := ac.resumeToken
+		require.True(t, sess.detachIfCurrent(ac))
+		require.True(t, d.parkAttachment(sess, ac))
 
-	// Headless close cannot find the parked attachment through sess.snapshotAttachments()[0].
-	// Its capture must already have been released before the attachment parked.
-	require.NoError(t, d.closePane(sess, tb, closed.id, nil, false))
-	ac.sendMu.Lock()
-	require.NotContains(t, ac.render.panes, closed, "parked attachment must not retain a pane closed while headless")
-	ac.sendMu.Unlock()
+		// Headless close cannot find the parked attachment through sess.snapshotAttachments()[0].
+		// Its capture must already have been released before the attachment parked.
+		require.NoError(t, d.closePane(sess, tb, closed.id, nil, false))
+		ac.sendMu.Lock()
+		require.NotContains(t, ac.render.panes, closed, "parked attachment must not retain a pane closed while headless")
+		ac.sendMu.Unlock()
 
-	newTransport, newTransportLog := newTrackedConnection(t)
-	resumedSess, resumedAC, err := d.route(helloResumeCapable(protocol.IntentResume, sess.name, token), newTransport)
-	require.NoError(t, err)
-	require.Same(t, sess, resumedSess)
-	require.Same(t, ac, resumedAC)
-	require.True(t, resumedSess.renderCoordinator().markAttachmentReady(resumedSess.renderCoordinator().attachmentLease(resumedAC)))
-	d.firstPaint(resumedSess, resumedAC)
+		newTransport, newTransportLog := newTrackedConnection(t)
+		resumedSess, resumedAC, err := d.route(helloResumeCapable(protocol.IntentResume, sess.name, token), newTransport)
+		require.NoError(t, err)
+		require.Same(t, sess, resumedSess)
+		require.Same(t, ac, resumedAC)
+		require.True(t, resumedSess.renderCoordinator().markAttachmentReady(resumedSess.renderCoordinator().attachmentLease(resumedAC)))
+		d.firstPaint(resumedSess, resumedAC)
 
-	sends := testFramesOfType(newTransportLog.Sends(), "Output")
-	require.Len(t, sends, 1)
-	output := unmarshalTestOutput(t, sends[0].Payload)
-	require.Zero(t, output.Base, "resume must start with a complete frame")
-	terminal := vt.NewScreen(resumedAC.geometry.Size.Cols, resumedAC.geometry.Size.Rows)
-	terminal.Write(output.Data)
-	contents := strings.Join(frameRows(terminal), "\n")
-	require.Contains(t, contents, "survivor", "resume first paint must contain current headless content")
-	require.NotContains(t, contents, "closed", "resume first paint must not contain closed pane content")
+		sends := testFramesOfType(newTransportLog.Sends(), "Output")
+		require.Len(t, sends, 1)
+		output := unmarshalTestOutput(t, sends[0].Payload)
+		require.Zero(t, output.Base, "resume must start with a complete frame")
+		terminal := vt.NewScreen(resumedAC.geometry.Size.Cols, resumedAC.geometry.Size.Rows)
+		terminal.Write(output.Data)
+		contents := strings.Join(frameRows(terminal), "\n")
+		require.Contains(t, contents, "survivor", "resume first paint must contain current headless content")
+		require.NotContains(t, contents, "closed", "resume first paint must not contain closed pane content")
+	})
 }
 
 func TestExplicitDetachDoesNotPark(t *testing.T) {
-	pty, release := newBlockingPTY(t)
-	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
-	tr, _, _ := newConn(t, mustHello(protocol.IntentAttach, "unused", domain.Size{}))
-	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), tr)
-	require.NoError(t, err)
-	d.clientGone(sess, ac, ac.transport(), true)
-	d.mu.Lock()
-	parked := len(d.resume.parked)
-	d.mu.Unlock()
-	require.Zero(t, parked)
+	synctest.Test(t, func(t *testing.T) {
+		pty, release := newBlockingPTY(t)
+		defer release()
+		d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
+		tr, _, _ := newConn(t, mustHello(protocol.IntentAttach, "unused", domain.Size{}))
+		sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), tr)
+		require.NoError(t, err)
+		d.clientGone(sess, ac, ac.transport(), true)
+		d.mu.Lock()
+		parked := len(d.resume.parked)
+		d.mu.Unlock()
+		require.Zero(t, parked)
+	})
 }
 
 func TestResumeParkUsesConfiguredGraceAndExpiresOnlyAfterGrace(t *testing.T) {
-	clk, clkTimers := newSignalClock(t, 8)
-	pty, release := newBlockingPTY(t)
-	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), clk)
-	WithResumeParkGrace(20 * time.Minute)(d)
-	tr, _, _ := newConn(t, mustHello(protocol.IntentAttach, "unused", domain.Size{}))
-	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), tr)
-	require.NoError(t, err)
-	token := ac.resumeToken
+	synctest.Test(t, func(t *testing.T) {
+		clk, clkTimers := newSignalClock(t, 8)
+		pty, release := newBlockingPTY(t)
+		defer release()
+		d := newTestDaemon(t, newFactory(t, pty), clk)
+		WithResumeParkGrace(20 * time.Minute)(d)
+		tr, _, _ := newConn(t, mustHello(protocol.IntentAttach, "unused", domain.Size{}))
+		sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), tr)
+		require.NoError(t, err)
+		token := ac.resumeToken
 
-	d.clientGone(sess, ac, ac.transport(), false)
-	timer := <-clkTimers
-	require.Equal(t, 20*time.Minute, timer.duration)
-	d.mu.Lock()
-	_, parkedBeforeGrace := d.resume.parked[token]
-	d.mu.Unlock()
-	require.True(t, parkedBeforeGrace, "parked attachment remains before configured grace timer fires")
-
-	timer.ch <- clk.Now()
-	require.Eventually(t, func() bool {
+		d.clientGone(sess, ac, ac.transport(), false)
+		timer := <-clkTimers
+		require.Equal(t, 20*time.Minute, timer.duration)
 		d.mu.Lock()
-		defer d.mu.Unlock()
-		_, ok := d.resume.parked[token]
-		return !ok
-	}, 2*time.Second, 10*time.Millisecond)
+		_, parkedBeforeGrace := d.resume.parked[token]
+		d.mu.Unlock()
+		require.True(t, parkedBeforeGrace, "parked attachment remains before configured grace timer fires")
+
+		timer.ch <- clk.Now()
+		synctest.Wait()
+		d.mu.Lock()
+		_, stillParked := d.resume.parked[token]
+		d.mu.Unlock()
+		require.False(t, stillParked, "parked credential must expire once its timer fires")
+	})
 }
 
 func TestParkExpiryAndShutdownCleanup(t *testing.T) {
-	clk, clkTimers := newSignalClock(t, 8)
-	pty, release := newBlockingPTY(t)
-	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), clk)
-	tr, _, _ := newConn(t, mustHello(protocol.IntentAttach, "unused", domain.Size{}))
-	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), tr)
-	require.NoError(t, err)
-	token := ac.resumeToken
-	d.clientGone(sess, ac, ac.transport(), false)
-	timer := <-clkTimers
-	timer.ch <- clk.Now()
-	require.Eventually(t, func() bool {
+	synctest.Test(t, func(t *testing.T) {
+		clk, clkTimers := newSignalClock(t, 8)
+		pty, release := newBlockingPTY(t)
+		defer release()
+		d := newTestDaemon(t, newFactory(t, pty), clk)
+		tr, _, _ := newConn(t, mustHello(protocol.IntentAttach, "unused", domain.Size{}))
+		sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), tr)
+		require.NoError(t, err)
+		token := ac.resumeToken
+		d.clientGone(sess, ac, ac.transport(), false)
+		timer := <-clkTimers
+		timer.ch <- clk.Now()
+		synctest.Wait()
 		d.mu.Lock()
-		defer d.mu.Unlock()
-		_, ok := d.resume.parked[token]
-		return !ok
-	}, 2*time.Second, 10*time.Millisecond)
+		_, stillParked := d.resume.parked[token]
+		d.mu.Unlock()
+		require.False(t, stillParked, "parked credential must expire once its timer fires")
 
-	pty2, release2 := newBlockingPTY(t)
-	defer release2()
-	d2 := newTestDaemon(t, newFactory(t, pty2), newStubClock(t))
-	tr2, _, _ := newConn(t, mustHello(protocol.IntentAttach, "unused", domain.Size{}))
-	sess2, ac2, err := d2.route(helloResumeCapable(protocol.IntentNew, "other", 0), tr2)
-	require.NoError(t, err)
-	d2.clientGone(sess2, ac2, ac2.transport(), false)
-	d2.shutdownAll(protocol.ReasonServerShutdown)
-	d2.mu.Lock()
-	parked := len(d2.resume.parked)
-	d2.mu.Unlock()
-	require.Zero(t, parked)
+		pty2, release2 := newBlockingPTY(t)
+		defer release2()
+		d2 := newTestDaemon(t, newFactory(t, pty2), newStubClock(t))
+		tr2, _, _ := newConn(t, mustHello(protocol.IntentAttach, "unused", domain.Size{}))
+		sess2, ac2, err := d2.route(helloResumeCapable(protocol.IntentNew, "other", 0), tr2)
+		require.NoError(t, err)
+		d2.clientGone(sess2, ac2, ac2.transport(), false)
+		d2.shutdownAll(protocol.ReasonServerShutdown)
+		d2.mu.Lock()
+		parked := len(d2.resume.parked)
+		d2.mu.Unlock()
+		require.Zero(t, parked)
+	})
 }
 
 func TestLiveParkAndResumeRetainsAttachmentWithoutDaemonHistory(t *testing.T) {
-	pty, release := newBlockingPTY(t)
-	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
-	tr, _, _ := newConn(t, mustHello(protocol.IntentAttach, "unused", domain.Size{}))
-	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), tr)
-	require.NoError(t, err)
+	synctest.Test(t, func(t *testing.T) {
+		pty, release := newBlockingPTY(t)
+		defer release()
+		d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
+		tr, _, _ := newConn(t, mustHello(protocol.IntentAttach, "unused", domain.Size{}))
+		sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), tr)
+		require.NoError(t, err)
 
-	d.clientGone(sess, ac, ac.transport(), false)
+		d.clientGone(sess, ac, ac.transport(), false)
 
-	token := ac.resumeToken
-	d.mu.Lock()
-	parked := d.resume.parked[token]
-	d.mu.Unlock()
-	require.NotNil(t, parked)
+		token := ac.resumeToken
+		d.mu.Lock()
+		parked := d.resume.parked[token]
+		d.mu.Unlock()
+		require.NotNil(t, parked)
 
-	tr2, _, _ := newConn(t, mustHello(protocol.IntentAttach, "unused", domain.Size{}))
-	resumedSess, resumedAC, err := d.route(helloResumeCapable(protocol.IntentResume, "work", token), tr2)
-	require.NoError(t, err)
-	require.Same(t, sess, resumedSess)
-	require.Same(t, ac, resumedAC)
+		tr2, _, _ := newConn(t, mustHello(protocol.IntentAttach, "unused", domain.Size{}))
+		resumedSess, resumedAC, err := d.route(helloResumeCapable(protocol.IntentResume, "work", token), tr2)
+		require.NoError(t, err)
+		require.Same(t, sess, resumedSess)
+		require.Same(t, ac, resumedAC)
+	})
 }
 
 func TestDiscardingParkedAttachmentDoesNotOwnPreviousSession(t *testing.T) {
@@ -1317,74 +1369,79 @@ func TestDiscardingParkedAttachmentDoesNotOwnPreviousSession(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			pty, release := newBlockingPTY(t)
-			defer release()
-			d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
-			tr, _, _ := newConn(t, mustHello(protocol.IntentAttach, "unused", domain.Size{}))
-			sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), tr)
-			require.NoError(t, err)
+			synctest.Test(t, func(t *testing.T) {
+				pty, release := newBlockingPTY(t)
+				defer release()
+				d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
+				tr, _, _ := newConn(t, mustHello(protocol.IntentAttach, "unused", domain.Size{}))
+				sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), tr)
+				require.NoError(t, err)
 
-			d.clientGone(sess, ac, ac.transport(), false)
+				d.clientGone(sess, ac, ac.transport(), false)
 
-			d.mu.Lock()
-			parked := d.resume.parked[ac.resumeToken]
-			require.NotNil(t, parked)
-			retirements := tc.discard(d, ac.resumeToken, parked)
-			d.mu.Unlock()
-			d.finishParkedAttachmentRetirements(retirements)
+				d.mu.Lock()
+				parked := d.resume.parked[ac.resumeToken]
+				require.NotNil(t, parked)
+				retirements := tc.discard(d, ac.resumeToken, parked)
+				d.mu.Unlock()
+				d.finishParkedAttachmentRetirements(retirements)
 
+			})
 		})
 	}
 }
 
 func TestEphemeralParkExpiryKeepsSessionWhenCloseOnExitOff(t *testing.T) {
-	clk, clkTimers := newSignalClock(t, 8)
-	pty, release := newBlockingPTY(t)
-	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), clk)
-	updateRuntimeConfig(d, func(rc *runtimeConfig) { rc.ephemeral = domain.EphemeralConfig{CloseOnExit: false} })
+	synctest.Test(t, func(t *testing.T) {
+		clk, clkTimers := newSignalClock(t, 8)
+		pty, release := newBlockingPTY(t)
+		defer release()
+		d := newTestDaemon(t, newFactory(t, pty), clk)
+		updateRuntimeConfig(d, func(rc *runtimeConfig) { rc.ephemeral = domain.EphemeralConfig{CloseOnExit: false} })
 
-	tr := newQuietConnection(t)
-	sess, ac, err := d.route(helloResumeCapable(protocol.IntentEphemeral, "", 0), tr)
-	require.NoError(t, err)
-	token := ac.resumeToken
-	require.NotZero(t, token)
+		tr := newQuietConnection(t)
+		sess, ac, err := d.route(helloResumeCapable(protocol.IntentEphemeral, "", 0), tr)
+		require.NoError(t, err)
+		token := ac.resumeToken
+		require.NotZero(t, token)
 
-	d.clientGone(sess, ac, ac.transport(), false)
-	timer := <-clkTimers
-	timer.ch <- clk.Now()
+		d.clientGone(sess, ac, ac.transport(), false)
+		timer := <-clkTimers
+		timer.ch <- clk.Now()
 
-	require.Eventually(t, func() bool {
+		synctest.Wait()
 		d.mu.Lock()
-		defer d.mu.Unlock()
-		_, ok := d.resume.parked[token]
-		return !ok
-	}, 2*time.Second, 10*time.Millisecond)
+		_, stillParked := d.resume.parked[token]
+		d.mu.Unlock()
+		require.False(t, stillParked, "parked credential must expire once its timer fires")
 
-	require.Equal(t, 1, sessionCount(d), "token expiry does not kill ephemeral session")
-	sess.mu.Lock()
-	require.Empty(t, sess.snapshotAttachmentsLocked())
-	sess.mu.Unlock()
+		require.Equal(t, 1, sessionCount(d), "token expiry does not kill ephemeral session")
+		sess.mu.Lock()
+		require.Empty(t, sess.snapshotAttachmentsLocked())
+		sess.mu.Unlock()
+	})
 }
 
 func TestKilledSessionPurgesParkedResumeToken(t *testing.T) {
-	pty, release := newBlockingPTY(t)
-	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
-	tr, _, _ := newConn(t, mustHello(protocol.IntentAttach, "unused", domain.Size{}))
-	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), tr)
-	require.NoError(t, err)
-	token := ac.resumeToken
-	d.clientGone(sess, ac, ac.transport(), false)
+	synctest.Test(t, func(t *testing.T) {
+		pty, release := newBlockingPTY(t)
+		defer release()
+		d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
+		tr, _, _ := newConn(t, mustHello(protocol.IntentAttach, "unused", domain.Size{}))
+		sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), tr)
+		require.NoError(t, err)
+		token := ac.resumeToken
+		d.clientGone(sess, ac, ac.transport(), false)
 
-	require.NoError(t, d.killSession(sess, protocol.ReasonSessionKilled, true))
-	d.mu.Lock()
-	_, parked := d.resume.parked[token]
-	d.mu.Unlock()
-	_, _, ok, err := d.resumeParked(helloResumeCapable(protocol.IntentResume, "work", token), newQuietConnection(t), domain.Size{Cols: 80, Rows: 24})
-	require.False(t, parked, "killSession purges parked token")
-	require.NoError(t, err)
-	require.False(t, ok, "killed session cannot be resumed")
+		require.NoError(t, d.killSession(sess, protocol.ReasonSessionKilled, true))
+		d.mu.Lock()
+		_, parked := d.resume.parked[token]
+		d.mu.Unlock()
+		_, _, ok, err := d.resumeParked(helloResumeCapable(protocol.IntentResume, "work", token), newQuietConnection(t), domain.Size{Cols: 80, Rows: 24})
+		require.False(t, parked, "killSession purges parked token")
+		require.NoError(t, err)
+		require.False(t, ok, "killed session cannot be resumed")
+	})
 }
 
 // TestKilledSessionUnblocksParkingWaiterFailsClosed covers session removal while
@@ -1392,232 +1449,250 @@ func TestKilledSessionPurgesParkedResumeToken(t *testing.T) {
 // must purge only that session's markers so the waiter unblocks and fails closed,
 // without touching another session's parking marker.
 func TestKilledSessionUnblocksParkingWaiterFailsClosed(t *testing.T) {
-	workPTY, releaseWork := newBlockingPTY(t)
-	defer releaseWork()
-	otherPTY, releaseOther := newBlockingPTY(t)
-	defer releaseOther()
-	// Separate PTYs are required: a shared mock PTY makes killSession(work)
-	// close other's pane and cascade-remove the other session under -race,
-	// falsely failing the other-marker / fail-closed assertions.
-	d := newTestDaemon(t, newFactorySeq(t, workPTY, otherPTY), newStubClock(t))
+	synctest.Test(t, func(t *testing.T) {
+		workPTY, releaseWork := newBlockingPTY(t)
+		defer releaseWork()
+		otherPTY, releaseOther := newBlockingPTY(t)
+		defer releaseOther()
+		// Separate PTYs are required: a shared mock PTY makes killSession(work)
+		// close other's pane and cascade-remove the other session under -race,
+		// falsely failing the other-marker / fail-closed assertions.
+		d := newTestDaemon(t, newFactorySeq(t, workPTY, otherPTY), newStubClock(t))
 
-	oldTr := newQuietConnection(t)
-	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTr)
-	require.NoError(t, err)
-	token := ac.resumeToken
-	require.NotZero(t, token)
+		oldTr := newQuietConnection(t)
+		sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTr)
+		require.NoError(t, err)
+		token := ac.resumeToken
+		require.NotZero(t, token)
 
-	otherTr := newQuietConnection(t)
-	otherSess, otherAC, err := d.route(helloResumeCapable(protocol.IntentNew, "other", 0), otherTr)
-	require.NoError(t, err)
-	otherToken := d.markParkingInFlight(otherSess, otherAC)
-	require.NotZero(t, otherToken)
-	require.NotEqual(t, token, otherToken)
+		otherTr := newQuietConnection(t)
+		otherSess, otherAC, err := d.route(helloResumeCapable(protocol.IntentNew, "other", 0), otherTr)
+		require.NoError(t, err)
+		otherToken := d.markParkingInFlight(otherSess, otherAC)
+		require.NotZero(t, otherToken)
+		require.NotEqual(t, token, otherToken)
 
-	require.Equal(t, token, d.markParkingInFlight(sess, ac))
-	d.mu.Lock()
-	parkingMarker := d.resume.parking[token]
-	otherMarker := d.resume.parking[otherToken]
-	d.mu.Unlock()
-	require.NotNil(t, parkingMarker, "fixture: parking marker must be published before kill")
-	require.Same(t, ac, parkingMarker.ac)
-	require.NotNil(t, otherMarker, "fixture: other session marker must remain published")
-	require.Same(t, otherAC, otherMarker.ac)
+		require.Equal(t, token, d.markParkingInFlight(sess, ac))
+		d.mu.Lock()
+		parkingMarker := d.resume.parking[token]
+		otherMarker := d.resume.parking[otherToken]
+		d.mu.Unlock()
+		require.NotNil(t, parkingMarker, "fixture: parking marker must be published before kill")
+		require.Same(t, ac, parkingMarker.ac)
+		require.NotNil(t, otherMarker, "fixture: other session marker must remain published")
+		require.Same(t, otherAC, otherMarker.ac)
 
-	waiterArmed := make(chan struct{})
-	d.afterParkingWaitArmed = func() { close(waiterArmed) }
-	waiterDone := make(chan bool, 1)
-	go func() {
-		waiterDone <- d.waitParkingInFlight(helloResumeCapable(protocol.IntentResume, "work", token))
-	}()
-	awaitTestCompletion(t, waiterArmed, "parking waiter did not arm before session kill")
+		waiterArmed := make(chan struct{})
+		d.afterParkingWaitArmed = func() { close(waiterArmed) }
+		waiterDone := make(chan bool, 1)
+		go func() {
+			waiterDone <- d.waitParkingInFlight(helloResumeCapable(protocol.IntentResume, "work", token))
+		}()
+		requireReceived(t, waiterArmed, "parking waiter did not arm before session kill")
 
-	require.NoError(t, d.killSession(sess, protocol.ReasonSessionKilled, true))
+		require.NoError(t, d.killSession(sess, protocol.ReasonSessionKilled, true))
 
-	waited := awaitTestValue(t, waiterDone, "parking waiter stayed blocked after session kill")
-	require.True(t, waited, "waiter must observe the session marker before it is purged")
+		waited := requireReceived(t, waiterDone, "parking waiter stayed blocked after session kill")
+		require.True(t, waited, "waiter must observe the session marker before it is purged")
 
-	d.mu.Lock()
-	_, stillParking := d.resume.parking[token]
-	otherAfter := d.resume.parking[otherToken]
-	otherRegistered := d.sessions[otherSess.id] == otherSess
-	closing := d.closing
-	d.mu.Unlock()
-	require.False(t, stillParking, "killSession must purge the killed session's parking marker")
-	require.NotNil(t, otherAfter, "killSession must not purge another session's parking marker")
-	require.Same(t, otherAC, otherAfter.ac)
-	require.True(t, otherRegistered, "other session must survive work kill when PTYs are isolated")
-	require.False(t, closing, "daemon must not shut down while the other session remains")
+		d.mu.Lock()
+		_, stillParking := d.resume.parking[token]
+		otherAfter := d.resume.parking[otherToken]
+		otherRegistered := d.sessions[otherSess.id] == otherSess
+		closing := d.closing
+		d.mu.Unlock()
+		require.False(t, stillParking, "killSession must purge the killed session's parking marker")
+		require.NotNil(t, otherAfter, "killSession must not purge another session's parking marker")
+		require.Same(t, otherAC, otherAfter.ac)
+		require.True(t, otherRegistered, "other session must survive work kill when PTYs are isolated")
+		require.False(t, closing, "daemon must not shut down while the other session remains")
 
-	_, _, err = d.route(helloResumeCapable(protocol.IntentResume, "work", token), newQuietConnection(t))
-	require.Error(t, err)
-	var killedErr *protoErr
-	require.ErrorAs(t, err, &killedErr)
-	require.Equal(t, protocol.ErrNoSuchSession, killedErr.code)
-	require.Contains(t, killedErr.Error(), "resume token is no longer valid")
+		_, _, err = d.route(helloResumeCapable(protocol.IntentResume, "work", token), newQuietConnection(t))
+		require.Error(t, err)
+		var killedErr *protoErr
+		require.ErrorAs(t, err, &killedErr)
+		require.Equal(t, protocol.ErrNoSuchSession, killedErr.code)
+		require.Contains(t, killedErr.Error(), "resume token is no longer valid")
+	})
 }
 
 func TestStaleClientGoneDoesNotDetachOrCloseFreshTransport(t *testing.T) {
-	p, release := newBlockingPTY(t)
-	defer release()
-	d := newTestDaemon(t, newFactory(t, p), newStubClock(t))
+	synctest.Test(t, func(t *testing.T) {
+		p, release := newBlockingPTY(t)
+		defer release()
+		d := newTestDaemon(t, newFactory(t, p), newStubClock(t))
 
-	oldTr, oldTrLog := newTrackedConnection(t)
-	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTr)
-	require.NoError(t, err)
-	freshTr, freshTrLog := newTrackedConnection(t)
-	ac.replaceTransport(freshTr)
+		oldTr, oldTrLog := newTrackedConnection(t)
+		sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTr)
+		require.NoError(t, err)
+		freshTr, freshTrLog := newTrackedConnection(t)
+		ac.replaceTransport(freshTr)
 
-	d.clientGone(sess, ac, oldTr, false)
+		d.clientGone(sess, ac, oldTr, false)
 
-	require.True(t, slices.Contains(sess.snapshotAttachments(), ac), "stale connection must not detach current client")
-	require.False(t, oldTrLog.Closed(), "stale transport is owned by its own loop/handler")
-	require.False(t, freshTrLog.Closed(), "fresh resumed transport must not be closed by stale loop")
+		require.True(t, slices.Contains(sess.snapshotAttachments(), ac), "stale connection must not detach current client")
+		require.False(t, oldTrLog.Closed(), "stale transport is owned by its own loop/handler")
+		require.False(t, freshTrLog.Closed(), "fresh resumed transport must not be closed by stale loop")
+	})
 }
 
 func TestRawTerminalSideEffectsAreOutputStateNeutral(t *testing.T) {
-	d := newTestDaemon(t, nil, newStubClock(t))
-	tr, trLog := newTrackedConnection(t)
-	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
-	ac.initOverlays()
+	synctest.Test(t, func(t *testing.T) {
+		d := newTestDaemon(t, nil, newStubClock(t))
+		tr, trLog := newTrackedConnection(t)
+		ac := &attachedClient{tr: tr, output: newOutputStateStream()}
+		ac.initOverlays()
 
-	require.NoError(t, d.boundedSendOutputErr(ac, []byte("copy")))
-	require.NoError(t, d.boundedSendOutputErr(ac, []byte("more")))
+		require.NoError(t, d.boundedSendOutputErr(ac, []byte("copy")))
+		require.NoError(t, d.boundedSendOutputErr(ac, []byte("more")))
 
-	sends := trLog.Sends()
-	require.Len(t, sends, 2)
-	first := unmarshalTestOutput(t, sends[0].Payload)
-	second := unmarshalTestOutput(t, sends[1].Payload)
-	require.Zero(t, first.Base)
-	require.Zero(t, first.New)
-	require.Zero(t, second.Base)
-	require.Zero(t, second.New)
+		sends := trLog.Sends()
+		require.Len(t, sends, 2)
+		first := unmarshalTestOutput(t, sends[0].Payload)
+		second := unmarshalTestOutput(t, sends[1].Payload)
+		require.Zero(t, first.Base)
+		require.Zero(t, first.New)
+		require.Zero(t, second.Base)
+		require.Zero(t, second.New)
+	})
 }
 
 func TestSequencedInputDoesNotPrematurelyEcho(t *testing.T) {
-	p, release := newBlockingPTY(t)
-	defer release()
-	d := newTestDaemon(t, newFactory(t, p), newStubClock(t))
-	tr := newQuietConnection(t)
-	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), tr)
-	require.NoError(t, err)
+	synctest.Test(t, func(t *testing.T) {
+		p, release := newBlockingPTY(t)
+		defer release()
+		d := newTestDaemon(t, newFactory(t, p), newStubClock(t))
+		tr := newQuietConnection(t)
+		sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), tr)
+		require.NoError(t, err)
 
-	d.handleSequencedInput(sess, ac, 42, []byte("x"))
+		d.handleSequencedInput(sess, ac, 42, []byte("x"))
 
-	require.Zero(t, ac.echoAck.Load())
+		require.Zero(t, ac.echoAck.Load())
+		// The stub timer never fires; stop the pending echo worker so the bubble can exit.
+		ac.echo.mu.Lock()
+		ac.echo.timer.stop()
+		ac.echo.mu.Unlock()
+	})
 }
 
 func TestResumeParkedRefreshesSessionBoundFuturePTYEnvironment(t *testing.T) {
-	initialPTY, releaseInitial := newBlockingPTY(t)
-	futurePTY, releaseFuture := newBlockingPTY(t)
-	defer releaseInitial()
-	defer releaseFuture()
-	var commands []string
-	var envs [][]string
-	factory := portsmocks.NewMockPTYFactory(t)
-	factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
-		func(_ context.Context, command string, _ []string, env []string, _ string, geometry domain.Geometry) (ports.PTY, error) {
-			if geometry.Size != (domain.Size{Cols: 80, Rows: 22}) {
-				return newQuietPTY(t), nil
-			}
-			commands = append(commands, command)
-			envs = append(envs, append([]string(nil), env...))
-			if len(commands) == 1 {
-				return initialPTY, nil
-			}
-			return futurePTY, nil
-		},
-	).Maybe()
-	d := newTestDaemon(t, factory, newStubClock(t))
-	tr, _, _ := newConn(t, mustHello(protocol.IntentAttach, "unused", domain.Size{}))
-	hello := helloResumeCapable(protocol.IntentNew, "work", 0)
-	hello.Env = []string{"SECRET=before", "SHELL=/bin/sh", "TERM=old", "VEV=old", "SSH_AUTH_SOCK=/run/old-agent"}
-	sess, ac, err := d.route(hello, tr)
-	require.NoError(t, err)
-	token := ac.resumeToken
-	require.True(t, sess.detachIfCurrent(ac))
-	require.True(t, d.parkAttachment(sess, ac))
+	synctest.Test(t, func(t *testing.T) {
+		initialPTY, releaseInitial := newBlockingPTY(t)
+		futurePTY, releaseFuture := newBlockingPTY(t)
+		defer releaseInitial()
+		defer releaseFuture()
+		var commands []string
+		var envs [][]string
+		factory := portsmocks.NewMockPTYFactory(t)
+		factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+			func(_ context.Context, command string, _ []string, env []string, _ string, geometry domain.Geometry) (ports.PTY, error) {
+				if geometry.Size != (domain.Size{Cols: 80, Rows: 22}) {
+					return newQuietPTY(t), nil
+				}
+				commands = append(commands, command)
+				envs = append(envs, append([]string(nil), env...))
+				if len(commands) == 1 {
+					return initialPTY, nil
+				}
+				return futurePTY, nil
+			},
+		).Maybe()
+		d := newTestDaemon(t, factory, newStubClock(t))
+		tr, _, _ := newConn(t, mustHello(protocol.IntentAttach, "unused", domain.Size{}))
+		hello := helloResumeCapable(protocol.IntentNew, "work", 0)
+		hello.Env = []string{"SECRET=before", "SHELL=/bin/sh", "TERM=old", "VEV=old", "SSH_AUTH_SOCK=/run/old-agent"}
+		sess, ac, err := d.route(hello, tr)
+		require.NoError(t, err)
+		token := ac.resumeToken
+		require.True(t, sess.detachIfCurrent(ac))
+		require.True(t, d.parkAttachment(sess, ac))
 
-	resumeHello := helloResumeCapable(protocol.IntentResume, "work", token)
-	resumeHello.Env = []string{"SECRET=after", "PAIR=a=b", "SHELL=/usr/bin/fish", "TERM=old", "COLORTERM=old", "TERM_PROGRAM=old", "VEV=old", "WAYLAND_DISPLAY=wayland-1"}
-	resumeHello.Color = terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor, Source: terminalcap.SourceDeclared}
-	_, _, ok, err := d.resumeParked(resumeHello, newQuietConnection(t), domain.Size{Cols: 80, Rows: 24})
-	require.NoError(t, err)
-	require.True(t, ok)
-	require.NoError(t, d.createTab(sess, domain.Size{Cols: 80, Rows: 24}))
+		resumeHello := helloResumeCapable(protocol.IntentResume, "work", token)
+		resumeHello.Env = []string{"SECRET=after", "PAIR=a=b", "SHELL=/usr/bin/fish", "TERM=old", "COLORTERM=old", "TERM_PROGRAM=old", "VEV=old", "WAYLAND_DISPLAY=wayland-1"}
+		resumeHello.Color = terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor, Source: terminalcap.SourceDeclared}
+		_, _, ok, err := d.resumeParked(resumeHello, newQuietConnection(t), domain.Size{Cols: 80, Rows: 24})
+		require.NoError(t, err)
+		require.True(t, ok)
+		require.NoError(t, d.createTab(sess, domain.Size{Cols: 80, Rows: 24}))
 
-	sess.mu.Lock()
-	future := sess.tabs[1].focusedPane()
-	futureTabID, futurePaneID := sess.tabs[1].stableID, future.stableID
-	require.Equal(t, []string{"SECRET=before", "SHELL=/bin/sh", "TERM=old", "VEV=old", "WAYLAND_DISPLAY=wayland-1"}, sess.env)
-	sess.mu.Unlock()
-	require.Equal(t, []string{"/bin/sh", "/bin/sh"}, commands)
-	require.Equal(t, []string{"SECRET=before", "SHELL=/bin/sh", "WAYLAND_DISPLAY=wayland-1", "TERM=xterm-256color", "COLORTERM=truecolor", "TERM_PROGRAM=vev", "VEV=session=work,tab=" + futureTabID + ",pane=" + futurePaneID}, envs[1])
+		sess.mu.Lock()
+		future := sess.tabs[1].focusedPane()
+		futureTabID, futurePaneID := sess.tabs[1].stableID, future.stableID
+		require.Equal(t, []string{"SECRET=before", "SHELL=/bin/sh", "TERM=old", "VEV=old", "WAYLAND_DISPLAY=wayland-1"}, sess.env)
+		sess.mu.Unlock()
+		require.Equal(t, []string{"/bin/sh", "/bin/sh"}, commands)
+		require.Equal(t, []string{"SECRET=before", "SHELL=/bin/sh", "WAYLAND_DISPLAY=wayland-1", "TERM=xterm-256color", "COLORTERM=truecolor", "TERM_PROGRAM=vev", "VEV=session=work,tab=" + futureTabID + ",pane=" + futurePaneID}, envs[1])
+	})
 }
 
 func TestResumeParkedDaemonOwnedPreservesSessionEnvironment(t *testing.T) {
-	pty, release := newBlockingPTY(t)
-	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
-	d.baseEnv = []string{"DAEMON=owned"}
-	oldTransport := newQuietConnection(t)
-	created := helloResumeCapable(protocol.IntentNew, "work", 0)
-	created.Env = []string{"LOCAL=client"}
-	sess, ac, err := d.route(created, oldTransport)
-	require.NoError(t, err)
-	localEnv, owned := ac.clientEnvironment()
-	require.True(t, owned, "a client-owned route records the attachment environment")
-	require.Equal(t, []string{"LOCAL=client"}, localEnv)
-	sess.mu.Lock()
-	sess.env = copyEnvironment(d.baseEnv)
-	sess.mu.Unlock()
-	token := ac.resumeToken
-	require.True(t, sess.detachIfCurrent(ac))
-	require.True(t, d.parkAttachment(sess, ac))
+	synctest.Test(t, func(t *testing.T) {
+		pty, release := newBlockingPTY(t)
+		defer release()
+		d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
+		d.baseEnv = []string{"DAEMON=owned"}
+		oldTransport := newQuietConnection(t)
+		created := helloResumeCapable(protocol.IntentNew, "work", 0)
+		created.Env = []string{"LOCAL=client"}
+		sess, ac, err := d.route(created, oldTransport)
+		require.NoError(t, err)
+		localEnv, owned := ac.clientEnvironment()
+		require.True(t, owned, "a client-owned route records the attachment environment")
+		require.Equal(t, []string{"LOCAL=client"}, localEnv)
+		sess.mu.Lock()
+		sess.env = copyEnvironment(d.baseEnv)
+		sess.mu.Unlock()
+		token := ac.resumeToken
+		require.True(t, sess.detachIfCurrent(ac))
+		require.True(t, d.parkAttachment(sess, ac))
 
-	resume := helloResumeCapable(protocol.IntentResume, "work", token)
-	resume.EnvironmentPolicy = protocol.EnvironmentPolicyDaemonOwned
-	resume.Env = []string{"UNTRUSTED=client"}
-	_, _, ok, err := d.resumeParked(resume, newQuietConnection(t), defaultSize)
-	require.NoError(t, err)
-	require.True(t, ok)
-	sess.mu.Lock()
-	require.Equal(t, []string{"DAEMON=owned"}, sess.env)
-	sess.mu.Unlock()
-	_, owned = ac.clientEnvironment()
-	require.False(t, owned, "a daemon-owned resume clears the attachment's client environment")
+		resume := helloResumeCapable(protocol.IntentResume, "work", token)
+		resume.EnvironmentPolicy = protocol.EnvironmentPolicyDaemonOwned
+		resume.Env = []string{"UNTRUSTED=client"}
+		_, _, ok, err := d.resumeParked(resume, newQuietConnection(t), defaultSize)
+		require.NoError(t, err)
+		require.True(t, ok)
+		sess.mu.Lock()
+		require.Equal(t, []string{"DAEMON=owned"}, sess.env)
+		sess.mu.Unlock()
+		_, owned = ac.clientEnvironment()
+		require.False(t, owned, "a daemon-owned resume clears the attachment's client environment")
 
-	require.NoError(t, d.killSession(sess, protocol.ReasonSessionKilled, true))
+		require.NoError(t, d.killSession(sess, protocol.ReasonSessionKilled, true))
+	})
 }
 
 func TestResumeRenegotiatesOutputWindowOnReusedStream(t *testing.T) {
-	pty, release := newBlockingPTY(t)
-	defer release()
-	d := newTestDaemon(t, newFactorySeq(t, pty), newStubClock(t))
-	firstHello := helloResumeCapable(protocol.IntentNew, "work", 0)
-	firstHello.MaxOutputInFlight = 8
-	sess, ac, err := d.route(firstHello, newQuietConnection(t))
-	require.NoError(t, err)
-	require.Equal(t, uint64(8), ac.output.maxOutstanding)
-	stream := ac.output
-	token := ac.resumeToken
-	require.True(t, sess.detachIfCurrent(ac))
-	require.True(t, d.parkAttachment(sess, ac))
+	synctest.Test(t, func(t *testing.T) {
+		pty, release := newBlockingPTY(t)
+		defer release()
+		d := newTestDaemon(t, newFactorySeq(t, pty), newStubClock(t))
+		firstHello := helloResumeCapable(protocol.IntentNew, "work", 0)
+		firstHello.MaxOutputInFlight = 8
+		sess, ac, err := d.route(firstHello, newQuietConnection(t))
+		require.NoError(t, err)
+		require.Equal(t, uint64(8), ac.output.maxOutstanding)
+		stream := ac.output
+		token := ac.resumeToken
+		require.True(t, sess.detachIfCurrent(ac))
+		require.True(t, d.parkAttachment(sess, ac))
 
-	resumeOne := helloResumeCapable(protocol.IntentResume, "work", token)
-	resumeOne.MaxOutputInFlight = 1
-	_, resumed, err := d.route(resumeOne, newQuietConnection(t))
-	require.NoError(t, err)
-	require.Same(t, stream, resumed.output)
-	require.Equal(t, uint64(1), resumed.output.maxOutstanding)
+		resumeOne := helloResumeCapable(protocol.IntentResume, "work", token)
+		resumeOne.MaxOutputInFlight = 1
+		_, resumed, err := d.route(resumeOne, newQuietConnection(t))
+		require.NoError(t, err)
+		require.Same(t, stream, resumed.output)
+		require.Equal(t, uint64(1), resumed.output.maxOutstanding)
 
-	token = resumed.resumeToken
-	require.True(t, sess.detachIfCurrent(resumed))
-	require.True(t, d.parkAttachment(sess, resumed))
-	resumeEight := helloResumeCapable(protocol.IntentResume, "work", token)
-	resumeEight.MaxOutputInFlight = 8
-	_, resumed, err = d.route(resumeEight, newQuietConnection(t))
-	require.NoError(t, err)
-	require.Same(t, stream, resumed.output)
-	require.Equal(t, uint64(8), resumed.output.maxOutstanding)
+		token = resumed.resumeToken
+		require.True(t, sess.detachIfCurrent(resumed))
+		require.True(t, d.parkAttachment(sess, resumed))
+		resumeEight := helloResumeCapable(protocol.IntentResume, "work", token)
+		resumeEight.MaxOutputInFlight = 8
+		_, resumed, err = d.route(resumeEight, newQuietConnection(t))
+		require.NoError(t, err)
+		require.Same(t, stream, resumed.output)
+		require.Equal(t, uint64(8), resumed.output.maxOutstanding)
+	})
 }

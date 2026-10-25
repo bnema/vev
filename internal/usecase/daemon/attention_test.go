@@ -5,6 +5,7 @@ import (
 	"io"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/mock"
@@ -13,7 +14,7 @@ import (
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/domain/layout"
-	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/keys"
@@ -85,34 +86,36 @@ func TestPTYReaderActiveVisibleAgentNotificationRendersBellBeforeAck(t *testing.
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			pty := newScriptPTY([][]byte{tt.data})
-			d, sess, ac, sends := newManualSessionWithPTYs(t, pty)
-			selectTestAttachmentTab(sess, 0)
-			d.setAttentionFrame(1)
+			synctest.Test(t, func(t *testing.T) {
+				pty := newScriptPTY(t, [][]byte{tt.data})
+				d, sess, ac, sends := newManualSessionWithPTYs(t, pty)
+				selectTestAttachmentTab(sess, 0)
+				d.setAttentionFrame(1)
 
-			d.sessWg.Add(1)
-			go d.ptyReader(sess, sess.tabs[0], sess.tabs[0].focusedPane())
+				d.sessWg.Add(1)
+				go d.ptyReader(sess, sess.tabs[0], sess.tabs[0].focusedPane())
 
-			require.Eventually(t, func() bool {
+				synctest.Wait()
 				sess.mu.Lock()
-				defer sess.mu.Unlock()
-				return sess.tabs[0].attention && !sess.tabs[0].attentionAt.IsZero()
-			}, 2*time.Second, 5*time.Millisecond)
+				flagged := sess.tabs[0].attention && !sess.tabs[0].attentionAt.IsZero()
+				sess.mu.Unlock()
+				require.True(t, flagged, "scripted agent notification never flagged the tab")
 
-			d.paint(sess, ac, true, nil)
-			data := mustOutputData(t, sends)
-			require.Contains(t, string(data), string(ui.AttentionGlyph))
+				d.paint(sess, ac, true, nil)
+				data := mustOutputData(t, sends)
+				require.Contains(t, string(data), string(ui.AttentionGlyph))
 
-			sess.mu.Lock()
-			require.False(t, sess.tabs[0].attention)
-			require.True(t, sess.tabs[0].attentionAt.IsZero())
-			sess.mu.Unlock()
+				sess.mu.Lock()
+				require.False(t, sess.tabs[0].attention)
+				require.True(t, sess.tabs[0].attentionAt.IsZero())
+				sess.mu.Unlock()
 
-			cleared := mustOutputData(t, sends)
-			require.NotContains(t, string(cleared), string(ui.AttentionGlyph))
+				cleared := mustOutputData(t, sends)
+				require.NotContains(t, string(cleared), string(ui.AttentionGlyph))
 
-			_ = pty.Close()
-			d.sessWg.Wait()
+				_ = pty.Close()
+				d.sessWg.Wait()
+			})
 		})
 	}
 }
@@ -132,23 +135,25 @@ func TestNoteAttentionFlagsDetachedActiveTab(t *testing.T) {
 }
 
 func TestPTYReaderBellMarksBackgroundTab(t *testing.T) {
-	p1, releasePTY1 := newBlockingPTY(t)
-	p2 := newScriptPTY([][]byte{[]byte("\a")})
-	d, sess, _, _ := newManualSessionWithPTYs(t, p1, p2)
-	defer releasePTY1()
-	selectTestAttachmentTab(sess, 0)
+	synctest.Test(t, func(t *testing.T) {
+		p1, releasePTY1 := newBlockingPTY(t)
+		p2 := newScriptPTY(t, [][]byte{[]byte("\a")})
+		d, sess, _, _ := newManualSessionWithPTYs(t, p1, p2)
+		defer releasePTY1()
+		selectTestAttachmentTab(sess, 0)
 
-	d.sessWg.Add(1)
-	go d.ptyReader(sess, sess.tabs[1], sess.tabs[1].focusedPane())
+		d.sessWg.Add(1)
+		go d.ptyReader(sess, sess.tabs[1], sess.tabs[1].focusedPane())
 
-	require.Eventually(t, func() bool {
+		synctest.Wait()
 		sess.mu.Lock()
-		defer sess.mu.Unlock()
-		return sess.tabs[1].attention && !sess.tabs[1].attentionAt.IsZero()
-	}, 2*time.Second, 5*time.Millisecond)
+		flagged := sess.tabs[1].attention && !sess.tabs[1].attentionAt.IsZero()
+		sess.mu.Unlock()
+		require.True(t, flagged, "bell never flagged the background tab")
 
-	_ = p2.Close()
-	d.sessWg.Wait()
+		_ = p2.Close()
+		d.sessWg.Wait()
+	})
 }
 
 // TestNoteAttentionDoesNotBlockOnWedgedOtherClient is the regression test for
@@ -159,108 +164,113 @@ func TestPTYReaderBellMarksBackgroundTab(t *testing.T) {
 // session. A second session's client whose Send never returns must not stop
 // noteAttention from returning promptly.
 func TestNoteAttentionDoesNotBlockOnWedgedOtherClient(t *testing.T) {
-	d, sess, _, _, releases := newManualTabSession(t, 2)
-	defer releases[0]()
-	defer releases[1]()
-	selectTestAttachmentTab(sess, 0)
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, _, _, releases := newManualTabSession(t, 2)
+		defer releases[0]()
+		defer releases[1]()
+		selectTestAttachmentTab(sess, 0)
 
-	trW := newMockServerConnection(t)
-	block := make(chan struct{})
-	t.Cleanup(func() { close(block) })
-	trW.EXPECT().Send(mock.Anything).RunAndReturn(func(wire.Envelope) error {
-		<-block
-		return nil
-	}).Maybe()
-	trW.EXPECT().Close().Return(nil).Maybe()
-	acW := &attachedClient{tr: trW, output: newOutputStateStream(), geometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}}
-	acW.initOverlays()
-	sctxW, cancelW := context.WithCancel(d.serveCtx)
-	t.Cleanup(cancelW)
-	tabW := newTestTabWithContext(newScriptPTY(nil), sctxW, cancelW)
-	sessW := &session{sessionCore: sessionCore{id: "wedged", name: "wedged", attachments: map[*attachedClient]struct{}{acW: {}}}, ctx: sctxW, cancel: cancelW, tabs: []*tab{tabW}}
-	acW.setSession(sessW)
-	acW.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: acW}, nil)
-	d.sessions[sessW.id] = sessW
+		trW := newMockServerConnection(t)
+		block := make(chan struct{})
+		t.Cleanup(func() { close(block) })
+		trW.EXPECT().Send(mock.Anything).RunAndReturn(func(wire.Envelope) error {
+			<-block
+			return nil
+		}).Maybe()
+		trW.EXPECT().Close().Return(nil).Maybe()
+		acW := &attachedClient{tr: trW, output: newOutputStateStream(), geometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}}
+		acW.initOverlays()
+		sctxW, cancelW := context.WithCancel(d.serveCtx)
+		t.Cleanup(cancelW)
+		tabW := newTestTabWithContext(newScriptPTY(t, nil), sctxW, cancelW)
+		sessW := &session{sessionCore: sessionCore{id: "wedged", name: "wedged", attachments: map[*attachedClient]struct{}{acW: {}}}, ctx: sctxW, cancel: cancelW, tabs: []*tab{tabW}}
+		acW.setSession(sessW)
+		acW.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: acW}, nil)
+		d.sessions[sessW.id] = sessW
 
-	done := make(chan struct{})
-	go func() {
-		d.noteAttention(sess, sess.tabs[1])
-		close(done)
-	}()
+		done := make(chan struct{})
+		go func() {
+			d.noteAttention(sess, sess.tabs[1])
+			close(done)
+		}()
 
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("noteAttention blocked on a wedged other-session client's Send")
-	}
+		requireReceived(t, done, "noteAttention blocked on a wedged other-session client's Send")
 
-	sess.mu.Lock()
-	defer sess.mu.Unlock()
-	require.True(t, sess.tabs[1].attention)
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		require.True(t, sess.tabs[1].attention)
+	})
 }
 
-type scriptPTY struct {
+// scriptPTYState feeds scripted reads to a MockPTY, then blocks until Close.
+type scriptPTYState struct {
 	mu     sync.Mutex
 	reads  [][]byte
 	closed chan struct{}
 	once   sync.Once
 }
 
-func newScriptPTY(reads [][]byte) *scriptPTY {
-	return &scriptPTY{reads: reads, closed: make(chan struct{})}
-}
-
-func (p *scriptPTY) Read(b []byte) (int, error) {
-	p.mu.Lock()
-	if len(p.reads) > 0 {
-		next := p.reads[0]
-		p.reads = p.reads[1:]
-		p.mu.Unlock()
+func (s *scriptPTYState) read(b []byte) (int, error) {
+	s.mu.Lock()
+	if len(s.reads) > 0 {
+		next := s.reads[0]
+		s.reads = s.reads[1:]
+		s.mu.Unlock()
 		return copy(b, next), nil
 	}
-	p.mu.Unlock()
-	<-p.closed
+	s.mu.Unlock()
+	<-s.closed
 	return 0, io.EOF
 }
 
-func (p *scriptPTY) Write(b []byte) (int, error) { return len(b), nil }
-func (p *scriptPTY) Close() error {
-	p.once.Do(func() { close(p.closed) })
-	return nil
+func (s *scriptPTYState) close() { s.once.Do(func() { close(s.closed) }) }
+
+// newScriptPTY returns a MockPTY that replays reads once, then blocks until Close.
+func newScriptPTY(t testing.TB, reads [][]byte) *portsmocks.MockPTY {
+	t.Helper()
+	st := &scriptPTYState{reads: reads, closed: make(chan struct{})}
+	p := portsmocks.NewMockPTY(t)
+	p.EXPECT().Read(mock.Anything).RunAndReturn(st.read).Maybe()
+	p.EXPECT().Write(mock.Anything).RunAndReturn(func(b []byte) (int, error) { return len(b), nil }).Maybe()
+	p.EXPECT().Close().RunAndReturn(func() error { st.close(); return nil }).Maybe()
+	p.EXPECT().Resize(mock.Anything).Return(nil).Maybe()
+	p.EXPECT().Pid().Return(4242).Maybe()
+	p.EXPECT().ForegroundPgid().Return(4242, nil).Maybe()
+	return p
 }
-func (p *scriptPTY) Resize(domain.Geometry) error { return nil }
-func (p *scriptPTY) Pid() int                     { return 4242 }
-func (p *scriptPTY) ForegroundPgid() (int, error) { return 4242, nil }
 
 func TestAckAttentionClearsOnlyPaintedVisibleTab(t *testing.T) {
-	d, sess, ac, sends, releases := newManualTabSession(t, 2)
-	defer releases[0]()
-	defer releases[1]()
-	selectTestAttachmentTab(sess, 0)
-	sess.mu.Lock()
-	sess.tabs[0].attention = true
-	sess.tabs[0].attentionAt = time.Unix(1, 0)
-	sess.tabs[1].attention = true
-	sess.tabs[1].attentionAt = time.Unix(2, 0)
-	sess.mu.Unlock()
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, ac, sends, releases := newManualTabSession(t, 2)
+		defer releases[0]()
+		defer releases[1]()
+		selectTestAttachmentTab(sess, 0)
+		sess.mu.Lock()
+		sess.tabs[0].attention = true
+		sess.tabs[0].attentionAt = time.Unix(1, 0)
+		sess.tabs[1].attention = true
+		sess.tabs[1].attentionAt = time.Unix(2, 0)
+		sess.mu.Unlock()
 
-	d.paint(sess, ac, true, nil)
-	_ = mustOutputData(t, sends)
-	// The deferred repaint (from ackAttention) targets all attached clients,
-	// including this one, but the bars it would draw are already exactly what
-	// the full paint above just sent: no second frame should follow.
-	select {
-	case f := <-sends:
-		t.Fatalf("unexpected extra frame after ack: %s", envelopeMessageName(t, f.Payload))
-	case <-time.After(50 * time.Millisecond):
-	}
+		d.paint(sess, ac, true, nil)
+		_ = mustOutputData(t, sends)
+		// The deferred repaint (from ackAttention) targets all attached clients,
+		// including this one, but the bars it would draw are already exactly what
+		// the full paint above just sent: no second frame should follow.
+		synctest.Wait()
+		select {
+		case f := <-sends:
+			t.Fatalf("unexpected extra frame after ack: %s", envelopeMessageName(t, f.Payload))
+		default:
+		}
 
-	sess.mu.Lock()
-	defer sess.mu.Unlock()
-	require.False(t, sess.tabs[0].attention)
-	require.True(t, sess.tabs[0].attentionAt.IsZero())
-	require.True(t, sess.tabs[1].attention)
-	require.False(t, sess.tabs[1].attentionAt.IsZero())
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		require.False(t, sess.tabs[0].attention)
+		require.True(t, sess.tabs[0].attentionAt.IsZero())
+		require.True(t, sess.tabs[1].attention)
+		require.False(t, sess.tabs[1].attentionAt.IsZero())
+	})
 }
 
 func TestPaintPreservesBackgroundAttention(t *testing.T) {
@@ -284,34 +294,37 @@ func TestPaintPreservesBackgroundAttention(t *testing.T) {
 }
 
 func TestSwitchTabClearsAttentionEndToEnd(t *testing.T) {
-	d, sess, ac, sends, releases := newManualTabSession(t, 2)
-	defer releases[0]()
-	defer releases[1]()
-	selectTestAttachmentTab(sess, 0)
-	sess.mu.Lock()
-	sess.tabs[1].attention = true
-	sess.tabs[1].attentionAt = time.Unix(2, 0)
-	sess.mu.Unlock()
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, ac, sends, releases := newManualTabSession(t, 2)
+		defer releases[0]()
+		defer releases[1]()
+		selectTestAttachmentTab(sess, 0)
+		sess.mu.Lock()
+		sess.tabs[1].attention = true
+		sess.tabs[1].attentionAt = time.Unix(2, 0)
+		sess.mu.Unlock()
 
-	require.True(t, selectTestAttachmentTab(sess, 1))
-	d.paint(sess, ac, true, nil)
-	data := mustOutputData(t, sends)
-	position, ok := decodeServerMessage(t, awaitFrame(t, sends, "RoutePosition")).(protocol.RoutePosition)
-	require.True(t, ok)
-	require.Equal(t, domain.TabStableID(sess.tabs[1].stableID), position.ActiveTabID)
-	// The tab transition publishes its position, but the deferred repaint has
-	// no additional terminal bytes.
-	select {
-	case f := <-sends:
-		t.Fatalf("unexpected extra frame after ack: %s", envelopeMessageName(t, f.Payload))
-	case <-time.After(50 * time.Millisecond):
-	}
+		require.True(t, selectTestAttachmentTab(sess, 1))
+		d.paint(sess, ac, true, nil)
+		data := mustOutputData(t, sends)
+		position, ok := decodeServerMessage(t, requireFrame(t, sends, "RoutePosition")).(protocol.RoutePosition)
+		require.True(t, ok)
+		require.Equal(t, domain.TabStableID(sess.tabs[1].stableID), position.ActiveTabID)
+		// The tab transition publishes its position, but the deferred repaint has
+		// no additional terminal bytes.
+		synctest.Wait()
+		select {
+		case f := <-sends:
+			t.Fatalf("unexpected extra frame after ack: %s", envelopeMessageName(t, f.Payload))
+		default:
+		}
 
-	require.NotContains(t, string(data), "")
-	sess.mu.Lock()
-	defer sess.mu.Unlock()
-	require.False(t, sess.tabs[1].attention)
-	require.True(t, sess.tabs[1].attentionAt.IsZero())
+		require.NotContains(t, string(data), "")
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		require.False(t, sess.tabs[1].attention)
+		require.True(t, sess.tabs[1].attentionAt.IsZero())
+	})
 }
 
 func TestCloseRingingTabClearsClientBar(t *testing.T) {
@@ -341,34 +354,37 @@ func TestCloseRingingTabClearsClientBar(t *testing.T) {
 // and a repaint following only a pulse-frame advance touches the bar rows
 // without re-emitting screen content.
 func TestAnimationRepaintConfinedToBarRows(t *testing.T) {
-	d, sess, ac, sends, releases := newManualTabSession(t, 2)
-	defer releases[0]()
-	defer releases[1]()
-	selectTestAttachmentTab(sess, 0)
-	sess.tabs[0].focusedPane().screen.Write([]byte("MIDSCREENMARKER"))
-	sess.mu.Lock()
-	sess.tabs[1].attention = true
-	sess.tabs[1].attentionAt = time.Unix(1, 0)
-	sess.mu.Unlock()
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, ac, sends, releases := newManualTabSession(t, 2)
+		defer releases[0]()
+		defer releases[1]()
+		selectTestAttachmentTab(sess, 0)
+		sess.tabs[0].focusedPane().screen.Write([]byte("MIDSCREENMARKER"))
+		sess.mu.Lock()
+		sess.tabs[1].attention = true
+		sess.tabs[1].attentionAt = time.Unix(1, 0)
+		sess.mu.Unlock()
 
-	d.paint(sess, ac, true, nil)
-	full := mustOutputData(t, sends)
-	require.Contains(t, string(full), "MIDSCREENMARKER")
+		d.paint(sess, ac, true, nil)
+		full := mustOutputData(t, sends)
+		require.Contains(t, string(full), "MIDSCREENMARKER")
 
-	// Nothing changed: a repaint against the warm cache must send nothing.
-	d.repaintAttachedClients(sess)
-	select {
-	case f := <-sends:
-		t.Fatalf("unexpected frame on unchanged repaint: %s", envelopeMessageName(t, f.Payload))
-	case <-time.After(50 * time.Millisecond):
-	}
+		// Nothing changed: a repaint against the warm cache must send nothing.
+		d.repaintAttachedClients(sess)
+		synctest.Wait()
+		select {
+		case f := <-sends:
+			t.Fatalf("unexpected frame on unchanged repaint: %s", envelopeMessageName(t, f.Payload))
+		default:
+		}
 
-	// Advance the pulse frame (only the bells' rendered style changes) and
-	// repaint: the bytes sent must not repaint screen content.
-	d.advanceAttentionFrame()
-	d.repaintAttachedClients(sess)
-	data := mustOutputData(t, sends)
-	require.NotContains(t, string(data), "MIDSCREENMARKER")
+		// Advance the pulse frame (only the bells' rendered style changes) and
+		// repaint: the bytes sent must not repaint screen content.
+		d.advanceAttentionFrame()
+		d.repaintAttachedClients(sess)
+		data := mustOutputData(t, sends)
+		require.NotContains(t, string(data), "MIDSCREENMARKER")
+	})
 }
 
 // TestComposeFrameAttentionFrameChangeDamagesOnlyBars pins the same invariant
@@ -480,20 +496,23 @@ func TestJumpAttentionCrossesSessionsWhenNoLocalBells(t *testing.T) {
 }
 
 func TestJumpAttentionNoopsWithNoBells(t *testing.T) {
-	d, sess, ac, sends, releases := newManualTabSession(t, 2)
-	defer releases[0]()
-	defer releases[1]()
-	selectTestAttachmentTab(sess, 0)
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, ac, sends, releases := newManualTabSession(t, 2)
+		defer releases[0]()
+		defer releases[1]()
+		selectTestAttachmentTab(sess, 0)
 
-	require.NoError(t, d.jumpAttention(sess, ac), "no target to jump to is not a failure")
+		require.NoError(t, d.jumpAttention(sess, ac), "no target to jump to is not a failure")
 
-	require.Same(t, sess, ac.currentSession())
-	require.Equal(t, 0, testAttachmentTabIndex(sess))
-	select {
-	case f := <-sends:
-		t.Fatalf("unexpected frame on no-op jump: %s", envelopeMessageName(t, f.Payload))
-	case <-time.After(20 * time.Millisecond):
-	}
+		require.Same(t, sess, ac.currentSession())
+		require.Equal(t, 0, testAttachmentTabIndex(sess))
+		synctest.Wait()
+		select {
+		case f := <-sends:
+			t.Fatalf("unexpected frame on no-op jump: %s", envelopeMessageName(t, f.Payload))
+		default:
+		}
+	})
 }
 
 // TestJumpAttentionSwitchFailureReportsNotice drives jumpAttention's
@@ -532,95 +551,74 @@ func TestJumpAttentionSwitchFailureReportsNotice(t *testing.T) {
 }
 
 func TestAttentionAnimatorParksAdvancesAndResets(t *testing.T) {
-	d, sess, _, sends, releases := newManualTabSession(t, 2)
-	defer releases[0]()
-	defer releases[1]()
-	clk := newManualAttentionClock()
-	d.clock = clk
-	selectTestAttachmentTab(sess, 0)
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, _, sends, releases := newManualTabSession(t, 2)
+		defer releases[0]()
+		defer releases[1]()
+		clk, clkTimers := newSignalClock(t, 8)
+		d.clock = clk
+		selectTestAttachmentTab(sess, 0)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		d.attentionAnimator(ctx)
-		close(done)
-	}()
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() {
+			d.attentionAnimator(ctx)
+			close(done)
+		}()
 
-	select {
-	case <-clk.timers:
-		t.Fatal("parked animator requested timer with no attention")
-	case <-time.After(20 * time.Millisecond):
-	}
-
-	sess.mu.Lock()
-	sess.tabs[1].attention = true
-	sess.tabs[1].attentionAt = time.Unix(1, 0)
-	sess.mu.Unlock()
-	d.pokeAttentionTicker()
-
-	timer := clk.nextTimer(t)
-	timer.fire()
-	_ = mustOutputData(t, sends)
-	require.Equal(t, 1, d.attentionFrame())
-
-	sess.mu.Lock()
-	sess.tabs[1].attention = false
-	sess.tabs[1].attentionAt = time.Time{}
-	sess.mu.Unlock()
-	d.pokeAttentionTicker()
-
-	require.Eventually(t, func() bool { return d.attentionFrame() == 0 }, time.Second, time.Millisecond)
-	_ = mustOutputData(t, sends)
-	select {
-	case <-clk.timers:
-		t.Fatal("animator requested new timer after attention cleared")
-	case <-time.After(20 * time.Millisecond):
-	}
-
-	cancel()
-	require.Eventually(t, func() bool {
+		synctest.Wait()
 		select {
-		case <-done:
-			return true
+		case <-clkTimers:
+			t.Fatal("parked animator requested timer with no attention")
 		default:
-			return false
 		}
-	}, time.Second, time.Millisecond)
+
+		sess.mu.Lock()
+		sess.tabs[1].attention = true
+		sess.tabs[1].attentionAt = time.Unix(1, 0)
+		sess.mu.Unlock()
+		d.pokeAttentionTicker()
+
+		timer := requireReceived(t, clkTimers, "animator never armed its pulse timer")
+		timer.fire()
+		_ = mustOutputData(t, sends)
+		require.Equal(t, 1, d.attentionFrame())
+
+		sess.mu.Lock()
+		sess.tabs[1].attention = false
+		sess.tabs[1].attentionAt = time.Time{}
+		sess.mu.Unlock()
+		d.pokeAttentionTicker()
+
+		synctest.Wait()
+		require.Equal(t, 0, d.attentionFrame(), "animator must reset the pulse frame once attention clears")
+		_ = mustOutputData(t, sends)
+		synctest.Wait()
+		select {
+		case <-clkTimers:
+			t.Fatal("animator requested new timer after attention cleared")
+		default:
+		}
+
+		cancel()
+		requireReceived(t, done, "animator did not stop after cancel")
+	})
 }
 
 func TestPokeAttentionTickerIsNonBlockingCapOne(t *testing.T) {
-	d := New(nil, newStubClock(t), nil)
-	require.Equal(t, 1, cap(d.animWake))
-	d.pokeAttentionTicker()
-	d.pokeAttentionTicker()
-	require.Len(t, d.animWake, 1)
+	synctest.Test(t, func(t *testing.T) {
+		d := New(nil, newStubClock(t), nil)
+		require.Equal(t, 1, cap(d.animWake))
+		d.pokeAttentionTicker()
+		d.pokeAttentionTicker()
+		require.Len(t, d.animWake, 1)
+	})
 }
 
-type manualAttentionClock struct {
-	timers chan *manualAttentionTimer
-}
-
-func newManualAttentionClock() *manualAttentionClock {
-	return &manualAttentionClock{timers: make(chan *manualAttentionTimer, 8)}
-}
-
-func (c *manualAttentionClock) Now() time.Time { return time.Unix(100, 0) }
-func (c *manualAttentionClock) NewTimer(time.Duration) ports.Timer {
-	t := &manualAttentionTimer{ch: make(chan time.Time, 1)}
-	c.timers <- t
-	return t
-}
-func (c *manualAttentionClock) nextTimer(t *testing.T) *manualAttentionTimer {
-	t.Helper()
-	select {
-	case timer := <-c.timers:
-		return timer
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for attention timer")
-		return nil
-	}
-}
-
+// manualAttentionTimer is still consumed by echo_ack_test.go (batch B owns that
+// file and its echoTestClock). Remove it once echo_ack_test.go no longer uses it.
+//
+//testpolicy:double transitional timer for batch-B echoTestClock; no new users
 type manualAttentionTimer struct {
 	ch chan time.Time
 }

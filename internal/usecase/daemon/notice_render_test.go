@@ -3,7 +3,7 @@ package daemon
 import (
 	"strings"
 	"testing"
-	"time"
+	"testing/synctest"
 
 	"github.com/stretchr/testify/require"
 
@@ -79,30 +79,28 @@ func containsTopRight(rows []string, text string, minCol int) bool {
 // the message top-right, and that it disappears once the fake clock crosses
 // the toast's TTL.
 func TestPaintComposesNoticeToastTopRightAndExpiresOnTTL(t *testing.T) {
-	clk := newNoticeClock()
-	d, sess, ac, sends := newNoticeFixture(t, clk)
-	screen := vt.NewScreen(ac.geometry.Size.Cols, ac.geometry.Size.Rows)
+	synctest.Test(t, func(t *testing.T) {
+		clk := newNoticeClock()
+		d, sess, ac, sends := newNoticeFixture(t, clk)
+		screen := vt.NewScreen(ac.geometry.Size.Cols, ac.geometry.Size.Rows)
 
-	d.notify(sess, domain.NoticeError, domain.NoticePaneSpawn, "couldn't open pane", nil)
-	awaitToastCount(t, ac, 1)
-	replayOutputFrames(t, screen, drainAllFrames(sends))
+		d.notify(sess, domain.NoticeError, domain.NoticePaneSpawn, "couldn't open pane", nil)
+		requireToastCount(t, ac, 1)
+		replayOutputFrames(t, screen, drainAllFrames(sends))
 
-	rows := frameRows(captureTestFrame(screen))
-	if !containsTopRight(rows, "couldn't open pane", ac.geometry.Size.Cols/2) {
-		t.Fatalf("composed frame missing toast message top-right:\n%s", strings.Join(rows, "\n"))
-	}
+		rows := frameRows(captureTestFrame(screen))
+		if !containsTopRight(rows, "couldn't open pane", ac.geometry.Size.Cols/2) {
+			t.Fatalf("composed frame missing toast message top-right:\n%s", strings.Join(rows, "\n"))
+		}
 
-	clk.advance(noticeTTL(domain.NoticeError))
-	awaitToastCount(t, ac, 0)
-	select {
-	case f := <-sends:
+		clk.advance(noticeTTL(domain.NoticeError))
+		requireToastCount(t, ac, 0)
+		f := requireReceived(t, sends, "expiry did not invalidate the render")
 		replayOutputFrames(t, screen, append([]wire.Envelope{f}, drainAllFrames(sends)...))
-	case <-time.After(2 * time.Second):
-		t.Fatal("expiry did not invalidate the render")
-	}
 
-	rows = frameRows(captureTestFrame(screen))
-	if containsTopRight(rows, "couldn't open pane", ac.geometry.Size.Cols/2) {
-		t.Fatalf("toast message still present after TTL expired:\n%s", strings.Join(rows, "\n"))
-	}
+		rows = frameRows(captureTestFrame(screen))
+		if containsTopRight(rows, "couldn't open pane", ac.geometry.Size.Cols/2) {
+			t.Fatalf("toast message still present after TTL expired:\n%s", strings.Join(rows, "\n"))
+		}
+	})
 }

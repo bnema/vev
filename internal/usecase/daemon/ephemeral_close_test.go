@@ -3,6 +3,7 @@ package daemon
 import (
 	"sync"
 	"testing"
+	"testing/synctest"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
@@ -27,30 +28,32 @@ func TestEphemeralCloseOnExit(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			pty, release := newBlockingPTY(t)
-			defer release()
-			d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
-			updateRuntimeConfig(d, func(rc *runtimeConfig) { rc.ephemeral = domain.EphemeralConfig{CloseOnExit: tt.closeOnExit} })
+			synctest.Test(t, func(t *testing.T) {
+				pty, release := newBlockingPTY(t)
+				defer release()
+				d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
+				updateRuntimeConfig(d, func(rc *runtimeConfig) { rc.ephemeral = domain.EphemeralConfig{CloseOnExit: tt.closeOnExit} })
 
-			tr := newQuietConnection(t)
-			sess, ac, err := d.route(helloResumeCapable(tt.intent, tt.sessionName, 0), tr)
-			require.NoError(t, err)
-			for i := 1; i < tt.clients; i++ {
-				_, _, err := d.route(helloResumeCapable(protocol.IntentAttach, sess.nameSnapshot(), 0), newQuietConnection(t))
+				tr := newQuietConnection(t)
+				sess, ac, err := d.route(helloResumeCapable(tt.intent, tt.sessionName, 0), tr)
 				require.NoError(t, err)
-			}
+				for i := 1; i < tt.clients; i++ {
+					_, _, err := d.route(helloResumeCapable(protocol.IntentAttach, sess.nameSnapshot(), 0), newQuietConnection(t))
+					require.NoError(t, err)
+				}
 
-			d.clientGone(sess, ac, tr, true)
-			if tt.renamed {
-				require.NoError(t, d.renameSession(sess, "kept"))
-			}
-			d.reapAbandonedEphemeral(sess)
+				d.clientGone(sess, ac, tr, true)
+				if tt.renamed {
+					require.NoError(t, d.renameSession(sess, "kept"))
+				}
+				d.reapAbandonedEphemeral(sess)
 
-			require.Equal(t, !tt.wantRemoved, d.sessionRegistered(sess))
-			if !tt.wantRemoved {
-				require.NoError(t, d.killSession(sess, protocol.ReasonSessionKilled, false))
-			}
-			d.sessWg.Wait()
+				require.Equal(t, !tt.wantRemoved, d.sessionRegistered(sess))
+				if !tt.wantRemoved {
+					require.NoError(t, d.killSession(sess, protocol.ReasonSessionKilled, false))
+				}
+				d.sessWg.Wait()
+			})
 		})
 	}
 }
@@ -66,39 +69,41 @@ func TestEphemeralCloseOnExitWaitsForParkExpiry(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			clock, clockTimers := newSignalClock(t, 8)
-			pty, release := newBlockingPTY(t)
-			defer release()
-			d := newTestDaemon(t, newFactory(t, pty), clock)
+			synctest.Test(t, func(t *testing.T) {
+				clock, clockTimers := newSignalClock(t, 8)
+				pty, release := newBlockingPTY(t)
+				defer release()
+				d := newTestDaemon(t, newFactory(t, pty), clock)
 
-			tr := newQuietConnection(t)
-			sess, ac, err := d.route(helloResumeCapable(protocol.IntentEphemeral, "", 0), tr)
-			require.NoError(t, err)
-			if tt.otherClient {
-				_, _, err := d.route(helloResumeCapable(protocol.IntentAttach, sess.nameSnapshot(), 0), newQuietConnection(t))
+				tr := newQuietConnection(t)
+				sess, ac, err := d.route(helloResumeCapable(protocol.IntentEphemeral, "", 0), tr)
 				require.NoError(t, err)
-			}
-			token := ac.resumeToken
+				if tt.otherClient {
+					_, _, err := d.route(helloResumeCapable(protocol.IntentAttach, sess.nameSnapshot(), 0), newQuietConnection(t))
+					require.NoError(t, err)
+				}
+				token := ac.resumeToken
 
-			// A link loss parks: the session must survive so the client can resume.
-			d.clientGone(sess, ac, tr, false)
-			<-clockTimers
-			d.reapAbandonedEphemeral(sess)
-			require.True(t, d.sessionRegistered(sess), "parked attachment keeps the ephemeral session")
+				// A link loss parks: the session must survive so the client can resume.
+				d.clientGone(sess, ac, tr, false)
+				<-clockTimers
+				d.reapAbandonedEphemeral(sess)
+				require.True(t, d.sessionRegistered(sess), "parked attachment keeps the ephemeral session")
 
-			d.mu.Lock()
-			parked := d.resume.parked[token]
-			d.mu.Unlock()
-			require.NotNil(t, parked)
-			// Expire directly instead of firing the timer, so no watcher
-			// goroutine races the assertion below.
-			d.expireParked(token, parked)
+				d.mu.Lock()
+				parked := d.resume.parked[token]
+				d.mu.Unlock()
+				require.NotNil(t, parked)
+				// Expire directly instead of firing the timer, so no watcher
+				// goroutine races the assertion below.
+				d.expireParked(token, parked)
 
-			require.Equal(t, !tt.wantRemoved, d.sessionRegistered(sess))
-			if !tt.wantRemoved {
-				require.NoError(t, d.killSession(sess, protocol.ReasonSessionKilled, false))
-			}
-			d.sessWg.Wait()
+				require.Equal(t, !tt.wantRemoved, d.sessionRegistered(sess))
+				if !tt.wantRemoved {
+					require.NoError(t, d.killSession(sess, protocol.ReasonSessionKilled, false))
+				}
+				d.sessWg.Wait()
+			})
 		})
 	}
 }
@@ -119,28 +124,30 @@ func TestDetachFrameEphemeralCloseOnExit(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			pty, release := newBlockingPTY(t)
-			defer release()
-			d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
-			updateRuntimeConfig(d, func(rc *runtimeConfig) { rc.ephemeral = domain.EphemeralConfig{CloseOnExit: tt.closeOnExit} })
-			tr, sends, _ := newConn(t,
-				mustHello(tt.intent, tt.sessionName, domain.Size{Cols: 80, Rows: 24}),
-				mustClientEnvelope(tt.detach),
-			)
+			synctest.Test(t, func(t *testing.T) {
+				pty, release := newBlockingPTY(t)
+				defer release()
+				d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
+				updateRuntimeConfig(d, func(rc *runtimeConfig) { rc.ephemeral = domain.EphemeralConfig{CloseOnExit: tt.closeOnExit} })
+				tr, sends, _ := newConn(t,
+					mustHello(tt.intent, tt.sessionName, domain.Size{Cols: 80, Rows: 24}),
+					mustClientEnvelope(tt.detach),
+				)
 
-			var hg sync.WaitGroup
-			hg.Go(func() { d.handleConn(tr) })
-			awaitFrame(t, sends, "Welcome")
-			hg.Wait()
+				var hg sync.WaitGroup
+				hg.Go(func() { d.handleConn(tr) })
+				requireFrame(t, sends, "Welcome")
+				hg.Wait()
 
-			if tt.wantRemoved {
-				require.Equal(t, 0, sessionCount(d))
-			} else {
-				require.Equal(t, 1, sessionCount(d))
-				require.NoError(t, d.killSession(firstSession(d), protocol.ReasonSessionKilled, false))
-			}
-			d.sessWg.Wait()
-			d.waitNotifies()
+				if tt.wantRemoved {
+					require.Equal(t, 0, sessionCount(d))
+				} else {
+					require.Equal(t, 1, sessionCount(d))
+					require.NoError(t, d.killSession(firstSession(d), protocol.ReasonSessionKilled, false))
+				}
+				d.sessWg.Wait()
+				d.waitNotifies()
+			})
 		})
 	}
 }

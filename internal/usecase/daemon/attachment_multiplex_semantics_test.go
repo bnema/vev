@@ -3,6 +3,7 @@ package daemon
 import (
 	"slices"
 	"testing"
+	"testing/synctest"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
@@ -102,85 +103,89 @@ func TestMultiplexClaimantRemovalDoesNotTouchUnrelatedSession(t *testing.T) {
 // overlay runtime, and command-result carriage are attachment-owned. Aliasing
 // any of those fields, or routing a result to the peer, breaks the snapshots.
 func TestMultiplexAttachmentLocalStateAndFrames(t *testing.T) {
-	d, sess, first, firstFrames := newManualSessionWithPTYs(t, newQuietPTY(t))
-	peerTransport, peerFrames := newCapturingTransport(t)
-	peer, err := d.attachClient(sess, peerTransport, domain.Size{Cols: 90, Rows: 30}, attachClientOptions{})
-	require.NoError(t, err)
-	require.NotSame(t, first.output, peer.output)
-	require.NotSame(t, first.overlays, peer.overlays)
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, first, firstFrames := newManualSessionWithPTYs(t, newQuietPTY(t))
+		peerTransport, peerFrames := newCapturingTransport(t)
+		peer, err := d.attachClient(sess, peerTransport, domain.Size{Cols: 90, Rows: 30}, attachClientOptions{})
+		require.NoError(t, err)
+		require.NotSame(t, first.output, peer.output)
+		require.NotSame(t, first.overlays, peer.overlays)
 
-	peerView := peer.viewSnapshot()
-	require.True(t, sess.updateAttachmentView(first, func(view *attachmentView) { view.windowTop = 7; view.liveBottom = false }))
-	require.Equal(t, peerView, peer.viewSnapshot())
+		peerView := peer.viewSnapshot()
+		require.True(t, sess.updateAttachmentView(first, func(view *attachmentView) { view.windowTop = 7; view.liveBottom = false }))
+		require.Equal(t, peerView, peer.viewSnapshot())
 
-	first.overlays.paletteMu.Lock()
-	first.overlays.paletteFeedback = "first-only"
-	first.overlays.paletteMu.Unlock()
-	peer.overlays.paletteMu.Lock()
-	require.Empty(t, peer.overlays.paletteFeedback)
-	peer.overlays.paletteMu.Unlock()
+		first.overlays.paletteMu.Lock()
+		first.overlays.paletteFeedback = "first-only"
+		first.overlays.paletteMu.Unlock()
+		peer.overlays.paletteMu.Lock()
+		require.Empty(t, peer.overlays.paletteFeedback)
+		peer.overlays.paletteMu.Unlock()
 
-	rc := d.attachCoordinator(sess, nil, first, true)
-	d.attachCoordinator(sess, nil, peer, true)
-	firstToken := sess.captureAttachmentCapability(first, first.transport())
-	firstToken.lease = rc.attachmentLease(first)
-	first.installTestAttachmentCapability(firstToken)
-	peerToken := sess.captureAttachmentCapability(peer, peer.transport())
-	peerToken.lease = rc.attachmentLease(peer)
-	peer.installTestAttachmentCapability(peerToken)
-	require.False(t, d.handleAttachmentClientMessage(firstToken, protocol.CommandRequest{Version: protocol.Version, RequestID: 77, Attached: true, Slug: "next-tab"}))
-	result, ok := decodeServerMessage(t, awaitFrame(t, firstFrames, "CommandResult")).(protocol.CommandResult)
-	require.True(t, ok)
-	require.Equal(t, uint64(77), result.RequestID)
-	require.True(t, result.Outcome == protocol.CommandSucceeded, result.Text)
-	select {
-	case frame := <-peerFrames:
-		if command, ok := decodeServerMessage(t, frame).(protocol.CommandResult); ok && command.RequestID == 77 {
-			t.Fatal("command result crossed attachment stream")
+		rc := d.attachCoordinator(sess, nil, first, true)
+		d.attachCoordinator(sess, nil, peer, true)
+		firstToken := sess.captureAttachmentCapability(first, first.transport())
+		firstToken.lease = rc.attachmentLease(first)
+		first.installTestAttachmentCapability(firstToken)
+		peerToken := sess.captureAttachmentCapability(peer, peer.transport())
+		peerToken.lease = rc.attachmentLease(peer)
+		peer.installTestAttachmentCapability(peerToken)
+		require.False(t, d.handleAttachmentClientMessage(firstToken, protocol.CommandRequest{Version: protocol.Version, RequestID: 77, Attached: true, Slug: "next-tab"}))
+		result, ok := decodeServerMessage(t, requireFrame(t, firstFrames, "CommandResult")).(protocol.CommandResult)
+		require.True(t, ok)
+		require.Equal(t, uint64(77), result.RequestID)
+		require.True(t, result.Outcome == protocol.CommandSucceeded, result.Text)
+		select {
+		case frame := <-peerFrames:
+			if command, ok := decodeServerMessage(t, frame).(protocol.CommandResult); ok && command.RequestID == 77 {
+				t.Fatal("command result crossed attachment stream")
+			}
+		default:
 		}
-	default:
-	}
+	})
 }
 
 // TestMultiplexReconnectGenerationFencesOldEffects proves an older attachment
 // capability cannot act after a production suspension/activation reconnect.
 // Accepting the old token would change size or execute its command.
 func TestMultiplexReconnectGenerationFencesOldEffects(t *testing.T) {
-	d, sess, reconnecting, oldFrames := newManualSessionWithPTYs(t, &transactionalResizePTY{})
-	peer := addMultiplexTestAttachment(t, sess, domain.Geometry{Size: domain.Size{Cols: 100, Rows: 30}})
-	rc := d.attachCoordinator(sess, nil, reconnecting, true)
-	d.attachCoordinator(sess, nil, peer, true)
-	old := sess.captureAttachmentCapability(reconnecting, reconnecting.transport())
-	old.lease = rc.attachmentLease(reconnecting)
-	reconnecting.installTestAttachmentCapability(old)
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, reconnecting, oldFrames := newManualSessionWithPTYs(t, &transactionalResizePTY{})
+		peer := addMultiplexTestAttachment(t, sess, domain.Geometry{Size: domain.Size{Cols: 100, Rows: 30}})
+		rc := d.attachCoordinator(sess, nil, reconnecting, true)
+		d.attachCoordinator(sess, nil, peer, true)
+		old := sess.captureAttachmentCapability(reconnecting, reconnecting.transport())
+		old.lease = rc.attachmentLease(reconnecting)
+		reconnecting.installTestAttachmentCapability(old)
 
-	require.NoError(t, d.suspendAttachment(old, protocol.SuspendAttachment{RequestID: 1}))
-	for len(oldFrames) != 0 {
-		<-oldFrames
-	}
-	fresh, _ := newCapturingTransport(t)
-	reconnecting.replaceTransport(fresh)
-	target := protocol.ExactSessionTarget{LifecycleID: sess.incarnation, SessionName: sess.name}
-	require.NoError(t, d.activateAttachment(reconnecting, reconnecting.transportSnapshot(), protocol.ActivateAttachment{RequestID: 2, Target: target, Size: reconnecting.sizeSnapshot()}))
-	current := sess.captureAttachmentCapability(reconnecting, fresh)
-	require.Greater(t, current.generation, old.generation, "production reconnect did not advance the attachment generation")
-	require.NotEqual(t, current.transport.incarnation, old.transport.incarnation)
+		require.NoError(t, d.suspendAttachment(old, protocol.SuspendAttachment{RequestID: 1}))
+		for len(oldFrames) != 0 {
+			<-oldFrames
+		}
+		fresh, _ := newCapturingTransport(t)
+		reconnecting.replaceTransport(fresh)
+		target := protocol.ExactSessionTarget{LifecycleID: sess.incarnation, SessionName: sess.name}
+		require.NoError(t, d.activateAttachment(reconnecting, reconnecting.transportSnapshot(), protocol.ActivateAttachment{RequestID: 2, Target: target, Size: reconnecting.sizeSnapshot()}))
+		current := sess.captureAttachmentCapability(reconnecting, fresh)
+		require.Greater(t, current.generation, old.generation, "production reconnect did not advance the attachment generation")
+		require.NotEqual(t, current.transport.incarnation, old.transport.incarnation)
 
-	// Isolate the generation clause from transport-incarnation fencing: use the
-	// current transport and lease with only the previous production generation.
-	staleGeneration := current
-	staleGeneration.generation = old.generation
-	require.False(t, staleGeneration.current(), "previous generation remained current after reconnect")
-	before := reconnecting.geometrySnapshot()
-	require.False(t, d.handleAttachmentClientMessage(staleGeneration, protocol.Resize{Size: domain.Size{Cols: 140, Rows: 50}}))
-	require.False(t, d.handleAttachmentClientMessage(staleGeneration, protocol.CommandRequest{Version: protocol.Version, RequestID: 9, Attached: true, Slug: "next-tab"}))
-	require.Equal(t, before, reconnecting.geometrySnapshot())
-	select {
-	case <-oldFrames:
-		t.Fatal("stale generation emitted a frame")
-	default:
-	}
-	require.True(t, slices.Contains(sess.snapshotAttachments(), peer))
+		// Isolate the generation clause from transport-incarnation fencing: use the
+		// current transport and lease with only the previous production generation.
+		staleGeneration := current
+		staleGeneration.generation = old.generation
+		require.False(t, staleGeneration.current(), "previous generation remained current after reconnect")
+		before := reconnecting.geometrySnapshot()
+		require.False(t, d.handleAttachmentClientMessage(staleGeneration, protocol.Resize{Size: domain.Size{Cols: 140, Rows: 50}}))
+		require.False(t, d.handleAttachmentClientMessage(staleGeneration, protocol.CommandRequest{Version: protocol.Version, RequestID: 9, Attached: true, Slug: "next-tab"}))
+		require.Equal(t, before, reconnecting.geometrySnapshot())
+		select {
+		case <-oldFrames:
+			t.Fatal("stale generation emitted a frame")
+		default:
+		}
+		require.True(t, slices.Contains(sess.snapshotAttachments(), peer))
+	})
 }
 
 // TestMultiplexSingleStreamErrorIsolation proves one failed attachment is

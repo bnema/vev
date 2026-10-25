@@ -3,6 +3,7 @@ package daemon
 import (
 	"runtime"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -43,25 +44,27 @@ func TestResizeAndRetryCallbacksRejectSameObjectLeaseReplacement(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			clock := newCoordinatorMockClock(t, 1)
-			rc := newRenderCoordinator(renderCoordinatorOptions{clock: clock.clock})
-			ac := &attachedClient{}
-			rc.attach(ac)
-			lease := rc.attachmentLease(ac)
-			ran := false
-			tc.schedule(rc, ac, lease, func() { ran = true })
-			timer := awaitCoordinatorScheduledTimer(t, clock)
-			done := tc.done(t, rc)
-			require.NotNil(t, done)
+			synctest.Test(t, func(t *testing.T) {
+				clock := newCoordinatorMockClock(t, 1)
+				rc := newRenderCoordinator(renderCoordinatorOptions{clock: clock.clock})
+				ac := &attachedClient{}
+				rc.attach(ac)
+				lease := rc.attachmentLease(ac)
+				ran := false
+				tc.schedule(rc, ac, lease, func() { ran = true })
+				timer := awaitCoordinatorScheduledTimer(t, clock)
+				done := tc.done(t, rc)
+				require.NotNil(t, done)
 
-			rc.noteDetach(ac)
-			rc.attach(ac) // resume the exact same object under a new incarnation
-			timer.ch <- time.Time{}
-			awaitTestCompletion(t, done, "stale callback did not complete")
-			for range 32 {
-				runtime.Gosched()
-			}
-			require.False(t, ran, "stale %s callback ran after lease replacement", tc.name)
+				rc.noteDetach(ac)
+				rc.attach(ac) // resume the exact same object under a new incarnation
+				timer.ch <- time.Time{}
+				requireReceived(t, done, "stale callback did not complete")
+				for range 32 {
+					runtime.Gosched()
+				}
+				require.False(t, ran, "stale %s callback ran after lease replacement", tc.name)
+			})
 		})
 	}
 }

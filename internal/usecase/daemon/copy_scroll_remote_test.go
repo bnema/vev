@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
@@ -28,14 +29,16 @@ func TestCopyScrollOverDelayedAcks(t *testing.T) {
 		for _, window := range []uint8{1, protocol.MaxOutputWindow} {
 			for _, rtt := range rtts {
 				t.Run(fmt.Sprintf("%s/window%d/%v", scenario.name, window, rtt), func(t *testing.T) {
-					res := replayCopyScroll(t, scenario.upfront, scenario.perTick, window, rtt)
-					t.Logf("rows per tick (- = stall): %s", res.log)
-					if res.maxJump > copyScrollMaxStep {
-						t.Errorf("one frame jumped %d rows, want at most %d", res.maxJump, copyScrollMaxStep)
-					}
-					if res.scrolled != res.requested {
-						t.Fatalf("scrolled %d rows, want %d", res.scrolled, res.requested)
-					}
+					synctest.Test(t, func(t *testing.T) {
+						res := replayCopyScroll(t, scenario.upfront, scenario.perTick, window, rtt)
+						t.Logf("rows per tick (- = stall): %s", res.log)
+						if res.maxJump > copyScrollMaxStep {
+							t.Errorf("one frame jumped %d rows, want at most %d", res.maxJump, copyScrollMaxStep)
+						}
+						if res.scrolled != res.requested {
+							t.Fatalf("scrolled %d rows, want %d", res.scrolled, res.requested)
+						}
+					})
 				})
 			}
 		}
@@ -47,8 +50,9 @@ func TestCopyScrollOverDelayedAcks(t *testing.T) {
 // while the default window keeps it moving.
 func TestCopyScrollWindowBoundsStalls(t *testing.T) {
 	rtt := 100 * time.Millisecond
-	narrow := replayCopyScroll(t, 1, 1, 1, rtt)
-	wide := replayCopyScroll(t, 1, 1, protocol.MaxOutputWindow, rtt)
+	var narrow, wide copyScrollReplay
+	synctest.Test(t, func(t *testing.T) { narrow = replayCopyScroll(t, 1, 1, 1, rtt) })
+	synctest.Test(t, func(t *testing.T) { wide = replayCopyScroll(t, 1, 1, protocol.MaxOutputWindow, rtt) })
 	if wide.stalls >= narrow.stalls {
 		t.Fatalf("window %d stalled %d ticks, window 1 stalled %d: a wider window must stall less", protocol.MaxOutputWindow, wide.stalls, narrow.stalls)
 	}
@@ -116,26 +120,16 @@ func replayCopyScroll(t *testing.T, upfront, perTick int, window uint8, rtt time
 		}
 	}
 	frames := 0
-	awaitFrame := func() {
-		select {
-		case e := <-sent:
-			acks = append(acks, ack{at: tick + ticksPerRTT, epoch: e.epoch, seen: e.state})
-			frames++
-		case <-time.After(5 * time.Second):
-			t.Fatal("expected a scroll frame, none was emitted")
-		}
+	takeFrame := func() {
+		e := requireReceived(t, sent, "expected a scroll frame, none was emitted")
+		acks = append(acks, ack{at: tick + ticksPerRTT, epoch: e.epoch, seen: e.state})
+		frames++
 	}
-	awaitTimer := func() {
-		deadline := time.After(5 * time.Second)
-		for frameTimer == nil {
-			select {
-			case tm := <-clock.timers:
-				if tm.duration == copyScrollFrame {
-					frameTimer = tm
-				}
-			case <-deadline:
-				t.Fatal("held animation did not re-arm its frame timer")
-			}
+	takeTimer := func() {
+		synctest.Wait()
+		collectTimer()
+		if frameTimer == nil {
+			t.Fatal("held animation did not re-arm its frame timer")
 		}
 	}
 	fed := 0
@@ -145,8 +139,9 @@ func replayCopyScroll(t *testing.T, upfront, perTick int, window uint8, rtt time
 			f.d.smoothCopyWheel(f.sess, f.ac, -3)
 			fed++
 			if idle && !full {
-				awaitFrame()
+				takeFrame()
 			}
+			synctest.Wait()
 			collectTimer()
 		}
 	}
@@ -159,10 +154,11 @@ func replayCopyScroll(t *testing.T, upfront, perTick int, window uint8, rtt time
 		frameTimer = nil
 		timer.ch <- time.Time{}
 		if full {
-			awaitTimer()
+			takeTimer()
 			return
 		}
-		awaitFrame()
+		takeFrame()
+		synctest.Wait()
 		collectTimer()
 	}
 

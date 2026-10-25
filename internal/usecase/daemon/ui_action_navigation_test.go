@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"testing"
+	"testing/synctest"
 
 	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/protocol"
@@ -16,17 +17,19 @@ func TestUIActionNavigationUsesAdmittedCause(t *testing.T) {
 			protocol.RouteCreateSessionAction{CauseActionID: 999, RequestID: 1, SnapshotGeneration: 2, Key: 3, Generation: 4, SessionName: "new"},
 		} {
 			t.Run(testNavigationName(message, actionID), func(t *testing.T) {
-				_, sess, ac, sends := newManualSessionWithPTYs(t, nil)
-				effect, ok := ac.beginAttachmentEffect(captureAttachmentCapability(sess, ac, ac.transport()))
-				require.True(t, ok)
-				t.Cleanup(effect.End)
-				effect.uiActionID = actionID
-				require.NoError(t, effect.sendControl(message))
-				frame := awaitTestValue(t, sends, "navigation was not sent")
-				require.Equal(t, actionID, testNavigationCause(t, frame.Payload))
-				original, err := testServerEnvelope(message)
-				require.NoError(t, err)
-				require.Equal(t, uint64(999), testNavigationCause(t, original.Payload), "sending must not mutate reusable navigation templates")
+				synctest.Test(t, func(t *testing.T) {
+					_, sess, ac, sends := newManualSessionWithPTYs(t, nil)
+					effect, ok := ac.beginAttachmentEffect(captureAttachmentCapability(sess, ac, ac.transport()))
+					require.True(t, ok)
+					t.Cleanup(effect.End)
+					effect.uiActionID = actionID
+					require.NoError(t, effect.sendControl(message))
+					frame := requireReceived(t, sends, "navigation was not sent")
+					require.Equal(t, actionID, testNavigationCause(t, frame.Payload))
+					original, err := testServerEnvelope(message)
+					require.NoError(t, err)
+					require.Equal(t, uint64(999), testNavigationCause(t, original.Payload), "sending must not mutate reusable navigation templates")
+				})
 			})
 		}
 	}
@@ -65,20 +68,22 @@ func testNavigationCause(t *testing.T, payload []byte) uint64 {
 }
 
 func TestUIActionInputPaletteSubmissionCarriesItsOwnCause(t *testing.T) {
-	d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
-	rc := d.attachCoordinator(sess, nil, ac, true)
-	t.Cleanup(func() { rc.beginSessionTeardown().finish(); rc.waitForTimerWorkers() })
-	ac.setRouteSnapshot(protocol.RecentRouteSnapshot{
-		Generation: 9, Active: protocol.RouteRef{Key: 1, Generation: 1},
-		ActiveEntry: testRouteEntry(1, 1, sess.name, 1, protocol.RouteKindLocal),
-		Entries:     []protocol.RecentRouteEntry{{Key: 8, Generation: 4, Target: testRouteTarget("logs", 8), Name: "logs", HostLabel: "edge", Kind: protocol.RouteKindRemote}},
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
+		rc := d.attachCoordinator(sess, nil, ac, true)
+		t.Cleanup(func() { rc.beginSessionTeardown().finish(); rc.waitForTimerWorkers() })
+		ac.setRouteSnapshot(protocol.RecentRouteSnapshot{
+			Generation: 9, Active: protocol.RouteRef{Key: 1, Generation: 1},
+			ActiveEntry: testRouteEntry(1, 1, sess.name, 1, protocol.RouteKindLocal),
+			Entries:     []protocol.RecentRouteEntry{{Key: 8, Generation: 4, Target: testRouteTarget("logs", 8), Name: "logs", HostLabel: "edge", Kind: protocol.RouteKindRemote}},
+		})
+		for _, input := range []protocol.Input{
+			{ActionID: 40, Data: []byte("\x1b ")},
+			{ActionID: 41, Data: []byte("logs@edge\r")},
+		} {
+			require.False(t, d.handleAttachmentClientMessage(captureAttachmentCapability(sess, ac, ac.transport()), input))
+		}
+		frame := requireFrame(t, sends, "RouteNavigationAction")
+		require.Equal(t, uint64(41), testNavigationCause(t, frame.Payload), "submission owns navigation, not the earlier palette-opening action")
 	})
-	for _, input := range []protocol.Input{
-		{ActionID: 40, Data: []byte("\x1b ")},
-		{ActionID: 41, Data: []byte("logs@edge\r")},
-	} {
-		require.False(t, d.handleAttachmentClientMessage(captureAttachmentCapability(sess, ac, ac.transport()), input))
-	}
-	frame := awaitFrame(t, sends, "RouteNavigationAction")
-	require.Equal(t, uint64(41), testNavigationCause(t, frame.Payload), "submission owns navigation, not the earlier palette-opening action")
 }
