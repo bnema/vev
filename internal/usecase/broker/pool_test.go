@@ -65,7 +65,11 @@ func mockPhysical(t testing.TB, f *fakePhysical, options ...physicalOption) *por
 	if f.mock != nil {
 		return f.mock
 	}
-	m := portsmocks.NewMockBrokerPhysicalConnection(t)
+	// Connectors may build physicals on goroutines still settling at teardown.
+	// Every expectation is optional, so bind failures without a cleanup that
+	// could assert while registration is in progress.
+	m := &portsmocks.MockBrokerPhysicalConnection{}
+	m.Test(t)
 	f.mock = m
 	for _, option := range options {
 		option(m)

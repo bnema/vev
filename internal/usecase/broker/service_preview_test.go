@@ -38,14 +38,19 @@ type previewStep struct {
 
 func newPreviewWatchConn(t testing.TB, stream ports.BrokerStreamID) *previewWatchConn {
 	c := &previewWatchConn{stream: stream, sent: make(chan protocol.ClientMessage, 4), steps: make(chan previewStep, 8), done: make(chan struct{})}
-	c.typed = portsmocks.NewMockClientConnection(t)
+	// Streams may be opened by teardown goroutines after cleanup starts. Every
+	// expectation is optional, so bind failures without registering a cleanup
+	// that could race with construction.
+	c.typed = &portsmocks.MockClientConnection{}
+	c.typed.Test(t)
 	c.typed.EXPECT().SendClient(mock.Anything).RunAndReturn(c.sendClient).Maybe()
 	c.typed.EXPECT().ReceiveServer().RunAndReturn(c.receiveServer).Maybe()
 	c.typed.EXPECT().Capabilities().Return(protocol.ConnectionCapabilities{OutputDataLimit: protocol.MaxOutputDataLen}).Maybe()
 	c.typed.EXPECT().LinkState().Return(ports.LinkStateConnected).Maybe()
 	c.typed.EXPECT().LinkEvents().Return(nil).Maybe()
 	c.typed.EXPECT().Close().RunAndReturn(c.close).Maybe()
-	c.raw = portsmocks.NewMockBrokerEnvelopeStream(t)
+	c.raw = &portsmocks.MockBrokerEnvelopeStream{}
+	c.raw.Test(t)
 	c.raw.EXPECT().Done().Return((<-chan struct{})(c.done)).Maybe()
 	c.raw.EXPECT().Err().Return(nil).Maybe()
 	c.raw.EXPECT().Close().RunAndReturn(c.close).Maybe()

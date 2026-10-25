@@ -76,7 +76,7 @@ func receiveLocalCall(t *testing.T, probe *scriptedLocalProbe) localProbeCall {
 // without sleeping on the behavior under test.
 func requireNoLocalProbeWithin(t *testing.T, probe *scriptedLocalProbe, window time.Duration) {
 	t.Helper()
-	// Inside a synctest bubble, Sleep advances fake time only.
+	// Fake time: inside the synctest bubble, Sleep only advances the bubble clock.
 	time.Sleep(window)
 	synctest.Wait()
 	select {
