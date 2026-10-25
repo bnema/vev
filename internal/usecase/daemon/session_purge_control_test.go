@@ -13,7 +13,7 @@ import (
 
 func TestStoppedPurgeMetadataFailureFencesCatalogue(t *testing.T) {
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
-	repository := &retryablePurgeRepository{}
+	repository := newRetryablePurgeRepository(t, nil)
 	WithSnapshotRepository(repository)(d)
 	store, state := newMockStore(t)
 	WithStore(t, store)(d)

@@ -10,12 +10,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/domain/layout"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
 	snapcodec "github.com/bnema/vev/internal/snapshotcodec"
@@ -1096,7 +1098,7 @@ func newPerformanceFixtureWithCleanup(t testing.TB, config performanceConfig, re
 		liveWrites:  [][]byte{[]byte("\x1b[1;1HA\x1b[2;2HA"), []byte("\x1b[1;1HB\x1b[2;2HB")},
 		resizeSizes: [2]domain.Size{{Cols: 100, Rows: 30}, config.size},
 	}
-	WithSnapshotRepository(fixture.snapshots)(d)
+	WithSnapshotRepository(fixture.snapshots.mock(t))(d)
 	d.startSnapshotEncodeWorker()
 	if registerCleanup {
 		t.Cleanup(d.stopSnapshotEncodeWorker)
@@ -1422,12 +1424,21 @@ const snapshotHeadBytes = 4 + 8 + 32
 type countingSnapshotMetrics struct {
 	writes, objectBytes, historyBlobBytes, suppliedObjectBytes, suppliedHistoryBytes, manifestBytes, headBytes uint64
 }
+
+// countingSnapshotRepository counts published bytes. It is a plain recorder;
+// mock(t) wires its Publish into a generated snapshot repository.
 type countingSnapshotRepository struct {
-	noOpSnapshotRepository
 	mu sync.Mutex
 	countingSnapshotMetrics
 	objects map[string]map[ports.SnapshotDigest]struct{}
 	last    []byte
+}
+
+func (s *countingSnapshotRepository) mock(t testing.TB) *portsmocks.MockSnapshotRepository {
+	t.Helper()
+	return newSnapshotRepositoryMock(t, func(m *portsmocks.MockSnapshotRepository) {
+		m.EXPECT().Publish(mock.Anything, mock.Anything).RunAndReturn(s.Publish).Maybe()
+	})
 }
 
 // Publish models the bytes written by the filesystem repository: immutable

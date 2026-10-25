@@ -21,8 +21,10 @@ import (
 	recoveryusecase "github.com/bnema/vev/internal/usecase/recovery"
 )
 
+// snapshotAcceptanceRepository is the in-memory generation store behind
+// snapshotAcceptanceRepository.mock. It is a plain recorder and does not
+// implement ports.SnapshotRepository itself.
 type snapshotAcceptanceRepository struct {
-	noOpSnapshotRepository
 	mu          sync.Mutex
 	names       []string
 	generations map[string]ports.SnapshotGeneration
@@ -95,6 +97,17 @@ func (r *snapshotAcceptanceRepository) LoadCheckpoint(ctx context.Context, id do
 		return ports.SnapshotGeneration{}, errors.New("checkpoint unavailable")
 	}
 	return generation, nil
+}
+
+// mock returns a generated snapshot repository whose Publish and
+// LoadCheckpoint run against this store; everything else keeps the no-op
+// defaults.
+func (r *snapshotAcceptanceRepository) mock(t testing.TB) *portsmocks.MockSnapshotRepository {
+	t.Helper()
+	return newSnapshotRepositoryMock(t, func(m *portsmocks.MockSnapshotRepository) {
+		m.EXPECT().Publish(mock.Anything, mock.Anything).RunAndReturn(r.Publish).Maybe()
+		m.EXPECT().LoadCheckpoint(mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(r.LoadCheckpoint).Maybe()
+	})
 }
 
 func TestSnapshotAcceptanceRepositoryLoadMutationDoesNotChangeStoredGeneration(t *testing.T) {
@@ -218,10 +231,11 @@ func TestRestoreIncrementalGenerationAcceptance(t *testing.T) {
 	d.baseEnv = []string{"TERM=xterm-kitty", "COLORTERM=truecolor"}
 	checkpoint := domain.CheckpointRef{Generation: generation.Generation, ManifestDigest: snapcodec.ManifestDigest(generation.Manifest)}
 	record := domain.CatalogueRecord{Name: snapshot.Name, IncarnationID: generation.IncarnationID, Cwd: "/snapshot/cwd", CreatedAt: int64(snapshot.CreatedAt), Committed: &checkpoint}
-	catalogue := newDurableRecoveryCatalogue([]domain.CatalogueRecord{record})
+	catalogue := newRecoveryCatalogueOnly(t, []domain.CatalogueRecord{record})
+	repositoryMock := repository.mock(t)
 	WithCatalogue(catalogue, []domain.CatalogueRecord{record})(d)
-	WithSnapshotRepository(repository)(d)
-	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, repository, nil))(d)
+	WithSnapshotRepository(repositoryMock)(d)
+	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, repositoryMock, nil))(d)
 	t.Cleanup(func() { release(); d.sessWg.Wait() })
 
 	d.restoreIncrementalSnapshots(context.Background())
@@ -497,13 +511,14 @@ func TestRestoredSessionMetadataUpdatePreservesCheckpointLineage(t *testing.T) {
 		CreatedAt: int64(snapshot.CreatedAt), UpdatedAt: 81, LastUsedSeq: 17,
 		TabNames: []string{"before"}, Committed: &committed,
 	}
-	catalogue := newDurableRecoveryCatalogue([]domain.CatalogueRecord{record})
+	catalogue, catalogueState := newRecoveryCatalogueMock(t, []domain.CatalogueRecord{record})
+	repositoryMock := repository.mock(t)
 
 	pty, release := newBlockingPTY(t)
 	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
-	coordinator := recoveryusecase.NewCoordinator(catalogue, repository, nil)
+	coordinator := recoveryusecase.NewCoordinator(catalogue, repositoryMock, nil)
 	WithCatalogue(catalogue, []domain.CatalogueRecord{record})(d)
-	WithSnapshotRepository(repository)(d)
+	WithSnapshotRepository(repositoryMock)(d)
 	WithRecoveryCoordinator(coordinator)(d)
 	t.Cleanup(func() { release(); d.sessWg.Wait() })
 
@@ -514,7 +529,7 @@ func TestRestoredSessionMetadataUpdatePreservesCheckpointLineage(t *testing.T) {
 	require.NotNil(t, restored)
 	require.NoError(t, d.renameTab(restored, restored.tabs[0], "after"))
 
-	updates := catalogue.MetadataUpdates()
+	updates := catalogueState.MetadataUpdates()
 	require.Len(t, updates, 1, "the authoritative Catalogue port must receive restored-session metadata updates")
 	require.Equal(t, record.IncarnationID, updates[0].IncarnationID)
 	updated, ok, err := catalogue.Record(record.Name)

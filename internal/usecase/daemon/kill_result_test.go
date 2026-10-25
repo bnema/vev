@@ -113,7 +113,7 @@ func TestHandleKillAllReportsBoundedStructuredPartialFailures(t *testing.T) {
 	const total = purgeSummaryFailureLimit + 3
 
 	fail := make(map[domain.IncarnationID]error, total)
-	repository := newSelectivePurgeRepository(fail)
+	repository := newSelectivePurgeRepository(t, fail)
 	d := newTestDaemon(t, nil, newStubClock(t))
 	WithSnapshotRepository(repository)(d)
 	store, _ := newMockStore(t)
@@ -243,7 +243,7 @@ func TestHandleKillAllSupersededByDaemonShutdownSendsOneUnknownOutcome(t *testin
 // result that cannot be delivered is logged (never silently closing as
 // success) and still carries the bounded structured failures.
 func TestKillAllUndeliverableResultIsLogged(t *testing.T) {
-	repository := newSelectivePurgeRepository(map[domain.IncarnationID]error{{2}: errors.New("delete failed")})
+	repository := newSelectivePurgeRepository(t, map[domain.IncarnationID]error{{2}: errors.New("delete failed")})
 	d := newTestDaemon(t, nil, newStubClock(t))
 	var logged syncedLogBuffer
 	d.log = slog.New(slog.NewTextHandler(&logged, nil))

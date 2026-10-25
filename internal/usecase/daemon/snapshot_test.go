@@ -18,7 +18,7 @@ import (
 
 // TestWithSnapshotRepositoryRejectsTypedNil verifies typed nil repositories are disabled.
 func TestWithSnapshotRepositoryRejectsTypedNil(t *testing.T) {
-	var repository *snapshotAcceptanceRepository
+	var repository *portsmocks.MockSnapshotRepository
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
 
 	WithSnapshotRepository(repository)(d)
@@ -95,29 +95,6 @@ func newSnapshotTestSession(t *testing.T, name string, ephemeral bool, cwd strin
 	}
 	sess.snapEligible.Store(!ephemeral && name != "")
 	return sess
-}
-
-// noOpSnapshotRepository supplies the current durable repository contract to
-// focused test sinks that only need to observe publication or deletion calls.
-type noOpSnapshotRepository struct{}
-
-var _ ports.SnapshotRepository = noOpSnapshotRepository{}
-
-func (noOpSnapshotRepository) Publish(context.Context, ports.SnapshotPublication) error { return nil }
-func (noOpSnapshotRepository) LoadCheckpoint(context.Context, domain.IncarnationID, string, ports.CheckpointRef) (ports.SnapshotGeneration, error) {
-	return ports.SnapshotGeneration{}, errors.New("unused")
-}
-func (noOpSnapshotRepository) ReconcileCheckpoint(context.Context, domain.IncarnationID, ports.CheckpointRef) error {
-	return nil
-}
-func (noOpSnapshotRepository) DeleteIncarnation(context.Context, domain.IncarnationID) error {
-	return nil
-}
-func (noOpSnapshotRepository) SnapshotIncarnations(context.Context) ([]domain.IncarnationID, error) {
-	return nil, nil
-}
-func (noOpSnapshotRepository) CollectIncarnationGarbage(context.Context, domain.IncarnationID, *domain.CheckpointRef) error {
-	return nil
 }
 
 func awaitSnapshotIdle(t testing.TB, sess *session) {

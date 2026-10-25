@@ -6,10 +6,12 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	recoveryusecase "github.com/bnema/vev/internal/usecase/recovery"
 )
 
@@ -63,8 +65,10 @@ func (c *movePersistenceCatalogue) UpdateMetadata(update domain.CatalogueMetadat
 func (c *movePersistenceCatalogue) Sync() error  { return nil }
 func (c *movePersistenceCatalogue) Close() error { return nil }
 
+// movePersistenceRepository records the lock state observed by Publish and
+// DeleteIncarnation. It is a plain recorder; mock(t) wires it into a generated
+// snapshot repository.
 type movePersistenceRepository struct {
-	noOpSnapshotRepository
 	mu           sync.Mutex
 	events       []string
 	publish      error
@@ -74,6 +78,14 @@ type movePersistenceRepository struct {
 	moved        *tab
 	pane         *pane
 	outsideLocks bool
+}
+
+func (r *movePersistenceRepository) mock(t testing.TB) *portsmocks.MockSnapshotRepository {
+	t.Helper()
+	return newSnapshotRepositoryMock(t, func(m *portsmocks.MockSnapshotRepository) {
+		m.EXPECT().Publish(mock.Anything, mock.Anything).RunAndReturn(r.Publish).Maybe()
+		m.EXPECT().DeleteIncarnation(mock.Anything, mock.Anything).RunAndReturn(r.DeleteIncarnation).Maybe()
+	})
 }
 
 func (r *movePersistenceRepository) Publish(context.Context, ports.SnapshotPublication) error {
@@ -207,9 +219,10 @@ func TestMoveTabPersistenceMatrix(t *testing.T) {
 				catalogue.records[destination.name] = domain.CatalogueRecord{Name: destination.name, IncarnationID: destination.incarnation}
 			}
 			repository := &movePersistenceRepository{}
+			repositoryMock := repository.mock(t)
 			WithCatalogue(catalogue, nil)(d)
-			WithSnapshotRepository(repository)(d)
-			WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, repository, nil))(d)
+			WithSnapshotRepository(repositoryMock)(d)
+			WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, repositoryMock, nil))(d)
 
 			require.NoError(t, d.moveTab(moveTabRequest{
 				Source: moveSessionLocator{ID: source.id, Incarnation: source.incarnation}, SourceTabID: domain.TabStableID(moved.stableID),
@@ -257,7 +270,7 @@ func TestMoveSnapshotPublicationFailureReportsWithoutRollback(t *testing.T) {
 		publish: errors.New("injected publication failure"),
 		daemon:  d, source: source, destination: destination, moved: moved, pane: moved.focusedPane(),
 	}
-	WithSnapshotRepository(repository)(d)
+	WithSnapshotRepository(repository.mock(t))(d)
 	startSnapshotEncodeWorker(t, d)
 
 	require.NoError(t, d.moveTab(moveTabRequest{

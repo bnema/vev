@@ -7,10 +7,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	renderer "github.com/bnema/vev-vt/ansi"
 	"github.com/bnema/vev/internal/domain"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	recoveryusecase "github.com/bnema/vev/internal/usecase/recovery"
 )
 
@@ -382,8 +384,9 @@ func (c *moveTabPurgeCatalogue) UpdateMetadata(update domain.CatalogueMetadataUp
 func (c *moveTabPurgeCatalogue) Sync() error  { return nil }
 func (c *moveTabPurgeCatalogue) Close() error { return nil }
 
+// moveTabPurgeRepository records the lock state observed by DeleteIncarnation.
+// It is a plain recorder; mock(t) wires it into a generated snapshot repository.
 type moveTabPurgeRepository struct {
-	noOpSnapshotRepository
 	d           *Daemon
 	source      *session
 	destination *session
@@ -395,6 +398,13 @@ type moveTabPurgeRepository struct {
 	deleted     []domain.IncarnationID
 	outside     bool
 	dirty       bool
+}
+
+func (r *moveTabPurgeRepository) mock(t testing.TB) *portsmocks.MockSnapshotRepository {
+	t.Helper()
+	return newSnapshotRepositoryMock(t, func(m *portsmocks.MockSnapshotRepository) {
+		m.EXPECT().DeleteIncarnation(mock.Anything, mock.Anything).RunAndReturn(r.DeleteIncarnation).Maybe()
+	})
 }
 
 func (r *moveTabPurgeRepository) DeleteIncarnation(_ context.Context, id domain.IncarnationID) error {
@@ -471,8 +481,9 @@ func TestMoveTabFinalNamedSourcePurgesAfterDestinationAdmissionAndFailureDoesNot
 		catalogue: catalogue, err: failure,
 	}
 	WithCatalogue(catalogue, nil)(d)
-	WithSnapshotRepository(repository)(d)
-	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, repository, nil))(d)
+	repositoryMock := repository.mock(t)
+	WithSnapshotRepository(repositoryMock)(d)
+	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, repositoryMock, nil))(d)
 
 	require.NoError(t, d.moveTab(moveTabRequest{
 		Source: moveSessionLocator{ID: source.id, Incarnation: source.incarnation}, SourceTabID: domain.TabStableID(moved.stableID),

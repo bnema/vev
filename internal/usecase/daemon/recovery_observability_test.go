@@ -8,8 +8,10 @@ import (
 	"log/slog"
 	"testing"
 
-	"github.com/bnema/vev/internal/domain"
 	"github.com/stretchr/testify/require"
+
+	"github.com/bnema/vev/internal/domain"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 )
 
 func TestStartupRecoveryCounts(t *testing.T) {
@@ -22,7 +24,7 @@ func TestStartupRecoveryCounts(t *testing.T) {
 		{Name: "new", IncarnationID: domain.IncarnationID{3}},
 		{Name: "broken", IncarnationID: domain.IncarnationID{4}, Committed: ref, DegradedReason: "terminal contents must not appear"},
 	}
-	d := New(nil, newStubClock(t), log, WithCatalogue(newDurableRecoveryCatalogue(records), records))
+	d := New(nil, newStubClock(t), log, WithCatalogue(newRecoveryCatalogueOnly(t, records), records))
 	d.logSessionRestoreComplete(records[0], 7, false)
 	d.logSessionDegraded(records[3], "checkpoint-invalid")
 	d.logStartupRecoveryCounts(0)
@@ -42,21 +44,15 @@ func TestStartupRecoveryCounts(t *testing.T) {
 	require.EqualValues(t, 1, startup["broken"])
 }
 
-type failingRecordsCatalogue struct {
-	*durableRecoveryCatalogue
-	err error
-}
-
-func (c failingRecordsCatalogue) Records() ([]domain.CatalogueRecord, error) {
-	return nil, c.err
-}
-
 func TestStartupRecoveryCountsFallsBackWhenCatalogueReadFails(t *testing.T) {
 	var buffer bytes.Buffer
 	record := domain.CatalogueRecord{Name: "broken", IncarnationID: domain.IncarnationID{4}, Committed: &domain.CheckpointRef{Generation: 1, ManifestDigest: [32]byte{1}}, DegradedReason: "invalid"}
 	d := New(nil, newStubClock(t), slog.New(slog.NewJSONHandler(&buffer, nil)))
 	d.persistEnabled = true
-	d.catalogue = failingRecordsCatalogue{durableRecoveryCatalogue: newDurableRecoveryCatalogue(nil), err: errors.New("read failed")}
+	failing, _ := newRecoveryCatalogueMock(t, nil, func(m *portsmocks.MockCatalogue, _ *recoveryCatalogueState) {
+		m.EXPECT().Records().Return(nil, errors.New("read failed")).Maybe()
+	})
+	d.catalogue = failing
 	d.inactive[record.Name] = inactiveSession{record: record}
 
 	d.logStartupRecoveryCounts(0)
