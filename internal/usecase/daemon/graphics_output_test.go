@@ -2,13 +2,14 @@ package daemon
 
 import (
 	"bytes"
-	"io"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 
 	vt "github.com/bnema/vev-vt"
 	"github.com/bnema/vev-vt/graphics"
@@ -17,7 +18,6 @@ import (
 	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
-	"github.com/stretchr/testify/require"
 )
 
 func attachmentOutputWithGraphics(state *graphicsOutputState) *attachmentOutput {
@@ -50,34 +50,29 @@ func recordIndex(data []byte, record string) int {
 	return bytes.Index(data, []byte(record))
 }
 
-type lateGraphicsCleanupTransport struct {
-	started     chan struct{}
-	release     chan struct{}
-	finished    chan struct{}
-	sends       chan wire.Envelope
-	startedOnce sync.Once
-	finishOnce  sync.Once
+// lateGraphicsCleanup holds one cleanup send open until released, then
+// delivers the stale frame, so a test can prove a late success is not a
+// terminal ACK.
+type lateGraphicsCleanup struct {
+	*sendGate
+	sends    chan wire.Envelope
+	finished chan struct{}
 }
 
-func newLateGraphicsCleanupTransport() *lateGraphicsCleanupTransport {
-	return &lateGraphicsCleanupTransport{
-		started:  make(chan struct{}),
-		release:  make(chan struct{}),
-		finished: make(chan struct{}),
-		sends:    make(chan wire.Envelope, 1),
-	}
+func newLateGraphicsCleanupConnection(t testing.TB) (*mockServerConnection, *lateGraphicsCleanup) {
+	t.Helper()
+	late := &lateGraphicsCleanup{sendGate: newSendGate(), sends: make(chan wire.Envelope, 1), finished: make(chan struct{})}
+	var finishOnce sync.Once
+	conn, _ := newTrackedConnection(t, withSendFunc(func(frame wire.Envelope, log *connLog) error {
+		late.enter()
+		late.wait()
+		log.record(frame)
+		late.sends <- frame
+		finishOnce.Do(func() { close(late.finished) })
+		return nil
+	}))
+	return conn, late
 }
-
-func (t *lateGraphicsCleanupTransport) Send(frame wire.Envelope) error {
-	t.startedOnce.Do(func() { close(t.started) })
-	<-t.release
-	t.sends <- frame
-	t.finishOnce.Do(func() { close(t.finished) })
-	return nil
-}
-
-func (*lateGraphicsCleanupTransport) Recv() (wire.Envelope, error) { return wire.Envelope{}, io.EOF }
-func (*lateGraphicsCleanupTransport) Close() error                 { return nil }
 
 func TestGraphicsOutputReplaysStaticKittenIcatFixture(t *testing.T) {
 	state := newGraphicsOutputState()
@@ -174,7 +169,7 @@ func TestFreshCapabilityDowngradePreservesForeignTerminalGraphics(t *testing.T) 
 }
 
 func TestReplacementKittyTerminalGetsFreshGraphicsState(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	sess := &session{sessionCore: sessionCore{id: "work"}}
 	ac := &attachedClient{clientID: [16]byte{1}, output: newOutputStateStream()}
 
@@ -385,7 +380,7 @@ func TestGraphicsOutputExhaustionResetsInsideItsNamespace(t *testing.T) {
 }
 
 func TestGraphicsNamespaceQuarantinesOnParkExpiryAndFailedCleanup(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	base := graphicsIDNamespaceSize + 1
 	block := (base - 1) / graphicsIDNamespaceSize
 
@@ -411,7 +406,7 @@ func TestGraphicsNamespaceQuarantinesOnParkExpiryAndFailedCleanup(t *testing.T) 
 	require.NoError(t, err)
 	seed.commit()
 	failed := &attachedClient{
-		tr:     failingOutputTransport{},
+		tr:     newFailingConnection(t),
 		output: attachmentOutputWithGraphics(failedState),
 	}
 	d.mu.Lock()
@@ -426,7 +421,7 @@ func TestGraphicsNamespaceQuarantinesOnParkExpiryAndFailedCleanup(t *testing.T) 
 }
 
 func TestGraphicsNamespaceStaysQuarantinedAfterSocketSendSuccessWithoutTerminalFlush(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	key := "session:unflushed:attachment"
 	d.mu.Lock()
 	oldBase, oldFence := d.reserveGraphicsNamespaceLeaseLocked(key)
@@ -441,11 +436,11 @@ func TestGraphicsNamespaceStaysQuarantinedAfterSocketSendSuccessWithoutTerminalF
 	// This transport models only successful delivery to the client socket. It
 	// deliberately provides no evidence that the client flushed the side effect
 	// to its outer terminal before being lost.
-	transport := &closeTrackingTransport{}
+	transport, transportLog := newTrackedConnection(t)
 	ac := &attachedClient{tr: transport, output: attachmentOutputWithGraphics(state)}
 	require.NoError(t, d.cleanupAttachmentOutput(ac))
 	require.Nil(t, ac.output.graphicsOutput)
-	sends := transport.Sends()
+	sends := transportLog.Sends()
 	require.Len(t, sends, 1)
 	cleanup := unmarshalTestOutput(t, sends[0].Payload)
 	require.Zero(t, cleanup.New, "graphics cleanup is an unacknowledged side-effect frame")
@@ -459,7 +454,7 @@ func TestGraphicsNamespaceStaysQuarantinedAfterSocketSendSuccessWithoutTerminalF
 }
 
 func TestGraphicsNamespaceStaysQuarantinedAfterFinalDeleteAndParkExpiry(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	key := "session:empty-park:attachment"
 	d.mu.Lock()
 	oldBase, oldFence := d.reserveGraphicsNamespaceLeaseLocked(key)
@@ -497,14 +492,14 @@ func TestGraphicsNamespaceStaysQuarantinedAfterFinalDeleteAndParkExpiry(t *testi
 }
 
 func TestGraphicsNamespacePoolExhaustionFallsBackToText(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	d.mu.Lock()
 	for block := uint64(0); block < graphicsIDNamespaceCount; block++ {
 		d.graphics.reserved[block] = struct{}{}
 	}
 	ac := d.prepareAttachedClientLocked(
 		&session{sessionCore: sessionCore{id: "work"}},
-		&closeTrackingTransport{},
+		newQuietConnection(t),
 		domain.Geometry{Size: defaultSize},
 		attachClientOptions{
 			capabilitiesSet:      true,
@@ -519,7 +514,7 @@ func TestGraphicsNamespacePoolExhaustionFallsBackToText(t *testing.T) {
 }
 
 func TestGraphicsNamespaceQuarantineFencesTimedOutLateDelete(t *testing.T) {
-	clock := &signalClock{timers: make(chan *signalTimer, 1)}
+	clock, clockTimers := newSignalClock(t, 1)
 	d := newTestDaemon(t, nil, clock)
 	key := "session:stale:attachment"
 	d.mu.Lock()
@@ -536,15 +531,15 @@ func TestGraphicsNamespaceQuarantineFencesTimedOutLateDelete(t *testing.T) {
 	}
 	require.NotZero(t, oldID)
 
-	transport := newLateGraphicsCleanupTransport()
+	transport, late := newLateGraphicsCleanupConnection(t)
 	ac := &attachedClient{tr: transport, output: attachmentOutputWithGraphics(oldState)}
 	cleanupDone := make(chan struct{})
 	go func() {
 		_ = d.cleanupAttachmentOutput(ac)
 		close(cleanupDone)
 	}()
-	awaitTestCompletion(t, transport.started, "timed-out cleanup did not reach the stale transport")
-	timer := awaitTestValue(t, clock.timers, "cleanup watchdog timer was not armed")
+	awaitTestCompletion(t, late.entered, "timed-out cleanup did not reach the stale transport")
+	timer := awaitTestValue(t, clockTimers, "cleanup watchdog timer was not armed")
 	timer.ch <- time.Time{}
 	awaitTestCompletion(t, cleanupDone, "timed-out cleanup did not retire the attachment")
 
@@ -566,9 +561,9 @@ func TestGraphicsNamespaceQuarantineFencesTimedOutLateDelete(t *testing.T) {
 	require.NotZero(t, newID)
 	require.NotEqual(t, oldID, newID, "fresh attachment IDs must not share the quarantined block")
 
-	close(transport.release)
-	staleFrame := awaitTestValue(t, transport.sends, "late stale cleanup did not execute")
-	awaitTestCompletion(t, transport.finished, "late stale cleanup did not return")
+	late.open()
+	staleFrame := awaitTestValue(t, late.sends, "late stale cleanup did not execute")
+	awaitTestCompletion(t, late.finished, "late stale cleanup did not return")
 	staleOutput := unmarshalTestOutput(t, staleFrame.Payload)
 	require.Contains(t, string(staleOutput.Data), "i="+strconv.FormatUint(oldID, 10))
 	require.NotContains(t, string(staleOutput.Data), "i="+strconv.FormatUint(newID, 10), "late cleanup must never target the fresh attachment")

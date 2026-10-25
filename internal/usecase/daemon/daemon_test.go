@@ -24,48 +24,51 @@ import (
 
 // --- test doubles -----------------------------------------------------------
 
-// stubClock returns timers whose channel never fires, so a scheduler under it
-// blocks in its debounce loop until the session context is cancelled. Used by
-// every test that is not specifically exercising the debounce. Now reports a
-// fixed non-zero instant so recorded timestamps are deterministic and set.
-type stubClock struct{}
-
-func (stubClock) Now() time.Time                     { return time.Unix(1_700_000_000, 0) }
-func (stubClock) NewTimer(time.Duration) ports.Timer { return stubTimer{} }
-
-type stubTimer struct{}
-
-func (stubTimer) C() <-chan time.Time      { return nil }
-func (stubTimer) Reset(time.Duration) bool { return false }
-func (stubTimer) Stop() bool               { return true }
-
-type signalClock struct {
-	called chan struct{}
-	timers chan *signalTimer
-	once   sync.Once
+// newStubClock fixes timestamps and disables timer delivery.
+func newStubClock(t testing.TB) *portsmocks.MockClock {
+	t.Helper()
+	c := portsmocks.NewMockClock(t)
+	c.EXPECT().Now().Return(time.Unix(1_700_000_000, 0)).Maybe()
+	timer := newStubTimer(t)
+	c.EXPECT().NewTimer(mock.Anything).Return(timer).Maybe()
+	return c
 }
 
-func (c *signalClock) Now() time.Time { return time.Time{} }
-func (c *signalClock) NewTimer(d time.Duration) ports.Timer {
-	if c.called != nil {
-		c.once.Do(func() { close(c.called) })
-	}
-	if c.timers == nil {
-		return stubTimer{}
-	}
-	t := &signalTimer{ch: make(chan time.Time, 1), duration: d}
-	c.timers <- t
-	return t
+func newStubTimer(t testing.TB) *portsmocks.MockTimer {
+	t.Helper()
+	timer := portsmocks.NewMockTimer(t)
+	timer.EXPECT().C().Return(nil).Maybe()
+	timer.EXPECT().Reset(mock.Anything).Return(false).Maybe()
+	timer.EXPECT().Stop().Return(true).Maybe()
+	return timer
 }
 
-type signalTimer struct {
+func newSignalClock(t testing.TB, buffer int) (*portsmocks.MockClock, <-chan *testTimer) {
+	t.Helper()
+	timers := make(chan *testTimer, buffer)
+	c := portsmocks.NewMockClock(t)
+	c.EXPECT().Now().Return(time.Time{}).Maybe()
+	c.EXPECT().NewTimer(mock.Anything).RunAndReturn(func(d time.Duration) ports.Timer {
+		timer := &portsmocks.MockTimer{}
+		timer.Test(t)
+		tt := &testTimer{MockTimer: timer, ch: make(chan time.Time, 1), duration: d}
+		timer.EXPECT().C().Return((<-chan time.Time)(tt.ch)).Maybe()
+		timer.EXPECT().Reset(mock.Anything).Return(false).Maybe()
+		timer.EXPECT().Stop().Return(true).Maybe()
+		t.Cleanup(func() { timer.AssertExpectations(t) })
+		timers <- tt
+		return timer
+	}).Maybe()
+	return c, timers
+}
+
+type testTimer struct {
+	*portsmocks.MockTimer
 	ch       chan time.Time
 	duration time.Duration
 }
 
-func (t *signalTimer) C() <-chan time.Time      { return t.ch }
-func (t *signalTimer) Reset(time.Duration) bool { return false }
-func (t *signalTimer) Stop() bool               { return true }
+func (tt *testTimer) fire() { tt.ch <- time.Time{} }
 
 func newTestDaemon(t testing.TB, ptys ports.PTYFactory, clk ports.Clock) *Daemon {
 	t.Helper()
@@ -146,46 +149,36 @@ func newBlockingPTYWithFailingWrite(t *testing.T, writeErr error) (*portsmocks.M
 	return p, unblock
 }
 
-// quietPTY is an independently closable PTY for background floating prewarms.
-// It intentionally has no testify expectations: tests using the factories below
-// are asserting their regular panes, not incidental asynchronous prewarms.
-type quietPTY struct{ done chan struct{} }
-
-func newQuietPTY() *quietPTY                  { return &quietPTY{done: make(chan struct{})} }
-func (p *quietPTY) Read([]byte) (int, error)  { <-p.done; return 0, io.EOF }
-func (*quietPTY) Write(b []byte) (int, error) { return len(b), nil }
-func (p *quietPTY) Close() error {
-	select {
-	case <-p.done:
-	default:
-		close(p.done)
-	}
-	return nil
-}
-func (*quietPTY) Resize(domain.Geometry) error { return nil }
-func (*quietPTY) Pid() int                     { return 0 }
-func (*quietPTY) ForegroundPgid() (int, error) { return 0, nil }
-
-// blockingOpenFactory keeps activation tests deterministically in Warming
-// without starting pane reader/scheduler goroutines.
-type blockingOpenFactory struct {
-	release chan struct{}
-	once    sync.Once
-}
-
-func newBlockingOpenFactory(t *testing.T, d *Daemon) *blockingOpenFactory {
+// newQuietPTY provides an independently closable PTY for background prewarms.
+func newQuietPTY(t testing.TB) *portsmocks.MockPTY {
 	t.Helper()
-	f := &blockingOpenFactory{release: make(chan struct{})}
-	t.Cleanup(func() {
-		f.once.Do(func() { close(f.release) })
-		d.sessWg.Wait()
-	})
-	return f
+	// Open may run during cleanup. Publish the cleanup assertion only after
+	// every optional expectation is configured.
+	p := &portsmocks.MockPTY{}
+	p.Test(t)
+	done := make(chan struct{})
+	var once sync.Once
+	p.EXPECT().Read(mock.Anything).RunAndReturn(func([]byte) (int, error) { <-done; return 0, io.EOF }).Maybe()
+	p.EXPECT().Write(mock.Anything).RunAndReturn(func(b []byte) (int, error) { return len(b), nil }).Maybe()
+	p.EXPECT().Close().RunAndReturn(func() error { once.Do(func() { close(done) }); return nil }).Maybe()
+	p.EXPECT().Resize(mock.Anything).Return(nil).Maybe()
+	p.EXPECT().Pid().Return(0).Maybe()
+	p.EXPECT().ForegroundPgid().Return(0, nil).Maybe()
+	t.Cleanup(func() { p.AssertExpectations(t) })
+	return p
 }
 
-func (f *blockingOpenFactory) Open(_ context.Context, _ string, _ []string, _ []string, _ string, _ domain.Geometry) (ports.PTY, error) {
-	<-f.release
-	return nil, io.ErrClosedPipe
+// newBlockingOpenFactory keeps activation tests deterministically in Warming.
+func newBlockingOpenFactory(t *testing.T, d *Daemon) *portsmocks.MockPTYFactory {
+	t.Helper()
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release); d.sessWg.Wait() })
+	factory := portsmocks.NewMockPTYFactory(t)
+	factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(func(context.Context, string, []string, []string, string, domain.Geometry) (ports.PTY, error) {
+		<-release
+		return nil, io.ErrClosedPipe
+	}).Maybe()
+	return factory
 }
 
 // newFactory keeps the supplied fixture for normal panes. Floating prewarms
@@ -203,7 +196,7 @@ func newFactory(t *testing.T, p ports.PTY) *portsmocks.MockPTYFactory {
 			if geometry.Size == normal {
 				return p, nil
 			}
-			return newQuietPTY(), nil
+			return newQuietPTY(t), nil
 		},
 	).Maybe()
 	return f
@@ -223,10 +216,10 @@ func newFactorySeq(t *testing.T, ptys ...ports.PTY) *portsmocks.MockPTYFactory {
 				normal = geometry.Size
 			}
 			if geometry.Size != normal {
-				return newQuietPTY(), nil
+				return newQuietPTY(t), nil
 			}
 			if next >= len(ptys) {
-				return newQuietPTY(), nil
+				return newQuietPTY(t), nil
 			}
 			p := ptys[next]
 			next++
@@ -393,7 +386,7 @@ func newCapturingTransport(t testing.TB) (*mockServerConnection, chan wire.Envel
 
 func newManualSessionWithPTYs(t testing.TB, ptys ...ports.PTY) (*Daemon, *session, *attachedClient, chan wire.Envelope) {
 	t.Helper()
-	return newManualSessionWithPTYsClock(t, stubClock{}, ptys...)
+	return newManualSessionWithPTYsClock(t, newStubClock(t), ptys...)
 }
 
 func newManualSessionWithPTYsClock(t testing.TB, clock ports.Clock, ptys ...ports.PTY) (*Daemon, *session, *attachedClient, chan wire.Envelope) {
@@ -403,7 +396,7 @@ func newManualSessionWithPTYsClock(t testing.TB, clock ports.Clock, ptys ...port
 
 func newManualSessionWithPTYsCleanup(t testing.TB, registerCleanup bool, ptys ...ports.PTY) (*Daemon, *session, *attachedClient, chan wire.Envelope) {
 	t.Helper()
-	return newManualSessionWithPTYsClockCleanup(t, stubClock{}, registerCleanup, ptys...)
+	return newManualSessionWithPTYsClockCleanup(t, newStubClock(t), registerCleanup, ptys...)
 }
 
 func newTestLifecycle(t testing.TB) domain.SessionLifecycleID {
@@ -613,9 +606,9 @@ func TestRouteRejectsInvalidTerminalSizeBeforeResumeMutation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			pty, release := newBlockingPTY(t)
 			defer release()
-			d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+			d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 
-			transport := &closeTrackingTransport{}
+			transport := newQuietConnection(t)
 			sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), transport)
 			require.NoError(t, err)
 			token := ac.resumeToken
@@ -628,7 +621,7 @@ func TestRouteRejectsInvalidTerminalSizeBeforeResumeMutation(t *testing.T) {
 
 			invalid := helloResumeCapable(protocol.IntentResume, "work", token)
 			invalid.Size = tt.size
-			_, _, err = d.route(invalid, &closeTrackingTransport{})
+			_, _, err = d.route(invalid, newQuietConnection(t))
 			var protocolErr *protoErr
 			require.ErrorAs(t, err, &protocolErr)
 			require.Equal(t, protocol.ErrInternal, protocolErr.code)
@@ -673,7 +666,11 @@ func (notifyClock) Now() time.Time { return time.Now() }
 func (notifyClock) NewTimer(d time.Duration) ports.Timer {
 	switch d {
 	case debounceInterval:
-		return stubTimer{}
+		timer := &portsmocks.MockTimer{}
+		timer.EXPECT().C().Return(nil).Maybe()
+		timer.EXPECT().Reset(mock.Anything).Return(false).Maybe()
+		timer.EXPECT().Stop().Return(true).Maybe()
+		return timer
 	case detachNotifyTimeout:
 		return realTimer{t: time.NewTimer(5 * time.Millisecond)}
 	default:

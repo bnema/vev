@@ -32,7 +32,7 @@ var (
 // colorClient is one attachment plus the output frames its transport received.
 type colorClient struct {
 	ac   *attachedClient
-	tr   *closeTrackingTransport
+	tr   *connLog
 	seen int
 }
 
@@ -91,13 +91,13 @@ func attachColorClients(t *testing.T, modes []terminalcap.ColorCapabilities) (*D
 	t.Helper()
 	pty, release := newBlockingPTY(t)
 	t.Cleanup(release)
-	d := newTestDaemon(t, newFactorySeq(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactorySeq(t, pty), newStubClock(t))
 	var (
 		sess    *session
 		clients []*colorClient
 	)
 	for i, color := range modes {
-		tr := &closeTrackingTransport{}
+		tr, trLog := newTrackedConnection(t)
 		intent := protocol.IntentAttach
 		if i == 0 {
 			intent = protocol.IntentNew
@@ -109,7 +109,7 @@ func attachColorClients(t *testing.T, modes []terminalcap.ColorCapabilities) (*D
 		}
 		require.Same(t, sess, s)
 		require.Equal(t, color.Mode, ac.terminalCapabilities.Color.Mode)
-		clients = append(clients, &colorClient{ac: ac, tr: tr})
+		clients = append(clients, &colorClient{ac: ac, tr: trLog})
 	}
 	return d, sess, clients
 }
@@ -222,14 +222,14 @@ func TestResumeAdoptsColorOfLatestHello(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			pty, release := newBlockingPTY(t)
 			defer release()
-			d := newTestDaemon(t, newFactorySeq(t, pty), stubClock{})
-			oldTr := &closeTrackingTransport{}
+			d := newTestDaemon(t, newFactorySeq(t, pty), newStubClock(t))
+			oldTr, oldTrLog := newTrackedConnection(t)
 			sess, ac, err := d.route(colorHello(protocol.IntentNew, "work", 1, 0, tt.from), oldTr)
 			require.NoError(t, err)
 			for _, w := range paneColorWrites {
 				sess.tabs[0].focusedPane().screen.Write([]byte(w))
 			}
-			before := &colorClient{ac: ac, tr: oldTr}
+			before := &colorClient{ac: ac, tr: oldTrLog}
 			d.paint(sess, ac, true, nil)
 			_, data := before.newOutput(t)
 			requireProfile(t, tt.from.Mode, data)
@@ -238,14 +238,14 @@ func TestResumeAdoptsColorOfLatestHello(t *testing.T) {
 			if !tt.liveResume {
 				d.clientGone(sess, ac, oldTr, false)
 			}
-			newTr := &closeTrackingTransport{}
+			newTr, newTrLog := newTrackedConnection(t)
 			resumedSess, resumed, err := d.route(colorHello(protocol.IntentResume, "work", 1, token, tt.to), newTr)
 			require.NoError(t, err)
 			require.Same(t, sess, resumedSess)
 			require.Same(t, ac, resumed)
 			require.Equal(t, tt.to, resumed.terminalCapabilities.Color)
 
-			after := &colorClient{ac: resumed, tr: newTr}
+			after := &colorClient{ac: resumed, tr: newTrLog}
 			d.paint(resumedSess, resumed, true, nil)
 			outs, data := after.newOutput(t)
 			require.NotEmpty(t, outs)

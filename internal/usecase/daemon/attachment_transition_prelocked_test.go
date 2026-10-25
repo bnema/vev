@@ -11,13 +11,13 @@ import (
 func TestValidateAttachmentTransitionPrelockedLeavesMembershipUntouchedOnFailure(t *testing.T) {
 	t.Parallel()
 
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	source := &session{sessionCore: sessionCore{id: domain.SessionID("source")}}
 	target := &session{sessionCore: sessionCore{id: domain.SessionID("target")}}
-	next := &attachedClient{tr: &closeTrackingTransport{}}
+	next := &attachedClient{tr: newQuietConnection(t)}
 	next.setSession(source)
 	source.registerAttachmentLocked(next)
-	old := &attachedClient{tr: &closeTrackingTransport{}}
+	old := &attachedClient{tr: newQuietConnection(t)}
 	old.setSession(target)
 	target.registerAttachment(old)
 	d.sessions[source.id] = source

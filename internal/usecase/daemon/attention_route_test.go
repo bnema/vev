@@ -58,7 +58,7 @@ func TestOldestRouteAttention(t *testing.T) {
 // navigation request on the attachment.
 func TestJumpAttentionDelegatesOtherDaemonsToTheClient(t *testing.T) {
 	d, source, ac, _ := newManualSessionWithPTYs(t, nil)
-	transport := &closeTrackingTransport{}
+	transport, transportLog := newTrackedConnection(t)
 	ac.replaceTransport(transport)
 	rc := d.attachCoordinator(source, nil, ac, true)
 	token := source.captureAttachmentCapability(ac, transport)
@@ -75,7 +75,7 @@ func TestJumpAttentionDelegatesOtherDaemonsToTheClient(t *testing.T) {
 	require.NoError(t, d.jumpAttentionForAttachment(source, ac, effect))
 
 	var actions []protocol.RouteNavigationAction
-	for _, frame := range transport.Sends() {
+	for _, frame := range transportLog.Sends() {
 		if action, ok := decodeServerMessage(t, frame).(protocol.RouteNavigationAction); ok {
 			actions = append(actions, action)
 		}

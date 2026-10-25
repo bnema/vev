@@ -1,78 +1,26 @@
 package daemon
 
 import (
-	"errors"
-	"io"
 	"strings"
-	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 
 	vt "github.com/bnema/vev-vt"
 	renderer "github.com/bnema/vev-vt/ansi"
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
-	"github.com/stretchr/testify/require"
 )
-
-type datagramTestTransport struct {
-	sends chan wire.Envelope
-	recv  chan wire.Envelope
-	once  sync.Once
-}
-
-type failingOutputTransport struct{}
-
-func (failingOutputTransport) Send(wire.Envelope) error     { return errors.New("send failed") }
-func (failingOutputTransport) Recv() (wire.Envelope, error) { return wire.Envelope{}, io.EOF }
-func (failingOutputTransport) Close() error                 { return nil }
-
-type asyncPaintTransport struct {
-	syncSends  chan wire.Envelope
-	asyncSends chan wire.Envelope
-}
-
-func (t *asyncPaintTransport) Send(f wire.Envelope) error      { t.syncSends <- f; return nil }
-func (t *asyncPaintTransport) SendAsync(f wire.Envelope) error { t.asyncSends <- f; return nil }
-func (t *asyncPaintTransport) Recv() (wire.Envelope, error)    { return wire.Envelope{}, io.EOF }
-func (t *asyncPaintTransport) Close() error                    { return nil }
-
-type timedSideEffectTransport struct {
-	closeTrackingTransport
-}
-
-func (t *timedSideEffectTransport) SendSynchronous(f wire.Envelope) error {
-	return t.Send(f)
-}
-
-type noWatchdogClock struct{}
-
-func (noWatchdogClock) Now() time.Time { return time.Time{} }
-func (noWatchdogClock) NewTimer(time.Duration) ports.Timer {
-	panic("owned synchronous send must not install daemon watchdog")
-}
-
-func newDatagramTestTransport() *datagramTestTransport {
-	return &datagramTestTransport{sends: make(chan wire.Envelope, 64), recv: make(chan wire.Envelope, 64)}
-}
-
-func (t *datagramTestTransport) Send(f wire.Envelope) error { t.sends <- f; return nil }
-func (t *datagramTestTransport) Recv() (wire.Envelope, error) {
-	f, ok := <-t.recv
-	if !ok {
-		return wire.Envelope{}, io.EOF
-	}
-	return f, nil
-}
-func (t *datagramTestTransport) Close() error { t.once.Do(func() { close(t.recv) }); return nil }
 
 func TestDatagramAttachPipelinesRendererBeforeAck(t *testing.T) {
 	p, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
 	d, sess, _, _ := newManualSessionWithPTYs(t, p)
-	tr := newDatagramTestTransport()
+	tr, trSends, trRecv := newChannelConnection(t)
 	routed, ac, err := d.route(protocol.Hello{
 		Version:           protocol.Version,
 		Intent:            protocol.IntentAttach,
@@ -91,40 +39,40 @@ func TestDatagramAttachPipelinesRendererBeforeAck(t *testing.T) {
 
 	sess.tabs[0].focusedPane().screen.Write([]byte("A"))
 	d.paint(sess, ac, false, nil)
-	first := awaitFrame(t, tr.sends, "Output")
+	first := awaitFrame(t, trSends, "Output")
 	out := unmarshalTestOutput(t, first.Payload)
 	require.Equal(t, uint64(1), out.New)
 
 	sess.tabs[0].focusedPane().screen.Write([]byte("\rB"))
 	d.paint(sess, ac, false, nil)
-	updated := awaitFrame(t, tr.sends, "Output")
+	updated := awaitFrame(t, trSends, "Output")
 	out = unmarshalTestOutput(t, updated.Payload)
 	require.Equal(t, uint64(2), out.New)
 	// Both states were emitted before the Ack; the ordered dependency chain
 	// must therefore remain valid without waiting for renderer acknowledgement.
-	tr.recv <- mustClientEnvelope(protocol.Ack{Epoch: out.Epoch, State: out.New})
+	trRecv <- mustClientEnvelope(protocol.Ack{Epoch: out.Epoch, State: out.New})
 	require.NoError(t, tr.Close())
 	d.runConnLoop(ac)
 
 	// The production Ack path retires retained states without moving the
 	// renderer baseline backward.
 	d.paint(sess, ac, false, nil)
-	require.Empty(t, tr.sends)
+	require.Empty(t, trSends)
 }
 
 func TestPaintExplicitlyUsesAsyncTransportCapability(t *testing.T) {
 	p, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
-	tr := &asyncPaintTransport{syncSends: make(chan wire.Envelope, 1), asyncSends: make(chan wire.Envelope, 1)}
+	tr, frames := newCapabilityConnection(t, asyncCapabilities())
 	ac.replaceTransport(tr)
 	sess.tabs[0].focusedPane().screen.Write([]byte("A"))
 
 	d.paint(sess, ac, false, nil)
 
-	awaitFrame(t, tr.asyncSends, "Output")
+	awaitFrame(t, frames.async, "Output")
 	select {
-	case frame := <-tr.syncSends:
+	case frame := <-frames.sends:
 		t.Fatalf("paint used synchronous Send: %+v", envelopeMessageName(t, frame.Payload))
 	default:
 	}
@@ -134,7 +82,7 @@ func TestDatagramMultipleUnackedScrollPaintsMatchLatestFrame(t *testing.T) {
 	p, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
 	d, sess, _, _ := newManualSessionWithPTYs(t, p)
-	tr := newDatagramTestTransport()
+	tr, trSends, _ := newChannelConnection(t)
 	_, ac, err := d.route(protocol.Hello{
 		Version:           protocol.Version,
 		Intent:            protocol.IntentAttach,
@@ -154,7 +102,7 @@ func TestDatagramMultipleUnackedScrollPaintsMatchLatestFrame(t *testing.T) {
 	pane.screen.ClearDamage()
 	client := vt.NewScreen(80, 25)
 	d.paint(sess, ac, true, nil)
-	first := mustApplyOutput(t, client, awaitFrame(t, tr.sends, "Output"))
+	first := mustApplyOutput(t, client, awaitFrame(t, trSends, "Output"))
 	ac.ackOutputState(first.Epoch, first.New)
 
 	// Preserve the frame after one scroll while inducing a real VT scroll
@@ -174,7 +122,7 @@ func TestDatagramMultipleUnackedScrollPaintsMatchLatestFrame(t *testing.T) {
 		pane.screen.Write([]byte("\nq"))
 		writeTestFrame(t, pane.screen, desired)
 		d.paint(sess, ac, false, nil)
-		mustApplyOutput(t, client, awaitFrame(t, tr.sends, "Output"))
+		mustApplyOutput(t, client, awaitFrame(t, trSends, "Output"))
 	}
 
 	require.Equal(t, 'B', client.Cell(0, 1).Rune,
@@ -239,15 +187,15 @@ func TestLocalOutputAckDoesNotMoveRendererShadowBackward(t *testing.T) {
 }
 
 func TestRawTerminalSideEffectDoesNotEnterFullOutputWindow(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
-	tr := &closeTrackingTransport{}
+	d := newTestDaemon(t, nil, newStubClock(t))
+	tr, trLog := newTrackedConnection(t)
 	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.output.next = maxUnackedOutputStates
 
 	require.NoError(t, d.boundedSendOutputErr(ac, []byte("\x1b]52;c;YQ==\x07")))
 	require.Equal(t, uint64(maxUnackedOutputStates), ac.output.next)
 	require.Equal(t, uint64(maxUnackedOutputStates), ac.output.outstanding())
-	sends := tr.Sends()
+	sends := trLog.Sends()
 	require.Len(t, sends, 1)
 	out := unmarshalTestOutput(t, sends[0].Payload)
 	require.Zero(t, out.Base)
@@ -255,19 +203,29 @@ func TestRawTerminalSideEffectDoesNotEnterFullOutputWindow(t *testing.T) {
 }
 
 func TestOwnedSynchronousSideEffectSkipsOuterWatchdog(t *testing.T) {
-	d := newTestDaemon(t, nil, noWatchdogClock{})
-	tr := &timedSideEffectTransport{}
+	// An unexpected NewTimer call fails the mock: no daemon watchdog may be armed.
+	clock := portsmocks.NewMockClock(t)
+	clock.EXPECT().Now().Return(time.Time{}).Maybe()
+	d := newTestDaemon(t, nil, clock)
+	var sent []wire.Envelope
+	tr := portsmocks.NewMockServerConnection(t)
+	tr.EXPECT().Capabilities().Return(protocol.ConnectionCapabilities{OutputDataLimit: protocol.MaxOutputDataLen, PreferredOutputWindow: protocol.MaxOutputWindow, OwnedSynchronousSend: true}).Maybe()
+	tr.EXPECT().SendOutputSynchronous(mock.Anything).RunAndReturn(func(output protocol.Output) error {
+		envelope, err := testServerEnvelope(output)
+		sent = append(sent, envelope)
+		return err
+	}).Maybe()
 	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 
 	require.NoError(t, d.boundedSendOutputErr(ac, make([]byte, 100*1024)))
-	require.Len(t, tr.Sends(), 1)
+	require.Len(t, sent, 1)
 }
 
 func TestFailedPaintSendRollsBackOutputState(t *testing.T) {
 	p, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
-	ac.replaceTransport(failingOutputTransport{})
+	ac.replaceTransport(newFailingConnection(t))
 	sess.tabs[0].focusedPane().screen.Write([]byte("A"))
 
 	d.paint(sess, ac, false, nil)
@@ -310,10 +268,10 @@ func TestResizeGrowthFirstFrameIncludesConcurrentPTYRedraw(t *testing.T) {
 
 			// The resize deadline drives coordinator prepare/apply/commit. No test
 			// writes the grown columns directly.
-			clock := &signalClock{timers: make(chan *signalTimer, 2)}
+			clock, clockTimers := newSignalClock(t, 2)
 			d.clock = clock
 			d.resize(sess, ac, domain.Size{Cols: 120, Rows: 24})
-			timer := <-clock.timers
+			timer := <-clockTimers
 			done := captureResizeCallbackDone(t, sess.renderCoordinator())
 			timer.ch <- time.Time{}
 			awaitTestCompletion(t, done, "resize callback did not complete")
@@ -337,13 +295,13 @@ func TestResizeWithoutPTYOutputFlushesOneFullFrameAtDeadline(t *testing.T) {
 	p, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	clk := &signalClock{timers: make(chan *signalTimer, 1)}
+	clk, clkTimers := newSignalClock(t, 1)
 	d.clock = clk
 
 	d.resize(sess, ac, domain.Size{Cols: 120, Rows: 24})
-	var timer *signalTimer
+	var timer *testTimer
 	select {
-	case timer = <-clk.timers:
+	case timer = <-clkTimers:
 	case <-time.After(time.Second):
 		t.Fatal("resize did not schedule a bounded paint")
 	}
@@ -366,21 +324,21 @@ func TestResizeBurstFlushesOnlyLatestGeometry(t *testing.T) {
 	p, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	clk := &signalClock{timers: make(chan *signalTimer, 2)}
+	clk, clkTimers := newSignalClock(t, 2)
 	d.clock = clk
 
 	d.resize(sess, ac, domain.Size{Cols: 100, Rows: 24})
-	var first *signalTimer
+	var first *testTimer
 	select {
-	case first = <-clk.timers:
+	case first = <-clkTimers:
 	case <-time.After(time.Second):
 		t.Fatal("first resize did not schedule a bounded paint")
 	}
 	firstDone := captureResizeCallbackDone(t, sess.renderCoordinator())
 	d.resize(sess, ac, domain.Size{Cols: 120, Rows: 24})
-	var latest *signalTimer
+	var latest *testTimer
 	select {
-	case latest = <-clk.timers:
+	case latest = <-clkTimers:
 	case <-time.After(time.Second):
 		t.Fatal("latest resize did not replace the bounded paint")
 	}

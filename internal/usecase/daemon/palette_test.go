@@ -162,7 +162,7 @@ func TestCaptureOverlayLayersPreservesPaletteDescriptionSurfaceAcrossFallbacks(t
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d := newTestDaemon(t, nil, stubClock{})
+			d := newTestDaemon(t, nil, newStubClock(t))
 			d.ApplyConfig(tt.config)
 			applied := d.resolveAppliedTheme(tt.raw, terminalcap.ColorCapabilities{})
 			model := palette.New(palette.CommandResults([]command.Command{
@@ -502,11 +502,11 @@ func TestPaletteJRSUsesEffectiveOverrideOnly(t *testing.T) {
 }
 
 func TestPaletteQualifiesDaemonSessionForRemoteAttachment(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
-	current := addControlSession(d, "current", "tab-current", "pane-current")
+	d := newTestDaemon(t, nil, newStubClock(t))
+	current := addControlSession(t, d, "current", "tab-current", "pane-current")
 	current.ephemeral = false
 	current.incarnation = domain.SessionLifecycleID{41}
-	target := addControlSession(d, "target", "tab-target", "pane-target")
+	target := addControlSession(t, d, "target", "tab-target", "pane-target")
 	target.ephemeral = false
 	target.incarnation = domain.SessionLifecycleID{42}
 
@@ -538,11 +538,11 @@ func TestPaletteQualifiesDaemonSessionForRemoteAttachment(t *testing.T) {
 }
 
 func TestPaletteResultsDeduplicateByLifecycleAndKeepEqualLabels(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
-	current := addControlSession(d, "hi", "tab-1", "pane-1")
+	d := newTestDaemon(t, nil, newStubClock(t))
+	current := addControlSession(t, d, "hi", "tab-1", "pane-1")
 	current.ephemeral = false
 	current.incarnation = domain.SessionLifecycleID{1}
-	local := addControlSession(d, "vev", "tab-2", "pane-2")
+	local := addControlSession(t, d, "vev", "tab-2", "pane-2")
 	local.ephemeral = false
 	local.incarnation = domain.SessionLifecycleID{2}
 	remoteOne := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{21}, SessionName: "vev"}
@@ -905,7 +905,7 @@ func TestPaletteReopensWithSuccessfulCommandFirst(t *testing.T) {
 }
 
 func TestPaletteCodeOverridesRejectAPIOnlyCommands(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 
 	overrides, warnings := d.buildCodeOverrides(map[string]string{
 		"new-tab": "TAB",
@@ -918,7 +918,7 @@ func TestPaletteCodeOverridesRejectAPIOnlyCommands(t *testing.T) {
 }
 
 func TestCommandByEffectiveCodeExcludesAPIOnlyCommands(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	overrides := map[string]string{
 		"new-tab": "TAB",
 		"toast":   "API",

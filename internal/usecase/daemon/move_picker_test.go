@@ -14,7 +14,7 @@ import (
 
 func setupMovePickerSessions(t *testing.T, extraDestinationTabs int) (*Daemon, *session, *attachedClient, *session, *tab, []func()) {
 	t.Helper()
-	return setupMovePickerSessionsWithClock(t, stubClock{}, extraDestinationTabs)
+	return setupMovePickerSessionsWithClock(t, newStubClock(t), extraDestinationTabs)
 }
 
 func setupMovePickerSessionsWithClock(t *testing.T, clock ports.Clock, extraDestinationTabs int) (*Daemon, *session, *attachedClient, *session, *tab, []func()) {
@@ -390,10 +390,10 @@ func TestMovePickerCompositeFollow(t *testing.T) {
 				source.tabs = append(source.tabs, newTabWithStableID("remaining", "remaining-pane", pty, movedTab.size))
 				publishTiledPaneOwners(source, source.tabs[1])
 			}
-			peer := &attachedClient{tr: &closeTrackingTransport{}, output: newOutputStateStream(), geometry: domain.Geometry{Size: ac.geometry.Size}}
+			peer := &attachedClient{tr: newQuietConnection(t), output: newOutputStateStream(), geometry: domain.Geometry{Size: ac.geometry.Size}}
 			peer.setSession(source)
 			source.registerAttachment(peer)
-			destinationPeer := &attachedClient{tr: &closeTrackingTransport{}, output: newOutputStateStream(), geometry: domain.Geometry{Size: ac.geometry.Size}}
+			destinationPeer := &attachedClient{tr: newQuietConnection(t), output: newOutputStateStream(), geometry: domain.Geometry{Size: ac.geometry.Size}}
 			destinationPeer.setSession(destination)
 			destination.registerAttachment(destinationPeer)
 			destination.selectAttachmentTabLocked(destinationPeer, domain.TabStableID(destinationTab.stableID))
@@ -452,7 +452,7 @@ func TestMovePickerCompositeFollow(t *testing.T) {
 // fresh effect on the published destination capability and reports the
 // correlated PickerResult the ui-driver action waits for.
 func TestMovePickerCompositeFollowReportsCorrelatedResult(t *testing.T) {
-	d, source, ac, destination, _, releases, sends := setupMovePickerSessionsCore(t, stubClock{}, 0)
+	d, source, ac, destination, _, releases, sends := setupMovePickerSessionsCore(t, newStubClock(t), 0)
 	defer releaseAll(releases)
 	old := captureAttachmentCapability(source, ac, ac.transport())
 	locator := moveSourceForSession(source, ac, "source-tab", "")
@@ -484,7 +484,7 @@ func TestMovePickerCompositeFollowReportsCorrelatedResult(t *testing.T) {
 // exactly once, instead of only logging while the ui-driver action runs to its
 // deadline.
 func TestMovePickerCompositeFollowCompletionReadmitsSupersededCapability(t *testing.T) {
-	d, source, ac, destination, _, releases, sends := setupMovePickerSessionsCore(t, stubClock{}, 0)
+	d, source, ac, destination, _, releases, sends := setupMovePickerSessionsCore(t, newStubClock(t), 0)
 	defer releaseAll(releases)
 	base, ok := ac.transport().(*mockServerConnection)
 	require.True(t, ok, "fixture transport is not the capturing mock")
@@ -553,7 +553,7 @@ func supersedeAttachmentCapabilityForTest(published attachmentCapability, base *
 // attachment's current capability. Aborting instead would leave the post-close
 // drain and the ui-driver action pending forever.
 func TestMovePickerCompositeFollowReadmitsSupersededCapabilityBeforeIdentity(t *testing.T) {
-	d, source, ac, destination, _, releases, sends := setupMovePickerSessionsCore(t, stubClock{}, 0)
+	d, source, ac, destination, _, releases, sends := setupMovePickerSessionsCore(t, newStubClock(t), 0)
 	defer releaseAll(releases)
 	base, ok := ac.transport().(*mockServerConnection)
 	require.True(t, ok, "fixture transport is not the capturing mock")
@@ -646,7 +646,7 @@ func assertNoFurtherFrame(t *testing.T, sends <-chan wire.Envelope, frameName st
 // delivers bounded feedback and a repaint through the attachment's current
 // capability so the client's post-close drain can release the terminal.
 func TestMovePickerClosedRejectionUsesFreshEffect(t *testing.T) {
-	d, source, ac, destination, destinationTab, releases, sends := setupMovePickerSessionsCore(t, stubClock{}, 0)
+	d, source, ac, destination, destinationTab, releases, sends := setupMovePickerSessionsCore(t, newStubClock(t), 0)
 	defer releaseAll(releases)
 	old := captureAttachmentCapability(source, ac, ac.transport())
 	locator := moveSourceForSession(source, ac, "source-tab", "")

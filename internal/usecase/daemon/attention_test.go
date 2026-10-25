@@ -589,7 +589,7 @@ func TestAttentionAnimatorParksAdvancesAndResets(t *testing.T) {
 }
 
 func TestPokeAttentionTickerIsNonBlockingCapOne(t *testing.T) {
-	d := New(nil, stubClock{}, nil)
+	d := New(nil, newStubClock(t), nil)
 	require.Equal(t, 1, cap(d.animWake))
 	d.pokeAttentionTicker()
 	d.pokeAttentionTicker()

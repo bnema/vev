@@ -1,26 +1,18 @@
 package daemon
 
 import (
-	"errors"
-	"io"
 	"maps"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/domain/layout"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/internal/usecase/ui"
-	"github.com/stretchr/testify/require"
 )
-
-type cacheFailTransport struct{}
-
-func (cacheFailTransport) Send(wire.Envelope) error     { return errors.New("send failed") }
-func (cacheFailTransport) Recv() (wire.Envelope, error) { return wire.Envelope{}, io.EOF }
-func (cacheFailTransport) Close() error                 { return nil }
 
 func TestPipelineCachePublishesOnlyAfterEmission(t *testing.T) {
 	for _, failure := range []struct {
@@ -36,7 +28,7 @@ func TestPipelineCachePublishesOnlyAfterEmission(t *testing.T) {
 		},
 		{
 			name:  "send",
-			apply: func(_ *composedRenderFrame, ac *attachedClient) { ac.replaceTransport(cacheFailTransport{}) },
+			apply: func(_ *composedRenderFrame, ac *attachedClient) { ac.replaceTransport(newFailingConnection(t)) },
 		},
 	} {
 		t.Run(failure.name, func(t *testing.T) {

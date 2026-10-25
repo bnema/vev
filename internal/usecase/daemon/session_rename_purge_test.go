@@ -68,7 +68,7 @@ func TestEphemeralPromotionPreservesIncarnation(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
 	store, state := newMockStore(t)
-	d := newTestDaemon(t, newFactory(t, p), stubClock{})
+	d := newTestDaemon(t, newFactory(t, p), newStubClock(t))
 	WithStore(t, store)(d)
 
 	sess, err := createSessionForTest(d, "0", true, "/tmp", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, d.baseEnv)
@@ -84,8 +84,8 @@ func TestEphemeralPromotionPreservesIncarnation(t *testing.T) {
 }
 
 func TestRenamePreservesIncarnationSnapshotSources(t *testing.T) {
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
-	repository := &retryablePurgeRepository{}
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
+	repository := newRetryablePurgeRepository(t, nil)
 	WithSnapshotRepository(repository)(d)
 	store, state := newMockStore(t)
 	WithStore(t, store)(d)

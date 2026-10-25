@@ -151,7 +151,7 @@ func TestStoppedNamedSessionResumePublishesNextCheckpointInSameDaemon(t *testing
 	firstPTY, releaseFirst := newBlockingPTY(t)
 	resumedPTY, releaseResumed := newBlockingPTY(t)
 	repository := newSnapshotLifecycleRepository(t)
-	d := newTestDaemon(t, newFactorySeq(t, keeperPTY, firstPTY, resumedPTY), stubClock{})
+	d := newTestDaemon(t, newFactorySeq(t, keeperPTY, firstPTY, resumedPTY), newStubClock(t))
 	WithSnapshotRepository(repository)(d)
 	store, _ := newMockStore(t)
 	WithStore(t, store)(d)
@@ -164,9 +164,9 @@ func TestStoppedNamedSessionResumePublishesNextCheckpointInSameDaemon(t *testing
 		d.sessWg.Wait()
 	})
 
-	_, _, err := d.route(snapshotLifecycleHello(protocol.IntentEphemeral, ""), &closeTrackingTransport{})
+	_, _, err := d.route(snapshotLifecycleHello(protocol.IntentEphemeral, ""), newQuietConnection(t))
 	require.NoError(t, err, "keeper session setup failed")
-	sess, _, err := d.route(snapshotLifecycleHello(protocol.IntentNew, "work"), &closeTrackingTransport{})
+	sess, _, err := d.route(snapshotLifecycleHello(protocol.IntentNew, "work"), newQuietConnection(t))
 	require.NoError(t, err)
 
 	testAttachmentTab(sess).focusedPane().screen.Write([]byte("first checkpoint"))
@@ -188,7 +188,7 @@ func TestStoppedNamedSessionResumePublishesNextCheckpointInSameDaemon(t *testing
 	require.Equal(t, firstRecord.Committed.Generation+1, closedRecord.Committed.Generation,
 		"terminal checkpoint must be authoritative before same-daemon resume")
 
-	resumed, _, err := d.route(snapshotLifecycleHello(protocol.IntentAttach, sess.name), &closeTrackingTransport{})
+	resumed, _, err := d.route(snapshotLifecycleHello(protocol.IntentAttach, sess.name), newQuietConnection(t))
 	require.NoError(t, err)
 	require.NotSame(t, sess, resumed, "stopped-session attach must create a new live runtime")
 	require.Equal(t, sess.incarnation, resumed.incarnation, "resume must retain durable incarnation authority")

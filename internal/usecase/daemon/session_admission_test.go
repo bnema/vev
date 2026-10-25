@@ -7,26 +7,23 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 )
 
-// admittedTransport wraps a typed server connection and stamps the provisioned
-// admission an accepting side would have resolved from its binding. It
-// implements the optional ports.SessionAdmissionProvider seam the daemon asserts
-// structurally, returning a defensive copy exactly as a real accepted
-// connection does. present=false models a legacy connection that carries no
-// provisioned admission at all.
-type admittedTransport struct {
-	ports.ServerConnection
-	admission ports.SessionAdmission
-	present   bool
-}
-
-func (t *admittedTransport) SessionAdmission() (ports.SessionAdmission, bool) {
-	if !t.present {
-		return ports.SessionAdmission{}, false
-	}
-	return t.admission.Clone(), true
+// newAdmittedConnection stamps the provisioned admission an accepting side
+// would have resolved from its binding onto a tracked connection. The daemon
+// asserts the optional ports.SessionAdmissionProvider seam structurally, and
+// the provider mock returns a defensive copy exactly as a real accepted
+// connection does. A legacy connection that carries no provisioned admission
+// at all is a plain newQuietConnection.
+func newAdmittedConnection(t testing.TB, admission ports.SessionAdmission) *admittedConnection {
+	t.Helper()
+	provider := portsmocks.NewMockSessionAdmissionProvider(t)
+	provider.EXPECT().SessionAdmission().RunAndReturn(func() (ports.SessionAdmission, bool) {
+		return admission.Clone(), true
+	}).Maybe()
+	return &admittedConnection{mockServerConnection: newQuietConnection(t), provider: provider}
 }
 
 // admissionTestPolicy builds one valid exact policy whose environment-policy
@@ -356,7 +353,7 @@ func TestSessionHelloAdmissionIsDefensiveCopy(t *testing.T) {
 		Purpose: ports.BrokerStreamAttachment, Admission: ports.BrokerAdmissionCreateNamed,
 		Name: "work", Env: []string{"TERM=xterm-256color"},
 	}
-	tr := &admittedTransport{ServerConnection: &closeTrackingTransport{}, admission: stored, present: true}
+	tr := newAdmittedConnection(t, stored)
 
 	first, ok := sessionHelloAdmission(tr)
 	require.True(t, ok)
@@ -370,7 +367,7 @@ func TestSessionHelloAdmissionIsDefensiveCopy(t *testing.T) {
 	require.Equal(t, "work", second.Name)
 	require.Equal(t, "same-user", second.Policy.Trust)
 
-	legacy, ok := sessionHelloAdmission(&closeTrackingTransport{})
+	legacy, ok := sessionHelloAdmission(newQuietConnection(t))
 	require.False(t, ok)
 	require.Equal(t, ports.SessionAdmission{}, legacy, "a legacy connection carries no admission")
 }
@@ -417,8 +414,8 @@ func TestRouteRejectsSessionAdmissionContradictionsBeforeMutation(t *testing.T) 
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d := newTestDaemon(t, newFactory(t, newQuietPTY()), stubClock{})
-			tr := &admittedTransport{ServerConnection: &closeTrackingTransport{}, admission: tt.admission, present: true}
+			d := newTestDaemon(t, newFactory(t, newQuietPTY(t)), newStubClock(t))
+			tr := newAdmittedConnection(t, tt.admission)
 			_, _, err := d.route(tt.hello, tr)
 			var protocolErr *protoErr
 			require.ErrorAs(t, err, &protocolErr)
@@ -443,13 +440,13 @@ func TestRouteRemoteEphemeralCreateRequiresAdmissionProof(t *testing.T) {
 		Purpose: ports.BrokerStreamAttachment, Admission: ports.BrokerAdmissionCreateEphemeral,
 	}
 
-	proven := newTestDaemon(t, newFactory(t, newQuietPTY()), stubClock{})
+	proven := newTestDaemon(t, newFactory(t, newQuietPTY(t)), newStubClock(t))
 	proven.baseEnv = remotePoison
 	proven.dirOrHome = func(cwd string) string {
 		require.Empty(t, cwd, "a remote creation must not resolve a client working directory")
 		return "/daemon/home"
 	}
-	sess, ac, err := proven.route(hello, &admittedTransport{ServerConnection: &closeTrackingTransport{}, admission: admission, present: true})
+	sess, ac, err := proven.route(hello, newAdmittedConnection(t, admission))
 	require.NoError(t, err)
 	require.NotNil(t, ac)
 	sess.mu.Lock()
@@ -460,8 +457,8 @@ func TestRouteRemoteEphemeralCreateRequiresAdmissionProof(t *testing.T) {
 
 	// The same Hello without a provisioned admission is the legacy shape and
 	// must stay refused rather than inherit the remote create exception.
-	unproven := newTestDaemon(t, newFactory(t, newQuietPTY()), stubClock{})
-	legacyTr := &admittedTransport{ServerConnection: &closeTrackingTransport{}, present: false}
+	unproven := newTestDaemon(t, newFactory(t, newQuietPTY(t)), newStubClock(t))
+	legacyTr := newQuietConnection(t)
 	_, _, err = unproven.route(hello, legacyTr)
 	var protocolErr *protoErr
 	require.ErrorAs(t, err, &protocolErr)
@@ -483,13 +480,13 @@ func TestRouteRemoteNamedCreateUsesDaemonEnvironment(t *testing.T) {
 		Purpose: ports.BrokerStreamAttachment, Admission: ports.BrokerAdmissionCreateNamed, Name: "work",
 	}
 
-	d := newTestDaemon(t, newFactory(t, newQuietPTY()), stubClock{})
+	d := newTestDaemon(t, newFactory(t, newQuietPTY(t)), newStubClock(t))
 	d.baseEnv = remotePoison
 	d.dirOrHome = func(cwd string) string {
 		require.Empty(t, cwd, "a remote creation must not resolve a client working directory")
 		return "/daemon/home"
 	}
-	sess, ac, err := d.route(hello, &admittedTransport{ServerConnection: &closeTrackingTransport{}, admission: admission, present: true})
+	sess, ac, err := d.route(hello, newAdmittedConnection(t, admission))
 	require.NoError(t, err)
 	require.NotNil(t, ac)
 	sess.mu.Lock()
@@ -538,9 +535,9 @@ func TestRouteLocalCreateUsesAdmittedClientEnvironment(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			d := newTestDaemon(t, newFactory(t, newQuietPTY()), stubClock{})
+			d := newTestDaemon(t, newFactory(t, newQuietPTY(t)), newStubClock(t))
 			d.baseEnv = daemonPoison
-			tr := &admittedTransport{ServerConnection: &closeTrackingTransport{}, admission: tt.admission, present: true}
+			tr := newAdmittedConnection(t, tt.admission)
 			sess, ac, err := d.route(tt.hello, tr)
 			require.NoError(t, err)
 			require.NotNil(t, ac)
@@ -560,7 +557,7 @@ func TestRouteLocalAttachUpdatesOnlyFutureChildEnvironment(t *testing.T) {
 	firstEnv := []string{"MARK=first", "WAYLAND_DISPLAY=wayland-old"}
 	pty, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactorySeq(t, pty, newQuietPTY()), stubClock{})
+	d := newTestDaemon(t, newFactorySeq(t, pty, newQuietPTY(t)), newStubClock(t))
 
 	create := protocol.Hello{
 		Version: protocol.Version, Intent: protocol.IntentNew, Name: "work", Size: defaultSize,
@@ -570,7 +567,7 @@ func TestRouteLocalAttachUpdatesOnlyFutureChildEnvironment(t *testing.T) {
 		Origin: ports.SessionOriginLocal, Policy: admissionTestPolicy(ports.SessionOriginLocal),
 		Purpose: ports.BrokerStreamAttachment, Admission: ports.BrokerAdmissionCreateNamed, Name: "work", Env: firstEnv,
 	}
-	sess, _, err := d.route(create, &admittedTransport{ServerConnection: &closeTrackingTransport{}, admission: createAdmission, present: true})
+	sess, _, err := d.route(create, newAdmittedConnection(t, createAdmission))
 	require.NoError(t, err)
 	sess.mu.Lock()
 	require.Equal(t, firstEnv, sess.env)
@@ -590,7 +587,7 @@ func TestRouteLocalAttachUpdatesOnlyFutureChildEnvironment(t *testing.T) {
 		Origin: ports.SessionOriginLocal, Policy: admissionTestPolicy(ports.SessionOriginLocal),
 		Purpose: ports.BrokerStreamAttachment, Admission: ports.BrokerAdmissionExact, Target: target, Env: attachEnv,
 	}
-	_, _, err = d.route(attach, &admittedTransport{ServerConnection: &closeTrackingTransport{}, admission: exactAdmission, present: true})
+	_, _, err = d.route(attach, newAdmittedConnection(t, exactAdmission))
 	require.NoError(t, err)
 
 	sess.mu.Lock()
@@ -606,8 +603,8 @@ func TestRouteLocalAttachUpdatesOnlyFutureChildEnvironment(t *testing.T) {
 // process, takes the first local client's environment wholesale and only
 // refreshes session-bound variables afterwards.
 func TestRouteLocalAttachAdoptsClientEnvironmentForRestoredSession(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
-	sess := addControlSession(d, "work", "tab-1", "pane-1")
+	d := newTestDaemon(t, nil, newStubClock(t))
+	sess := addControlSession(t, d, "work", "tab-1", "pane-1")
 	sess.ephemeral = false
 	sess.incarnation = newTestLifecycle(t)
 	sess.mu.Lock()
@@ -626,7 +623,7 @@ func TestRouteLocalAttachAdoptsClientEnvironmentForRestoredSession(t *testing.T)
 			Origin: ports.SessionOriginLocal, Policy: admissionTestPolicy(ports.SessionOriginLocal),
 			Purpose: ports.BrokerStreamAttachment, Admission: ports.BrokerAdmissionExact, Target: target, Env: env,
 		}
-		tr := &admittedTransport{ServerConnection: &closeTrackingTransport{}, admission: admission, present: true}
+		tr := newAdmittedConnection(t, admission)
 		_, ac, err := d.route(hello, tr)
 		require.NoError(t, err)
 		d.clientGone(sess, ac, tr, false)
@@ -649,8 +646,8 @@ func TestRouteLocalAttachAdoptsClientEnvironmentForRestoredSession(t *testing.T)
 // the daemon-owned session keeps what it was created with, and only a
 // client-owned local attach refreshes future-child state.
 func TestRouteRemoteExactAttachPreservesSessionEnvironment(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
-	sess := addControlSession(d, "work", "tab-1", "pane-1")
+	d := newTestDaemon(t, nil, newStubClock(t))
+	sess := addControlSession(t, d, "work", "tab-1", "pane-1")
 	sess.ephemeral = false
 	sess.incarnation = newTestLifecycle(t)
 	sess.mu.Lock()
@@ -667,7 +664,7 @@ func TestRouteRemoteExactAttachPreservesSessionEnvironment(t *testing.T) {
 		Origin: ports.SessionOriginRemote, Policy: admissionTestPolicy(ports.SessionOriginRemote),
 		Purpose: ports.BrokerStreamAttachment, Admission: ports.BrokerAdmissionExact, Target: target,
 	}
-	tr := &admittedTransport{ServerConnection: &closeTrackingTransport{}, admission: admission, present: true}
+	tr := newAdmittedConnection(t, admission)
 	routed, ac, err := d.route(hello, tr)
 	require.NoError(t, err)
 	require.Same(t, sess, routed)
@@ -702,8 +699,8 @@ func TestRouteResumeRejectsMismatchedAdmittedTargetBeforeClaim(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			pty, release := newBlockingPTY(t)
 			defer release()
-			d := newTestDaemon(t, newFactory(t, pty), stubClock{})
-			oldTransport := &closeTrackingTransport{}
+			d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
+			oldTransport := newQuietConnection(t)
 			sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTransport)
 			require.NoError(t, err)
 			token := ac.resumeToken
@@ -719,7 +716,7 @@ func TestRouteResumeRejectsMismatchedAdmittedTargetBeforeClaim(t *testing.T) {
 				Origin: ports.SessionOriginRemote, Policy: remotePolicy,
 				Purpose: ports.BrokerStreamAttachment, Admission: ports.BrokerAdmissionExact, Target: target,
 			}
-			tr := &admittedTransport{ServerConnection: &closeTrackingTransport{}, admission: admission, present: true}
+			tr := newAdmittedConnection(t, admission)
 			_, _, err = d.route(resume, tr)
 			var protocolErr *protoErr
 			require.ErrorAs(t, err, &protocolErr)

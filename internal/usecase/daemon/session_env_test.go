@@ -3,10 +3,11 @@ package daemon
 import (
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	snapcodec "github.com/bnema/vev/internal/snapshotcodec"
-	"github.com/stretchr/testify/require"
 )
 
 func TestRefreshSessionEnvironment(t *testing.T) {
@@ -317,7 +318,7 @@ func TestAttachedClientEnvironment(t *testing.T) {
 }
 
 func TestNewRestoredSessionEnvironmentIsProvisional(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	d.baseEnv = []string{"SHELL=/bin/sh", "PATH=/daemon"}
 	sess := d.newRestoredSession(snapcodec.Session{Name: "work"}, d.serveCtx, func() {}, nil)
 	require.Equal(t, d.baseEnv, sess.env)
@@ -329,8 +330,8 @@ func TestNewRestoredSessionEnvironmentIsProvisional(t *testing.T) {
 // after the attachment and its client environment are prepared, the session
 // environment and its provisional state stay untouched.
 func TestFailedAttachTransitionLeavesSessionEnvironment(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
-	sess := addControlSession(d, "work", "tab-1", "pane-1")
+	d := newTestDaemon(t, nil, newStubClock(t))
+	sess := addControlSession(t, d, "work", "tab-1", "pane-1")
 	sess.ephemeral = false
 	sess.incarnation = newTestLifecycle(t)
 	sess.mu.Lock()
@@ -355,7 +356,7 @@ func TestFailedAttachTransitionLeavesSessionEnvironment(t *testing.T) {
 		Origin: ports.SessionOriginLocal, Policy: admissionTestPolicy(ports.SessionOriginLocal),
 		Purpose: ports.BrokerStreamAttachment, Admission: ports.BrokerAdmissionExact, Target: target, Env: env,
 	}
-	_, _, err := d.route(hello, &admittedTransport{ServerConnection: &closeTrackingTransport{}, admission: admission, present: true})
+	_, _, err := d.route(hello, newAdmittedConnection(t, admission))
 	require.Error(t, err)
 
 	sess.mu.Lock()
@@ -374,10 +375,10 @@ func TestEnvironmentSeedCarriesProvisionalState(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			factory := &controlPTYFactory{}
-			d := newTestDaemon(t, factory, stubClock{})
-			t.Cleanup(func() { factory.close(); d.sessWg.Wait() })
-			source := addControlSession(d, "work", "t_work", "p_work")
+			factory, closeFactory := newControlPTYFactory(t, nil)
+			d := newTestDaemon(t, factory, newStubClock(t))
+			t.Cleanup(func() { closeFactory(); d.sessWg.Wait() })
+			source := addControlSession(t, d, "work", "t_work", "p_work")
 			source.mu.Lock()
 			source.env = []string{"PATH=/source"}
 			source.envProvisional = tt.provisional

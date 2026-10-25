@@ -5,9 +5,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	vt "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
-	"github.com/stretchr/testify/require"
 )
 
 func TestCopyWheelReplayMatchesFullComposition(t *testing.T) {
@@ -81,7 +82,7 @@ func TestCopyWheelFailedScrollKeepsCommittedFrames(t *testing.T) {
 	before := cloneComposeCache(f.ac.render.cache)
 	var compositions int
 	f.ac.renderStages = renderStageHooks{compose: func() { compositions++ }}
-	f.ac.replaceTransport(cacheFailTransport{})
+	f.ac.replaceTransport(newFailingConnection(t))
 	f.d.copyWheel(f.sess, f.ac, -3)
 	f.d.paint(f.sess, f.ac, false, nil)
 	require.Positive(t, compositions, "the failed scroll must be composed")

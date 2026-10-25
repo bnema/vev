@@ -94,7 +94,7 @@ func TestSessionSnapshotViewUsesPromotedMutexForLocalTabAndRoleState(t *testing.
 func TestLocalCreateThenKillRemovesLiveRegistryEntry(t *testing.T) {
 	pty, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 
 	sess, err := createSessionForTest(d, "0", true, "/tmp", defaultSize, terminalEnv{}, nil)
 	require.NoError(t, err)

@@ -12,7 +12,7 @@ import (
 )
 
 func TestAttachmentSuspensionRevokesEffectsAndGeometry(t *testing.T) {
-	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
+	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
 	rc := d.attachCoordinator(sess, nil, ac, true)
 	token := sess.captureAttachmentCapability(ac, ac.transport())
 	ac.installTestAttachmentCapability(token)
@@ -31,7 +31,7 @@ func TestAttachmentSuspensionRevokesEffectsAndGeometry(t *testing.T) {
 func TestAttachmentActivationExactLifecycle(t *testing.T) {
 	for _, stale := range []bool{false, true} {
 		t.Run(map[bool]string{false: "retained", true: "stale"}[stale], func(t *testing.T) {
-			d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
+			d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
 			d.attachCoordinator(sess, nil, ac, true)
 			token := sess.captureAttachmentCapability(ac, ac.transport())
 			ac.installTestAttachmentCapability(token)
@@ -58,7 +58,7 @@ func TestAttachmentActivationExactLifecycle(t *testing.T) {
 }
 
 func TestAttachmentSuspensionBarrierDrainsAdmittedEffects(t *testing.T) {
-	d, sess, ac, sends := newManualSessionWithPTYs(t, newQuietPTY())
+	d, sess, ac, sends := newManualSessionWithPTYs(t, newQuietPTY(t))
 	d.attachCoordinator(sess, nil, ac, true)
 	token := sess.captureAttachmentCapability(ac, ac.transport())
 	ac.installTestAttachmentCapability(token)
@@ -89,7 +89,7 @@ func TestAttachmentSuspensionBarrierDrainsAdmittedEffects(t *testing.T) {
 }
 
 func TestAttachmentActivationPublicationPrecedesSuccess(t *testing.T) {
-	d, sess, ac, sends := newManualSessionWithPTYs(t, newQuietPTY())
+	d, sess, ac, sends := newManualSessionWithPTYs(t, newQuietPTY(t))
 	d.attachCoordinator(sess, nil, ac, true)
 	token := sess.captureAttachmentCapability(ac, ac.transport())
 	ac.installTestAttachmentCapability(token)
@@ -124,7 +124,7 @@ func TestAttachmentActivationPublicationPrecedesSuccess(t *testing.T) {
 }
 
 func TestAttachmentSuspensionCloseDoesNotPark(t *testing.T) {
-	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
+	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
 	ac.resumeCapable, ac.resumeToken = true, 123
 	d.attachCoordinator(sess, nil, ac, true)
 	token := sess.captureAttachmentCapability(ac, ac.transport())
@@ -137,7 +137,7 @@ func TestAttachmentSuspensionCloseDoesNotPark(t *testing.T) {
 }
 
 func TestAttachmentSuspensionPeerGeometryFallbackAndReclaim(t *testing.T) {
-	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
+	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
 	peerTransport, _ := newCapturingTransport(t)
 	peer, err := d.attachClient(sess, peerTransport, domain.Size{Cols: 60, Rows: 20}, attachClientOptions{})
 	require.NoError(t, err)
@@ -157,7 +157,7 @@ func TestAttachmentSuspensionPeerGeometryFallbackAndReclaim(t *testing.T) {
 }
 
 func TestAttachmentSuspensionReaderKeepsControlAlive(t *testing.T) {
-	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
+	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
 	tr := newMockServerConnection(t)
 	incoming := make(chan protocol.ClientMessage, 4)
 	incoming <- protocol.SuspendAttachment{RequestID: 1}
@@ -191,7 +191,7 @@ func TestAttachmentSuspensionReaderKeepsControlAlive(t *testing.T) {
 }
 
 func TestAttachmentActivationCloseDuringFullPublication(t *testing.T) {
-	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
+	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
 	tr := newMockServerConnection(t)
 	var activated bool
 	tr.EXPECT().Send(mock.Anything).RunAndReturn(func(f wire.Envelope) error {

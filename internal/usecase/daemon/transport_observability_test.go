@@ -16,7 +16,7 @@ import (
 // path rather than merely listing the marks the implementation should emit.
 func TestTransportObservabilityDaemonBoundaries(t *testing.T) {
 	observer := &daemonRuntimeObserver{}
-	d, sess, ac, sends := newManualSessionWithPTYs(t, &quietPTY{})
+	d, sess, ac, sends := newManualSessionWithPTYs(t, newQuietPTY(t))
 	d.runtimeObserver = observer
 	// One in-flight state makes the second public resize take the ACK-blocked
 	// path. The real coordinator owns both renders and the ACK wake.

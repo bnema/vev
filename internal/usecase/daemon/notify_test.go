@@ -21,7 +21,7 @@ import (
 )
 
 func TestReportAttachmentErrorPreservesLocalOrNilScope(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	local := &session{sessionCore: sessionCore{id: "local", name: "local"}}
 	d.reportAttachmentError(local, domain.UserWarn(domain.NoticeClipboard, "local failure", nil))
 

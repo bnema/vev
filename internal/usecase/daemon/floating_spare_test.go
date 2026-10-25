@@ -121,7 +121,7 @@ func TestFloatingSpareIsSharedPerSession(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			factory := &spareFactory{}
-			d := newTestDaemon(t, factory, stubClock{})
+			d := newTestDaemon(t, factory, newStubClock(t))
 			d.ApplyConfig(domain.Config{Floating: cfg})
 			cwds := map[int]string{1: "/work", 2: tt.claimCwd}
 			WithProcessInspector(&processInspectorFake{cwd: func(pid int) (string, error) { return cwds[pid], nil }})(d)
@@ -228,7 +228,7 @@ func TestFloatingSpareAnswersStartupQueriesBeforeClaim(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			pty := &queryPTY{sparePTY: sparePTY{closed: make(chan struct{})}, query: tt.query, sent: make(chan struct{}), replied: make(chan []byte, 4)}
-			d := newTestDaemon(t, &queryFactory{pty: pty}, stubClock{})
+			d := newTestDaemon(t, &queryFactory{pty: pty}, newStubClock(t))
 			d.ApplyConfig(domain.Config{Floating: domain.FloatingConfig{Width: 80, Height: 80}})
 			tb := newTab(&pidPTY{pid: 1}, domain.Size{Cols: 80, Rows: 24})
 			tb.ctx, tb.cancel = context.WithCancel(t.Context())
@@ -253,7 +253,7 @@ func TestFloatingSpareAnswersStartupQueriesBeforeClaim(t *testing.T) {
 
 func TestFloatingSpareExitBeforeClaimDropsIt(t *testing.T) {
 	factory := &spareFactory{}
-	d := newTestDaemon(t, factory, stubClock{})
+	d := newTestDaemon(t, factory, newStubClock(t))
 	d.ApplyConfig(domain.Config{Floating: domain.FloatingConfig{Width: 80, Height: 80}})
 	tb := newTab(&pidPTY{pid: 1}, domain.Size{Cols: 80, Rows: 24})
 	tb.ctx, tb.cancel = context.WithCancel(t.Context())

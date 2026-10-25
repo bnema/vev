@@ -57,7 +57,7 @@ func TestAttachmentCapabilityRejectsIndependentIdentityChanges(t *testing.T) {
 		{
 			name: "transport replacement",
 			change: func(_ *session, ac *attachedClient, _ *renderCoordinator) {
-				ac.replaceTransport(&closeTrackingTransport{})
+				ac.replaceTransport(newQuietConnection(t))
 			},
 		},
 		{
@@ -78,8 +78,8 @@ func TestAttachmentCapabilityRejectsIndependentIdentityChanges(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
-			transport := &closeTrackingTransport{}
+			d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
+			transport := newQuietConnection(t)
 			ac.replaceTransport(transport)
 			rc := d.attachCoordinator(sess, nil, ac, true)
 			capability := sess.captureAttachmentCapability(ac, transport)
@@ -97,8 +97,8 @@ func TestAttachmentCapabilityRejectsIndependentIdentityChanges(t *testing.T) {
 }
 
 func TestAttachmentCapabilityInvalidationRejectsNewEffects(t *testing.T) {
-	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
-	transport := &closeTrackingTransport{}
+	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
+	transport := newQuietConnection(t)
 	ac.replaceTransport(transport)
 	rc := d.attachCoordinator(sess, nil, ac, true)
 	capability := sess.captureAttachmentCapability(ac, transport)

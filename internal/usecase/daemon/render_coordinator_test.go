@@ -1238,7 +1238,7 @@ func TestProducerInvalidations(t *testing.T) {
 			file: "floating.go",
 			name: "floating toggle to visible",
 			run: func(t *testing.T, d *Daemon, sess *session, ac *attachedClient) {
-				fp := newPaneWithStableID(layout.PaneID("floating"), "float-producer", newQuietPTY(), domain.Size{Cols: 40, Rows: 10})
+				fp := newPaneWithStableID(layout.PaneID("floating"), "float-producer", newQuietPTY(t), domain.Size{Cols: 40, Rows: 10})
 				tb := testAttachmentTab(sess)
 				tb.mu.Lock()
 				tb.floating.pane = fp

@@ -65,7 +65,7 @@ func (c *echoTestClock) nextTimer(t *testing.T) (*manualAttentionTimer, time.Dur
 
 func TestEchoAckWaitsForEchoTimeoutAndSendsAckOnlyOutput(t *testing.T) {
 	clock := newEchoTestClock()
-	d, sess, ac, sends := newManualSessionWithPTYsClock(t, clock, newQuietPTY())
+	d, sess, ac, sends := newManualSessionWithPTYsClock(t, clock, newQuietPTY(t))
 
 	// Drive the production input path so the acknowledgement wiring is
 	// covered, not just the tracker.
@@ -96,7 +96,7 @@ func TestEchoAckWaitsForEchoTimeoutAndSendsAckOnlyOutput(t *testing.T) {
 
 func TestEchoAckIgnoresUnsequencedAndStaleInput(t *testing.T) {
 	clock := newEchoTestClock()
-	d, _, ac, _ := newManualSessionWithPTYsClock(t, clock, newQuietPTY())
+	d, _, ac, _ := newManualSessionWithPTYsClock(t, clock, newQuietPTY(t))
 	ac.echoAck.Store(5)
 
 	d.noteInputApplied(ac, 0)
@@ -107,7 +107,7 @@ func TestEchoAckIgnoresUnsequencedAndStaleInput(t *testing.T) {
 
 func TestResetEchoAckDropsPendingInput(t *testing.T) {
 	clock := newEchoTestClock()
-	d, _, ac, sends := newManualSessionWithPTYsClock(t, clock, newQuietPTY())
+	d, _, ac, sends := newManualSessionWithPTYsClock(t, clock, newQuietPTY(t))
 
 	d.noteInputApplied(ac, 7)
 	timer, _ := clock.nextTimer(t)
@@ -121,7 +121,7 @@ func TestResetEchoAckDropsPendingInput(t *testing.T) {
 
 func TestEchoAckWaitsWhileOutputWindowIsFull(t *testing.T) {
 	clock := newEchoTestClock()
-	d, _, ac, sends := newManualSessionWithPTYsClock(t, clock, newQuietPTY())
+	d, _, ac, sends := newManualSessionWithPTYsClock(t, clock, newQuietPTY(t))
 	ac.output.maxOutstandingAtomic.Store(1)
 	ac.output.outstandingAtomic.Store(1)
 

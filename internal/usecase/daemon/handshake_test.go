@@ -2,8 +2,6 @@ package daemon
 
 import (
 	"context"
-	"io"
-	"sync"
 	"testing"
 	"time"
 
@@ -12,46 +10,11 @@ import (
 	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
 )
-
-type handshakeBlockingTransport struct {
-	blockWelcome bool
-	welcome      chan struct{}
-	closed       chan struct{}
-	closeOnce    sync.Once
-}
-
-func newHandshakeBlockingTransport(blockWelcome bool) *handshakeBlockingTransport {
-	return &handshakeBlockingTransport{
-		blockWelcome: blockWelcome,
-		welcome:      make(chan struct{}),
-		closed:       make(chan struct{}),
-	}
-}
-
-func (t *handshakeBlockingTransport) Send(frame wire.Envelope) error {
-	if t.blockWelcome && envelopeMessageName(nil, frame.Payload) == "Welcome" {
-		close(t.welcome)
-		<-t.closed
-		return io.ErrClosedPipe
-	}
-	return nil
-}
-
-func (t *handshakeBlockingTransport) Recv() (wire.Envelope, error) {
-	<-t.closed
-	return wire.Envelope{}, io.ErrClosedPipe
-}
-
-func (t *handshakeBlockingTransport) Close() error {
-	t.closeOnce.Do(func() { close(t.closed) })
-	return nil
-}
 
 func TestBoundedHandshakeCompletionCancellationDoesNotDoubleReceive(t *testing.T) {
 	ctx := &completionCancellationContext{}
-	tr := &closeTrackingTransport{}
+	tr := newQuietConnection(t)
 	done := make(chan error, 1)
 	go func() {
 		done <- boundedHandshakeOperation(ctx, tr, func() error {
@@ -83,7 +46,7 @@ func (*completionCancellationContext) Value(any) any { return nil }
 func TestBoundedHandshakeCancellationDoesNotWaitForUninterruptibleOperation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	tr := &closeTrackingTransport{}
+	tr := newQuietConnection(t)
 	started := make(chan struct{})
 	release := make(chan struct{})
 	operationDone := make(chan struct{})
@@ -112,7 +75,7 @@ func TestBoundedHandshakeCancellationDoesNotWaitForUninterruptibleOperation(t *t
 func TestHandshakeFirstPaintCancellationDoesNotRacePaintResult(t *testing.T) {
 	pty, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -126,7 +89,7 @@ func TestHandshakeFirstPaintCancellationDoesNotRacePaintResult(t *testing.T) {
 		close(paintDone)
 	}
 
-	tr := newHandshakeBlockingTransport(false)
+	tr, trH := newHandshakeBlockingConnection(t, false)
 	handshakeDone := make(chan struct{})
 	go func() {
 		d.handleHelloFrameWithContext(ctx, make(chan struct{}), func() {}, func() {}, tr,
@@ -136,7 +99,7 @@ func TestHandshakeFirstPaintCancellationDoesNotRacePaintResult(t *testing.T) {
 
 	awaitTestCompletion(t, paintStarted, "first paint did not start")
 	cancel()
-	awaitTestCompletion(t, tr.closed, "handshake cancellation did not close the transport")
+	awaitTestCompletion(t, trH.Done(), "handshake cancellation did not close the transport")
 	select {
 	case <-paintDone:
 		t.Fatal("first paint completed before cancellation returned")
@@ -150,15 +113,15 @@ func TestHandshakeFirstPaintCancellationDoesNotRacePaintResult(t *testing.T) {
 func TestHandshakeFailureAfterWelcomeDoesNotReportExplicitDetach(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
-	tr := &closeTrackingTransport{}
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
+	tr, trLog := newTrackedConnection(t)
 	sess, ac, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "welcome-failed", Size: domain.Size{Cols: 80, Rows: 24}, TermEnv: "xterm-256color"}, tr)
 	require.NoError(t, err)
 
 	d.failHandshakeAttachment(sess, ac, tr, true)
 
 	var detached *protocol.Detached
-	for _, frame := range tr.Sends() {
+	for _, frame := range trLog.Sends() {
 		message, decodeErr := sessionwire.DecodeServerEnvelope(frame.Payload)
 		require.NoError(t, decodeErr)
 		if value, ok := message.(protocol.Detached); ok {
@@ -171,20 +134,20 @@ func TestHandshakeFailureAfterWelcomeDoesNotReportExplicitDetach(t *testing.T) {
 }
 
 func TestHandshakeTimeoutClosesBlockedReceive(t *testing.T) {
-	clock := &signalClock{timers: make(chan *signalTimer, 1)}
+	clock, clockTimers := newSignalClock(t, 1)
 	d := newTestDaemon(t, nil, clock)
-	tr := newHandshakeBlockingTransport(false)
+	tr, trH := newHandshakeBlockingConnection(t, false)
 	done := make(chan struct{})
 	go func() {
 		d.handleConn(tr)
 		close(done)
 	}()
 
-	timer := <-clock.timers
+	timer := <-clockTimers
 	require.Equal(t, protocol.HandshakeTimeout, timer.duration)
 	timer.ch <- time.Time{}
 	awaitTestCompletion(t, done, "handshake receive did not stop after timeout")
-	requireClosedHandshakeTransport(t, tr)
+	requireClosedHandshakeTransport(t, trH)
 	d.mu.Lock()
 	require.Empty(t, d.sessions)
 	require.Empty(t, d.resume.parked)
@@ -194,29 +157,29 @@ func TestHandshakeTimeoutClosesBlockedReceive(t *testing.T) {
 func TestFailedResumeHandshakeRestoresParkedCredential(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
-	oldTransport := newHandshakeBlockingTransport(false)
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
+	oldTransport, _ := newHandshakeBlockingConnection(t, false)
 	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "resume-timeout", 0), oldTransport)
 	require.NoError(t, err)
 	token := ac.resumeToken
 	d.clientGone(sess, ac, oldTransport, false)
 	require.Empty(t, sess.snapshotAttachments())
 
-	clock := &signalClock{timers: make(chan *signalTimer, 1)}
+	clock, clockTimers := newSignalClock(t, 1)
 	d.clock = clock
-	resumeTransport := newHandshakeBlockingTransport(true)
+	resumeTransport, resumeTransportH := newHandshakeBlockingConnection(t, true)
 	done := make(chan struct{})
 	go func() {
 		d.handleHelloFrame(resumeTransport, mustClientEnvelope(helloResumeCapable(protocol.IntentResume, sess.name, token)))
 		close(done)
 	}()
 
-	timer := <-clock.timers
+	timer := <-clockTimers
 	require.Equal(t, protocol.HandshakeTimeout, timer.duration)
-	<-resumeTransport.welcome
+	<-resumeTransportH.welcome
 	timer.ch <- time.Time{}
 	awaitTestCompletion(t, done, "failed resume handshake did not finish")
-	requireClosedHandshakeTransport(t, resumeTransport)
+	requireClosedHandshakeTransport(t, resumeTransportH)
 	d.mu.Lock()
 	parked := d.resume.parked[token]
 	d.mu.Unlock()
@@ -230,56 +193,56 @@ func TestFailedResumeHandshakeRestoresParkedCredential(t *testing.T) {
 func TestHandshakeTimeoutClosesBlockedWelcomeSend(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	clock := &signalClock{timers: make(chan *signalTimer, 4)}
+	clock, clockTimers := newSignalClock(t, 4)
 	d := newTestDaemon(t, newFactory(t, pty), clock)
-	tr := newHandshakeBlockingTransport(true)
+	tr, trH := newHandshakeBlockingConnection(t, true)
 	done := make(chan struct{})
 	go func() {
 		d.handleHelloFrame(tr, mustHello(protocol.IntentNew, "timeout-send", domain.Size{Cols: 80, Rows: 24}))
 		close(done)
 	}()
 
-	timer := <-clock.timers
+	timer := <-clockTimers
 	require.Equal(t, protocol.HandshakeTimeout, timer.duration)
-	<-tr.welcome
+	<-trH.welcome
 	timer.ch <- time.Time{}
 	awaitTestCompletion(t, done, "handshake send did not stop after timeout")
-	requireClosedHandshakeTransport(t, tr)
+	requireClosedHandshakeTransport(t, trH)
 	d.mu.Lock()
 	require.Empty(t, d.sessions, "a timed-out newly-created handshake must not leave an empty session")
 	require.Empty(t, d.resume.parked)
 	d.mu.Unlock()
 }
 
-func requireClosedHandshakeTransport(t *testing.T, tr *handshakeBlockingTransport) {
+func requireClosedHandshakeTransport(t *testing.T, tr *handshakeLog) {
 	t.Helper()
 	select {
-	case <-tr.closed:
+	case <-tr.Done():
 	default:
 		t.Fatal("handshake timeout did not close transport")
 	}
 }
 
 func TestHandshakeTimeoutCancelsRouteRestoreWait(t *testing.T) {
-	clock := &signalClock{timers: make(chan *signalTimer, 1)}
+	clock, clockTimers := newSignalClock(t, 1)
 	d := newTestDaemon(t, nil, clock)
 	restoreDone := make(chan struct{})
 	d.mu.Lock()
 	d.inactive["restoring"] = inactiveSession{name: "restoring", restoreDone: restoreDone}
 	d.mu.Unlock()
 
-	tr := newHandshakeBlockingTransport(false)
+	tr, trH := newHandshakeBlockingConnection(t, false)
 	done := make(chan struct{})
 	go func() {
 		d.handleHelloFrame(tr, mustHello(protocol.IntentAttach, "restoring", domain.Size{Cols: 80, Rows: 24}))
 		close(done)
 	}()
 
-	timer := <-clock.timers
+	timer := <-clockTimers
 	require.Equal(t, protocol.HandshakeTimeout, timer.duration)
 	timer.ch <- time.Time{}
 	awaitTestCompletion(t, done, "route restore wait did not stop after handshake timeout")
-	requireClosedHandshakeTransport(t, tr)
+	requireClosedHandshakeTransport(t, trH)
 	d.mu.Lock()
 	require.Empty(t, d.sessions)
 	require.Empty(t, d.resume.parked)
@@ -289,26 +252,26 @@ func TestHandshakeTimeoutCancelsRouteRestoreWait(t *testing.T) {
 func TestHandshakeTimeoutRemovesRestoredEmptySession(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 	d.mu.Lock()
 	d.inactive["restored"] = inactiveSession{name: "restored", cwd: "/tmp", state: protocol.SessionDown}
 	d.mu.Unlock()
 
-	clock := &signalClock{timers: make(chan *signalTimer, 4)}
+	clock, clockTimers := newSignalClock(t, 4)
 	d.clock = clock
-	tr := newHandshakeBlockingTransport(true)
+	tr, trH := newHandshakeBlockingConnection(t, true)
 	done := make(chan struct{})
 	go func() {
 		d.handleHelloFrame(tr, mustHello(protocol.IntentAttach, "restored", domain.Size{Cols: 80, Rows: 24}))
 		close(done)
 	}()
 
-	timer := <-clock.timers
+	timer := <-clockTimers
 	require.Equal(t, protocol.HandshakeTimeout, timer.duration)
-	<-tr.welcome
+	<-trH.welcome
 	timer.ch <- time.Time{}
 	awaitTestCompletion(t, done, "timed-out restored attachment cleanup did not finish")
-	requireClosedHandshakeTransport(t, tr)
+	requireClosedHandshakeTransport(t, trH)
 	d.mu.Lock()
 	require.Empty(t, d.sessions)
 	_, retained := d.inactive["restored"]
@@ -319,27 +282,27 @@ func TestHandshakeTimeoutRemovesRestoredEmptySession(t *testing.T) {
 func TestHandshakeTimeoutPreservesUnrelatedAttachment(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
-	oldTransport := &closeTrackingTransport{}
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
+	oldTransport, oldTransportLog := newTrackedConnection(t)
 	sess, old, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "shared", Size: domain.Size{Cols: 80, Rows: 24}}, oldTransport)
 	require.NoError(t, err)
 
-	clock := &signalClock{timers: make(chan *signalTimer, 1)}
+	clock, clockTimers := newSignalClock(t, 1)
 	d.clock = clock
-	tr := newHandshakeBlockingTransport(true)
+	tr, trH := newHandshakeBlockingConnection(t, true)
 	done := make(chan struct{})
 	go func() {
 		d.handleHelloFrame(tr, mustHello(protocol.IntentAttach, "shared", domain.Size{Cols: 80, Rows: 24}))
 		close(done)
 	}()
 
-	timer := <-clock.timers
+	timer := <-clockTimers
 	require.Equal(t, protocol.HandshakeTimeout, timer.duration)
-	<-tr.welcome
+	<-trH.welcome
 	timer.ch <- time.Time{}
 	awaitTestCompletion(t, done, "timed-out attachment cleanup did not finish")
-	requireClosedHandshakeTransport(t, tr)
-	require.False(t, oldTransport.Closed(), "cleanup closed an unrelated attachment transport")
+	requireClosedHandshakeTransport(t, trH)
+	require.False(t, oldTransportLog.Closed(), "cleanup closed an unrelated attachment transport")
 	require.Same(t, sess, old.currentAttachmentSession())
 	require.Equal(t, []*attachedClient{old}, sess.snapshotAttachments())
 	d.mu.Lock()
@@ -352,9 +315,9 @@ func TestHandshakeTimeoutPreservesUnrelatedAttachment(t *testing.T) {
 func TestSuccessfulRouteOutlivesStoppedHandshakeContext(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 	ctx, cancel := context.WithCancel(context.Background())
-	sess, ac, err := d.routeWithContext(ctx, protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "lifetime", Size: domain.Size{Cols: 80, Rows: 24}}, &closeTrackingTransport{})
+	sess, ac, err := d.routeWithContext(ctx, protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "lifetime", Size: domain.Size{Cols: 80, Rows: 24}}, newQuietConnection(t))
 	require.NoError(t, err)
 	cancel()
 	select {

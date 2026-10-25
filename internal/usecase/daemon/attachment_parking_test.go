@@ -5,29 +5,23 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
 )
-
-type resumeWelcomeFailureTransport struct {
-	closeTrackingTransport
-}
-
-func (*resumeWelcomeFailureTransport) Send(wire.Envelope) error { return errWelcomeSendFailed }
 
 var errWelcomeSendFailed = errors.New("welcome send failed")
 
 func TestAttachmentLossParksOnlyThatAttachment(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 
-	firstTransport := &closeTrackingTransport{}
+	firstTransport := newQuietConnection(t)
 	sess, first, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), firstTransport)
 	require.NoError(t, err)
-	secondTransport := &closeTrackingTransport{}
+	secondTransport, secondTransportLog := newTrackedConnection(t)
 	_, second, err := d.route(helloResumeCapable(protocol.IntentAttach, "work", 0), secondTransport)
 	require.NoError(t, err)
 
@@ -44,17 +38,17 @@ func TestAttachmentLossParksOnlyThatAttachment(t *testing.T) {
 	require.False(t, firstAttached)
 	require.True(t, secondAttached)
 	require.True(t, slices.Contains(sess.snapshotAttachments(), second))
-	require.False(t, secondTransport.Closed())
+	require.False(t, secondTransportLog.Closed())
 }
 
 func TestTwoAttachmentsParkIndependently(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
-	firstTransport := &closeTrackingTransport{}
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
+	firstTransport := newQuietConnection(t)
 	sess, first, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), firstTransport)
 	require.NoError(t, err)
-	secondTransport := &closeTrackingTransport{}
+	secondTransport := newQuietConnection(t)
 	_, second, err := d.route(helloResumeCapable(protocol.IntentAttach, "work", 0), secondTransport)
 	require.NoError(t, err)
 	firstToken, secondToken := first.resumeToken, second.resumeToken
@@ -75,11 +69,11 @@ func TestTwoAttachmentsParkIndependently(t *testing.T) {
 func TestParkExpiryRemovesOnlyOneAttachment(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
-	firstTransport := &closeTrackingTransport{}
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
+	firstTransport := newQuietConnection(t)
 	sess, first, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), firstTransport)
 	require.NoError(t, err)
-	secondTransport := &closeTrackingTransport{}
+	secondTransport := newQuietConnection(t)
 	_, second, err := d.route(helloResumeCapable(protocol.IntentAttach, "work", 0), secondTransport)
 	require.NoError(t, err)
 	d.clientGone(sess, first, firstTransport, false)
@@ -100,15 +94,15 @@ func TestParkExpiryRemovesOnlyOneAttachment(t *testing.T) {
 func TestResumeRotatesCredentialAndRejectsStaleTransport(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
-	oldTransport := &closeTrackingTransport{}
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
+	oldTransport := newQuietConnection(t)
 	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTransport)
 	require.NoError(t, err)
 	oldToken := ac.resumeToken
 	oldGeneration := ac.lifecycle.generationValue()
 	d.clientGone(sess, ac, oldTransport, false)
 
-	newTransport := &closeTrackingTransport{}
+	newTransport := newQuietConnection(t)
 	resumed, same, ok, err := d.resumeParked(helloResumeCapable(protocol.IntentResume, "work", oldToken), newTransport, defaultSize)
 	require.NoError(t, err)
 	require.True(t, ok)
@@ -134,15 +128,15 @@ func TestResumeRotatesCredentialAndRejectsStaleTransport(t *testing.T) {
 func TestSuccessfulResumeRejectsOldCredentialAfterWelcome(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
-	oldTransport := &closeTrackingTransport{}
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
+	oldTransport := newQuietConnection(t)
 	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTransport)
 	require.NoError(t, err)
 	oldToken := ac.resumeToken
 	ac.setRouteSnapshot(protocol.RecentRouteSnapshot{Generation: 1})
 	d.clientGone(sess, ac, oldTransport, false)
 
-	resumedTransport := &closeTrackingTransport{}
+	resumedTransport, resumedTransportLog := newTrackedConnection(t)
 	d.handleHello(resumedTransport, helloResumeCapable(protocol.IntentResume, "work", oldToken))
 	newToken := ac.resumeToken
 	require.NotEqual(t, oldToken, newToken)
@@ -152,21 +146,23 @@ func TestSuccessfulResumeRejectsOldCredentialAfterWelcome(t *testing.T) {
 	d.mu.Unlock()
 	require.False(t, oldRetained)
 	require.NotNil(t, newParked)
-	require.NotEmpty(t, resumedTransport.Sends())
-	require.Equal(t, "Welcome", envelopeMessageName(t, resumedTransport.Sends()[0].Payload), "Welcome must remain the first server frame after Hello")
+	require.NotEmpty(t, resumedTransportLog.Sends())
+	require.Equal(t, "Welcome", envelopeMessageName(t, resumedTransportLog.Sends()[0].Payload), "Welcome must remain the first server frame after Hello")
 }
 
 func TestFailedResumeHandshakeKeepsParkedCredential(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
-	oldTransport := &closeTrackingTransport{}
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
+	oldTransport := newQuietConnection(t)
 	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTransport)
 	require.NoError(t, err)
 	token := ac.resumeToken
 	d.clientGone(sess, ac, oldTransport, false)
 
-	failed := &resumeWelcomeFailureTransport{}
+	failed, _ := newTrackedConnection(t, func(c *mockServerConnection, _ *connLog) {
+		c.EXPECT().Send(mock.Anything).Return(errWelcomeSendFailed).Maybe()
+	})
 	d.handleHello(failed, helloResumeCapable(protocol.IntentResume, "work", token))
 	require.Nil(t, ac.transport())
 	d.mu.Lock()
@@ -177,7 +173,7 @@ func TestFailedResumeHandshakeKeepsParkedCredential(t *testing.T) {
 	require.False(t, claimed)
 	require.Equal(t, token, ac.resumeToken)
 
-	_, resumed, ok, err := d.resumeParked(helloResumeCapable(protocol.IntentResume, "work", token), &closeTrackingTransport{}, defaultSize)
+	_, resumed, ok, err := d.resumeParked(helloResumeCapable(protocol.IntentResume, "work", token), newQuietConnection(t), defaultSize)
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Same(t, ac, resumed)
@@ -186,8 +182,8 @@ func TestFailedResumeHandshakeKeepsParkedCredential(t *testing.T) {
 func TestConcurrentResumeHasExactlyOneWinner(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
-	oldTransport := &closeTrackingTransport{}
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
+	oldTransport := newQuietConnection(t)
 	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTransport)
 	require.NoError(t, err)
 	token := ac.resumeToken
@@ -200,7 +196,7 @@ func TestConcurrentResumeHasExactlyOneWinner(t *testing.T) {
 	results := make(chan result, 2)
 	for range 2 {
 		go func() {
-			_, _, ok, resumeErr := d.resumeParked(helloResumeCapable(protocol.IntentResume, "work", token), &closeTrackingTransport{}, defaultSize)
+			_, _, ok, resumeErr := d.resumeParked(helloResumeCapable(protocol.IntentResume, "work", token), newQuietConnection(t), defaultSize)
 			results <- result{ok: ok, err: resumeErr}
 		}()
 	}
@@ -218,14 +214,14 @@ func TestConcurrentResumeHasExactlyOneWinner(t *testing.T) {
 func TestKillSessionClosesEveryAttachmentAndParkedCredential(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
-	firstTransport := &closeTrackingTransport{}
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
+	firstTransport, firstTransportLog := newTrackedConnection(t)
 	sess, _, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), firstTransport)
 	require.NoError(t, err)
-	secondTransport := &closeTrackingTransport{}
+	secondTransport, secondTransportLog := newTrackedConnection(t)
 	_, _, err = d.route(helloResumeCapable(protocol.IntentAttach, "work", 0), secondTransport)
 	require.NoError(t, err)
-	parkedTransport := &closeTrackingTransport{}
+	parkedTransport, parkedTransportLog := newTrackedConnection(t)
 	_, parkedAttachment, err := d.route(helloResumeCapable(protocol.IntentAttach, "work", 0), parkedTransport)
 	require.NoError(t, err)
 	d.clientGone(sess, parkedAttachment, parkedTransport, false)
@@ -233,9 +229,9 @@ func TestKillSessionClosesEveryAttachmentAndParkedCredential(t *testing.T) {
 
 	require.NoError(t, d.killSession(sess, protocol.ReasonSessionKilled, false))
 	d.waitNotifies()
-	require.True(t, firstTransport.Closed())
-	require.True(t, secondTransport.Closed())
-	require.True(t, parkedTransport.Closed())
+	require.True(t, firstTransportLog.Closed())
+	require.True(t, secondTransportLog.Closed())
+	require.True(t, parkedTransportLog.Closed())
 	d.mu.Lock()
 	_, retained := d.resume.parked[parkedToken]
 	d.mu.Unlock()
@@ -245,13 +241,13 @@ func TestKillSessionClosesEveryAttachmentAndParkedCredential(t *testing.T) {
 func TestResumeCredentialIsInvalidAfterDaemonRestart(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
-	transport := &closeTrackingTransport{}
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
+	transport := newQuietConnection(t)
 	_, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), transport)
 	require.NoError(t, err)
 	token := ac.resumeToken
-	restarted := newTestDaemon(t, newFactory(t, pty), stubClock{})
-	_, _, err = restarted.route(helloResumeCapable(protocol.IntentResume, "work", token), &closeTrackingTransport{})
+	restarted := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
+	_, _, err = restarted.route(helloResumeCapable(protocol.IntentResume, "work", token), newQuietConnection(t))
 	var protocolErr *protoErr
 	require.ErrorAs(t, err, &protocolErr)
 	require.Equal(t, protocol.ErrNoSuchSession, protocolErr.code)
@@ -260,11 +256,11 @@ func TestResumeCredentialIsInvalidAfterDaemonRestart(t *testing.T) {
 func TestHandleHelloAllowsMultipleAttachments(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
-	firstTransport := &closeTrackingTransport{}
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
+	firstTransport := newQuietConnection(t)
 	sess, first, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), firstTransport)
 	require.NoError(t, err)
-	secondTransport := &closeTrackingTransport{}
+	secondTransport := newQuietConnection(t)
 	_, second, err := d.route(helloResumeCapable(protocol.IntentAttach, "work", 0), secondTransport)
 	require.NoError(t, err)
 	require.Equal(t, true, sess.attachmentRegistered(first))

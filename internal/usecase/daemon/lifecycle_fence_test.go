@@ -8,8 +8,8 @@ import (
 )
 
 func TestValidateAttachmentTransitionLocksSourceCoordinatorBeforeLeaseValidation(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
-	transport := &closeTrackingTransport{}
+	d := newTestDaemon(t, nil, newStubClock(t))
+	transport := newQuietConnection(t)
 	source := &session{sessionCore: sessionCore{id: domain.SessionID("source")}}
 	target := &session{sessionCore: sessionCore{id: domain.SessionID("target")}}
 	ac := &attachedClient{tr: transport}
@@ -57,8 +57,8 @@ func TestValidateAttachmentTransitionLocksSourceCoordinatorBeforeLeaseValidation
 }
 
 func TestAttachmentCapabilityRevalidatesTheCapturedTransportIncarnation(t *testing.T) {
-	first := &closeTrackingTransport{}
-	second := &closeTrackingTransport{}
+	first := newQuietConnection(t)
+	second := newQuietConnection(t)
 	ac := &attachedClient{tr: first}
 	sess := &session{sessionCore: sessionCore{id: domain.SessionID("work")}}
 	ac.setSession(sess)

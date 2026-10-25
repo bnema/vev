@@ -7,7 +7,7 @@ package daemon
 import (
 	"context"
 
-	mock "github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/mock"
 )
 
 // newMockbarScriptExecutor creates a new instance of mockbarScriptExecutor. It also registers a testing interface on the mock and a cleanup function to assert the mocks expectations.

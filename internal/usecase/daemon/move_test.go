@@ -81,7 +81,7 @@ func TestMovePaneMutationCrossSession(t *testing.T) {
 }
 
 func TestMovePaneRetiresEmptySourceWithoutClosingTransferredResources(t *testing.T) {
-	movedPTY := newQuietPTY()
+	movedPTY := newQuietPTY(t)
 	d, source, active, _ := newManualSessionWithPTYs(t, movedPTY)
 	clip, err := os.CreateTemp(t.TempDir(), "move-clip-")
 	require.NoError(t, err)
@@ -97,7 +97,7 @@ func TestMovePaneRetiresEmptySourceWithoutClosingTransferredResources(t *testing
 	movedTab := source.tabs[0]
 	movedTab.stableID = "source-tab"
 
-	destinationPTY := newQuietPTY()
+	destinationPTY := newQuietPTY(t)
 	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination", ephemeral: true}, tabs: []*tab{newTabWithStableID("destination-tab", "destination-pane", destinationPTY, domain.Size{Cols: 80, Rows: 23})}}
 	publishTiledPaneOwners(destination, destination.tabs[0])
 	d.mu.Lock()
@@ -112,11 +112,7 @@ func TestMovePaneRetiresEmptySourceWithoutClosingTransferredResources(t *testing
 		DestinationTabID: domain.TabStableID(destination.tabs[0].stableID),
 	})
 	require.NoError(t, err)
-	select {
-	case <-movedPTY.done:
-		t.Fatal("retiring the source closed the transferred PTY")
-	default:
-	}
+	movedPTY.AssertNotCalled(t, "Close")
 	select {
 	case <-moved.ctx.Done():
 		t.Fatal("retiring the source cancelled the transferred pane process")
@@ -132,7 +128,7 @@ func TestMovePaneRetiresEmptySourceWithoutClosingTransferredResources(t *testing
 }
 
 func TestMovePaneRetiresSourceParkedClients(t *testing.T) {
-	movedPTY := newQuietPTY()
+	movedPTY := newQuietPTY(t)
 	d, source, _, _ := newManualSessionWithPTYs(t, movedPTY)
 	source.mu.Lock()
 	clearAttachmentsForTestLocked(source)
@@ -141,11 +137,11 @@ func TestMovePaneRetiresSourceParkedClients(t *testing.T) {
 	movedTab := source.tabs[0]
 	movedTab.stableID = "source-tab"
 
-	transport := &closeTrackingTransport{}
+	transport, transportLog := newTrackedConnection(t)
 	parked := &attachedClient{tr: transport, output: newOutputStateStream(), geometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}, resumeCapable: true}
 	parked.initOverlays()
 	require.True(t, d.parkAttachment(source, parked))
-	destinationPTY := newQuietPTY()
+	destinationPTY := newQuietPTY(t)
 	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination", ephemeral: true}, tabs: []*tab{newTabWithStableID("destination-tab", "destination-pane", destinationPTY, domain.Size{Cols: 80, Rows: 23})}}
 	publishTiledPaneOwners(destination, destination.tabs[0])
 	d.mu.Lock()
@@ -162,7 +158,7 @@ func TestMovePaneRetiresSourceParkedClients(t *testing.T) {
 	d.mu.Lock()
 	require.Empty(t, d.resume.parked, "retired source parked clients must leave the daemon registry")
 	d.mu.Unlock()
-	require.True(t, transport.Closed(), "retired source parked transport was not closed")
+	require.True(t, transportLog.Closed(), "retired source parked transport was not closed")
 }
 
 func TestPrepareMovePaneCandidateIsPure(t *testing.T) {

@@ -2,45 +2,33 @@ package daemon
 
 import (
 	"bytes"
-	"sync"
 	"testing"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	recoveryusecase "github.com/bnema/vev/internal/usecase/recovery"
 )
 
-type syncCountingCatalogue struct {
-	*durableRecoveryCatalogue
-
-	muSync sync.Mutex
-	syncs  int
-}
-
-func (c *syncCountingCatalogue) Sync() error {
-	c.muSync.Lock()
-	defer c.muSync.Unlock()
-	c.syncs++
-	return nil
-}
-
-func (c *syncCountingCatalogue) syncCount() int {
-	c.muSync.Lock()
-	defer c.muSync.Unlock()
-	return c.syncs
-}
-
-func (c *syncCountingCatalogue) Create(record domain.CatalogueRecord) error {
-	c.mu.Lock()
-	if _, exists := c.records[record.Name]; exists {
-		c.mu.Unlock()
-		return errSessionNameInUse
-	}
-	c.records[record.Name] = record
-	c.mu.Unlock()
-	return c.Sync()
+// newSyncCountingCatalogue is a recovery catalogue mock whose Create commits
+// like an identity write: it rejects an existing name and syncs durably. The
+// returned state counts every Sync.
+func newSyncCountingCatalogue(t testing.TB, records []domain.CatalogueRecord) (*portsmocks.MockCatalogue, *recoveryCatalogueState) {
+	t.Helper()
+	return newRecoveryCatalogueMock(t, records, func(m *portsmocks.MockCatalogue, state *recoveryCatalogueState) {
+		m.EXPECT().Create(mock.Anything).RunAndReturn(func(record domain.CatalogueRecord) error {
+			state.mu.Lock()
+			if _, exists := state.records[record.Name]; exists {
+				state.mu.Unlock()
+				return errSessionNameInUse
+			}
+			state.records[record.Name] = record
+			state.mu.Unlock()
+			return state.Sync()
+		}).Maybe()
+	})
 }
 
 func TestMetadataWritesAreDeferred(t *testing.T) {
@@ -49,19 +37,19 @@ func TestMetadataWritesAreDeferred(t *testing.T) {
 	sess.mu.Lock()
 	record := sess.persistRecordLocked(sess.createdAt)
 	sess.mu.Unlock()
-	cat := &syncCountingCatalogue{durableRecoveryCatalogue: newDurableRecoveryCatalogue([]domain.CatalogueRecord{record})}
-	d := newTestDaemon(t, nil, stubClock{})
+	cat, catState := newSyncCountingCatalogue(t, []domain.CatalogueRecord{record})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	d.catalogue = cat
 	d.persistEnabled = true
 	d.sessions[sess.id] = sess
 
-	syncsBefore := cat.syncCount()
+	syncsBefore := catState.syncCount()
 	require.NoError(t, d.renameTab(sess, sess.tabs[0], "build"))
 	d.touchMRU(sess)
-	require.Equal(t, syncsBefore, cat.syncCount(), "metadata updates must not force a durable write")
+	require.Equal(t, syncsBefore, catState.syncCount(), "metadata updates must not force a durable write")
 
 	require.NoError(t, d.flushCatalogue())
-	require.Greater(t, cat.syncCount(), syncsBefore)
+	require.Greater(t, catState.syncCount(), syncsBefore)
 
 	got, ok, err := cat.Record("work")
 	require.NoError(t, err)
@@ -72,16 +60,16 @@ func TestMetadataWritesAreDeferred(t *testing.T) {
 func TestIdentityWritesAreSynchronous(t *testing.T) {
 	t.Parallel()
 	sess := newSnapshotTestSession(t, "0", true, "/work")
-	cat := &syncCountingCatalogue{durableRecoveryCatalogue: newDurableRecoveryCatalogue(nil)}
-	d := newTestDaemon(t, nil, stubClock{})
+	cat, catState := newSyncCountingCatalogue(t, nil)
+	d := newTestDaemon(t, nil, newStubClock(t))
 	d.catalogue = cat
 	d.persistEnabled = true
 	d.recovery = recoveryusecase.NewCoordinator(cat, nil, bytes.NewReader(bytes.Repeat([]byte{1}, 16)))
 	d.sessions[sess.id] = sess
 
-	syncsBefore := cat.syncCount()
+	syncsBefore := catState.syncCount()
 	require.NoError(t, d.renameSession(sess, "work"))
-	require.Greater(t, cat.syncCount(), syncsBefore, "creating a named session must be durable before it is exposed")
+	require.Greater(t, catState.syncCount(), syncsBefore, "creating a named session must be durable before it is exposed")
 
 	d.mu.Lock()
 	published := d.findByNameLocked("work")
@@ -91,5 +79,3 @@ func TestIdentityWritesAreSynchronous(t *testing.T) {
 	require.False(t, sess.ephemeral)
 	sess.mu.Unlock()
 }
-
-var _ ports.Catalogue = (*syncCountingCatalogue)(nil)

@@ -8,7 +8,6 @@ package daemon
 import (
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"strconv"
 	"sync"
@@ -46,8 +45,8 @@ func requireNoFurtherSends(t *testing.T, sends chan wire.Envelope) {
 // live session answers with one KillSucceeded result correlated to the request
 // and removes the session.
 func TestHandleKillSessionSendsExactlyOneSucceededResult(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
-	addControlSession(d, "work", "t_work", "p_work")
+	d := newTestDaemon(t, nil, newStubClock(t))
+	addControlSession(t, d, "work", "t_work", "p_work")
 
 	tr, sends := newCapturingTransport(t)
 	d.handleKill(tr, protocol.Kill{RequestID: 7, Scope: protocol.KillSession, Name: "work"})
@@ -62,7 +61,7 @@ func TestHandleKillSessionSendsExactlyOneSucceededResult(t *testing.T) {
 // session answers with one definite KillFailed result, not a close-as-success,
 // and leaves the registry untouched.
 func TestHandleKillSessionSendsDefiniteFailureResult(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 
 	tr, sends := newCapturingTransport(t)
 	d.handleKill(tr, protocol.Kill{RequestID: 9, Scope: protocol.KillSession, Name: "ghost"})
@@ -77,7 +76,7 @@ func TestHandleKillSessionSendsDefiniteFailureResult(t *testing.T) {
 // TestHandleKillInvalidScopeSendsDefiniteFailureResult proves an invalid scope
 // still receives exactly one definite failure instead of a silent close.
 func TestHandleKillInvalidScopeSendsDefiniteFailureResult(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 
 	tr, sends := newCapturingTransport(t)
 	d.handleKill(tr, protocol.Kill{RequestID: 3, Scope: protocol.KillScope(9)})
@@ -91,7 +90,7 @@ func TestHandleKillInvalidScopeSendsDefiniteFailureResult(t *testing.T) {
 // TestHandleKillAllEmptyDaemonSendsOneSucceededResult proves a successful
 // kill-all answers with one KillSucceeded result and leaves the daemon serving.
 func TestHandleKillAllEmptyDaemonSendsOneSucceededResult(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 
 	tr, sends := newCapturingTransport(t)
 	d.handleKill(tr, protocol.Kill{RequestID: 11, Scope: protocol.KillAll})
@@ -114,8 +113,8 @@ func TestHandleKillAllReportsBoundedStructuredPartialFailures(t *testing.T) {
 	const total = purgeSummaryFailureLimit + 3
 
 	fail := make(map[domain.IncarnationID]error, total)
-	repository := newSelectivePurgeRepository(fail)
-	d := newTestDaemon(t, nil, stubClock{})
+	repository := newSelectivePurgeRepository(t, fail)
+	d := newTestDaemon(t, nil, newStubClock(t))
 	WithSnapshotRepository(repository)(d)
 	store, _ := newMockStore(t)
 	WithStore(t, store)(d)
@@ -193,7 +192,7 @@ func newKillOrderTransport(t *testing.T, teardown <-chan struct{}) (*mockServerC
 // connection closes, so a client can observe success instead of inferring it
 // from a close.
 func TestHandleKillDaemonSendsResultBeforeTeardownAndClose(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 
 	tr, recorder := newKillOrderTransport(t, d.done)
 	d.handleKill(tr, protocol.Kill{RequestID: 42, Scope: protocol.KillDaemon})
@@ -208,37 +207,13 @@ func TestHandleKillDaemonSendsResultBeforeTeardownAndClose(t *testing.T) {
 	}
 }
 
-// recordFailTransport records every sent envelope then fails, so a test can
-// inspect the exact result an undeliverable control send attempted.
-type recordFailTransport struct {
-	mu   sync.Mutex
-	sent []wire.Envelope
-	err  error
-}
-
-func (t *recordFailTransport) Send(envelope wire.Envelope) error {
-	t.mu.Lock()
-	t.sent = append(t.sent, envelope)
-	t.mu.Unlock()
-	return t.err
-}
-
-func (*recordFailTransport) Recv() (wire.Envelope, error) { return wire.Envelope{}, io.EOF }
-func (*recordFailTransport) Close() error                 { return nil }
-
-func (t *recordFailTransport) payloads() []wire.Envelope {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return append([]wire.Envelope(nil), t.sent...)
-}
-
 // TestHandleKillAllSupersededByDaemonShutdownSendsOneUnknownOutcome proves a
 // KillAll that an explicit daemon shutdown superseded answers with exactly one
 // correlated KillOutcomeUnknown carrying ErrServerShutdown, records the outcome
 // and code in the send-failure log, and sends nothing further (no success and no
 // second result).
 func TestHandleKillAllSupersededByDaemonShutdownSendsOneUnknownOutcome(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	var logged syncedLogBuffer
 	d.log = slog.New(slog.NewTextHandler(&logged, nil))
 
@@ -247,10 +222,10 @@ func TestHandleKillAllSupersededByDaemonShutdownSendsOneUnknownOutcome(t *testin
 	d.closing = true
 	d.mu.Unlock()
 
-	recorder := &recordFailTransport{err: errors.New("client gone")}
-	d.handleKill(&rawServerConnection{raw: recorder}, protocol.Kill{RequestID: 5, Scope: protocol.KillAll})
+	recorder, recorderLog := newTrackedConnection(t, withSendError(errors.New("client gone")))
+	d.handleKill(recorder, protocol.Kill{RequestID: 5, Scope: protocol.KillAll})
 
-	payloads := recorder.payloads()
+	payloads := recorderLog.Sends()
 	require.Len(t, payloads, 1, "a superseded kill-all must attempt exactly one result")
 	message, err := sessionwire.DecodeServerEnvelope(payloads[0].Payload)
 	require.NoError(t, err)
@@ -268,8 +243,8 @@ func TestHandleKillAllSupersededByDaemonShutdownSendsOneUnknownOutcome(t *testin
 // result that cannot be delivered is logged (never silently closing as
 // success) and still carries the bounded structured failures.
 func TestKillAllUndeliverableResultIsLogged(t *testing.T) {
-	repository := newSelectivePurgeRepository(map[domain.IncarnationID]error{{2}: errors.New("delete failed")})
-	d := newTestDaemon(t, nil, stubClock{})
+	repository := newSelectivePurgeRepository(t, map[domain.IncarnationID]error{{2}: errors.New("delete failed")})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	var logged syncedLogBuffer
 	d.log = slog.New(slog.NewTextHandler(&logged, nil))
 	WithSnapshotRepository(repository)(d)
@@ -280,13 +255,13 @@ func TestKillAllUndeliverableResultIsLogged(t *testing.T) {
 	require.NoError(t, d.catalogue.Create(record))
 	d.inactive["stopped"] = inactiveSessionFromRecord(record, protocol.SessionDown, nil)
 
-	recorder := &recordFailTransport{err: errors.New("client gone")}
-	d.handleKill(&rawServerConnection{raw: recorder}, protocol.Kill{RequestID: 1, Scope: protocol.KillAll})
+	recorder, recorderLog := newTrackedConnection(t, withSendError(errors.New("client gone")))
+	d.handleKill(recorder, protocol.Kill{RequestID: 1, Scope: protocol.KillAll})
 
 	require.Contains(t, logged.String(), "kill result")
 	require.Contains(t, logged.String(), "client gone")
 
-	payloads := recorder.payloads()
+	payloads := recorderLog.Sends()
 	require.Len(t, payloads, 1, "exactly one result is attempted")
 	message, err := sessionwire.DecodeServerEnvelope(payloads[0].Payload)
 	require.NoError(t, err)

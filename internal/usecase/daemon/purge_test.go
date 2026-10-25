@@ -29,7 +29,7 @@ import (
 // can also run a one-shot onDelete hook to interleave a state change (such as
 // an explicit shutdown) after the first destructive purge unit.
 type selectivePurgeRepository struct {
-	noOpSnapshotRepository
+	*portsmocks.MockSnapshotRepository
 
 	mu       sync.Mutex
 	fail     map[domain.IncarnationID]error
@@ -38,20 +38,26 @@ type selectivePurgeRepository struct {
 	once     sync.Once
 }
 
-func (r *selectivePurgeRepository) DeleteIncarnation(_ context.Context, id domain.IncarnationID) error {
-	r.mu.Lock()
-	r.calls = append(r.calls, id)
-	err := r.fail[id]
-	hook := r.onDelete
-	r.mu.Unlock()
-	if hook != nil {
-		r.once.Do(hook)
-	}
-	return err
-}
-
-func newSelectivePurgeRepository(fail map[domain.IncarnationID]error) *selectivePurgeRepository {
-	return &selectivePurgeRepository{fail: fail}
+// newSelectivePurgeRepository returns a snapshot repository mock whose
+// DeleteIncarnation records the call, runs the one-shot onDelete hook, and
+// fails for the configured lifecycles.
+func newSelectivePurgeRepository(t testing.TB, fail map[domain.IncarnationID]error) *selectivePurgeRepository {
+	t.Helper()
+	r := &selectivePurgeRepository{fail: fail}
+	r.MockSnapshotRepository = newSnapshotRepositoryMock(t, func(m *portsmocks.MockSnapshotRepository) {
+		m.EXPECT().DeleteIncarnation(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, id domain.IncarnationID) error {
+			r.mu.Lock()
+			r.calls = append(r.calls, id)
+			err := r.fail[id]
+			hook := r.onDelete
+			r.mu.Unlock()
+			if hook != nil {
+				r.once.Do(hook)
+			}
+			return err
+		}).Maybe()
+	})
+	return r
 }
 
 // TestPurgeAllRemovesLiveAndInactiveAndKeepsDaemonActive is the KillAll
@@ -64,7 +70,7 @@ func TestPurgeAllRemovesLiveAndInactiveAndKeepsDaemonActive(t *testing.T) {
 	writes := make(chan []byte, 8)
 	afterPTY, releaseAfter := newBlockingPTYWithWrites(t, writes)
 	tabPTY, releaseTab := newBlockingPTY(t)
-	d := newTestDaemon(t, newFactorySeq(t, seedPTY, afterPTY, tabPTY), stubClock{})
+	d := newTestDaemon(t, newFactorySeq(t, seedPTY, afterPTY, tabPTY), newStubClock(t))
 
 	seed, err := createSessionForTest(d, "0", true, "/tmp", sz, terminalEnv{}, nil)
 	require.NoError(t, err)
@@ -137,11 +143,11 @@ func TestPurgeAllRemovesLiveAndInactiveAndKeepsDaemonActive(t *testing.T) {
 // broken records are reported with their class and name without cancelling the
 // purge of the healthy live sibling, and without stopping the daemon.
 func TestPurgeAllReportsStructuredPartialFailures(t *testing.T) {
-	repository := newSelectivePurgeRepository(map[domain.IncarnationID]error{
+	repository := newSelectivePurgeRepository(t, map[domain.IncarnationID]error{
 		{2}: errors.New("stopped delete failed"),
 		{3}: errors.New("broken delete failed"),
 	})
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
 	WithSnapshotRepository(repository)(d)
 	store, _ := newMockStore(t)
 	WithStore(t, store)(d)
@@ -190,8 +196,8 @@ func TestPurgeAllReportsStructuredPartialFailures(t *testing.T) {
 // with no live/stopped/broken registry entry is purged and, when its deletion
 // fails, reported as a durable-class failure.
 func TestPurgeAllReportsDurableOrphanFailure(t *testing.T) {
-	repository := newSelectivePurgeRepository(map[domain.IncarnationID]error{{9}: errors.New("orphan delete failed")})
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	repository := newSelectivePurgeRepository(t, map[domain.IncarnationID]error{{9}: errors.New("orphan delete failed")})
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
 	WithSnapshotRepository(repository)(d)
 	store, _ := newMockStore(t)
 	WithStore(t, store)(d)
@@ -212,16 +218,16 @@ func TestPurgeAllReportsDurableOrphanFailure(t *testing.T) {
 func TestPurgeAdmissionGatesAndReopens(t *testing.T) {
 	routePTY, releaseRoute := newBlockingPTY(t)
 	defer releaseRoute()
-	d := newTestDaemon(t, newFactorySeq(t, routePTY), stubClock{})
-	addControlSession(d, "work", "t_work", "p_work")
-	addNamedMoveDestination(d, "dest", "t_dest", "p_dest")
+	d := newTestDaemon(t, newFactorySeq(t, routePTY), newStubClock(t))
+	addControlSession(t, d, "work", "t_work", "p_work")
+	addNamedMoveDestination(t, d, "dest", "t_dest", "p_dest")
 	require.Equal(t, 2, sessionCount(d))
 
 	beginTestPurgeAdmission(t, d)
 
 	created := make(chan error, 1)
 	go func() {
-		_, _, err := d.route(helloResumeCapable(protocol.IntentEphemeral, "", 0), &closeTrackingTransport{})
+		_, _, err := d.route(helloResumeCapable(protocol.IntentEphemeral, "", 0), newQuietConnection(t))
 		created <- err
 	}()
 	select {
@@ -256,7 +262,7 @@ func TestPurgeAllLinearizesConcurrentCreate(t *testing.T) {
 	for attempt := 0; attempt < 24; attempt++ {
 		seedPTY, releaseSeed := newBlockingPTY(t)
 		routePTY, releaseRoute := newBlockingPTY(t)
-		d := newTestDaemon(t, newFactorySeq(t, seedPTY, routePTY), stubClock{})
+		d := newTestDaemon(t, newFactorySeq(t, seedPTY, routePTY), newStubClock(t))
 
 		seed, err := createSessionForTest(d, "0", true, "/tmp", sz, terminalEnv{}, nil)
 		require.NoError(t, err)
@@ -269,7 +275,7 @@ func TestPurgeAllLinearizesConcurrentCreate(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			_, _, createErr = d.route(helloResumeCapable(protocol.IntentEphemeral, "", 0), &closeTrackingTransport{})
+			_, _, createErr = d.route(helloResumeCapable(protocol.IntentEphemeral, "", 0), newQuietConnection(t))
 		}()
 		go func() {
 			defer wg.Done()
@@ -308,7 +314,7 @@ func TestPurgeAllLinearizesConcurrentRestore(t *testing.T) {
 	for attempt := 0; attempt < 16; attempt++ {
 		seedPTY, releaseSeed := newBlockingPTY(t)
 		restorePTY, releaseRestore := newBlockingPTY(t)
-		d := newTestDaemon(t, newFactorySeq(t, seedPTY, restorePTY), stubClock{})
+		d := newTestDaemon(t, newFactorySeq(t, seedPTY, restorePTY), newStubClock(t))
 
 		seed, err := createSessionForTest(d, "work", false, "/tmp", sz, terminalEnv{}, nil)
 		require.NoError(t, err)
@@ -326,7 +332,7 @@ func TestPurgeAllLinearizesConcurrentRestore(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			_, _, restoreErr = d.route(helloResumeCapable(protocol.IntentAttach, "work", 0), &closeTrackingTransport{})
+			_, _, restoreErr = d.route(helloResumeCapable(protocol.IntentAttach, "work", 0), newQuietConnection(t))
 		}()
 		go func() {
 			defer wg.Done()
@@ -362,7 +368,7 @@ func TestPurgeAllLinearizesConcurrentRestore(t *testing.T) {
 func TestShutdownAllStillStopsDaemonWithSessionsClientsAndWorkers(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	pty, releasePTY := newBlockingPTY(t)
-	d := newTestDaemon(t, newFactorySeq(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactorySeq(t, pty), newStubClock(t))
 
 	tr, sends, releaseConn := newConn(t, mustHello(protocol.IntentNew, "work", sz))
 	var hg sync.WaitGroup
@@ -424,25 +430,29 @@ func killAllSessions(d *Daemon) {
 // hold a restoration worker inside its admitted lifespan deterministically and
 // observe KillAll admission against it.
 type gatedCheckpointRepository struct {
-	noOpSnapshotRepository
+	*portsmocks.MockSnapshotRepository
 	generation ports.SnapshotGeneration
 	entered    chan struct{}
 	release    chan struct{}
 	once       sync.Once
 }
 
-func newGatedCheckpointRepository(generation ports.SnapshotGeneration) *gatedCheckpointRepository {
-	return &gatedCheckpointRepository{generation: generation, entered: make(chan struct{}), release: make(chan struct{})}
-}
-
-func (r *gatedCheckpointRepository) LoadCheckpoint(ctx context.Context, _ domain.IncarnationID, _ string, _ ports.CheckpointRef) (ports.SnapshotGeneration, error) {
-	r.once.Do(func() { close(r.entered) })
-	select {
-	case <-r.release:
-	case <-ctx.Done():
-		return ports.SnapshotGeneration{}, ctx.Err()
-	}
-	return r.generation, nil
+func newGatedCheckpointRepository(t testing.TB, generation ports.SnapshotGeneration) *gatedCheckpointRepository {
+	t.Helper()
+	r := &gatedCheckpointRepository{generation: generation, entered: make(chan struct{}), release: make(chan struct{})}
+	r.MockSnapshotRepository = newSnapshotRepositoryMock(t, func(m *portsmocks.MockSnapshotRepository) {
+		m.EXPECT().LoadCheckpoint(mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+			RunAndReturn(func(ctx context.Context, _ domain.IncarnationID, _ string, _ ports.CheckpointRef) (ports.SnapshotGeneration, error) {
+				r.once.Do(func() { close(r.entered) })
+				select {
+				case <-r.release:
+				case <-ctx.Done():
+					return ports.SnapshotGeneration{}, ctx.Err()
+				}
+				return r.generation, nil
+			}).Maybe()
+	})
+	return r
 }
 
 // syncedLogBuffer collects log output for assertions without racing the
@@ -472,15 +482,15 @@ func (b *syncedLogBuffer) String() string {
 func TestPurgeAllWaitsForAdmittedRestoreThenPurges(t *testing.T) {
 	snapshot := restoreAcceptanceSession(t, "work")
 	generation := acceptanceGeneration(t, snapshot, 9)
-	repository := newGatedCheckpointRepository(generation)
+	repository := newGatedCheckpointRepository(t, generation)
 	pty, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
 
-	d := newTestDaemon(t, newFactorySeq(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactorySeq(t, pty), newStubClock(t))
 	d.baseEnv = []string{"TERM=xterm-256color"}
 	checkpoint := domain.CheckpointRef{Generation: generation.Generation, ManifestDigest: snapcodec.ManifestDigest(generation.Manifest)}
 	record := domain.CatalogueRecord{Name: snapshot.Name, IncarnationID: generation.IncarnationID, Cwd: "/snapshot/cwd", CreatedAt: int64(snapshot.CreatedAt), Committed: &checkpoint}
-	catalogue := newDurableRecoveryCatalogue([]domain.CatalogueRecord{record})
+	catalogue := newRecoveryCatalogueOnly(t, []domain.CatalogueRecord{record})
 	WithCatalogue(catalogue, []domain.CatalogueRecord{record})(d)
 	WithSnapshotRepository(repository)(d)
 	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, repository, nil))(d)
@@ -537,10 +547,10 @@ func TestPurgeAllWaitsForAdmittedRestoreThenPurges(t *testing.T) {
 func TestRestoreCatalogueAbandonsRecordsSupersededByPurge(t *testing.T) {
 	record := durableRecoveryRecord(1)
 	record.Name = "work"
-	catalogue := newDurableRecoveryCatalogue([]domain.CatalogueRecord{record})
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	catalogue := newRecoveryCatalogueOnly(t, []domain.CatalogueRecord{record})
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
 	WithCatalogue(catalogue, []domain.CatalogueRecord{record})(d)
-	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, noOpSnapshotRepository{}, nil))(d)
+	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, newSnapshotRepositoryMock(t), nil))(d)
 
 	epoch := d.purgeEpochSnapshot()
 	result := d.purgeAllSessions(protocol.ReasonSessionKilled)
@@ -563,7 +573,7 @@ func TestRestoreCatalogueAbandonsRecordsSupersededByPurge(t *testing.T) {
 // in-progress gate and the completed-purge epoch are revalidated before a
 // restore publishes any registry entry.
 func TestEnsureCatalogueRegistryEntryRejectsSupersededRestore(t *testing.T) {
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
 	record := durableRecoveryRecord(1)
 	record.Name = "work"
 
@@ -595,7 +605,7 @@ func TestEnsureCatalogueRegistryEntryRejectsSupersededRestore(t *testing.T) {
 // cancellation, drains its job queue without touching the registry, and lets
 // the producer and the worker join.
 func TestRestoreCatalogueCancellationDrainsAdmission(t *testing.T) {
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
 	record := durableRecoveryRecord(1)
 	record.Name = "work"
 
@@ -622,7 +632,7 @@ func TestRestoreCatalogueCancellationDrainsAdmission(t *testing.T) {
 // owner at a time: a second concurrent purge cannot enter the critical section
 // until the first releases it.
 func TestPurgeAllSerializesConcurrentKillAll(t *testing.T) {
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
 	entered := make(chan struct{})
 	releaseFirst := make(chan struct{})
 	var calls atomic.Int32
@@ -656,8 +666,8 @@ func TestPurgeAllSerializesConcurrentKillAll(t *testing.T) {
 func TestCommandPathPurgeAdmissionMapsToRetryableError(t *testing.T) {
 	routePTY, releaseRoute := newBlockingPTY(t)
 	defer releaseRoute()
-	d := newTestDaemon(t, newFactorySeq(t, routePTY), stubClock{})
-	addControlSession(d, "work", "t_work", "p_work")
+	d := newTestDaemon(t, newFactorySeq(t, routePTY), newStubClock(t))
+	addControlSession(t, d, "work", "t_work", "p_work")
 
 	beginTestPurgeAdmission(t, d)
 	result := sendCommand(t, d, protocol.CommandRequest{
@@ -677,7 +687,7 @@ func TestRemoteTargetRouteWaitsForPurgeAdmission(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	pty, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
-	d := newTestDaemon(t, newFactorySeq(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactorySeq(t, pty), newStubClock(t))
 	sess, err := createSessionForTest(d, "work", false, "/tmp", sz, terminalEnv{}, nil)
 	require.NoError(t, err)
 	sess.mu.Lock()
@@ -717,7 +727,7 @@ func TestRemoteTargetRouteWaitsForPurgeAdmission(t *testing.T) {
 func TestConcurrentCreateAndExplicitShutdownInterlock(t *testing.T) {
 	for attempt := 0; attempt < 24; attempt++ {
 		pty, releasePTY := newBlockingPTY(t)
-		d := newTestDaemon(t, newFactorySeq(t, pty), stubClock{})
+		d := newTestDaemon(t, newFactorySeq(t, pty), newStubClock(t))
 
 		start := make(chan struct{})
 		var wg sync.WaitGroup
@@ -726,7 +736,7 @@ func TestConcurrentCreateAndExplicitShutdownInterlock(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			_, _, createErr = d.route(helloResumeCapable(protocol.IntentEphemeral, "", 0), &closeTrackingTransport{})
+			_, _, createErr = d.route(helloResumeCapable(protocol.IntentEphemeral, "", 0), newQuietConnection(t))
 		}()
 		go func() {
 			defer wg.Done()
@@ -751,7 +761,7 @@ func TestConcurrentCreateAndExplicitShutdownInterlock(t *testing.T) {
 		default:
 			t.Fatalf("attempt %d: explicit shutdown must signal Serve", attempt)
 		}
-		_, _, afterErr := d.route(helloResumeCapable(protocol.IntentEphemeral, "", 0), &closeTrackingTransport{})
+		_, _, afterErr := d.route(helloResumeCapable(protocol.IntentEphemeral, "", 0), newQuietConnection(t))
 		require.Error(t, afterErr, "attempt %d: a Hello after shutdown must be rejected", attempt)
 
 		releasePTY()
@@ -767,10 +777,10 @@ func TestPurgeAllSupersededByExplicitShutdownPreservesStopAuthority(t *testing.T
 	sz := domain.Size{Cols: 80, Rows: 24}
 	pty, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
-	d := newTestDaemon(t, newFactorySeq(t, pty), stubClock{})
-	catalogue := newDurableRecoveryCatalogue(nil)
+	d := newTestDaemon(t, newFactorySeq(t, pty), newStubClock(t))
+	catalogue := newRecoveryCatalogueOnly(t, nil)
 	WithCatalogue(catalogue, nil)(d)
-	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, noOpSnapshotRepository{}, bytes.NewReader(bytes.Repeat([]byte{0x5a}, 32))))(d)
+	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, newSnapshotRepositoryMock(t), bytes.NewReader(bytes.Repeat([]byte{0x5a}, 32))))(d)
 
 	_, err := createSessionForTest(d, "work", false, "/tmp", sz, terminalEnv{}, nil)
 	require.NoError(t, err)
@@ -796,8 +806,8 @@ func TestPurgeAllSupersededByExplicitShutdownPreservesStopAuthority(t *testing.T
 // delivered is logged, so a client that never observes the explicit correlated
 // KillResult cannot silently infer success from a close.
 func TestPurgeAllLogsFailedControlSend(t *testing.T) {
-	repository := newSelectivePurgeRepository(map[domain.IncarnationID]error{{2}: errors.New("delete failed")})
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	repository := newSelectivePurgeRepository(t, map[domain.IncarnationID]error{{2}: errors.New("delete failed")})
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
 	var logged syncedLogBuffer
 	d.log = slog.New(slog.NewTextHandler(&logged, nil))
 	WithSnapshotRepository(repository)(d)
@@ -840,15 +850,15 @@ func TestPurgeResultSummaryBoundsWireDetail(t *testing.T) {
 func TestPurgeAllPurgesSettledRestore(t *testing.T) {
 	snapshot := restoreAcceptanceSession(t, "work")
 	generation := acceptanceGeneration(t, snapshot, 4)
-	repository := newGatedCheckpointRepository(generation)
+	repository := newGatedCheckpointRepository(t, generation)
 	pty, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
 
-	d := newTestDaemon(t, newFactorySeq(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactorySeq(t, pty), newStubClock(t))
 	d.baseEnv = []string{"TERM=xterm-256color"}
 	checkpoint := domain.CheckpointRef{Generation: generation.Generation, ManifestDigest: snapcodec.ManifestDigest(generation.Manifest)}
 	record := domain.CatalogueRecord{Name: snapshot.Name, IncarnationID: generation.IncarnationID, Cwd: "/snapshot/cwd", CreatedAt: int64(snapshot.CreatedAt), Committed: &checkpoint}
-	catalogue := newDurableRecoveryCatalogue([]domain.CatalogueRecord{record})
+	catalogue := newRecoveryCatalogueOnly(t, []domain.CatalogueRecord{record})
 	WithCatalogue(catalogue, []domain.CatalogueRecord{record})(d)
 	WithSnapshotRepository(repository)(d)
 	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, repository, nil))(d)
@@ -881,7 +891,7 @@ func TestPurgeAllConcurrentWithExplicitShutdown(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	for attempt := 0; attempt < 16; attempt++ {
 		pty, releasePTY := newBlockingPTY(t)
-		d := newTestDaemon(t, newFactorySeq(t, pty), stubClock{})
+		d := newTestDaemon(t, newFactorySeq(t, pty), newStubClock(t))
 		_, err := createSessionForTest(d, "work", false, "/tmp", sz, terminalEnv{}, nil)
 		require.NoError(t, err)
 
@@ -926,7 +936,7 @@ func TestPurgeAllConcurrentWithExplicitShutdown(t *testing.T) {
 // never returns. It proves the purge admission drain and daemon shutdown stay
 // bounded instead of waiting on an uncooperative transition.
 type cancellationIgnoringRepository struct {
-	noOpSnapshotRepository
+	*portsmocks.MockSnapshotRepository
 
 	generation ports.SnapshotGeneration
 	entered    chan struct{}
@@ -934,18 +944,18 @@ type cancellationIgnoringRepository struct {
 	once       sync.Once
 }
 
-func newCancellationIgnoringRepository(generation ports.SnapshotGeneration) *cancellationIgnoringRepository {
-	return &cancellationIgnoringRepository{
-		generation: generation,
-		entered:    make(chan struct{}),
-		release:    make(chan struct{}),
-	}
-}
-
-func (r *cancellationIgnoringRepository) LoadCheckpoint(context.Context, domain.IncarnationID, string, ports.CheckpointRef) (ports.SnapshotGeneration, error) {
-	r.once.Do(func() { close(r.entered) })
-	<-r.release
-	return r.generation, nil
+func newCancellationIgnoringRepository(t testing.TB, generation ports.SnapshotGeneration) *cancellationIgnoringRepository {
+	t.Helper()
+	r := &cancellationIgnoringRepository{generation: generation, entered: make(chan struct{}), release: make(chan struct{})}
+	r.MockSnapshotRepository = newSnapshotRepositoryMock(t, func(m *portsmocks.MockSnapshotRepository) {
+		m.EXPECT().LoadCheckpoint(mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+			RunAndReturn(func(context.Context, domain.IncarnationID, string, ports.CheckpointRef) (ports.SnapshotGeneration, error) {
+				r.once.Do(func() { close(r.entered) })
+				<-r.release
+				return r.generation, nil
+			}).Maybe()
+	})
+	return r
 }
 
 // awaitPurgeGateClosed waits until a purge has closed the transient admission
@@ -992,10 +1002,10 @@ func requirePurgeAdmissionBalanced(t *testing.T, d *Daemon) {
 func TestRestoreCatalogueCaptureOrdersAfterPurgeNotResurrect(t *testing.T) {
 	record := durableRecoveryRecord(1)
 	record.Name = "work"
-	catalogue := newDurableRecoveryCatalogue([]domain.CatalogueRecord{record})
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	catalogue := newRecoveryCatalogueOnly(t, []domain.CatalogueRecord{record})
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
 	WithCatalogue(catalogue, []domain.CatalogueRecord{record})(d)
-	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, noOpSnapshotRepository{}, nil))(d)
+	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, newSnapshotRepositoryMock(t), nil))(d)
 
 	// Hold one admitted transition so the purge closes the gate and parks in its
 	// drain: the exact interleaving point where a capture previously slipped in.
@@ -1042,8 +1052,8 @@ func TestRestoreCatalogueCaptureOrdersAfterPurgeNotResurrect(t *testing.T) {
 func TestPurgeAllAdmissionDrainBoundedWithUncooperativeRepository(t *testing.T) {
 	snapshot := restoreAcceptanceSession(t, "work")
 	generation := acceptanceGeneration(t, snapshot, 5)
-	repository := newCancellationIgnoringRepository(generation)
-	clock := &signalClock{timers: make(chan *signalTimer, 8)}
+	repository := newCancellationIgnoringRepository(t, generation)
+	clock, clockTimers := newSignalClock(t, 8)
 	pty, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
 
@@ -1051,7 +1061,7 @@ func TestPurgeAllAdmissionDrainBoundedWithUncooperativeRepository(t *testing.T) 
 	d.baseEnv = []string{"TERM=xterm-256color"}
 	checkpoint := domain.CheckpointRef{Generation: generation.Generation, ManifestDigest: snapcodec.ManifestDigest(generation.Manifest)}
 	record := domain.CatalogueRecord{Name: snapshot.Name, IncarnationID: generation.IncarnationID, Cwd: "/snapshot/cwd", CreatedAt: int64(snapshot.CreatedAt), Committed: &checkpoint}
-	catalogue := newDurableRecoveryCatalogue([]domain.CatalogueRecord{record})
+	catalogue := newRecoveryCatalogueOnly(t, []domain.CatalogueRecord{record})
 	WithCatalogue(catalogue, []domain.CatalogueRecord{record})(d)
 	WithSnapshotRepository(repository)(d)
 	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, repository, nil))(d)
@@ -1067,7 +1077,7 @@ func TestPurgeAllAdmissionDrainBoundedWithUncooperativeRepository(t *testing.T) 
 	go func() { purged <- d.purgeAllSessions(protocol.ReasonSessionKilled) }()
 
 	// The purge is parked in its admission drain; fire the bounded deadline.
-	timer := awaitTestValue(t, clock.timers, "purge did not arm its bounded admission deadline")
+	timer := awaitTestValue(t, clockTimers, "purge did not arm its bounded admission deadline")
 	timer.ch <- time.Now()
 
 	result := awaitTestValue(t, purged, "KillAll did not return after its bounded drain")
@@ -1110,7 +1120,7 @@ func TestPurgeAllAdmissionDrainBoundedWithUncooperativeRepository(t *testing.T) 
 // rather than waiting out its bounded timeout. This is what keeps Serve from
 // wedging behind a purge when an admitted transition refuses to drain.
 func TestPurgeAllAdmissionDrainDefersToExplicitShutdown(t *testing.T) {
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
 	require.NoError(t, d.acquirePurgeAdmission(context.Background()))
 
 	purged := make(chan purgeResult, 1)
@@ -1137,7 +1147,7 @@ func TestPurgeAllAdmissionDrainDefersToExplicitShutdown(t *testing.T) {
 // stopped authority is removed), while the not-yet-owned unit stays live for
 // the stop to preserve.
 func TestPurgeAllDefersToExplicitShutdownPerUnit(t *testing.T) {
-	repository := newSelectivePurgeRepository(nil)
+	repository := newSelectivePurgeRepository(t, nil)
 	var d *Daemon
 	repository.onDelete = func() {
 		d.mu.Lock()
@@ -1145,8 +1155,8 @@ func TestPurgeAllDefersToExplicitShutdownPerUnit(t *testing.T) {
 		d.signalPurgeAdmissionChangedLocked()
 		d.mu.Unlock()
 	}
-	d = newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
-	catalogue := newDurableRecoveryCatalogue(nil)
+	d = newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
+	catalogue := newRecoveryCatalogueOnly(t, nil)
 	WithCatalogue(catalogue, nil)(d)
 	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, repository, nil))(d)
 
@@ -1203,7 +1213,7 @@ func occupySessionTeardown(sess *session) {
 // seedPurgeableLiveSession inserts a named live session with durable authority
 // and a closed-safe PTY, then parks its teardown ownership so a purge must reach
 // the destructive boundary before it can remove the unit.
-func seedPurgeableLiveSession(t *testing.T, d *Daemon, catalogue *durableRecoveryCatalogue, name string) *session {
+func seedPurgeableLiveSession(t *testing.T, d *Daemon, catalogue ports.Catalogue, name string) *session {
 	t.Helper()
 	live := newSnapshotTestSession(t, name, false, "/"+name)
 	require.NoError(t, catalogue.Create(live.persistRecordLocked(live.createdAt)))
@@ -1223,19 +1233,19 @@ func seedPurgeableLiveSession(t *testing.T, d *Daemon, catalogue *durableRecover
 // live budget are separate deadlines, so a fresh live budget is armed when the
 // live phase begins.
 func TestPurgeAllLiveDeadlineSkipIsTypedAndRetryable(t *testing.T) {
-	clock := &signalClock{timers: make(chan *signalTimer, 64)}
+	clock, clockTimers := newSignalClock(t, 64)
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
-	catalogue := newDurableRecoveryCatalogue(nil)
+	catalogue := newRecoveryCatalogueOnly(t, nil)
 	WithCatalogue(catalogue, nil)(d)
-	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, noOpSnapshotRepository{}, nil))(d)
+	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, newSnapshotRepositoryMock(t), nil))(d)
 
 	live := seedPurgeableLiveSession(t, d, catalogue, "work")
 
 	purged := make(chan purgeResult, 1)
 	go func() { purged <- d.purgeAllSessions(protocol.ReasonSessionKilled) }()
 
-	admission := awaitTestValue(t, clock.timers, "purge did not arm its admission deadline")
-	liveBudget := awaitTestValue(t, clock.timers, "purge did not arm a separate live-teardown budget")
+	admission := awaitTestValue(t, clockTimers, "purge did not arm its admission deadline")
+	liveBudget := awaitTestValue(t, clockTimers, "purge did not arm a separate live-teardown budget")
 	require.NotSame(t, admission, liveBudget, "live teardown must spend its own budget, not the admission drain's")
 	liveBudget.ch <- time.Now()
 
@@ -1283,11 +1293,11 @@ func TestPurgeAllLiveDeadlineSkipIsTypedAndRetryable(t *testing.T) {
 // as purged.
 func TestPurgeAllLiveBudgetSkipsEveryRemainingSlowUnit(t *testing.T) {
 	const units = 3
-	clock := &signalClock{timers: make(chan *signalTimer, 64)}
+	clock, clockTimers := newSignalClock(t, 64)
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
-	catalogue := newDurableRecoveryCatalogue(nil)
+	catalogue := newRecoveryCatalogueOnly(t, nil)
 	WithCatalogue(catalogue, nil)(d)
-	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, noOpSnapshotRepository{}, nil))(d)
+	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, newSnapshotRepositoryMock(t), nil))(d)
 
 	names := make([]string, 0, units)
 	for i := range units {
@@ -1300,8 +1310,8 @@ func TestPurgeAllLiveBudgetSkipsEveryRemainingSlowUnit(t *testing.T) {
 	purged := make(chan purgeResult, 1)
 	go func() { purged <- d.purgeAllSessions(protocol.ReasonSessionKilled) }()
 
-	_ = awaitTestValue(t, clock.timers, "purge did not arm its admission deadline")
-	liveBudget := awaitTestValue(t, clock.timers, "purge did not arm a separate live-teardown budget")
+	_ = awaitTestValue(t, clockTimers, "purge did not arm its admission deadline")
+	liveBudget := awaitTestValue(t, clockTimers, "purge did not arm a separate live-teardown budget")
 	liveBudget.ch <- time.Now()
 
 	result := awaitTestValue(t, purged, "purge did not return after the shared live budget expired")
@@ -1340,7 +1350,7 @@ func TestPurgeAllLiveBudgetSkipsEveryRemainingSlowUnit(t *testing.T) {
 // counting as a completed stop. A later deadline-free pass completes the stop
 // once the competing owner releases teardown.
 func TestTerminateAllForShutdownReportsDeadlineSkippedSession(t *testing.T) {
-	clock := &signalClock{timers: make(chan *signalTimer, 64)}
+	clock, clockTimers := newSignalClock(t, 64)
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
 
 	live := newSnapshotTestSession(t, "0", true, "/tmp")
@@ -1352,7 +1362,7 @@ func TestTerminateAllForShutdownReportsDeadlineSkippedSession(t *testing.T) {
 
 	deadline := newSnapshotShutdownDeadline(clock)
 	defer deadline.stop()
-	timer := awaitTestValue(t, clock.timers, "shutdown deadline did not arm")
+	timer := awaitTestValue(t, clockTimers, "shutdown deadline did not arm")
 	timer.ch <- time.Now()
 
 	require.True(t, d.terminateAllForShutdown(protocol.ReasonServerShutdown, deadline),
@@ -1376,11 +1386,11 @@ func TestTerminateAllForShutdownReportsDeadlineSkippedSession(t *testing.T) {
 // budget expires, the purge reports supersession instead of a drain timeout and
 // removes nothing, so the stop keeps ownership of every lifecycle.
 func TestPurgeAdmissionDeadlineDefersToConcurrentExplicitStop(t *testing.T) {
-	clock := &signalClock{timers: make(chan *signalTimer, 64)}
+	clock, clockTimers := newSignalClock(t, 64)
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
-	catalogue := newDurableRecoveryCatalogue(nil)
+	catalogue := newRecoveryCatalogueOnly(t, nil)
 	WithCatalogue(catalogue, nil)(d)
-	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, noOpSnapshotRepository{}, nil))(d)
+	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, newSnapshotRepositoryMock(t), nil))(d)
 
 	live := seedPurgeableLiveSession(t, d, catalogue, "work")
 	// Hold one admitted transition so the purge parks in its bounded drain.
@@ -1396,7 +1406,7 @@ func TestPurgeAdmissionDeadlineDefersToConcurrentExplicitStop(t *testing.T) {
 	d.mu.Lock()
 	d.closing = true
 	d.mu.Unlock()
-	admission := awaitTestValue(t, clock.timers, "purge did not arm its admission deadline")
+	admission := awaitTestValue(t, clockTimers, "purge did not arm its admission deadline")
 	admission.ch <- time.Now()
 
 	result := awaitTestValue(t, purged, "purge did not return after the drain budget expired")
@@ -1420,18 +1430,18 @@ func TestPurgeAdmissionDeadlineDefersToConcurrentExplicitStop(t *testing.T) {
 // classified as superseded rather than a teardown failure, and it stays live for
 // the stop to preserve.
 func TestPurgeLiveDeadlineDefersToConcurrentExplicitStop(t *testing.T) {
-	clock := &signalClock{timers: make(chan *signalTimer, 64)}
+	clock, clockTimers := newSignalClock(t, 64)
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
-	catalogue := newDurableRecoveryCatalogue(nil)
+	catalogue := newRecoveryCatalogueOnly(t, nil)
 	WithCatalogue(catalogue, nil)(d)
-	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, noOpSnapshotRepository{}, nil))(d)
+	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, newSnapshotRepositoryMock(t), nil))(d)
 
 	live := seedPurgeableLiveSession(t, d, catalogue, "work")
 
 	purged := make(chan purgeResult, 1)
 	go func() { purged <- d.purgeAllSessions(protocol.ReasonSessionKilled) }()
-	_ = awaitTestValue(t, clock.timers, "purge did not arm its admission deadline")
-	liveBudget := awaitTestValue(t, clock.timers, "purge did not arm a separate live-teardown budget")
+	_ = awaitTestValue(t, clockTimers, "purge did not arm its admission deadline")
+	liveBudget := awaitTestValue(t, clockTimers, "purge did not arm a separate live-teardown budget")
 
 	d.mu.Lock()
 	d.closing = true
@@ -1457,26 +1467,29 @@ func TestPurgeLiveDeadlineDefersToConcurrentExplicitStop(t *testing.T) {
 // is released and ignores context cancellation, so a bounded sweep can only
 // finish by stopping its wait on the uncooperative delete.
 type blockingPurgeDeleteRepository struct {
-	noOpSnapshotRepository
+	*portsmocks.MockSnapshotRepository
 
 	entered chan struct{}
 	release chan struct{}
 	once    sync.Once
 }
 
-func newBlockingPurgeDeleteRepository() *blockingPurgeDeleteRepository {
-	return &blockingPurgeDeleteRepository{entered: make(chan struct{}), release: make(chan struct{})}
-}
-
-func (r *blockingPurgeDeleteRepository) DeleteIncarnation(context.Context, domain.IncarnationID) error {
-	r.once.Do(func() { close(r.entered) })
-	<-r.release
-	return nil
+func newBlockingPurgeDeleteRepository(t testing.TB) *blockingPurgeDeleteRepository {
+	t.Helper()
+	r := &blockingPurgeDeleteRepository{entered: make(chan struct{}), release: make(chan struct{})}
+	r.MockSnapshotRepository = newSnapshotRepositoryMock(t, func(m *portsmocks.MockSnapshotRepository) {
+		m.EXPECT().DeleteIncarnation(mock.Anything, mock.Anything).RunAndReturn(func(context.Context, domain.IncarnationID) error {
+			r.once.Do(func() { close(r.entered) })
+			<-r.release
+			return nil
+		}).Maybe()
+	})
+	return r
 }
 
 // seedStoppedPurgeRecords publishes one stopped and one broken registry record
 // with durable authority, so a stopped/broken sweep has real work to bound.
-func seedStoppedPurgeRecords(t *testing.T, d *Daemon, catalogue *durableRecoveryCatalogue) {
+func seedStoppedPurgeRecords(t *testing.T, d *Daemon, catalogue ports.Catalogue) {
 	t.Helper()
 	stopped := domain.CatalogueRecord{Name: "stopped", IncarnationID: domain.IncarnationID{2}, CreatedAt: 7}
 	require.NoError(t, catalogue.Create(stopped))
@@ -1506,7 +1519,7 @@ func TestPurgeAllParticipantChangeRetriesOnceAndPurgesExactly(t *testing.T) {
 		{
 			name: "token resume",
 			change: func(d *Daemon, sess *session, ac *attachedClient) {
-				fresh := &closeTrackingTransport{}
+				fresh := newQuietConnection(t)
 				ac.replaceTransport(fresh)
 				ac.installTestAttachmentCapability(sess.captureAttachmentCapability(ac, fresh))
 			},
@@ -1514,10 +1527,10 @@ func TestPurgeAllParticipantChangeRetriesOnceAndPurgesExactly(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
-			catalogue := newDurableRecoveryCatalogue(nil)
+			d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
+			catalogue := newRecoveryCatalogueOnly(t, nil)
 			WithCatalogue(catalogue, nil)(d)
-			WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, noOpSnapshotRepository{}, nil))(d)
+			WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, newSnapshotRepositoryMock(t), nil))(d)
 			require.NoError(t, catalogue.Create(sess.persistRecordLocked(1)))
 
 			attempts := 0
@@ -1558,10 +1571,10 @@ func TestPurgeAllParticipantChangeRetriesOnceAndPurgesExactly(t *testing.T) {
 // authority, and is removed only when the churn stops. The churn alternates a
 // detach with a resumed membership, so every attempt's snapshot is stale.
 func TestPurgeAllParticipantChurnIsTypedNotFalseSuccess(t *testing.T) {
-	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
-	catalogue := newDurableRecoveryCatalogue(nil)
+	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
+	catalogue := newRecoveryCatalogueOnly(t, nil)
 	WithCatalogue(catalogue, nil)(d)
-	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, noOpSnapshotRepository{}, nil))(d)
+	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, newSnapshotRepositoryMock(t), nil))(d)
 	require.NoError(t, catalogue.Create(sess.persistRecordLocked(1)))
 
 	var churn atomic.Bool
@@ -1626,10 +1639,10 @@ func TestPurgeAllParticipantChurnIsTypedNotFalseSuccess(t *testing.T) {
 // removed while the purge's participant snapshot went stale owns nothing, so
 // the purge reports success rather than a phantom live failure.
 func TestPurgeAllAlreadyRemovedParticipantChangeIsSuccess(t *testing.T) {
-	d, sess, _, _ := newManualSessionWithPTYs(t, newQuietPTY())
-	catalogue := newDurableRecoveryCatalogue(nil)
+	d, sess, _, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
+	catalogue := newRecoveryCatalogueOnly(t, nil)
 	WithCatalogue(catalogue, nil)(d)
-	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, noOpSnapshotRepository{}, nil))(d)
+	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, newSnapshotRepositoryMock(t), nil))(d)
 	require.NoError(t, catalogue.Create(sess.persistRecordLocked(1)))
 
 	d.afterAttachmentEffectParticipantsSnapshotted = func(action string, _ []*attachedClient) {
@@ -1663,10 +1676,10 @@ func TestPurgeAllAlreadyRemovedParticipantChangeIsSuccess(t *testing.T) {
 // admission is released, the daemon keeps serving, and its next purge removes
 // the leftovers.
 func TestPurgeAllStoppedSweepDeadlineIsTypedAndReleasesGate(t *testing.T) {
-	clock := &signalClock{timers: make(chan *signalTimer, 64)}
+	clock, clockTimers := newSignalClock(t, 64)
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
-	catalogue := newDurableRecoveryCatalogue(nil)
-	repository := newBlockingPurgeDeleteRepository()
+	catalogue := newRecoveryCatalogueOnly(t, nil)
+	repository := newBlockingPurgeDeleteRepository(t)
 	WithCatalogue(catalogue, nil)(d)
 	WithSnapshotRepository(repository)(d)
 	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, repository, nil))(d)
@@ -1675,8 +1688,8 @@ func TestPurgeAllStoppedSweepDeadlineIsTypedAndReleasesGate(t *testing.T) {
 	purged := make(chan purgeResult, 1)
 	go func() { purged <- d.purgeAllSessions(protocol.ReasonSessionKilled) }()
 
-	admission := awaitTestValue(t, clock.timers, "purge did not arm its admission deadline")
-	stoppedBudget := awaitTestValue(t, clock.timers, "purge did not arm a separate stopped sweep budget")
+	admission := awaitTestValue(t, clockTimers, "purge did not arm its admission deadline")
+	stoppedBudget := awaitTestValue(t, clockTimers, "purge did not arm a separate stopped sweep budget")
 	require.NotSame(t, admission, stoppedBudget, "the sweep must spend its own budget, not the admission drain's")
 	awaitTestValue(t, repository.entered, "the sweep did not start its uncooperative delete")
 	stoppedBudget.ch <- time.Now()
@@ -1727,10 +1740,10 @@ func TestPurgeAllStoppedSweepDeadlineIsTypedAndReleasesGate(t *testing.T) {
 // budget: the stopped budget expiring leaves a parked live unit untouched and
 // arms a fresh live budget, whose expiry then reports that live unit.
 func TestPurgeAllStoppedAndLiveBudgetsAreIndependent(t *testing.T) {
-	clock := &signalClock{timers: make(chan *signalTimer, 64)}
+	clock, clockTimers := newSignalClock(t, 64)
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
-	catalogue := newDurableRecoveryCatalogue(nil)
-	repository := newBlockingPurgeDeleteRepository()
+	catalogue := newRecoveryCatalogueOnly(t, nil)
+	repository := newBlockingPurgeDeleteRepository(t)
 	WithCatalogue(catalogue, nil)(d)
 	WithSnapshotRepository(repository)(d)
 	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, repository, nil))(d)
@@ -1740,13 +1753,13 @@ func TestPurgeAllStoppedAndLiveBudgetsAreIndependent(t *testing.T) {
 	purged := make(chan purgeResult, 1)
 	go func() { purged <- d.purgeAllSessions(protocol.ReasonSessionKilled) }()
 
-	admission := awaitTestValue(t, clock.timers, "purge did not arm its admission deadline")
-	stoppedBudget := awaitTestValue(t, clock.timers, "purge did not arm a stopped sweep budget")
+	admission := awaitTestValue(t, clockTimers, "purge did not arm its admission deadline")
+	stoppedBudget := awaitTestValue(t, clockTimers, "purge did not arm a stopped sweep budget")
 	require.NotSame(t, admission, stoppedBudget)
 	awaitTestValue(t, repository.entered, "the sweep did not start its uncooperative delete")
 	stoppedBudget.ch <- time.Now()
 
-	liveBudget := awaitTestValue(t, clock.timers, "the expired sweep did not arm a fresh live budget")
+	liveBudget := awaitTestValue(t, clockTimers, "the expired sweep did not arm a fresh live budget")
 	require.NotSame(t, admission, liveBudget)
 	require.NotSame(t, stoppedBudget, liveBudget)
 	liveBudget.ch <- time.Now()
@@ -1787,10 +1800,10 @@ func TestPurgeAllStoppedAndLiveBudgetsAreIndependent(t *testing.T) {
 // budget expires, the purge reports supersession rather than typed
 // stopped/broken failures, so the stop keeps authority over every record.
 func TestPurgeAllStoppedSweepDeadlineDefersToExplicitShutdown(t *testing.T) {
-	clock := &signalClock{timers: make(chan *signalTimer, 64)}
+	clock, clockTimers := newSignalClock(t, 64)
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
-	catalogue := newDurableRecoveryCatalogue(nil)
-	repository := newBlockingPurgeDeleteRepository()
+	catalogue := newRecoveryCatalogueOnly(t, nil)
+	repository := newBlockingPurgeDeleteRepository(t)
 	WithCatalogue(catalogue, nil)(d)
 	WithSnapshotRepository(repository)(d)
 	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, repository, nil))(d)
@@ -1799,8 +1812,8 @@ func TestPurgeAllStoppedSweepDeadlineDefersToExplicitShutdown(t *testing.T) {
 	purged := make(chan purgeResult, 1)
 	go func() { purged <- d.purgeAllSessions(protocol.ReasonSessionKilled) }()
 
-	_ = awaitTestValue(t, clock.timers, "purge did not arm its admission deadline")
-	stoppedBudget := awaitTestValue(t, clock.timers, "purge did not arm a stopped sweep budget")
+	_ = awaitTestValue(t, clockTimers, "purge did not arm its admission deadline")
+	stoppedBudget := awaitTestValue(t, clockTimers, "purge did not arm a stopped sweep budget")
 	awaitTestValue(t, repository.entered, "the sweep did not start its uncooperative delete")
 
 	// The stop begins exactly as the sweep budget expires and is deliberately not
@@ -1830,10 +1843,10 @@ func TestPurgeAllStoppedSweepDeadlineDefersToExplicitShutdown(t *testing.T) {
 // shutdown begins as the kill aborts, the purge neither retries against the
 // stop nor reports a live failure, so the stop preserves the session.
 func TestPurgeAllParticipantChangeDefersToConcurrentExplicitShutdown(t *testing.T) {
-	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
-	catalogue := newDurableRecoveryCatalogue(nil)
+	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
+	catalogue := newRecoveryCatalogueOnly(t, nil)
 	WithCatalogue(catalogue, nil)(d)
-	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, noOpSnapshotRepository{}, nil))(d)
+	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, newSnapshotRepositoryMock(t), nil))(d)
 	require.NoError(t, catalogue.Create(sess.persistRecordLocked(1)))
 
 	// The racing path changes the participants and begins an explicit stop at
@@ -1873,10 +1886,10 @@ func TestPurgeAllParticipantChangeDefersToConcurrentExplicitShutdown(t *testing.
 // no-op. The purge must defer to the stop and report supersession instead of
 // counting the stop-owned unit as a successful purge.
 func TestPurgeAllStopBetweenPrecheckAndOwnershipIsSupersededNotSuccess(t *testing.T) {
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
-	catalogue := newDurableRecoveryCatalogue(nil)
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
+	catalogue := newRecoveryCatalogueOnly(t, nil)
 	WithCatalogue(catalogue, nil)(d)
-	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, noOpSnapshotRepository{}, nil))(d)
+	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, newSnapshotRepositoryMock(t), nil))(d)
 
 	live := newSnapshotTestSession(t, "work", false, "/work")
 	record := live.persistRecordLocked(live.createdAt)
@@ -1922,21 +1935,24 @@ func TestPurgeAllStopBetweenPrecheckAndOwnershipIsSupersededNotSuccess(t *testin
 // deliberately ignores context cancellation, modelling an uncooperative
 // publisher whose repository call outlives the shared teardown budget.
 type blockingPublicationRepository struct {
-	noOpSnapshotRepository
+	*portsmocks.MockSnapshotRepository
 
 	entered chan struct{}
 	release chan struct{}
 	once    sync.Once
 }
 
-func newBlockingPublicationRepository() *blockingPublicationRepository {
-	return &blockingPublicationRepository{entered: make(chan struct{}), release: make(chan struct{})}
-}
-
-func (r *blockingPublicationRepository) Publish(context.Context, ports.SnapshotPublication) error {
-	r.once.Do(func() { close(r.entered) })
-	<-r.release
-	return nil
+func newBlockingPublicationRepository(t testing.TB) *blockingPublicationRepository {
+	t.Helper()
+	r := &blockingPublicationRepository{entered: make(chan struct{}), release: make(chan struct{})}
+	r.MockSnapshotRepository = newSnapshotRepositoryMock(t, func(m *portsmocks.MockSnapshotRepository) {
+		m.EXPECT().Publish(mock.Anything, mock.Anything).RunAndReturn(func(context.Context, ports.SnapshotPublication) error {
+			r.once.Do(func() { close(r.entered) })
+			<-r.release
+			return nil
+		}).Maybe()
+	})
+	return r
 }
 
 // TestPurgeAllLiveQuarantineJoinBoundedByDeadlineReleasesAdmission proves the
@@ -1945,10 +1961,10 @@ func (r *blockingPublicationRepository) Publish(context.Context, ports.SnapshotP
 // admission open, the live unit is reported as a typed skip instead of being
 // counted as purged, and a later purge removes it once the publisher returns.
 func TestPurgeAllLiveQuarantineJoinBoundedByDeadlineReleasesAdmission(t *testing.T) {
-	clock := &signalClock{timers: make(chan *signalTimer, 64)}
+	clock, clockTimers := newSignalClock(t, 64)
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
-	catalogue := newDurableRecoveryCatalogue(nil)
-	repository := newBlockingPublicationRepository()
+	catalogue := newRecoveryCatalogueOnly(t, nil)
+	repository := newBlockingPublicationRepository(t)
 	WithCatalogue(catalogue, nil)(d)
 	WithSnapshotRepository(repository)(d)
 	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, repository, nil))(d)
@@ -1974,8 +1990,8 @@ func TestPurgeAllLiveQuarantineJoinBoundedByDeadlineReleasesAdmission(t *testing
 	purged := make(chan purgeResult, 1)
 	go func() { purged <- d.purgeAllSessions(protocol.ReasonSessionKilled) }()
 
-	_ = awaitTestValue(t, clock.timers, "purge did not arm its admission deadline")
-	liveBudget := awaitTestValue(t, clock.timers, "purge did not arm a separate live-teardown budget")
+	_ = awaitTestValue(t, clockTimers, "purge did not arm its admission deadline")
+	liveBudget := awaitTestValue(t, clockTimers, "purge did not arm a separate live-teardown budget")
 	liveBudget.ch <- time.Now()
 
 	result := awaitTestValue(t, purged, "purge did not return while the publisher stayed blocked")
@@ -2009,13 +2025,13 @@ func TestPurgeAllLiveQuarantineJoinBoundedByDeadlineReleasesAdmission(t *testing
 // permanently ineligible. The surviving session checkpoints again, an EOF
 // teardown completes, and its attached client is never left frozen.
 func TestPurgeAllLiveQuarantineAbortRestoresSurvivingSession(t *testing.T) {
-	clock := &signalClock{timers: make(chan *signalTimer, 64)}
-	d, live, ac, _ := newManualSessionWithPTYsClock(t, clock, newQuietPTY())
+	clock, clockTimers := newSignalClock(t, 64)
+	d, live, ac, _ := newManualSessionWithPTYsClock(t, clock, newQuietPTY(t))
 	live.createdAt = 42
 	live.snapEligible.Store(true)
 
-	catalogue := newDurableRecoveryCatalogue(nil)
-	repository := newBlockingPublicationRepository()
+	catalogue := newRecoveryCatalogueOnly(t, nil)
+	repository := newBlockingPublicationRepository(t)
 	WithCatalogue(catalogue, nil)(d)
 	WithSnapshotRepository(repository)(d)
 	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, repository, nil))(d)
@@ -2038,8 +2054,8 @@ func TestPurgeAllLiveQuarantineAbortRestoresSurvivingSession(t *testing.T) {
 	purged := make(chan purgeResult, 1)
 	go func() { purged <- d.purgeAllSessions(protocol.ReasonSessionKilled) }()
 
-	_ = awaitTestValue(t, clock.timers, "purge did not arm its admission deadline")
-	liveBudget := awaitTestValue(t, clock.timers, "purge did not arm a separate live-teardown budget")
+	_ = awaitTestValue(t, clockTimers, "purge did not arm its admission deadline")
+	liveBudget := awaitTestValue(t, clockTimers, "purge did not arm a separate live-teardown budget")
 	liveBudget.ch <- time.Now()
 
 	result := awaitTestValue(t, purged, "purge did not return while the publisher stayed blocked")
@@ -2113,10 +2129,10 @@ func TestSessionKillPostQuarantineParticipantMismatchRestoresSurvivingSession(t 
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
+			d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
 			sess.snapEligible.Store(true)
-			catalogue := newDurableRecoveryCatalogue(nil)
-			repository := noOpSnapshotRepository{}
+			catalogue := newRecoveryCatalogueOnly(t, nil)
+			repository := newSnapshotRepositoryMock(t)
 			WithCatalogue(catalogue, nil)(d)
 			WithSnapshotRepository(repository)(d)
 			WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, repository, nil))(d)
@@ -2130,7 +2146,7 @@ func TestSessionKillPostQuarantineParticipantMismatchRestoresSurvivingSession(t 
 				// so the teardown must abort and roll the quarantine back. The
 				// attachment gate is frozen here, so only the transport incarnation
 				// changes; the capability is rebound by the next real claim.
-				fresh := &closeTrackingTransport{}
+				fresh := newQuietConnection(t)
 				ac.replaceTransport(fresh)
 			}
 			t.Cleanup(func() { d.afterSessionKillQuarantine = nil })
@@ -2165,7 +2181,7 @@ func TestSessionKillPostQuarantineParticipantMismatchRestoresSurvivingSession(t 
 // ignores context cancellation, and signals when the blocked call returns, so a
 // test can observe a detached live exact delete outliving the bounded purge.
 type blockingLiveDeleteRepository struct {
-	noOpSnapshotRepository
+	*portsmocks.MockSnapshotRepository
 
 	entered  chan struct{}
 	release  chan struct{}
@@ -2176,23 +2192,26 @@ type blockingLiveDeleteRepository struct {
 	once sync.Once
 }
 
-func newBlockingLiveDeleteRepository() *blockingLiveDeleteRepository {
-	return &blockingLiveDeleteRepository{
+func newBlockingLiveDeleteRepository(t testing.TB) *blockingLiveDeleteRepository {
+	t.Helper()
+	r := &blockingLiveDeleteRepository{
 		entered:  make(chan struct{}),
 		release:  make(chan struct{}),
 		returned: make(chan struct{}),
 	}
-}
-
-func (r *blockingLiveDeleteRepository) DeleteIncarnation(context.Context, domain.IncarnationID) error {
-	r.once.Do(func() { close(r.entered) })
-	<-r.release
-	select {
-	case <-r.returned:
-	default:
-		close(r.returned)
-	}
-	return r.err
+	r.MockSnapshotRepository = newSnapshotRepositoryMock(t, func(m *portsmocks.MockSnapshotRepository) {
+		m.EXPECT().DeleteIncarnation(mock.Anything, mock.Anything).RunAndReturn(func(context.Context, domain.IncarnationID) error {
+			r.once.Do(func() { close(r.entered) })
+			<-r.release
+			select {
+			case <-r.returned:
+			default:
+				close(r.returned)
+			}
+			return r.err
+		}).Maybe()
+	})
+	return r
 }
 
 // TestPurgeAllLiveDurableDeleteBoundedDetachesAndReleasesGate proves a live
@@ -2203,10 +2222,10 @@ func (r *blockingLiveDeleteRepository) DeleteIncarnation(context.Context, domain
 // delete, and once the stale delete returns the name is free for a later
 // same-name lifecycle.
 func TestPurgeAllLiveDurableDeleteBoundedDetachesAndReleasesGate(t *testing.T) {
-	clock := &signalClock{timers: make(chan *signalTimer, 64)}
+	clock, clockTimers := newSignalClock(t, 64)
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
-	catalogue := newDurableRecoveryCatalogue(nil)
-	repository := newBlockingLiveDeleteRepository()
+	catalogue := newRecoveryCatalogueOnly(t, nil)
+	repository := newBlockingLiveDeleteRepository(t)
 	WithCatalogue(catalogue, nil)(d)
 	WithSnapshotRepository(repository)(d)
 	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, repository, nil))(d)
@@ -2221,8 +2240,8 @@ func TestPurgeAllLiveDurableDeleteBoundedDetachesAndReleasesGate(t *testing.T) {
 	purged := make(chan purgeResult, 1)
 	go func() { purged <- d.purgeAllSessions(protocol.ReasonSessionKilled) }()
 
-	_ = awaitTestValue(t, clock.timers, "purge did not arm its admission deadline")
-	liveBudget := awaitTestValue(t, clock.timers, "purge did not arm a separate live-teardown budget")
+	_ = awaitTestValue(t, clockTimers, "purge did not arm its admission deadline")
+	liveBudget := awaitTestValue(t, clockTimers, "purge did not arm a separate live-teardown budget")
 	awaitTestValue(t, repository.entered, "the live purge did not start its uncooperative delete")
 	liveBudget.ch <- time.Now()
 
@@ -2288,10 +2307,10 @@ func TestPurgeAllLiveDurableDeleteBoundedDetachesAndReleasesGate(t *testing.T) {
 // and createdAt it captured: a same-name replacement lifecycle that holds the
 // name when the stale delete returns is never removed.
 func TestPurgeAllDetachedLiveDeleteFencesSameNameReplacement(t *testing.T) {
-	clock := &signalClock{timers: make(chan *signalTimer, 64)}
+	clock, clockTimers := newSignalClock(t, 64)
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
-	catalogue := newDurableRecoveryCatalogue(nil)
-	repository := newBlockingLiveDeleteRepository()
+	catalogue := newRecoveryCatalogueOnly(t, nil)
+	repository := newBlockingLiveDeleteRepository(t)
 	WithCatalogue(catalogue, nil)(d)
 	WithSnapshotRepository(repository)(d)
 	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, repository, nil))(d)
@@ -2306,8 +2325,8 @@ func TestPurgeAllDetachedLiveDeleteFencesSameNameReplacement(t *testing.T) {
 	purged := make(chan purgeResult, 1)
 	go func() { purged <- d.purgeAllSessions(protocol.ReasonSessionKilled) }()
 
-	_ = awaitTestValue(t, clock.timers, "purge did not arm its admission deadline")
-	liveBudget := awaitTestValue(t, clock.timers, "purge did not arm a separate live-teardown budget")
+	_ = awaitTestValue(t, clockTimers, "purge did not arm its admission deadline")
+	liveBudget := awaitTestValue(t, clockTimers, "purge did not arm a separate live-teardown budget")
 	awaitTestValue(t, repository.entered, "the live purge did not start its uncooperative delete")
 	liveBudget.ch <- time.Now()
 	result := awaitTestValue(t, purged, "purge did not return while the live durable delete stayed blocked")
@@ -2338,12 +2357,12 @@ func TestPurgeAllDetachedLiveDeleteFencesSameNameReplacement(t *testing.T) {
 // pending verdict is still recorded, using bounded non-sensitive fields instead
 // of the user-chosen session name.
 func TestPurgeAllLogsDetachedLiveDeleteLateFailure(t *testing.T) {
-	clock := &signalClock{timers: make(chan *signalTimer, 64)}
+	clock, clockTimers := newSignalClock(t, 64)
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
 	var logged syncedLogBuffer
 	d.log = slog.New(slog.NewTextHandler(&logged, nil))
-	catalogue := newDurableRecoveryCatalogue(nil)
-	repository := newBlockingLiveDeleteRepository()
+	catalogue := newRecoveryCatalogueOnly(t, nil)
+	repository := newBlockingLiveDeleteRepository(t)
 	repository.err = errors.New("detached delete failed")
 	WithCatalogue(catalogue, nil)(d)
 	WithSnapshotRepository(repository)(d)
@@ -2359,8 +2378,8 @@ func TestPurgeAllLogsDetachedLiveDeleteLateFailure(t *testing.T) {
 	purged := make(chan purgeResult, 1)
 	go func() { purged <- d.purgeAllSessions(protocol.ReasonSessionKilled) }()
 
-	_ = awaitTestValue(t, clock.timers, "purge did not arm its admission deadline")
-	liveBudget := awaitTestValue(t, clock.timers, "purge did not arm a separate live-teardown budget")
+	_ = awaitTestValue(t, clockTimers, "purge did not arm its admission deadline")
+	liveBudget := awaitTestValue(t, clockTimers, "purge did not arm a separate live-teardown budget")
 	awaitTestValue(t, repository.entered, "the live purge did not start its uncooperative delete")
 	liveBudget.ch <- time.Now()
 

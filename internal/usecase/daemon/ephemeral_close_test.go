@@ -29,14 +29,14 @@ func TestEphemeralCloseOnExit(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			pty, release := newBlockingPTY(t)
 			defer release()
-			d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+			d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 			updateRuntimeConfig(d, func(rc *runtimeConfig) { rc.ephemeral = domain.EphemeralConfig{CloseOnExit: tt.closeOnExit} })
 
-			tr := &closeTrackingTransport{}
+			tr := newQuietConnection(t)
 			sess, ac, err := d.route(helloResumeCapable(tt.intent, tt.sessionName, 0), tr)
 			require.NoError(t, err)
 			for i := 1; i < tt.clients; i++ {
-				_, _, err := d.route(helloResumeCapable(protocol.IntentAttach, sess.nameSnapshot(), 0), &closeTrackingTransport{})
+				_, _, err := d.route(helloResumeCapable(protocol.IntentAttach, sess.nameSnapshot(), 0), newQuietConnection(t))
 				require.NoError(t, err)
 			}
 
@@ -66,23 +66,23 @@ func TestEphemeralCloseOnExitWaitsForParkExpiry(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			clock := &signalClock{timers: make(chan *signalTimer, 8)}
+			clock, clockTimers := newSignalClock(t, 8)
 			pty, release := newBlockingPTY(t)
 			defer release()
 			d := newTestDaemon(t, newFactory(t, pty), clock)
 
-			tr := &closeTrackingTransport{}
+			tr := newQuietConnection(t)
 			sess, ac, err := d.route(helloResumeCapable(protocol.IntentEphemeral, "", 0), tr)
 			require.NoError(t, err)
 			if tt.otherClient {
-				_, _, err := d.route(helloResumeCapable(protocol.IntentAttach, sess.nameSnapshot(), 0), &closeTrackingTransport{})
+				_, _, err := d.route(helloResumeCapable(protocol.IntentAttach, sess.nameSnapshot(), 0), newQuietConnection(t))
 				require.NoError(t, err)
 			}
 			token := ac.resumeToken
 
 			// A link loss parks: the session must survive so the client can resume.
 			d.clientGone(sess, ac, tr, false)
-			<-clock.timers
+			<-clockTimers
 			d.reapAbandonedEphemeral(sess)
 			require.True(t, d.sessionRegistered(sess), "parked attachment keeps the ephemeral session")
 
@@ -121,7 +121,7 @@ func TestDetachFrameEphemeralCloseOnExit(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			pty, release := newBlockingPTY(t)
 			defer release()
-			d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+			d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 			updateRuntimeConfig(d, func(rc *runtimeConfig) { rc.ephemeral = domain.EphemeralConfig{CloseOnExit: tt.closeOnExit} })
 			tr, sends, _ := newConn(t,
 				mustHello(tt.intent, tt.sessionName, domain.Size{Cols: 80, Rows: 24}),

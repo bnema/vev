@@ -37,7 +37,7 @@ func TestBarBackgroundConfigResolvesBarSurface(t *testing.T) {
 			cfg.Theme = tt.mode
 			cfg.ThemePalette = !tt.paletteOff
 			cfg.Bar.Transparent = tt.transparent
-			d := newTestDaemon(t, nil, stubClock{})
+			d := newTestDaemon(t, nil, newStubClock(t))
 			d.ApplyConfig(cfg)
 
 			themedCfg := themeConfigSnapshot{mode: cfg.Theme, paletteOff: tt.paletteOff, accent: cfg.ThemeAccent}

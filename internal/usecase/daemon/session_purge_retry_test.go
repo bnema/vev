@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
@@ -13,22 +14,31 @@ import (
 )
 
 type retryablePurgeRepository struct {
-	noOpSnapshotRepository
+	*portsmocks.MockSnapshotRepository
 	deleteErr      error
 	calls          []string
 	deadlineScoped []bool
 }
 
-func (r *retryablePurgeRepository) DeleteIncarnation(ctx context.Context, _ domain.IncarnationID) error {
-	_, hasDeadline := ctx.Deadline()
-	r.deadlineScoped = append(r.deadlineScoped, hasDeadline)
-	r.calls = append(r.calls, "delete incarnation")
-	return r.deleteErr
+// newRetryablePurgeRepository records each DeleteIncarnation call and whether
+// its context carried a deadline, then fails with deleteErr.
+func newRetryablePurgeRepository(t testing.TB, deleteErr error) *retryablePurgeRepository {
+	t.Helper()
+	r := &retryablePurgeRepository{deleteErr: deleteErr}
+	r.MockSnapshotRepository = newSnapshotRepositoryMock(t, func(m *portsmocks.MockSnapshotRepository) {
+		m.EXPECT().DeleteIncarnation(mock.Anything, mock.Anything).RunAndReturn(func(ctx context.Context, _ domain.IncarnationID) error {
+			_, hasDeadline := ctx.Deadline()
+			r.deadlineScoped = append(r.deadlineScoped, hasDeadline)
+			r.calls = append(r.calls, "delete incarnation")
+			return r.deleteErr
+		}).Maybe()
+	})
+	return r
 }
 
 func TestLivePurgeLeavesFailedDirectoryDeletionForBackgroundGarbageCollection(t *testing.T) {
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
-	repository := &retryablePurgeRepository{deleteErr: errors.New("delete failed")}
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
+	repository := newRetryablePurgeRepository(t, errors.New("delete failed"))
 	WithSnapshotRepository(repository)(d)
 	store, _ := newMockStore(t)
 	WithStore(t, store)(d)

@@ -649,7 +649,7 @@ func TestApplyVisibleFloatingLayoutPreservesCommittedGeometryOnPTYResizeFailure(
 	popup.popupGeometry = committed
 	tb := newTab(nil, requestedSize)
 	installTestFloating(tb, popup, true)
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	d.ApplyConfig(domain.Config{Floating: cfg})
 	var tabUnlocked, paneUnlocked bool
 	pty.onResize = func() {
@@ -701,7 +701,7 @@ func TestApplyVisibleFloatingLayoutPublishesSameSizeGeometryWithoutPTYResize(t *
 	popup.popupGeometry = committed
 	tb := newTab(nil, size)
 	installTestFloating(tb, popup, true)
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	d.ApplyConfig(domain.Config{Floating: cfg})
 
 	sess := &session{tabs: []*tab{tb}}
@@ -727,7 +727,7 @@ func TestZeroInnerFloatingDrawerPublicationDoesNotRecheckCurrent(t *testing.T) {
 	popup.popupGeometry = committed
 	tb := newTab(nil, domain.Size{Cols: 79, Rows: 2})
 	installTestFloating(tb, popup, true)
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	d.ApplyConfig(domain.Config{Floating: cfg})
 	calls := 0
 
@@ -758,7 +758,7 @@ func TestZeroInnerFloatingDrawerRejectsStaleRequestWithoutPhysicalPublication(t 
 	popup.popupGeometry = committed
 	tb := newTab(nil, domain.Size{Cols: 79, Rows: 2})
 	installTestFloating(tb, popup, true)
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	d.ApplyConfig(domain.Config{Floating: cfg})
 
 	sess := &session{tabs: []*tab{tb}}

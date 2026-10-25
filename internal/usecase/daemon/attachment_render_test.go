@@ -1,37 +1,43 @@
 package daemon
 
 import (
-	"io"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
-	"github.com/stretchr/testify/require"
 )
 
-type blockedAttachmentTransport struct {
-	entered chan struct{}
-	release chan struct{}
+// blockedPeer is the control surface of a connection that can hold an Output
+// send open: gate signals the blocked send and releases it, sends receives
+// every frame once it is delivered, and blocked arms the hold.
+type blockedPeer struct {
+	*sendGate
 	sends   chan wire.Envelope
 	blocked atomic.Bool
-	once    sync.Once
 }
 
-func (t *blockedAttachmentTransport) Send(frame wire.Envelope) error {
-	if envelopeMessageName(nil, frame.Payload) == "Output" && t.blocked.Load() {
-		t.once.Do(func() { close(t.entered) })
-		<-t.release
-	}
-	t.sends <- frame
-	return nil
+// newBlockedPeerConnection returns a connection that, while peer.blocked is set,
+// parks every Output send on the gate before delivering it to peer.sends.
+func newBlockedPeerConnection(t testing.TB) (*mockServerConnection, *blockedPeer) {
+	t.Helper()
+	peer := &blockedPeer{sendGate: newSendGate(), sends: make(chan wire.Envelope, 8)}
+	conn, _ := newTrackedConnection(t, withSendFunc(func(frame wire.Envelope, log *connLog) error {
+		if envelopeMessageName(nil, frame.Payload) == "Output" && peer.blocked.Load() {
+			peer.enter()
+			peer.wait()
+		}
+		log.record(frame)
+		peer.sends <- frame
+		return nil
+	}))
+	return conn, peer
 }
-func (*blockedAttachmentTransport) Recv() (wire.Envelope, error) { return wire.Envelope{}, io.EOF }
-func (*blockedAttachmentTransport) Close() error                 { return nil }
 
 func TestStaleCapacityReadinessRequeuesWithoutAnotherInvalidation(t *testing.T) {
 	d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
@@ -102,7 +108,7 @@ func TestStaleCapacityReadinessRequeuesWithoutAnotherInvalidation(t *testing.T) 
 func TestAttachmentResizeKeepsPeerWindowAndExpandsSharedContent(t *testing.T) {
 	pty, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 	firstTransport, _ := newCapturingTransport(t)
 	sess, first, err := d.route(protocol.Hello{
 		Version: protocol.Version, Intent: protocol.IntentNew, Name: "work",
@@ -145,12 +151,12 @@ func TestAttachmentResizeKeepsPeerWindowAndExpandsSharedContent(t *testing.T) {
 func TestAttachmentFirstPaintDoesNotWaitForBlockedPeer(t *testing.T) {
 	pty, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
-	clock := &signalClock{timers: make(chan *signalTimer, 16)}
+	clock, _ := newSignalClock(t, 16)
 	d := newTestDaemon(t, newFactory(t, pty), clock)
-	oldTransport := &blockedAttachmentTransport{entered: make(chan struct{}), release: make(chan struct{}), sends: make(chan wire.Envelope, 8)}
+	oldTransport, oldTransportPeer := newBlockedPeerConnection(t)
 	sess, old, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{1}}, oldTransport)
 	require.NoError(t, err)
-	newTransport := &blockedAttachmentTransport{entered: make(chan struct{}), release: make(chan struct{}), sends: make(chan wire.Envelope, 8)}
+	newTransport, newTransportPeer := newBlockedPeerConnection(t)
 	_, fresh, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{2}}, newTransport)
 	require.NoError(t, err)
 
@@ -158,38 +164,38 @@ func TestAttachmentFirstPaintDoesNotWaitForBlockedPeer(t *testing.T) {
 	oldLease := rc.attachmentLease(old)
 	freshLease := rc.attachmentLease(fresh)
 	require.True(t, rc.markAttachmentReady(oldLease))
-	oldTransport.blocked.Store(true)
+	oldTransportPeer.blocked.Store(true)
 	pane := sess.tabs[0].focusedPane()
 	pane.mu.Lock()
 	pane.screen.Write([]byte("slow peer"))
 	pane.mu.Unlock()
 	require.True(t, rc.invalidate(renderInvalidation{class: invalidateUrgent, reset: true, producer: "test"}))
 	rc.fireCurrent(false)
-	awaitTestCompletion(t, oldTransport.entered, "slow attachment did not begin its blocked output")
+	awaitTestCompletion(t, oldTransportPeer.entered, "slow attachment did not begin its blocked output")
 
 	require.True(t, rc.markAttachmentReady(freshLease))
 	token := sess.captureAttachmentCapability(fresh, newTransport)
 	token.lease = freshLease
 	painted := make(chan bool, 1)
 	go func() { painted <- d.firstPaintForTransition(token) }()
-	frame := awaitTestValue(t, newTransport.sends, "healthy attachment first paint was gated by slow peer")
+	frame := awaitTestValue(t, newTransportPeer.sends, "healthy attachment first paint was gated by slow peer")
 	require.Equal(t, "Output", envelopeMessageName(t, frame.Payload))
 	require.True(t, <-painted)
-	close(oldTransport.release)
+	oldTransportPeer.open()
 }
 
 func TestMultiAttachmentHandshakeFirstPaintNotGatedByBlockedPeer(t *testing.T) {
 	pty, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
-	clock := &signalClock{timers: make(chan *signalTimer, 16)}
+	clock, _ := newSignalClock(t, 16)
 	d := newTestDaemon(t, newFactory(t, pty), clock)
-	oldTransport := &blockedAttachmentTransport{entered: make(chan struct{}), release: make(chan struct{}), sends: make(chan wire.Envelope, 8)}
+	oldTransport, oldTransportPeer := newBlockedPeerConnection(t)
 	sess, old, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{1}}, oldTransport)
 	require.NoError(t, err)
 	rc := sess.renderCoordinator()
 	require.True(t, rc.markAttachmentReady(rc.attachmentLease(old)))
 
-	oldTransport.blocked.Store(true)
+	oldTransportPeer.blocked.Store(true)
 	pane := sess.tabs[0].focusedPane()
 	pane.mu.Lock()
 	pane.screen.Write([]byte("slow peer"))
@@ -200,7 +206,7 @@ func TestMultiAttachmentHandshakeFirstPaintNotGatedByBlockedPeer(t *testing.T) {
 		rc.fireCurrent(false)
 		close(fireDone)
 	}()
-	awaitTestCompletion(t, oldTransport.entered, "slow attachment did not begin its blocked output")
+	awaitTestCompletion(t, oldTransportPeer.entered, "slow attachment did not begin its blocked output")
 
 	hello := protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{2}}
 	tr, sends, releaseConn := newConn(t, mustClientEnvelope(hello))
@@ -215,36 +221,36 @@ func TestMultiAttachmentHandshakeFirstPaintNotGatedByBlockedPeer(t *testing.T) {
 	require.Equal(t, "Output", envelopeMessageName(t, firstPaint.Payload))
 	releaseConn()
 	awaitTestCompletion(t, handshakeDone, "multi-attachment handshake did not complete after first paint")
-	close(oldTransport.release)
+	oldTransportPeer.open()
 	awaitTestCompletion(t, fireDone, "slow peer output did not finish after release")
 }
 
 func TestAttachmentPaintFanoutDoesNotWaitForBlockedPeer(t *testing.T) {
 	pty, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
-	firstTransport := &blockedAttachmentTransport{entered: make(chan struct{}), release: make(chan struct{}), sends: make(chan wire.Envelope, 8)}
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
+	firstTransport, firstTransportPeer := newBlockedPeerConnection(t)
 	sess, _, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{1}}, firstTransport)
 	require.NoError(t, err)
-	secondTransport := &blockedAttachmentTransport{entered: make(chan struct{}), release: make(chan struct{}), sends: make(chan wire.Envelope, 8)}
+	secondTransport, secondTransportPeer := newBlockedPeerConnection(t)
 	_, _, err = d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{2}}, secondTransport)
 	require.NoError(t, err)
 	rc := sess.renderCoordinator()
 	for _, ac := range sess.snapshotAttachments() {
 		require.True(t, rc.markAttachmentReady(rc.attachmentLease(ac)))
 	}
-	firstTransport.blocked.Store(true)
+	firstTransportPeer.blocked.Store(true)
 
 	sess.tabs[0].focusedPane().screen.Write([]byte("shared"))
 	rc.invalidate(renderInvalidation{class: invalidateUrgent, reset: true, producer: "test"})
 	rc.fireCurrent(false)
 	select {
-	case <-firstTransport.entered:
+	case <-firstTransportPeer.entered:
 	case <-time.After(time.Second):
 		t.Fatal("first attachment did not reach blocked send")
 	}
 	select {
-	case frame := <-secondTransport.sends:
+	case frame := <-secondTransportPeer.sends:
 		require.Equal(t, "Output", envelopeMessageName(t, frame.Payload))
 		out, ok := decodeServerMessage(t, frame).(protocol.Output)
 		require.True(t, ok)
@@ -252,13 +258,13 @@ func TestAttachmentPaintFanoutDoesNotWaitForBlockedPeer(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("second attachment waited for first attachment transport")
 	}
-	close(firstTransport.release)
+	firstTransportPeer.open()
 }
 
 func TestAttachmentResizeUsesLatestClaimedSessionGeometry(t *testing.T) {
 	pty, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 	firstTransport, _ := newCapturingTransport(t)
 	sess, first, err := d.route(protocol.Hello{
 		Version: protocol.Version, Intent: protocol.IntentNew, Name: "work",
@@ -320,7 +326,7 @@ func TestAttachmentResizeUsesLatestClaimedSessionGeometry(t *testing.T) {
 }
 
 func TestStaleAttachmentGeometryClaimCannotCommit(t *testing.T) {
-	d, sess, first, _ := newManualSessionWithPTYs(t, newQuietPTY())
+	d, sess, first, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
 	second := &attachedClient{output: newOutputStateStream()}
 	second.setSize(domain.Size{Cols: 90, Rows: 30})
 	second.setSession(sess)
@@ -350,7 +356,7 @@ func TestStaleAttachmentGeometryClaimCannotCommit(t *testing.T) {
 }
 
 func TestAttachmentMoveReconcilesSourceGeometryAfterOwnerRemoval(t *testing.T) {
-	d, source, moved, _ := newManualSessionWithPTYs(t, newQuietPTY())
+	d, source, moved, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
 	peer := &attachedClient{output: newOutputStateStream()}
 	peer.setSize(domain.Size{Cols: 80, Rows: 24})
 	peer.setSession(source)

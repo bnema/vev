@@ -342,7 +342,7 @@ type paneRearrangeSnapshot struct {
 func newPaneRearrangeHarness(t *testing.T, size domain.Size, tree *layout.Tree) *paneRearrangeHarness {
 	t.Helper()
 	factory := portsmocks.NewMockPTYFactory(t)
-	d := newTestDaemon(t, factory, stubClock{})
+	d := newTestDaemon(t, factory, newStubClock(t))
 	ids := layout.LeafIDs(tree.Root)
 	require.NotEmpty(t, ids)
 	ptys := make(map[layout.PaneID]*paneRearrangePTY, len(ids))

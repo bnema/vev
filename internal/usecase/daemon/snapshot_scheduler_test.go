@@ -19,7 +19,7 @@ import (
 )
 
 func TestSnapshotCoordinatorQuarantineCancelsPublicationBeforeDelete(t *testing.T) {
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
 	repository := portsmocks.NewMockSnapshotRepository(t)
 	WithSnapshotRepository(repository)(d)
 	startSnapshotEncodeWorker(t, d)
@@ -48,7 +48,7 @@ func TestSnapshotCoordinatorQuarantineCancelsPublicationBeforeDelete(t *testing.
 }
 
 func TestSnapshotCoordinatorQuarantineJoinsInFlightPublication(t *testing.T) {
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
 	repository := portsmocks.NewMockSnapshotRepository(t)
 	WithSnapshotRepository(repository)(d)
 	startSnapshotEncodeWorker(t, d)
@@ -89,7 +89,7 @@ func TestSnapshotCoordinatorQuarantineJoinsInFlightPublication(t *testing.T) {
 // pending count, so the worker-side finish that rejects its stale identity must
 // not decrement a replacement scheduled after the rollback.
 func TestQuarantineDiscardDoesNotDoubleDecrementPendingCaptures(t *testing.T) {
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
 	repository := portsmocks.NewMockSnapshotRepository(t)
 	WithSnapshotRepository(repository)(d)
 	startSnapshotEncodeWorker(t, d)
@@ -176,7 +176,7 @@ func TestQuarantineDiscardDoesNotDoubleDecrementPendingCaptures(t *testing.T) {
 }
 
 func TestForcedSnapshotSchedulesSuccessorAfterRoutineInFlight(t *testing.T) {
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
 	repository := portsmocks.NewMockSnapshotRepository(t)
 	WithSnapshotRepository(repository)(d)
 	startSnapshotEncodeWorker(t, d)
@@ -215,7 +215,7 @@ func TestForcedSnapshotSchedulesSuccessorAfterRoutineInFlight(t *testing.T) {
 }
 
 func TestForcedSnapshotSchedulesSuccessorForRoutineCaptureQueuedBehindWorker(t *testing.T) {
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
 	repository := portsmocks.NewMockSnapshotRepository(t)
 	WithSnapshotRepository(repository)(d)
 	startSnapshotEncodeWorker(t, d)
@@ -256,7 +256,7 @@ func TestForcedSnapshotSchedulesSuccessorForRoutineCaptureQueuedBehindWorker(t *
 }
 
 func TestMultipleForcedSnapshotsCoalesceToOneSuccessor(t *testing.T) {
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
 	repository := portsmocks.NewMockSnapshotRepository(t)
 	WithSnapshotRepository(repository)(d)
 	startSnapshotEncodeWorker(t, d)
@@ -382,7 +382,7 @@ func TestForcedSnapshotShutdownTimeoutRetainsRetryableStateAndNotice(t *testing.
 func TestServeShutdownDeadlineStillJoinsRetainedSessionWriter(t *testing.T) {
 	pty, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
-	clock := newServeShutdownClock()
+	clock := newServeShutdownClock(t)
 	d := newTestDaemon(t, newFactory(t, pty), clock)
 	repository := portsmocks.NewMockSnapshotRepository(t)
 	WithSnapshotRepository(repository)(d)
@@ -475,7 +475,7 @@ func awaitTeardownWaiters(t *testing.T, sess *session, want uint) {
 }
 
 func TestConcurrentSessionTeardownPublishesOneFinalSnapshot(t *testing.T) {
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
 	repository := portsmocks.NewMockSnapshotRepository(t)
 	WithSnapshotRepository(repository)(d)
 	startSnapshotEncodeWorker(t, d)
@@ -549,7 +549,7 @@ func TestConcurrentSessionTeardownPublishesOneFinalSnapshot(t *testing.T) {
 func TestServeShutdownCheckpointsBeforeStoppingSnapshotWorker(t *testing.T) {
 	p, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
-	d := newTestDaemon(t, newFactory(t, p), stubClock{})
+	d := newTestDaemon(t, newFactory(t, p), newStubClock(t))
 	repository := portsmocks.NewMockSnapshotRepository(t)
 	WithSnapshotRepository(repository)(d)
 
@@ -592,7 +592,7 @@ func TestServeShutdownCheckpointsBeforeStoppingSnapshotWorker(t *testing.T) {
 func TestServeShutdownDeadlineStillJoinsUncooperativeSnapshotRepository(t *testing.T) {
 	p, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
-	clock := newServeShutdownClock()
+	clock := newServeShutdownClock(t)
 	d := newTestDaemon(t, newFactory(t, p), clock)
 	repository := portsmocks.NewMockSnapshotRepository(t)
 	WithSnapshotRepository(repository)(d)
@@ -675,18 +675,20 @@ func TestServeShutdownDeadlineStillJoinsUncooperativeSnapshotRepository(t *testi
 }
 
 type serveShutdownClock struct {
+	t testing.TB
+
 	finalTimers chan *snapshotDeadlineTimer
 	finalBudget atomic.Int64
 }
 
-func newServeShutdownClock() *serveShutdownClock {
-	return &serveShutdownClock{finalTimers: make(chan *snapshotDeadlineTimer, 2)}
+func newServeShutdownClock(t testing.TB) *serveShutdownClock {
+	return &serveShutdownClock{t: t, finalTimers: make(chan *snapshotDeadlineTimer, 2)}
 }
 
 func (*serveShutdownClock) Now() time.Time { return time.Unix(100, 0) }
 func (c *serveShutdownClock) NewTimer(delay time.Duration) ports.Timer {
 	if delay != snapshotFinalFlushTimeout {
-		return stubTimer{}
+		return newStubTimer(c.t)
 	}
 	timer := &snapshotDeadlineTimer{ch: make(chan time.Time, 1), onFire: func() {
 		c.finalBudget.Add(int64(delay))
@@ -730,7 +732,7 @@ func serveSnapshotListener(t *testing.T, tr wire.Transport) *mockServerListener 
 }
 
 func TestRoutineSnapshotEligibilityStartsAtCompletionAndForcedDoesNotMoveIt(t *testing.T) {
-	clock := &snapshotSchedulerClock{now: time.Unix(100, 0)}
+	clock := &snapshotSchedulerClock{t: t, now: time.Unix(100, 0)}
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
 	repository := portsmocks.NewMockSnapshotRepository(t)
 	WithSnapshotRepository(repository)(d)
@@ -764,6 +766,8 @@ func TestRoutineSnapshotEligibilityStartsAtCompletionAndForcedDoesNotMoveIt(t *t
 }
 
 type snapshotSchedulerClock struct {
+	t testing.TB
+
 	mu  sync.Mutex
 	now time.Time
 }
@@ -774,7 +778,7 @@ func (c *snapshotSchedulerClock) Now() time.Time {
 	return c.now
 }
 
-func (*snapshotSchedulerClock) NewTimer(time.Duration) ports.Timer { return stubTimer{} }
+func (c *snapshotSchedulerClock) NewTimer(time.Duration) ports.Timer { return newStubTimer(c.t) }
 
 type snapshotDeadlineClock struct {
 	timers chan *snapshotDeadlineTimer

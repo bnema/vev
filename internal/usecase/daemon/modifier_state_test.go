@@ -53,7 +53,7 @@ func renderTestStatusRow(state barState) string {
 // TestSuspensionReleasesHeldCtrl pins that a suspended attachment, which
 // drops modifier reports, never activates with ranks stuck on.
 func TestSuspensionReleasesHeldCtrl(t *testing.T) {
-	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
+	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
 	d.attachCoordinator(sess, nil, ac, true)
 	token := sess.captureAttachmentCapability(ac, ac.transport())
 	ac.installTestAttachmentCapability(token)

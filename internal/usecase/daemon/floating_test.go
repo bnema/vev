@@ -170,7 +170,7 @@ func TestFloatingLifecycleCapturesLaunchBeforeOpenAndDoesNotHoldTabLock(t *testi
 	}).Once()
 	pty.EXPECT().Close().RunAndReturn(func() error { unblock(); return nil }).Once()
 	factory, opened, allowOpen := newGatedOpenFactory(t, pty, nil)
-	d := newTestDaemon(t, factory, stubClock{})
+	d := newTestDaemon(t, factory, newStubClock(t))
 	cwd := t.TempDir()
 	tb := newTabWithStableID("t_stable", "p_normal", newBlockingPanePTY(t), domain.Size{Cols: 100, Rows: 40})
 	tb.ctx, tb.cancel = context.WithCancel(t.Context())
@@ -235,7 +235,7 @@ func TestFloatingBlockedOpenReconcilesLatestResponsiveSize(t *testing.T) {
 		return nil
 	}).Once()
 	factory, opened, allowOpen := newGatedOpenFactory(t, floatingPTY, nil)
-	d := newTestDaemon(t, factory, stubClock{})
+	d := newTestDaemon(t, factory, newStubClock(t))
 	d.ApplyConfig(domain.Config{Floating: cfg})
 	tabCtx, cancelTab := context.WithCancel(t.Context())
 	t.Cleanup(cancelTab)
@@ -293,7 +293,7 @@ func TestFloatingLaunchOwnershipJoinsShutdown(t *testing.T) {
 		return nil
 	}).Once()
 	factory, opened, releaseOpen := newGatedOpenFactory(t, floatingPTY, nil)
-	d := newTestDaemon(t, factory, stubClock{})
+	d := newTestDaemon(t, factory, newStubClock(t))
 	tb := newFloatingTestTab(t)
 	sessCtx, cancel := context.WithCancel(t.Context())
 	sess := &session{sessionCore: sessionCore{id: "floating-ownership", name: "work"}, tabs: []*tab{tb}, ctx: sessCtx, cancel: cancel}
@@ -345,7 +345,7 @@ func TestFloatingLifecycleStaleSuccessAndOldExitCannotReplaceCurrentSlot(t *test
 	closed := make(chan struct{})
 	pty.EXPECT().Close().RunAndReturn(func() error { close(closed); return nil }).Once()
 	factory, opened, allowOpen := newGatedOpenFactory(t, pty, nil)
-	d := newTestDaemon(t, factory, stubClock{})
+	d := newTestDaemon(t, factory, newStubClock(t))
 	tb := newFloatingTestTab(t)
 	sess := &session{sessionCore: sessionCore{name: "work"}, tabs: []*tab{tb}, ctx: t.Context()}
 	d.startFloating(sess, tb, false)
@@ -378,7 +378,7 @@ func TestFloatingLifecycleStaleSuccessAndOldExitCannotReplaceCurrentSlot(t *test
 
 func TestFloatingExitUsesCurrentOwnerAfterTabTransfer(t *testing.T) {
 	factory := &lifetimePTYFactory{}
-	d := newTestDaemon(t, factory, stubClock{})
+	d := newTestDaemon(t, factory, newStubClock(t))
 	tb := newFloatingTestTab(t)
 	source := &session{sessionCore: sessionCore{id: "source", name: "source"}, tabs: []*tab{tb}, ctx: t.Context()}
 	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination"}, tabs: []*tab{tb}, ctx: t.Context()}
@@ -438,7 +438,7 @@ func TestFloatingReapAndTeardownCloseMatchingPaneOnce(t *testing.T) {
 	publishPaneOwner(p, sess, tb, g)
 	require.True(t, tb.installFloatingLocked(p, g))
 	tb.mu.Unlock()
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	d.reapInstalledFloating(p)
 	d.teardownFloating(tb, nil)
 	pty.AssertNumberOfCalls(t, "Close", 1)
@@ -452,7 +452,7 @@ func TestFloatingTeardownClosesInstalledPaneOnce(t *testing.T) {
 	g := tb.beginFloatingWarmLocked(false)
 	require.True(t, tb.installFloatingLocked(p, g))
 	tb.mu.Unlock()
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	d.teardownFloating(tb, nil)
 	d.teardownFloating(tb, nil)
 	pty.AssertNumberOfCalls(t, "Close", 1)
@@ -472,7 +472,7 @@ func TestFloatingTeardownClearsCapturedCopyMode(t *testing.T) {
 	ac.overlays.copyMode = &scopy.Mode{}
 	ac.overlays.copyPane = p
 	ac.overlays.copyMu.Unlock()
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 
 	d.teardownFloating(tb, ac)
 
@@ -619,7 +619,7 @@ func TestFloatingLaunchUsesLiveOrValidatedSessionCwd(t *testing.T) {
 					opened <- cwd
 					return nil, io.ErrUnexpectedEOF
 				}).Once()
-			d := newTestDaemon(t, factory, stubClock{})
+			d := newTestDaemon(t, factory, newStubClock(t))
 			d.dirOrHome = func(cwd string) string {
 				if cwd == "/invalid" {
 					return "/home/test"
@@ -665,7 +665,7 @@ func TestFloatingLaunchFailureCapturesSessionNameBeforeConcurrentRename(t *testi
 	factory, opened, release := newGatedOpenFactory(t, nil, io.ErrUnexpectedEOF)
 	var logs bytes.Buffer
 	handled := make(chan struct{})
-	d := newTestDaemon(t, factory, stubClock{})
+	d := newTestDaemon(t, factory, newStubClock(t))
 	d.log = slog.New(&floatingLogHandler{Handler: slog.NewTextHandler(&logs, nil), handled: handled})
 	tb := newFloatingTestTab(t)
 	sess := &session{sessionCore: sessionCore{name: "captured"}, tabs: []*tab{tb}, ctx: t.Context()}
@@ -703,7 +703,7 @@ func TestFloatingInstallLogsSessionNameSafelyDuringRename(t *testing.T) {
 	factory, opened, allowOpen := newGatedOpenFactory(t, floatingPTY, nil)
 	var logs bytes.Buffer
 	handled := make(chan struct{})
-	d := newTestDaemon(t, factory, stubClock{})
+	d := newTestDaemon(t, factory, newStubClock(t))
 	d.log = slog.New(&floatingLogHandler{Handler: slog.NewTextHandler(&logs, nil), handled: handled})
 	tb := newFloatingTestTab(t)
 	sess := &session{sessionCore: sessionCore{name: "captured"}, tabs: []*tab{tb}, ctx: t.Context()}
@@ -765,7 +765,7 @@ func TestFloatingAsyncSpawnFailureToastsOnlyForUserOpen(t *testing.T) {
 			factory := portsmocks.NewMockPTYFactory(t)
 			factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
 				Return(nil, spawnErr).Once()
-			d := newTestDaemon(t, factory, stubClock{})
+			d := newTestDaemon(t, factory, newStubClock(t))
 			tb := newFloatingTestTab(t)
 			tr, _ := newCapturingTransport(t)
 			ac := &attachedClient{tr: tr, output: newOutputStateStream(), geometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}}
@@ -800,8 +800,8 @@ func TestToggleFloatingStructuralErrorsAreUserErrors(t *testing.T) {
 		wantMsg string
 		cause   error
 	}{
-		{"nil session", newTestDaemon(t, nil, stubClock{}), nil, "couldn't open floating pane: no active session", nil},
-		{"no active tab", newTestDaemon(t, nil, stubClock{}), &session{}, "couldn't open floating pane: no active tab", layout.ErrNotFound},
+		{"nil session", newTestDaemon(t, nil, newStubClock(t)), nil, "couldn't open floating pane: no active session", nil},
+		{"no active tab", newTestDaemon(t, nil, newStubClock(t)), &session{}, "couldn't open floating pane: no active tab", layout.ErrNotFound},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -822,7 +822,7 @@ func TestToggleFloatingStructuralErrorsAreUserErrors(t *testing.T) {
 }
 
 func TestFloatingToggleUsesVisibleTarget(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	tb := newFloatingTestTab(t)
 	sess := &session{tabs: []*tab{tb}, ctx: t.Context()}
 	tb.mu.Lock()
