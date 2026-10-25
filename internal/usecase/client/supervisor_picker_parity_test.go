@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
@@ -23,13 +24,17 @@ import (
 // parityTestPicker adds the optional kill and notice seams of the real picker
 // to the scripted picker. The fields are guarded by attachTestPicker.mu.
 type parityTestPicker struct {
+	*mockpickerPresentationHost
 	*attachTestPicker
 	kill    pickerKillTarget
 	notices []string
 }
 
-func newParityTestPicker() *parityTestPicker {
-	return &parityTestPicker{attachTestPicker: newAttachTestPicker()}
+func newParityTestPicker(t *testing.T) *parityTestPicker {
+	p := &parityTestPicker{attachTestPicker: newAttachTestPicker(), mockpickerPresentationHost: newMockpickerPresentationHost(t)}
+	p.EXPECT().Notify(mock.Anything).Run(p.recordNotice).Maybe()
+	p.EXPECT().invalidatePresentation().Return().Maybe()
+	return p
 }
 
 func (p *parityTestPicker) ResolveKill(string) (pickerKillTarget, error) {
@@ -38,13 +43,11 @@ func (p *parityTestPicker) ResolveKill(string) (pickerKillTarget, error) {
 	return p.kill, nil
 }
 
-func (p *parityTestPicker) Notify(n domain.Notification) {
+func (p *parityTestPicker) recordNotice(n domain.Notification) {
 	p.mu.Lock()
 	p.notices = append(p.notices, n.Message)
 	p.mu.Unlock()
 }
-
-func (p *parityTestPicker) invalidatePresentation() {}
 
 func (p *parityTestPicker) noticeList() []string {
 	p.mu.Lock()
@@ -68,7 +71,7 @@ func TestPickerOverlayCommitAnotherTabSwitchesInPlace(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			picker := newParityTestPicker()
+			picker := newParityTestPicker(t)
 			harness := startAttachHarness(t, picker)
 			stream := attachLiveSession(t, harness, picker.attachTestPicker)
 			foreground := harness.sup.attachments.authority.foreground()
@@ -127,7 +130,7 @@ func TestSupervisorPickerKill(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			picker := newParityTestPicker()
+			picker := newParityTestPicker(t)
 			harness := startAttachHarness(t, picker)
 			harness.service.publishSnapshot(localDaemonSnapshot(3, 2))
 

@@ -102,7 +102,7 @@ func TestTerminalInputPumpStripsFocusReports(t *testing.T) {
 
 	observed := make(chan []byte, 1)
 	focus := make(chan domain.TerminalFocus, 1)
-	worker := &fakeWorker{run: func(ctx context.Context, fg AttachmentForeground) AttachmentEvent {
+	worker := newTestWorker(t, func(ctx context.Context, fg AttachmentForeground) AttachmentEvent {
 		event, ok := fg.Input(ctx)
 		if !ok {
 			return AttachmentEvent{Kind: AttachmentEventFailed, Err: errors.New("no input")}
@@ -111,7 +111,7 @@ func TestTerminalInputPumpStripsFocusReports(t *testing.T) {
 		observed <- append([]byte(nil), event.Data...)
 		focus <- attachmentTerminalFocus(fg).Focus()
 		return AttachmentEvent{Kind: AttachmentEventEnded}
-	}}
+	})
 
 	go func() {
 		_, _ = pw.Write([]byte("\x1b[O"))
