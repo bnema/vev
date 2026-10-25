@@ -11,11 +11,14 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	codec "github.com/bnema/vev/internal/snapshotcodec"
 	recoveryusecase "github.com/bnema/vev/internal/usecase/recovery"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
+// real I/O: publishes and reads checkpoint files.
 func TestIncarnationNamespace(t *testing.T) {
 	repo := NewRepository(privateDir(t))
 	id := domain.IncarnationID{1}
@@ -39,6 +42,7 @@ func TestIncarnationNamespace(t *testing.T) {
 	}
 }
 
+// real I/O: publishes and reads checkpoint files.
 func TestDirectCheckpointLoad(t *testing.T) {
 	repo := NewRepository(privateDir(t))
 	id := domain.IncarnationID{1}
@@ -62,6 +66,7 @@ func TestDirectCheckpointLoad(t *testing.T) {
 	}
 }
 
+// real I/O: publishes and reads checkpoint files.
 func TestLoadCheckpointPreservesManifestVersionError(t *testing.T) {
 	for _, tt := range []struct {
 		name    string
@@ -87,6 +92,7 @@ func TestLoadCheckpointPreservesManifestVersionError(t *testing.T) {
 	}
 }
 
+// real I/O: publishes and reads checkpoint files.
 func TestLoadCheckpointDoesNotClassifyCorruptionAsManifestVersion(t *testing.T) {
 	for _, tt := range []struct {
 		name   string
@@ -172,6 +178,7 @@ func TestLoadCheckpointDoesNotClassifyCorruptionAsManifestVersion(t *testing.T) 
 	}
 }
 
+// real I/O: publishes and reads checkpoint files.
 func TestReconcileCheckpoint(t *testing.T) {
 	repo := NewRepository(privateDir(t))
 	id := domain.IncarnationID{1}
@@ -201,6 +208,7 @@ func TestReconcileCheckpoint(t *testing.T) {
 	}
 }
 
+// real I/O: publishes and reads checkpoint files.
 func TestReconcileCheckpointRepairsOnlyDivergentHead(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -241,6 +249,7 @@ func TestReconcileCheckpointRepairsOnlyDivergentHead(t *testing.T) {
 	}
 }
 
+// real I/O: publishes and reads checkpoint files.
 func TestForwardOrphanRetryValidatesCheckpointBeforeCatalogueAdvance(t *testing.T) {
 	for _, tt := range []struct {
 		name   string
@@ -275,10 +284,20 @@ func TestForwardOrphanRetryValidatesCheckpointBeforeCatalogueAdvance(t *testing.
 			id := domain.IncarnationID{1}
 			publication := incarnationPublication(t, id, "work", 1, nil)
 			commitError := errors.New("catalogue commit failed")
-			catalogue := &forwardOrphanCatalogue{
-				record:       domain.CatalogueRecord{Name: publication.Name, IncarnationID: id},
-				replaceError: commitError,
-			}
+			record := domain.CatalogueRecord{Name: publication.Name, IncarnationID: id}
+			catalogue := portsmocks.NewMockCatalogue(t)
+			catalogue.EXPECT().Record(publication.Name).RunAndReturn(func(string) (domain.CatalogueRecord, bool, error) { return record, true, nil })
+			replaceCalls := 0
+			catalogue.EXPECT().Replace(publication.Name, mock.Anything).RunAndReturn(func(name string, next domain.CatalogueRecord) error {
+				require.Equal(t, record.Name, name)
+				require.Equal(t, record.Name, next.Name)
+				replaceCalls++
+				if replaceCalls == 1 {
+					return commitError
+				}
+				record = next
+				return nil
+			})
 			repository := NewRepository(privateDir(t))
 			coordinator := recoveryusecase.NewCoordinator(catalogue, repository, nil)
 
@@ -287,51 +306,10 @@ func TestForwardOrphanRetryValidatesCheckpointBeforeCatalogueAdvance(t *testing.
 			tt.mutate(t, repository, publication)
 			_, err = coordinator.PublishCheckpoint(t.Context(), publication.Name, publication)
 			require.Error(t, err)
-			require.Nil(t, catalogue.record.Committed, "an invalid forward orphan must not become authoritative")
-			require.Equal(t, 1, catalogue.replaceCalls, "retry must not advance the catalogue")
+			require.Nil(t, record.Committed, "an invalid forward orphan must not become authoritative")
+			require.Equal(t, 1, replaceCalls, "retry must not advance the catalogue")
 		})
 	}
-}
-
-type forwardOrphanCatalogue struct {
-	record       domain.CatalogueRecord
-	replaceError error
-	replaceCalls int
-}
-
-func (c *forwardOrphanCatalogue) Records() ([]domain.CatalogueRecord, error) {
-	return []domain.CatalogueRecord{c.record}, nil
-}
-
-func (c *forwardOrphanCatalogue) Record(name string) (domain.CatalogueRecord, bool, error) {
-	return c.record, c.record.Name == name, nil
-}
-
-func (c *forwardOrphanCatalogue) Create(domain.CatalogueRecord) error {
-	return errors.New("unexpected create")
-}
-func (c *forwardOrphanCatalogue) UpdateMetadata(domain.CatalogueMetadataUpdate) error {
-	return errors.New("unexpected metadata update")
-}
-func (c *forwardOrphanCatalogue) Sync() error { return nil }
-func (c *forwardOrphanCatalogue) Rename(string, domain.CatalogueRecord) error {
-	return errors.New("unexpected rename")
-}
-func (c *forwardOrphanCatalogue) Delete(string) error { return errors.New("unexpected delete") }
-func (c *forwardOrphanCatalogue) Close() error        { return nil }
-
-func (c *forwardOrphanCatalogue) Replace(name string, record domain.CatalogueRecord) error {
-	if name != c.record.Name || name != record.Name {
-		return errors.New("catalogue key mismatch")
-	}
-	c.replaceCalls++
-	if c.replaceError != nil {
-		err := c.replaceError
-		c.replaceError = nil
-		return err
-	}
-	c.record = record
-	return nil
 }
 
 func incarnationPublication(t *testing.T, id domain.IncarnationID, name string, generation uint64, parent *domain.CheckpointRef) ports.SnapshotPublication {
