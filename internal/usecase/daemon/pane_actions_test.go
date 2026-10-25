@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"runtime"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -54,32 +55,32 @@ func TestLayoutGenerationMutationBookkeeping(t *testing.T) {
 	})
 }
 
-type layoutRetryClock struct{ timers chan *layoutRetryTimer }
-
-type layoutRetryTimer struct {
-	ch    chan time.Time
-	delay time.Duration
+// awaitLayoutRetryTimer returns the pending retry timer (the one armed with
+// minOutputRenderDeadline), skipping unrelated timers. It must run inside a
+// synctest bubble.
+func awaitLayoutRetryTimer(t *testing.T, timers <-chan *testTimer) *testTimer {
+	t.Helper()
+	synctest.Wait()
+	for {
+		select {
+		case candidate := <-timers:
+			if candidate.duration == minOutputRenderDeadline {
+				return candidate
+			}
+		default:
+			t.Fatal("layout retry timer was never armed")
+			return nil
+		}
+	}
 }
-
-func (c *layoutRetryClock) Now() time.Time { return time.Unix(0, 0) }
-
-func (c *layoutRetryClock) NewTimer(delay time.Duration) ports.Timer {
-	timer := &layoutRetryTimer{ch: make(chan time.Time, 1), delay: delay}
-	c.timers <- timer
-	return timer
-}
-
-func (t *layoutRetryTimer) C() <-chan time.Time    { return t.ch }
-func (*layoutRetryTimer) Reset(time.Duration) bool { return false }
-func (*layoutRetryTimer) Stop() bool               { return true }
-func (t *layoutRetryTimer) fire()                  { t.ch <- time.Unix(0, 0) }
 
 func TestLayoutRetryIsBoundedDeduplicatedAndCanceled(t *testing.T) {
 	t.Run("persistent failure is bounded and reports once", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			pty := &transactionalResizePTY{errs: []error{errors.New("initial"), errors.New("retry 1"), errors.New("retry 2"), errors.New("retry 3")}}
-			d, sess, _, _ := newManualSessionWithPTYs(t, pty)
-			clock := &layoutRetryClock{timers: make(chan *layoutRetryTimer, 16)}
+			d, sess, ac, _ := newManualSessionWithPTYs(t, pty)
+			stopOverlayTimersAtCleanup(t, ac)
+			clock, timers := newSignalClock(t, 16)
 			d.clock = clock
 			tb := testAttachmentTab(sess)
 			tb.mu.Lock()
@@ -92,20 +93,13 @@ func TestLayoutRetryIsBoundedDeduplicatedAndCanceled(t *testing.T) {
 			// another timer/goroutine.
 			sess.geometry.scheduleAcceptedTabLayoutRetry(d, sess, tb)
 			for range maxAcceptedTabLayoutRetries {
-				var timer *layoutRetryTimer
-				for timer == nil {
-					candidate := <-clock.timers
-					if candidate.delay == minOutputRenderDeadline {
-						timer = candidate
-					}
-				}
-				timer.fire()
+				awaitLayoutRetryTimer(t, timers).fire()
 			}
-			require.Eventually(t, func() bool {
-				tb.layoutRetryMu.Lock()
-				defer tb.layoutRetryMu.Unlock()
-				return !tb.layoutRetryRunning
-			}, time.Second, time.Millisecond)
+			synctest.Wait()
+			tb.layoutRetryMu.Lock()
+			retryRunning := tb.layoutRetryRunning
+			tb.layoutRetryMu.Unlock()
+			require.False(t, retryRunning, "layout retry worker was still running at quiescence")
 			require.Len(t, pty.requested(), 1+maxAcceptedTabLayoutRetries)
 			count := 0
 			for _, notice := range d.notices.history() {
@@ -120,8 +114,9 @@ func TestLayoutRetryIsBoundedDeduplicatedAndCanceled(t *testing.T) {
 	t.Run("tab cancellation stops a waiting retry", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			pty := &transactionalResizePTY{errs: []error{errors.New("initial")}}
-			d, sess, _, _ := newManualSessionWithPTYs(t, pty)
-			clock := &layoutRetryClock{timers: make(chan *layoutRetryTimer, 16)}
+			d, sess, ac, _ := newManualSessionWithPTYs(t, pty)
+			stopOverlayTimersAtCleanup(t, ac)
+			clock, timers := newSignalClock(t, 16)
 			d.clock = clock
 			tb := testAttachmentTab(sess)
 			tb.mu.Lock()
@@ -129,20 +124,14 @@ func TestLayoutRetryIsBoundedDeduplicatedAndCanceled(t *testing.T) {
 			tb.bumpLayoutGenerationLocked()
 			tb.mu.Unlock()
 			sess.geometry.applyTabLayout(d, sess, tb)
-			var timer *layoutRetryTimer
-			for timer == nil {
-				candidate := <-clock.timers
-				if candidate.delay == minOutputRenderDeadline {
-					timer = candidate
-				}
-			}
+			timer := awaitLayoutRetryTimer(t, timers)
 			tb.cancel()
 			timer.fire()
-			require.Eventually(t, func() bool {
-				tb.layoutRetryMu.Lock()
-				defer tb.layoutRetryMu.Unlock()
-				return !tb.layoutRetryRunning
-			}, time.Second, time.Millisecond)
+			synctest.Wait()
+			tb.layoutRetryMu.Lock()
+			retryRunning := tb.layoutRetryRunning
+			tb.layoutRetryMu.Unlock()
+			require.False(t, retryRunning, "layout retry worker was still running at quiescence")
 			require.Len(t, pty.requested(), 1)
 		})
 	})
@@ -151,7 +140,8 @@ func TestLayoutRetryIsBoundedDeduplicatedAndCanceled(t *testing.T) {
 func TestFocusDirAtDoesNotApplyUncommittedCandidate(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		pty := &transactionalResizePTY{}
-		d, sess, _, _ := newManualSessionWithPTYs(t, pty)
+		d, sess, ac, _ := newManualSessionWithPTYs(t, pty)
+		stopOverlayTimersAtCleanup(t, ac)
 		tb := testAttachmentTab(sess)
 		second := newPane("pane-2", nil, domain.Size{Cols: 80, Rows: 23})
 		tb.mu.Lock()
@@ -170,8 +160,9 @@ func TestFocusDirAtDoesNotApplyUncommittedCandidate(t *testing.T) {
 func TestLayoutApplicationRetriesOnlyAcceptedFailedGeometry(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		pty := &transactionalResizePTY{errs: []error{errors.New("first resize fails")}}
-		d, sess, _, _ := newManualSessionWithPTYs(t, pty)
-		clock := &layoutRetryClock{timers: make(chan *layoutRetryTimer, 16)}
+		d, sess, ac, _ := newManualSessionWithPTYs(t, pty)
+		stopOverlayTimersAtCleanup(t, ac)
+		clock, timers := newSignalClock(t, 16)
 		d.clock = clock
 		tb, p := testAttachmentTab(sess), testAttachmentTab(sess).focusedPane()
 		tb.mu.Lock()
@@ -188,23 +179,16 @@ func TestLayoutApplicationRetriesOnlyAcceptedFailedGeometry(t *testing.T) {
 		}
 		sess.geometry.applyTabLayout(d, sess, tb)
 
-		var timer *layoutRetryTimer
-		for timer == nil {
-			candidate := <-clock.timers
-			if candidate.delay == minOutputRenderDeadline {
-				timer = candidate
-			}
-		}
+		timer := awaitLayoutRetryTimer(t, timers)
 		require.Equal(t, []domain.Size{{Cols: 100, Rows: 20}}, pty.requested())
 		require.Equal(t, domain.Size{Cols: 80, Rows: 23}, domain.Size{Cols: p.screen.Columns(), Rows: p.screen.Rows()}, "failed apply must not publish a VT resize")
 		timer.fire()
 		awaitSignal(t, secondResize, "accepted failure was not retried")
 		require.Equal(t, []domain.Size{{Cols: 100, Rows: 20}, {Cols: 100, Rows: 20}}, pty.requested())
-		require.Eventually(t, func() bool {
-			p.mu.Lock()
-			defer p.mu.Unlock()
-			return p.screen.Columns() == 100 && p.screen.Rows() == 20
-		}, time.Second, time.Millisecond, "successful retry did not publish its VT size")
+		synctest.Wait()
+		p.mu.Lock()
+		require.True(t, p.screen.Columns() == 100 && p.screen.Rows() == 20, "successful retry did not publish its VT size")
+		p.mu.Unlock()
 	})
 }
 
@@ -358,7 +342,8 @@ func TestLayoutApplicationRejectsStaleCloseFocusAndSize(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			first, entered, release := newBlockedPTY()
 			second := &transactionalResizePTY{}
-			d, sess, _, _ := newManualSessionWithPTYs(t, first)
+			d, sess, ac, _ := newManualSessionWithPTYs(t, first)
+			stopOverlayTimersAtCleanup(t, ac)
 			tb := testAttachmentTab(sess)
 			p1 := tb.focusedPane()
 			p2 := newPane("pane-2", second, domain.Size{Cols: 80, Rows: 23})
@@ -373,11 +358,20 @@ func TestLayoutApplicationRejectsStaleCloseFocusAndSize(t *testing.T) {
 			awaitSignal(t, entered, "old layout apply did not block")
 			closed := make(chan error, 1)
 			go func() { closed <- d.closePane(sess, tb, p2.id, nil, false) }()
-			require.Eventually(t, func() bool {
+			// closePane parks on the layout-apply sync.Mutex, which is not a durable
+			// block, so synctest.Wait cannot observe it. Yield (no time involved)
+			// until its tab mutation is visible.
+			closeMutated := false
+			for range 100000 {
 				tb.mu.Lock()
-				defer tb.mu.Unlock()
-				return tb.panes[p2.id] == nil && tb.layoutGeneration > 1
-			}, time.Second, time.Millisecond, "close must mutate before its serialized apply waits")
+				closeMutated = tb.panes[p2.id] == nil && tb.layoutGeneration > 1
+				tb.mu.Unlock()
+				if closeMutated {
+					break
+				}
+				runtime.Gosched()
+			}
+			require.True(t, closeMutated, "close must mutate before its serialized apply waits")
 			require.Equal(t, domain.Rect{Width: 80, Height: 23}, p1.rect, "stale plan published before release")
 			close(release)
 			awaitSignal(t, done, "stale layout apply did not finish")
@@ -402,7 +396,8 @@ func TestLayoutApplicationRejectsStaleCloseFocusAndSize(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			first, entered, release := newBlockedPTY()
 			second := &transactionalResizePTY{}
-			d, sess, _, _ := newManualSessionWithPTYs(t, first)
+			d, sess, ac, _ := newManualSessionWithPTYs(t, first)
+			stopOverlayTimersAtCleanup(t, ac)
 			tb := testAttachmentTab(sess)
 			p1 := tb.focusedPane()
 			p2 := newPane("pane-2", second, domain.Size{Cols: 80, Rows: 23})
@@ -438,7 +433,8 @@ func TestLayoutApplicationRejectsStaleCloseFocusAndSize(t *testing.T) {
 	t.Run("client size rejects and retries a blocked plan", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			pty, entered, release := newBlockedPTY()
-			d, sess, _, _ := newManualSessionWithPTYs(t, pty)
+			d, sess, ac, _ := newManualSessionWithPTYs(t, pty)
+			stopOverlayTimersAtCleanup(t, ac)
 			tb := testAttachmentTab(sess)
 			p := tb.focusedPane()
 			p.rect = domain.Rect{Width: 20, Height: 10}
@@ -467,13 +463,10 @@ func TestLayoutApplicationRejectsStaleCloseFocusAndSize(t *testing.T) {
 	})
 }
 
+// awaitSignal runs inside a synctest bubble: after quiescence ch must be ready.
 func awaitSignal(t *testing.T, ch <-chan struct{}, message string) {
 	t.Helper()
-	select {
-	case <-ch:
-	case <-time.After(2 * time.Second):
-		t.Fatal(message)
-	}
+	requireReceived(t, ch, message)
 }
 
 func TestSplitPaneCreatesFocusedShellInRequestedPosition(t *testing.T) {
@@ -803,12 +796,7 @@ func TestClosePaneActionDoesNotReenterDispatchBoundary(t *testing.T) {
 				})
 			})
 		}()
-		select {
-		case err := <-done:
-			require.NoError(t, err)
-		case <-time.After(time.Second):
-			t.Fatal("close pane action re-entered dispatch boundary")
-		}
+		require.NoError(t, requireReceived(t, done, "close pane action re-entered dispatch boundary"))
 	})
 }
 

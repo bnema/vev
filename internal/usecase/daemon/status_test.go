@@ -567,7 +567,8 @@ func TestAttachClientAppliesForcedThemeBeforeMsgTheme(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				p, releasePTY := newBlockingPTY(t)
-				d, sess, _, _ := newManualSessionWithPTYs(t, p)
+				d, sess, ac, _ := newManualSessionWithPTYs(t, p)
+				stopOverlayTimersAtCleanup(t, ac)
 				defer releasePTY()
 				d.ApplyConfig(domain.Config{Theme: tc.mode})
 				for _, tb := range sess.tabs {

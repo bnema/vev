@@ -136,7 +136,8 @@ func TestReplayResizePendingBuffersSuccessFailureAndBatchOrder(t *testing.T) {
 	t.Run("success resizes then replays", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			pty := &transactionalResizePTY{}
-			d, sess, _, _ := newManualSessionWithPTYs(t, pty)
+			d, sess, ac, _ := newManualSessionWithPTYs(t, pty)
+			stopOverlayTimersAtCleanup(t, ac)
 			tb, p := testAttachmentTab(sess), testAttachmentTab(sess).focusedPane()
 			p.resizeApplying = true
 			p.resizePending = []byte("A\x1b[1;81HB")
@@ -149,7 +150,8 @@ func TestReplayResizePendingBuffersSuccessFailureAndBatchOrder(t *testing.T) {
 	t.Run("failure retains old parser width", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			pty := &transactionalResizePTY{}
-			d, sess, _, _ := newManualSessionWithPTYs(t, pty)
+			d, sess, ac, _ := newManualSessionWithPTYs(t, pty)
+			stopOverlayTimersAtCleanup(t, ac)
 			tb, p := testAttachmentTab(sess), testAttachmentTab(sess).focusedPane()
 			p.resizeApplying = true
 			p.resizePending = []byte("\x1b[1;81HB")
@@ -161,7 +163,8 @@ func TestReplayResizePendingBuffersSuccessFailureAndBatchOrder(t *testing.T) {
 	t.Run("batches retain read order", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			pty := &transactionalResizePTY{}
-			d, sess, _, _ := newManualSessionWithPTYs(t, pty)
+			d, sess, ac, _ := newManualSessionWithPTYs(t, pty)
+			stopOverlayTimersAtCleanup(t, ac)
 			tb, p := testAttachmentTab(sess), testAttachmentTab(sess).focusedPane()
 			p.screen.OnResponse = func([]byte) { p.ptyResponses = append(p.ptyResponses, 'r') }
 			pty.onWrite = func([]byte) {
@@ -220,7 +223,8 @@ func TestProcessPTYDataRetainsCallbacksDuringResizeReplay(t *testing.T) {
 func TestApplySessionLayoutStopsRetryWhenSessionCanceled(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		pty := &transactionalResizePTY{}
-		d, sess, _, _ := newManualSessionWithPTYs(t, pty)
+		d, sess, ac, _ := newManualSessionWithPTYs(t, pty)
+		stopOverlayTimersAtCleanup(t, ac)
 		tb, p := testAttachmentTab(sess), testAttachmentTab(sess).focusedPane()
 		d.beforeSessionResizePublication = sess.cancel
 
@@ -241,7 +245,8 @@ func TestApplySessionLayoutStopsRetryWhenSessionCanceled(t *testing.T) {
 func TestTransactionalResizeApplyDoesNotHoldTabOrPaneLocks(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		pty := &transactionalResizePTY{}
-		d, sess, _, _ := newManualSessionWithPTYs(t, pty)
+		d, sess, ac, _ := newManualSessionWithPTYs(t, pty)
+		stopOverlayTimersAtCleanup(t, ac)
 		tb := testAttachmentTab(sess)
 		p := tb.focusedPane()
 		var tabUnlocked, paneUnlocked bool
@@ -288,7 +293,8 @@ func TestApplySessionLayoutReportsResizeFailuresOnce(t *testing.T) {
 				if tc.failureCount >= 2 {
 					second.errs = []error{errors.New("second failure")}
 				}
-				d, sess, _, _ := newManualSessionWithPTYs(t, first, second)
+				d, sess, ac, _ := newManualSessionWithPTYs(t, first, second)
+				stopOverlayTimersAtCleanup(t, ac)
 
 				failed, ok := sess.geometry.applySessionLayout(d, sess, domain.Size{Cols: 100, Rows: 30}, nil, nil)
 
@@ -538,7 +544,8 @@ func TestTransactionalResizeRechecksLeaseAtAttachmentPublication(t *testing.T) {
 func TestStaleRemovedMemberGateIsCanceledOnceByFreshPlan(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		pty := &transactionalResizePTY{}
-		d, sess, _, _ := newManualSessionWithPTYs(t, pty)
+		d, sess, ac, _ := newManualSessionWithPTYs(t, pty)
+		stopOverlayTimersAtCleanup(t, ac)
 		tb := testAttachmentTab(sess)
 		p := tb.focusedPane()
 		p.resizeApplying = true
@@ -564,7 +571,8 @@ func TestStaleRemovedMemberGateIsCanceledOnceByFreshPlan(t *testing.T) {
 func TestHeadlessResizeRetriesInvalidatedPlan(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		pty := &transactionalResizePTY{}
-		d, sess, _, _ := newManualSessionWithPTYs(t, pty)
+		d, sess, ac, _ := newManualSessionWithPTYs(t, pty)
+		stopOverlayTimersAtCleanup(t, ac)
 		tb := testAttachmentTab(sess)
 		var invalidate sync.Once
 		pty.onResize = func() {
@@ -638,7 +646,8 @@ func TestTransactionalResizeFloatingBreakpointRace(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				d, sess, _, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
+				d, sess, ac, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
+				stopOverlayTimersAtCleanup(t, ac)
 				d.ApplyConfig(domain.Config{Floating: cfg})
 				require.True(t, sess.geometry.requestResize(d, sess, nil, tc.from, true))
 

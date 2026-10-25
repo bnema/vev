@@ -390,7 +390,8 @@ func TestReportErrorUserErrorBecomesNotification(t *testing.T) {
 
 func TestReportErrorDetailsJoinUnwrapChain(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		d, sess, _, _ := newNoticeFixture(t, newNoticeClock())
+		d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
+		stopOverlayTimersAtCleanup(t, ac)
 		root := errors.New("permission denied")
 		mid := fmt.Errorf("open /dev/pts/3: %w", root)
 
@@ -455,7 +456,8 @@ func TestReportErrorBenignFiltered(t *testing.T) {
 // error that merely reads like a sentinel must still reach history.
 func TestReportErrorNonBenignIsNeverDropped(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		d, sess, _, _ := newNoticeFixture(t, newNoticeClock())
+		d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
+		stopOverlayTimersAtCleanup(t, ac)
 
 		d.reportError(sess, errors.New("no pane in that direction"))
 

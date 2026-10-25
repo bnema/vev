@@ -62,7 +62,8 @@ func (p *pane) clearOwnerForTest() {
 func TestPTYReaderExitReapsExactlyCurrentOwnerAfterPublication(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		ptyMock, pty := newOwnerRoutingPTY(t)
-		d, source, _, _ := newManualSessionWithPTYs(t, ptyMock)
+		d, source, ac, _ := newManualSessionWithPTYs(t, ptyMock)
+		stopOverlayTimersAtCleanup(t, ac)
 		sourceTab := testAttachmentTab(source)
 		moved := sourceTab.focusedPane()
 
