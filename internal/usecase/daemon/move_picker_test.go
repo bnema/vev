@@ -3,6 +3,7 @@ package daemon
 import (
 	"testing"
 	"testing/synctest"
+	"time"
 
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -657,9 +658,11 @@ func TestMovePickerCompositeFollowReadmitsSupersededCapabilityBeforeIdentity(t *
 
 // awaitSentCommittedIdentity reads the next committed route identity the daemon
 // published, skipping unrelated frames.
+//
+//testpolicy:realtime shared with callers outside synctest bubbles (session_picker_offer_test.go); the bounded timer is fake time inside a bubble
 func awaitSentCommittedIdentity(t *testing.T, sends <-chan wire.Envelope) protocol.CommittedRouteIdentity {
 	t.Helper()
-	synctest.Wait()
+	deadline := time.After(2 * time.Second)
 	for {
 		select {
 		case frame := <-sends:
@@ -668,7 +671,7 @@ func awaitSentCommittedIdentity(t *testing.T, sends <-chan wire.Envelope) protoc
 				continue
 			}
 			return identity
-		default:
+		case <-deadline:
 			t.Fatal("composite follow sent no committed route identity")
 			return protocol.CommittedRouteIdentity{}
 		}
@@ -677,14 +680,16 @@ func awaitSentCommittedIdentity(t *testing.T, sends <-chan wire.Envelope) protoc
 
 // assertNoFurtherFrame proves a frame was produced exactly once: no later frame
 // of that type may follow the one the caller already observed.
+//
+//testpolicy:realtime shared with callers outside synctest bubbles (session_picker_offer_test.go); the bounded timer is fake time inside a bubble
 func assertNoFurtherFrame(t *testing.T, sends <-chan wire.Envelope, frameName string, failure string) {
 	t.Helper()
-	synctest.Wait()
+	deadline := time.After(200 * time.Millisecond)
 	for {
 		select {
 		case frame := <-sends:
 			require.NotEqual(t, frameName, envelopeMessageName(t, frame.Payload), failure)
-		default:
+		case <-deadline:
 			return
 		}
 	}
@@ -725,10 +730,12 @@ func TestMovePickerClosedRejectionUsesFreshEffect(t *testing.T) {
 	})
 }
 
-// awaitSentPickerResult reports, at bubble quiescence, the result the daemon sent for a completed mutation.
+// awaitSentPickerResult blocks until the daemon reports a completed mutation.
+//
+//testpolicy:realtime shared with callers outside synctest bubbles (session_picker_offer_test.go); the bounded timer is fake time inside a bubble
 func awaitSentPickerResult(t *testing.T, sends <-chan wire.Envelope) protocol.PickerResult {
 	t.Helper()
-	synctest.Wait()
+	deadline := time.After(2 * time.Second)
 	for {
 		select {
 		case frame := <-sends:
@@ -737,7 +744,7 @@ func awaitSentPickerResult(t *testing.T, sends <-chan wire.Envelope) protocol.Pi
 				continue
 			}
 			return result
-		default:
+		case <-deadline:
 			t.Fatal("composite follow sent no correlated PickerResult")
 			return protocol.PickerResult{}
 		}
@@ -747,10 +754,12 @@ func awaitSentPickerResult(t *testing.T, sends <-chan wire.Envelope) protocol.Pi
 // collectSentPickerOutcome drains the bounded set of frames one rejection can
 // produce and returns the PickerFailure, plus any PickerResult that must not
 // exist on the rejection path.
+//
+//testpolicy:realtime shared with callers outside synctest bubbles (session_picker_offer_test.go); the bounded timer is fake time inside a bubble
 func collectSentPickerOutcome(t *testing.T, sends <-chan wire.Envelope) (failure protocol.PickerFailure, result *protocol.PickerResult) {
 	t.Helper()
 	found := false
-	synctest.Wait()
+	deadline := time.After(500 * time.Millisecond)
 	for {
 		select {
 		case frame := <-sends:
@@ -760,7 +769,7 @@ func collectSentPickerOutcome(t *testing.T, sends <-chan wire.Envelope) (failure
 			case protocol.PickerResult:
 				result = &message
 			}
-		default:
+		case <-deadline:
 			require.True(t, found, "closed rejection sent no bounded failure")
 			return failure, result
 		}
