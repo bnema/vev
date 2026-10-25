@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -55,8 +56,9 @@ func newExpiryCloseSignalTransport() *expiryCloseSignalTransport {
 }
 
 func (t *expiryCloseSignalTransport) Close() error {
+	err := t.closeTrackingTransport.Close()
 	t.once.Do(func() { close(t.closed) })
-	return t.closeTrackingTransport.Close()
+	return err
 }
 
 // newSuspendedExpiryFixture creates one manual session, suspends its sole
@@ -104,40 +106,42 @@ func waitForAttachmentCleanup(t *testing.T, d *Daemon) {
 }
 
 func TestSuspendedAttachmentSafetyExpiryEvictsAfterTimer(t *testing.T) {
-	d, sess, ac, timer, tr := newSuspendedExpiryFixture(t)
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, ac, timer, tr := newSuspendedExpiryFixture(t)
 
-	evicted := make(chan struct{})
-	var once sync.Once
-	d.afterClientGoneDetach = func() { once.Do(func() { close(evicted) }) }
+		evicted := make(chan struct{})
+		var once sync.Once
+		d.afterClientGoneDetach = func() { once.Do(func() { close(evicted) }) }
 
-	// Suspended-only presence is not observable, but membership and transport
-	// ownership are retained until expiry.
-	require.False(t, sess.snapshotView(viewOptions{}).attached, "suspended-only session must not be observably attached")
-	require.True(t, slices.Contains(sess.snapshotAttachments(), ac), "suspension retains session membership")
-	d.mu.Lock()
-	require.NotNil(t, d.suspended[ac], "suspension arms the daemon-owned safety expiry")
-	d.mu.Unlock()
+		// Suspended-only presence is not observable, but membership and transport
+		// ownership are retained until expiry.
+		require.False(t, sess.snapshotView(viewOptions{}).attached, "suspended-only session must not be observably attached")
+		require.True(t, slices.Contains(sess.snapshotAttachments(), ac), "suspension retains session membership")
+		d.mu.Lock()
+		require.NotNil(t, d.suspended[ac], "suspension arms the daemon-owned safety expiry")
+		d.mu.Unlock()
 
-	timer.ch <- time.Now()
-	awaitTestCompletion(t, evicted, "safety expiry never evicted the suspended attachment")
-	awaitTestCompletion(t, tr.closed, "expiry never closed the retained transport")
+		timer.fire()
+		requireReceived(t, evicted, "safety expiry never evicted the suspended attachment")
+		requireReceived(t, tr.closed, "expiry never closed the retained transport")
 
-	require.Nil(t, ac.currentAttachmentSession())
-	sess.mu.Lock()
-	_, registered := sess.attachments[ac]
-	sess.mu.Unlock()
-	require.False(t, registered, "expiry releases session membership")
-	require.True(t, tr.Closed(), "expiry closes the retained transport")
-	d.mu.Lock()
-	_, retained := d.suspended[ac]
-	parked := d.resume.parked[123]
-	d.mu.Unlock()
-	require.False(t, retained)
-	require.Nil(t, parked, "expiry must not park a resume credential")
-	require.False(t, ac.parked)
-	require.False(t, sess.snapshotView(viewOptions{}).attached)
-	require.Same(t, sess, firstSession(d), "expiry leaves the session to headless lifetime policy")
-	waitForAttachmentCleanup(t, d)
+		require.Nil(t, ac.currentAttachmentSession())
+		sess.mu.Lock()
+		_, registered := sess.attachments[ac]
+		sess.mu.Unlock()
+		require.False(t, registered, "expiry releases session membership")
+		require.True(t, tr.Closed(), "expiry closes the retained transport")
+		d.mu.Lock()
+		_, retained := d.suspended[ac]
+		parked := d.resume.parked[123]
+		d.mu.Unlock()
+		require.False(t, retained)
+		require.Nil(t, parked, "expiry must not park a resume credential")
+		require.False(t, ac.parked)
+		require.False(t, sess.snapshotView(viewOptions{}).attached)
+		require.Same(t, sess, firstSession(d), "expiry leaves the session to headless lifetime policy")
+		waitForAttachmentCleanup(t, d)
+	})
 }
 
 func TestSuspendedAttachmentExpiryLeavesEphemeralSessionRegistered(t *testing.T) {

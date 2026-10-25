@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/bnema/vev/internal/protocol/wire"
@@ -65,5 +66,19 @@ func awaitCoordinatorOutput(
 			t.Fatal(timeoutFailure)
 			return wire.Envelope{}
 		}
+	}
+}
+
+// requireReceived asserts a channel result after bubble goroutines are quiescent.
+func requireReceived[T any](t *testing.T, ch <-chan T, failure string) T {
+	t.Helper()
+	synctest.Wait()
+	select {
+	case value := <-ch:
+		return value
+	default:
+		t.Fatal(failure)
+		var zero T
+		return zero
 	}
 }
