@@ -15,6 +15,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 )
 
+// real I/O: reads and writes real files in temp directories.
 func TestStoreClaimAckRoundTrip(t *testing.T) {
 	t.Parallel()
 	dir := filepath.Join(t.TempDir(), "vev")
@@ -91,6 +92,7 @@ func TestStoreClaimWaitsForAppendInCriticalSection(t *testing.T) {
 	require.NoError(t, claimant.Ack())
 }
 
+// real I/O: reads and writes real files in temp directories.
 func TestStoreRepeatedClaimReplaysOwnerAndBlocksCompetitor(t *testing.T) {
 	t.Parallel()
 	dir := filepath.Join(t.TempDir(), "vev")
@@ -117,6 +119,7 @@ func TestStoreRepeatedClaimReplaysOwnerAndBlocksCompetitor(t *testing.T) {
 	require.Empty(t, empty)
 }
 
+// real I/O: reads and writes real files in temp directories.
 func TestStoreAckReleasesClaimAfterCleanupFailure(t *testing.T) {
 	t.Parallel()
 
@@ -226,6 +229,7 @@ func operationLockHeld(path string) (bool, error) {
 	return false, nil
 }
 
+// real I/O: reads and writes real files in temp directories.
 func TestStoreClaimOwnershipPreventsLiveReplayOrAck(t *testing.T) {
 	t.Parallel()
 	dir := filepath.Join(t.TempDir(), "vev")
@@ -248,6 +252,7 @@ func TestStoreClaimOwnershipPreventsLiveReplayOrAck(t *testing.T) {
 	require.Empty(t, empty)
 }
 
+// real I/O: reads and writes real files in temp directories.
 func TestStoreClaimMissingFileReturnsNil(t *testing.T) {
 	t.Parallel()
 
@@ -256,6 +261,7 @@ func TestStoreClaimMissingFileReturnsNil(t *testing.T) {
 	require.Nil(t, got)
 }
 
+// real I/O: reads and writes real files in temp directories.
 func TestStoreClaimSkipsGarbageLinesInOrder(t *testing.T) {
 	t.Parallel()
 	dir := filepath.Join(t.TempDir(), "vev")
@@ -276,6 +282,7 @@ func TestStoreClaimSkipsGarbageLinesInOrder(t *testing.T) {
 	require.NoError(t, store.Ack())
 }
 
+// real I/O: reads and writes real files in temp directories.
 func TestStoreClaimSkipsOversizedLines(t *testing.T) {
 	t.Parallel()
 
@@ -330,6 +337,7 @@ func TestStoreClaimSkipsOversizedLines(t *testing.T) {
 	}
 }
 
+// real I/O: reads and writes real files in temp directories.
 func TestStoreAppendUsesPrivatePermissions(t *testing.T) {
 	t.Parallel()
 	dir := filepath.Join(t.TempDir(), "vev")
