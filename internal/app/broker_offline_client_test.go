@@ -154,21 +154,14 @@ func startPersistentOfflineClientFixture(t *testing.T, shell string, shellArgs [
 	// initial navigation is not consumed against an artificial empty catalogue.
 	probe, err := brokeripc.NewConnector(socket, brokeripc.Config{}).Connect(ctx)
 	require.NoError(t, err)
-	subscription, err := probe.Subscribe()
-	require.NoError(t, err)
-	require.Eventually(t, func() bool {
-		for _, observation := range probe.Snapshot().Daemons {
+	awaitBrokerSnapshot(t, probe, func(snapshot ports.BrokerSnapshot) bool {
+		for _, observation := range snapshot.Daemons {
 			if observation.Local {
 				return true
 			}
 		}
-		select {
-		case <-subscription.Changed():
-		default:
-		}
 		return false
-	}, brokerTestWait, 5*time.Millisecond, "production broker never committed its local daemon authority")
-	subscription.Close()
+	}, "the production broker to commit its local daemon authority")
 	require.NoError(t, probe.Close())
 	t.Cleanup(func() {
 		cancel()
@@ -296,11 +289,11 @@ func TestOfflineEphemeralSessionIsNotPersistedViaBroker(t *testing.T) {
 
 	// The daemon persists on its own cadence; the durable catalogue must settle
 	// to exactly the named record and never gain the ephemeral one.
-	require.Eventually(t, func() bool {
+	// The catalogue is on disk and publishes no event, so this polls.
+	require.True(t, pollUntil(brokerTestWait, func() bool {
 		records, err := fixture.catalogue.Records()
-		require.NoError(t, err)
-		return len(records) == 1 && records[0].Name == "persisted"
-	}, brokerTestWait, pollInterval, "the durable catalogue must hold exactly the named session")
+		return err == nil && len(records) == 1 && records[0].Name == "persisted"
+	}), "the durable catalogue must hold exactly the named session")
 
 	records, err := fixture.catalogue.Records()
 	require.NoError(t, err)

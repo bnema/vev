@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -106,6 +107,37 @@ type scriptedLocalDaemon struct {
 	mu       sync.Mutex
 	streams  int
 	received []protocol.ClientMessage
+	// changed is signaled (coalesced) whenever a stream is admitted or a message
+	// is recorded, so waiters block on the event instead of polling.
+	changed chan struct{}
+}
+
+// signal wakes any waiter without ever blocking the serving goroutine.
+func (d *scriptedLocalDaemon) signal() {
+	select {
+	case d.changed <- struct{}{}:
+	default:
+	}
+}
+
+// awaitState blocks until ready reports true under the daemon lock, waking on
+// every recorded change and failing once brokerTestWait elapses.
+func (d *scriptedLocalDaemon) awaitState(t *testing.T, ready func() bool, what string) {
+	t.Helper()
+	deadline := time.After(brokerTestWait)
+	for {
+		d.mu.Lock()
+		ok := ready()
+		d.mu.Unlock()
+		if ok {
+			return
+		}
+		select {
+		case <-d.changed:
+		case <-deadline:
+			t.Fatal(what)
+		}
+	}
 }
 
 // newScriptedLocalDaemon serves one scripted daemonmux daemon over in-memory
@@ -113,7 +145,7 @@ type scriptedLocalDaemon struct {
 // the stream without an answer.
 func newScriptedLocalDaemon(t *testing.T, binding daemonmux.ServerBinding, respond func(protocol.ClientMessage) protocol.ServerMessage) *scriptedLocalDaemon {
 	t.Helper()
-	daemon := &scriptedLocalDaemon{respond: respond}
+	daemon := &scriptedLocalDaemon{respond: respond, changed: make(chan struct{}, 1)}
 	aggregate := daemonmux.NewAggregateListener()
 	supervisor, err := daemonmux.NewServerSupervisor(aggregate, binding, daemonmux.DefaultMuxCeilings(), 0)
 	require.NoError(t, err)
@@ -130,6 +162,7 @@ func newScriptedLocalDaemon(t *testing.T, binding daemonmux.ServerBinding, respo
 			daemon.mu.Lock()
 			daemon.streams++
 			daemon.mu.Unlock()
+			daemon.signal()
 			go daemon.serveStream(connection)
 		}
 	}()
@@ -163,6 +196,7 @@ func (d *scriptedLocalDaemon) serveStream(connection ports.ServerConnection) {
 		d.mu.Lock()
 		d.received = append(d.received, message)
 		d.mu.Unlock()
+		d.signal()
 		if d.respond == nil {
 			return
 		}
@@ -186,22 +220,15 @@ func (d *scriptedLocalDaemon) messages() []protocol.ClientMessage {
 // awaitMessages waits until the daemon recorded at least count messages.
 func (d *scriptedLocalDaemon) awaitMessages(t *testing.T, count int) []protocol.ClientMessage {
 	t.Helper()
-	require.Eventually(t, func() bool {
-		d.mu.Lock()
-		defer d.mu.Unlock()
-		return len(d.received) >= count
-	}, brokerTestWait, time.Millisecond, "scripted local daemon recorded %d messages", len(d.messages()))
+	d.awaitState(t, func() bool { return len(d.received) >= count },
+		fmt.Sprintf("scripted local daemon never recorded %d messages", count))
 	return d.messages()
 }
 
 // awaitStreams waits until the daemon admitted at least count logical streams.
 func (d *scriptedLocalDaemon) awaitStreams(t *testing.T, count int) {
 	t.Helper()
-	require.Eventually(t, func() bool {
-		d.mu.Lock()
-		defer d.mu.Unlock()
-		return d.streams >= count
-	}, brokerTestWait, time.Millisecond, "scripted local daemon admitted too few streams")
+	d.awaitState(t, func() bool { return d.streams >= count }, "scripted local daemon admitted too few streams")
 }
 
 // TestBrokerLocalProbeObservesAuthenticatedCatalogue proves the broker-owned
@@ -664,11 +691,9 @@ func TestBrokerLocalObservationRegistryPublishesLocalFirst(t *testing.T) {
 	t.Cleanup(func() { cancel(); <-done })
 	registry.RequestProbe("")
 
-	require.Eventually(t, func() bool {
-		snapshot := registry.Snapshot()
-		return len(snapshot.Daemons) == 1 && snapshot.Daemons[0].Local &&
-			!snapshot.Daemons[0].Checking && snapshot.Daemons[0].Availability == domain.RemoteAvailabilityReachable
-	}, 3*time.Second, 2*time.Millisecond)
+	waitLocalEntry(t, registry, func(entry ports.BrokerDaemonObservation) bool {
+		return !entry.Checking && entry.Availability == domain.RemoteAvailabilityReachable
+	})
 
 	snapshot := registry.Snapshot()
 	require.Len(t, snapshot.Daemons, 1)
@@ -681,10 +706,12 @@ func TestBrokerLocalObservationRegistryPublishesLocalFirst(t *testing.T) {
 
 	// The durable store persists remote observations only: the local entry never
 	// reaches disk.
-	require.Eventually(t, func() bool {
+	// The store is on disk and publishes no event, so this is the one place
+	// that polls.
+	require.True(t, pollUntil(3*time.Second, func() bool {
 		stored, err := store.Load()
 		return err == nil && stored.Revision > 0
-	}, 3*time.Second, 2*time.Millisecond)
+	}), "the broker store never persisted a revision")
 	stored, err := store.Load()
 	require.NoError(t, err)
 	for _, entry := range stored.Daemons {

@@ -1,6 +1,11 @@
 package app
 
-import "time"
+import (
+	"testing"
+	"time"
+
+	"github.com/bnema/vev/internal/ports"
+)
 
 // pollInterval is how often pollUntil re-evaluates its condition.
 const pollInterval = 5 * time.Millisecond
@@ -31,6 +36,35 @@ func pollUntil(timeout time.Duration, cond func() bool) bool {
 			}
 		case <-deadline.C:
 			return cond()
+		}
+	}
+}
+
+// awaitBrokerSnapshot blocks until pred accepts the connection's committed
+// snapshot. It waits on the broker's own subscription event, so nothing polls.
+func awaitBrokerSnapshot(t testing.TB, service interface {
+	Snapshot() ports.BrokerSnapshot
+	Subscribe() (ports.BrokerSubscription, error)
+	Done() <-chan struct{}
+	Err() error
+}, pred func(ports.BrokerSnapshot) bool, what string) ports.BrokerSnapshot {
+	t.Helper()
+	sub, err := service.Subscribe()
+	if err != nil {
+		t.Fatalf("subscribe while waiting for %s: %v", what, err)
+	}
+	defer sub.Close()
+	deadline := time.After(brokerTestWait)
+	for {
+		if snapshot := service.Snapshot(); pred(snapshot) {
+			return snapshot
+		}
+		select {
+		case <-sub.Changed():
+		case <-service.Done():
+			t.Fatalf("broker connection ended while waiting for %s: %v", what, service.Err())
+		case <-deadline:
+			t.Fatalf("timed out waiting for %s", what)
 		}
 	}
 }
