@@ -20,6 +20,8 @@ import (
 
 // transactionalResizePTY is deliberately channel-scripted: a test can stop a
 // transaction at PTY.Resize without relying on scheduler timing.
+//
+//testpolicy:double constructed as a literal (&transactionalResizePTY{}) by ~60 call sites in test files owned by other batches (attachment_effect_gate, clipboard, move_tab, render_coordinator, terminal_focus, ...); converting it needs a cross-batch rename. TODO(orchestrator): convert to a MockPTY helper once all batches are merged.
 type transactionalResizePTY struct {
 	mu        sync.Mutex
 	sizes     []domain.Size
@@ -78,6 +80,8 @@ func (p *transactionalResizePTY) writes() [][]byte {
 // resizeReaderPTY is a deterministic child: Resize releases its redraw only
 // after the daemon has installed resizeApplying, and waits until ptyReader has
 // accepted that read. It deliberately has no timing dependency.
+//
+//testpolicy:double its only user is output_state_sync_test.go, owned by another batch; convert both together. TODO(orchestrator).
 type resizeReaderPTY struct {
 	redraw    []byte
 	reads     chan []byte
