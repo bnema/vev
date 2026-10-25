@@ -49,7 +49,11 @@ func newListenerClock(t *testing.T, start time.Time) *listenerClock {
 	c.mock.EXPECT().Now().RunAndReturn(c.Now).Maybe()
 	c.mock.EXPECT().NewTimer(mock.Anything).RunAndReturn(func(d time.Duration) ports.Timer {
 		timer := &listenerTimer{clock: c, ch: make(chan time.Time, 1)}
-		timerMock := portsmocks.NewMockTimer(t)
+		// Every expectation is optional, so the timer mock registers no cleanup
+		// assertion: a watchdog creating a timer while the test's cleanups run
+		// would otherwise race the assertion against the expectations below.
+		timerMock := &portsmocks.MockTimer{}
+		timerMock.Test(t)
 		timerMock.EXPECT().C().Return(timer.ch).Maybe()
 		timerMock.EXPECT().Stop().RunAndReturn(timer.stop).Maybe()
 		timerMock.EXPECT().Reset(mock.Anything).RunAndReturn(timer.reset).Maybe()
