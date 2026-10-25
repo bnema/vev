@@ -50,28 +50,30 @@ func TestNoteAttentionFlagsVisibleTabUntilPainted(t *testing.T) {
 }
 
 func TestPaintDoesNotAckActiveAttentionOnBlankPulseFrame(t *testing.T) {
-	d, sess, ac, sends, releases := newManualTabSession(t, 1)
-	defer releases[0]()
-	selectTestAttachmentTab(sess, 0)
-	d.setAttentionFrame(0)
-	d.noteAttention(sess, sess.tabs[0])
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, ac, sends, releases := newManualTabSession(t, 1)
+		defer releases[0]()
+		selectTestAttachmentTab(sess, 0)
+		d.setAttentionFrame(0)
+		d.noteAttention(sess, sess.tabs[0])
 
-	d.paint(sess, ac, true, nil)
-	data := mustOutputData(t, sends)
-	require.NotContains(t, string(data), string(ui.AttentionGlyph))
+		d.paint(sess, ac, true, nil)
+		data := mustOutputData(t, sends)
+		require.NotContains(t, string(data), string(ui.AttentionGlyph))
 
-	sess.mu.Lock()
-	require.True(t, sess.tabs[0].attention)
-	sess.mu.Unlock()
+		sess.mu.Lock()
+		require.True(t, sess.tabs[0].attention)
+		sess.mu.Unlock()
 
-	d.setAttentionFrame(1)
-	d.paint(sess, ac, true, nil)
-	data = mustOutputData(t, sends)
-	require.Contains(t, string(data), string(ui.AttentionGlyph))
+		d.setAttentionFrame(1)
+		d.paint(sess, ac, true, nil)
+		data = mustOutputData(t, sends)
+		require.Contains(t, string(data), string(ui.AttentionGlyph))
 
-	sess.mu.Lock()
-	require.False(t, sess.tabs[0].attention)
-	sess.mu.Unlock()
+		sess.mu.Lock()
+		require.False(t, sess.tabs[0].attention)
+		sess.mu.Unlock()
+	})
 }
 
 func TestPTYReaderActiveVisibleAgentNotificationRendersBellBeforeAck(t *testing.T) {
@@ -274,23 +276,25 @@ func TestAckAttentionClearsOnlyPaintedVisibleTab(t *testing.T) {
 }
 
 func TestPaintPreservesBackgroundAttention(t *testing.T) {
-	d, sess, ac, sends, releases := newManualTabSession(t, 2)
-	defer releases[0]()
-	defer releases[1]()
-	selectTestAttachmentTab(sess, 0)
-	sess.mu.Lock()
-	sess.tabs[1].attention = true
-	sess.tabs[1].attentionAt = time.Unix(2, 0)
-	sess.mu.Unlock()
-	d.setAttentionFrame(1)
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, ac, sends, releases := newManualTabSession(t, 2)
+		defer releases[0]()
+		defer releases[1]()
+		selectTestAttachmentTab(sess, 0)
+		sess.mu.Lock()
+		sess.tabs[1].attention = true
+		sess.tabs[1].attentionAt = time.Unix(2, 0)
+		sess.mu.Unlock()
+		d.setAttentionFrame(1)
 
-	d.paint(sess, ac, true, nil)
-	data := mustOutputData(t, sends)
+		d.paint(sess, ac, true, nil)
+		data := mustOutputData(t, sends)
 
-	require.Contains(t, string(data), "")
-	sess.mu.Lock()
-	defer sess.mu.Unlock()
-	require.True(t, sess.tabs[1].attention)
+		require.Contains(t, string(data), "")
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		require.True(t, sess.tabs[1].attention)
+	})
 }
 
 func TestSwitchTabClearsAttentionEndToEnd(t *testing.T) {
@@ -328,24 +332,26 @@ func TestSwitchTabClearsAttentionEndToEnd(t *testing.T) {
 }
 
 func TestCloseRingingTabClearsClientBar(t *testing.T) {
-	d, sess, ac, sends, releases := newManualTabSession(t, 2)
-	defer releases[0]()
-	defer releases[1]()
-	selectTestAttachmentTab(sess, 0)
-	sess.mu.Lock()
-	ringing := sess.tabs[1]
-	ringing.attention = true
-	ringing.attentionAt = time.Unix(2, 0)
-	sess.mu.Unlock()
-	d.setAttentionFrame(1)
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, ac, sends, releases := newManualTabSession(t, 2)
+		defer releases[0]()
+		defer releases[1]()
+		selectTestAttachmentTab(sess, 0)
+		sess.mu.Lock()
+		ringing := sess.tabs[1]
+		ringing.attention = true
+		ringing.attentionAt = time.Unix(2, 0)
+		sess.mu.Unlock()
+		d.setAttentionFrame(1)
 
-	d.paint(sess, ac, true, nil)
-	before := mustOutputData(t, sends)
-	require.Contains(t, string(before), "")
+		d.paint(sess, ac, true, nil)
+		before := mustOutputData(t, sends)
+		require.Contains(t, string(before), "")
 
-	require.NoError(t, d.closeTab(sess, ringing, true))
-	after := mustOutputData(t, sends)
-	require.NotContains(t, string(after), "")
+		require.NoError(t, d.closeTab(sess, ringing, true))
+		after := mustOutputData(t, sends)
+		require.NotContains(t, string(after), "")
+	})
 }
 
 // TestAnimationRepaintConfinedToBarRows is the regression test for the pulse
@@ -440,59 +446,63 @@ func TestComposeFrameAttentionFrameChangeDamagesOnlyBars(t *testing.T) {
 }
 
 func TestAltAJumpAttentionSelectsOldestLocalTab(t *testing.T) {
-	d, sess, ac, sends, releases := newManualTabSession(t, 3)
-	sess.mu.Lock()
-	sess.registerAttachmentLocked(ac)
-	sess.mu.Unlock()
-	d.ptys = newBlockingOpenFactory(t, d)
-	defer releases[0]()
-	defer releases[1]()
-	defer releases[2]()
-	selectTestAttachmentTab(sess, 0)
-	sess.mu.Lock()
-	sess.tabs[1].attention = true
-	sess.tabs[1].attentionAt = time.Unix(20, 0)
-	sess.tabs[2].attention = true
-	sess.tabs[2].attentionAt = time.Unix(10, 0)
-	sess.mu.Unlock()
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, ac, sends, releases := newManualTabSession(t, 3)
+		sess.mu.Lock()
+		sess.registerAttachmentLocked(ac)
+		sess.mu.Unlock()
+		d.ptys = newBlockingOpenFactory(t, d)
+		defer releases[0]()
+		defer releases[1]()
+		defer releases[2]()
+		selectTestAttachmentTab(sess, 0)
+		sess.mu.Lock()
+		sess.tabs[1].attention = true
+		sess.tabs[1].attentionAt = time.Unix(20, 0)
+		sess.tabs[2].attention = true
+		sess.tabs[2].attentionAt = time.Unix(10, 0)
+		sess.mu.Unlock()
 
-	d.handleInput(sess, ac, []byte("\x1ba"))
+		d.handleInput(sess, ac, []byte("\x1ba"))
 
-	require.Equal(t, 2, testAttachmentTabIndex(sess))
-	requireFloatingInitialized(t, sess)
-	_ = mustOutputData(t, sends)
+		require.Equal(t, 2, testAttachmentTabIndex(sess))
+		requireFloatingInitialized(t, sess)
+		_ = mustOutputData(t, sends)
+	})
 }
 
 func TestJumpAttentionCrossesSessionsWhenNoLocalBells(t *testing.T) {
-	p1, release1 := newBlockingPTY(t)
-	p2, release2 := newBlockingPTY(t)
-	p3, release3 := newBlockingPTY(t)
-	defer release1()
-	defer release2()
-	defer release3()
-	d, sess1, ac, sends := newManualSessionWithPTYs(t, p1)
-	sctx2, cancel2 := context.WithCancel(d.serveCtx)
-	defer cancel2()
-	tab2a := newTestTabWithContext(p2, sctx2, cancel2)
-	tab2b := newTestTabWithContext(p3, sctx2, cancel2)
-	tab2a.attention = true
-	tab2a.attentionAt = time.Unix(9, 0)
-	tab2b.attention = true
-	tab2b.attentionAt = time.Unix(5, 0)
-	sess2 := &session{sessionCore: sessionCore{id: "other",
-		name: "other", incarnation: newTestLifecycle(t)}, ctx: sctx2,
-		cancel: cancel2,
-		tabs:   []*tab{tab2a, tab2b},
-	}
-	d.sessions[sess2.id] = sess2
+	synctest.Test(t, func(t *testing.T) {
+		p1, release1 := newBlockingPTY(t)
+		p2, release2 := newBlockingPTY(t)
+		p3, release3 := newBlockingPTY(t)
+		defer release1()
+		defer release2()
+		defer release3()
+		d, sess1, ac, sends := newManualSessionWithPTYs(t, p1)
+		sctx2, cancel2 := context.WithCancel(d.serveCtx)
+		defer cancel2()
+		tab2a := newTestTabWithContext(p2, sctx2, cancel2)
+		tab2b := newTestTabWithContext(p3, sctx2, cancel2)
+		tab2a.attention = true
+		tab2a.attentionAt = time.Unix(9, 0)
+		tab2b.attention = true
+		tab2b.attentionAt = time.Unix(5, 0)
+		sess2 := &session{sessionCore: sessionCore{id: "other",
+			name: "other", incarnation: newTestLifecycle(t)}, ctx: sctx2,
+			cancel: cancel2,
+			tabs:   []*tab{tab2a, tab2b},
+		}
+		d.sessions[sess2.id] = sess2
 
-	require.NoError(t, d.jumpAttention(sess1, ac))
+		require.NoError(t, d.jumpAttention(sess1, ac))
 
-	require.Same(t, sess2, ac.currentSession())
-	require.Contains(t, sess2.snapshotAttachments(), ac)
-	require.Empty(t, sess1.snapshotAttachments())
-	require.Equal(t, 1, testAttachmentTabIndex(sess2))
-	_ = mustOutputData(t, sends)
+		require.Same(t, sess2, ac.currentSession())
+		require.Contains(t, sess2.snapshotAttachments(), ac)
+		require.Empty(t, sess1.snapshotAttachments())
+		require.Equal(t, 1, testAttachmentTabIndex(sess2))
+		_ = mustOutputData(t, sends)
+	})
 }
 
 func TestJumpAttentionNoopsWithNoBells(t *testing.T) {

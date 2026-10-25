@@ -116,8 +116,8 @@ func TestPurgeAllRemovesLiveAndInactiveAndKeepsDaemonActive(t *testing.T) {
 		)
 		var hg sync.WaitGroup
 		hg.Go(func() { d.handleConn(tr) })
-		requireQueuedFrame(t, sends, "Welcome")
-		requireQueuedFrame(t, sends, "Output")
+		requireFrame(t, sends, "Welcome")
+		requireFrame(t, sends, "Output")
 
 		synctest.Wait()
 		forwarded := false
@@ -389,8 +389,8 @@ func TestShutdownAllStillStopsDaemonWithSessionsClientsAndWorkers(t *testing.T) 
 		tr, sends, releaseConn := newConn(t, mustHello(protocol.IntentNew, "work", sz))
 		var hg sync.WaitGroup
 		hg.Go(func() { d.handleConn(tr) })
-		requireQueuedFrame(t, sends, "Welcome")
-		requireQueuedFrame(t, sends, "Output")
+		requireFrame(t, sends, "Welcome")
+		requireFrame(t, sends, "Output")
 		require.Equal(t, 1, sessionCount(d))
 
 		require.False(t, d.shutdownAll(protocol.ReasonServerShutdown))

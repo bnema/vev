@@ -8,7 +8,7 @@ import (
 	"github.com/bnema/vev/internal/protocol/wire"
 )
 
-// requireFrame is the synctest-bubble form of awaitFrame: after quiescence it
+// requireFrame (the single shared frame helper) waits for quiescence, then
 // drains already-sent envelopes until one named want is found.
 func requireFrame(t *testing.T, ch <-chan wire.Envelope, want string) wire.Envelope {
 	t.Helper()

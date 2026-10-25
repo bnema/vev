@@ -422,22 +422,24 @@ func TestSessionViewAttachedRequiresInteractivePresence(t *testing.T) {
 }
 
 func TestHandleListAttachedExcludesSuspendedOnly(t *testing.T) {
-	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
-	d.attachCoordinator(sess, nil, ac, true)
-	require.True(t, listedAttached(t, d, sess.name), "an active attachment is observably attached")
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
+		d.attachCoordinator(sess, nil, ac, true)
+		require.True(t, listedAttached(t, d, sess.name), "an active attachment is observably attached")
 
-	token := sess.captureAttachmentCapability(ac, ac.transport())
-	ac.installTestAttachmentCapability(token)
-	require.NoError(t, d.suspendAttachment(token, protocol.SuspendAttachment{RequestID: 1}))
-	require.False(t, listedAttached(t, d, sess.name), "a suspended-only session is not attached in the listing")
-	require.True(t, slices.Contains(sess.snapshotAttachments(), ac), "suspension retains membership for activation")
+		token := sess.captureAttachmentCapability(ac, ac.transport())
+		ac.installTestAttachmentCapability(token)
+		require.NoError(t, d.suspendAttachment(token, protocol.SuspendAttachment{RequestID: 1}))
+		require.False(t, listedAttached(t, d, sess.name), "a suspended-only session is not attached in the listing")
+		require.True(t, slices.Contains(sess.snapshotAttachments(), ac), "suspension retains membership for activation")
 
-	require.NoError(t, d.activateAttachment(ac, ac.transportSnapshot(), protocol.ActivateAttachment{
-		RequestID: 2,
-		Target:    protocol.ExactSessionTarget{LifecycleID: sess.incarnation, SessionName: sess.name},
-		Size:      ac.sizeSnapshot(),
-	}))
-	require.True(t, listedAttached(t, d, sess.name), "activation restores observably attached presence")
+		require.NoError(t, d.activateAttachment(ac, ac.transportSnapshot(), protocol.ActivateAttachment{
+			RequestID: 2,
+			Target:    protocol.ExactSessionTarget{LifecycleID: sess.incarnation, SessionName: sess.name},
+			Size:      ac.sizeSnapshot(),
+		}))
+		require.True(t, listedAttached(t, d, sess.name), "activation restores observably attached presence")
+	})
 }
 
 func listedAttached(t *testing.T, d *Daemon, name string) bool {

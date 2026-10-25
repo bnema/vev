@@ -93,7 +93,7 @@ func TestPaletteInventoryDemandAndSelectionFlow(t *testing.T) {
 
 		interaction := d.enterPalette(current, ac)
 		d.sendPaletteInventoryDemand(ac, effect, true, interaction)
-		demandFrame := requireEnvelope(t, sends, "NavigationInventoryDemand")
+		demandFrame := requireFrame(t, sends, "NavigationInventoryDemand")
 		demand := decodeServerMessage(t, demandFrame).(protocol.NavigationInventoryDemand)
 		require.True(t, demand.Open)
 		require.Equal(t, interaction, demand.InteractionGeneration)
@@ -114,7 +114,7 @@ func TestPaletteInventoryDemandAndSelectionFlow(t *testing.T) {
 
 		d.handlePaletteInput(ac, []byte("zzqimported\r"), effect)
 
-		selectionFrame := requireEnvelope(t, sends, "NavigationInventorySelection")
+		selectionFrame := requireFrame(t, sends, "NavigationInventorySelection")
 		selection := decodeServerMessage(t, selectionFrame).(protocol.NavigationInventorySelection)
 		require.Equal(t, uint64(0), selection.CauseActionID, "keyboard input carries no automation cause")
 		require.Equal(t, interaction, selection.InteractionGeneration)
@@ -122,7 +122,7 @@ func TestPaletteInventoryDemandAndSelectionFlow(t *testing.T) {
 		require.Equal(t, "local", selection.SourceKey)
 		require.Equal(t, "aaa/zzqimported", selection.EntryKey)
 
-		closeFrame := requireEnvelope(t, sends, "NavigationInventoryDemand")
+		closeFrame := requireFrame(t, sends, "NavigationInventoryDemand")
 		closeDemand, ok := decodeServerMessage(t, closeFrame).(protocol.NavigationInventoryDemand)
 		require.True(t, ok)
 		require.False(t, closeDemand.Open)
@@ -262,10 +262,10 @@ func TestPaletteInventoryEscapeSendsCloseDemand(t *testing.T) {
 
 		interaction := d.enterPalette(current, ac)
 		d.sendPaletteInventoryDemand(ac, effect, true, interaction)
-		requireEnvelope(t, sends, "NavigationInventoryDemand")
+		requireFrame(t, sends, "NavigationInventoryDemand")
 
 		d.handlePaletteInput(ac, []byte{0x1b}, effect)
-		closeFrame := requireEnvelope(t, sends, "NavigationInventoryDemand")
+		closeFrame := requireFrame(t, sends, "NavigationInventoryDemand")
 		closeDemand, ok := decodeServerMessage(t, closeFrame).(protocol.NavigationInventoryDemand)
 		require.True(t, ok)
 		require.False(t, closeDemand.Open)

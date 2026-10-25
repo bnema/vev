@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"testing"
+	"testing/synctest"
 
 	"github.com/stretchr/testify/require"
 
@@ -375,25 +376,27 @@ func TestEnvironmentSeedCarriesProvisionalState(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			factory, closeFactory := newControlPTYFactory(t, nil)
-			d := newTestDaemon(t, factory, newStubClock(t))
-			t.Cleanup(func() { closeFactory(); d.sessWg.Wait() })
-			source := addControlSession(t, d, "work", "t_work", "p_work")
-			source.mu.Lock()
-			source.env = []string{"PATH=/source"}
-			source.envProvisional = tt.provisional
-			source.mu.Unlock()
+			synctest.Test(t, func(t *testing.T) {
+				factory, closeFactory := newControlPTYFactory(t, nil)
+				d := newTestDaemon(t, factory, newStubClock(t))
+				t.Cleanup(func() { closeFactory(); d.sessWg.Wait() })
+				source := addControlSession(t, d, "work", "t_work", "p_work")
+				source.mu.Lock()
+				source.env = []string{"PATH=/source"}
+				source.envProvisional = tt.provisional
+				source.mu.Unlock()
 
-			result := sendCommand(t, d, protocol.CommandRequest{Slug: "new-session", Args: []string{"seeded"}, TargetSession: "work"})
-			require.True(t, result.Outcome == protocol.CommandSucceeded, result.Text)
-			d.mu.Lock()
-			seeded := d.findByNameLocked("seeded")
-			d.mu.Unlock()
-			require.NotNil(t, seeded)
-			seeded.mu.Lock()
-			defer seeded.mu.Unlock()
-			require.Equal(t, []string{"PATH=/source"}, seeded.env)
-			require.Equal(t, tt.provisional, seeded.envProvisional)
+				result := sendCommand(t, d, protocol.CommandRequest{Slug: "new-session", Args: []string{"seeded"}, TargetSession: "work"})
+				require.True(t, result.Outcome == protocol.CommandSucceeded, result.Text)
+				d.mu.Lock()
+				seeded := d.findByNameLocked("seeded")
+				d.mu.Unlock()
+				require.NotNil(t, seeded)
+				seeded.mu.Lock()
+				defer seeded.mu.Unlock()
+				require.Equal(t, []string{"PATH=/source"}, seeded.env)
+				require.Equal(t, tt.provisional, seeded.envProvisional)
+			})
 		})
 	}
 }

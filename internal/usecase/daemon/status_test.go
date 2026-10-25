@@ -1549,8 +1549,8 @@ func TestStatusCoalescesCreateSwitchAndResize(t *testing.T) {
 
 		var hg sync.WaitGroup
 		hg.Go(func() { d.handleConn(tr) })
-		requireEnvelope(t, sends, "Welcome")
-		first := requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Welcome")
+		first := requireFrame(t, sends, "Output")
 		synctest.Wait()
 		sessions := listSessions(t, d)
 		require.True(t, len(sessions.Sessions) == 1 && sessions.Sessions[0].Tabs == 2, "the queued create-tab command did not apply")

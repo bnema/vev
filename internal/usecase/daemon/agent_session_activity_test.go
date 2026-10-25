@@ -220,45 +220,47 @@ func TestRepublishRepaintsOtherSessionViewers(t *testing.T) {
 }
 
 func TestSessionEntryDoneClearsOnlyWhenTabViewed(t *testing.T) {
-	d, sess, ac, sends, releases := newManualTabSession(t, 1)
-	defer releases[0]()
-	other, otherSends := addAgentTestSession(t, d, "other")
-	other.name = "other"
-	viewOtherSession(ac, other, false)
-	tb := other.tabs[0]
-	otherAC := testAttachment(other)
-	// The agent's own client is unfocused, so nothing has seen the tab.
-	otherAC.setTerminalFocus(domain.TerminalFocusUnfocused)
-	seedAgentStatus(d, other, tb, tb.focusedPane(), agentPaneStatus{state: agentactivity.Idle, done: true})
-	d.setAttentionFrame(1) // a visible pulse beat
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, ac, sends, releases := newManualTabSession(t, 1)
+		defer releases[0]()
+		other, otherSends := addAgentTestSession(t, d, "other")
+		other.name = "other"
+		viewOtherSession(ac, other, false)
+		tb := other.tabs[0]
+		otherAC := testAttachment(other)
+		// The agent's own client is unfocused, so nothing has seen the tab.
+		otherAC.setTerminalFocus(domain.TerminalFocusUnfocused)
+		seedAgentStatus(d, other, tb, tb.focusedPane(), agentPaneStatus{state: agentactivity.Idle, done: true})
+		d.setAttentionFrame(1) // a visible pulse beat
 
-	entryCellRune := func() rune {
-		bars := d.barStateForAttachmentPaletteHintsFor(sess, ac, "", nil, protocol.RecentRouteSnapshot{})
-		row := make([]renderer.Cell, 60)
-		drawStatusBarState(row, bars, resolveStyles(nil))
-		return row[sessionCellIndex].Rune
-	}
+		entryCellRune := func() rune {
+			bars := d.barStateForAttachmentPaletteHintsFor(sess, ac, "", nil, protocol.RecentRouteSnapshot{})
+			row := make([]renderer.Cell, 60)
+			drawStatusBarState(row, bars, resolveStyles(nil))
+			return row[sessionCellIndex].Rune
+		}
 
-	// The viewer paints its bar, entry included: Done stays.
-	_ = drainAllFrames(sends)
-	d.paint(sess, ac, true, nil)
-	require.Contains(t, string(mustOutputData(t, sends)), string(ui.DoneGlyph))
-	d.agents.step(d.daemonNow())
-	require.Equal(t, agentactivity.IndicatorDone, d.agents.sessionIndicator(other.incarnation))
-	require.Equal(t, ui.DoneGlyph, entryCellRune())
+		// The viewer paints its bar, entry included: Done stays.
+		_ = drainAllFrames(sends)
+		d.paint(sess, ac, true, nil)
+		require.Contains(t, string(mustOutputData(t, sends)), string(ui.DoneGlyph))
+		d.agents.step(d.daemonNow())
+		require.Equal(t, agentactivity.IndicatorDone, d.agents.sessionIndicator(other.incarnation))
+		require.Equal(t, ui.DoneGlyph, entryCellRune())
 
-	// An unfocused paint of the tab does not clear it either.
-	_ = drainAllFrames(otherSends)
-	d.paint(other, otherAC, true, nil)
-	d.agents.step(d.daemonNow())
-	require.Equal(t, ui.DoneGlyph, entryCellRune())
+		// An unfocused paint of the tab does not clear it either.
+		_ = drainAllFrames(otherSends)
+		d.paint(other, otherAC, true, nil)
+		d.agents.step(d.daemonNow())
+		require.Equal(t, ui.DoneGlyph, entryCellRune())
 
-	// A paint that may be seen of the agent's tab clears it everywhere.
-	otherAC.setTerminalFocus(domain.TerminalFocusFocused)
-	d.paint(other, otherAC, true, nil)
-	d.agents.step(d.daemonNow())
-	require.Equal(t, agentactivity.IndicatorNone, d.agents.sessionIndicator(other.incarnation))
-	require.Equal(t, ' ', entryCellRune())
+		// A paint that may be seen of the agent's tab clears it everywhere.
+		otherAC.setTerminalFocus(domain.TerminalFocusFocused)
+		d.paint(other, otherAC, true, nil)
+		d.agents.step(d.daemonNow())
+		require.Equal(t, agentactivity.IndicatorNone, d.agents.sessionIndicator(other.incarnation))
+		require.Equal(t, ' ', entryCellRune())
+	})
 }
 
 func TestSessionEntryGlyphSets(t *testing.T) {

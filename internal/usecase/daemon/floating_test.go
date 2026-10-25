@@ -523,7 +523,7 @@ func TestFloatingEOFRepaintsVisibleSlotOnly(t *testing.T) {
 		// Establish a renderer shadow first. The EOF repaint must reset it and
 		// redraw the underlying cell rather than depending on popup damage.
 		d.paint(sess, ac, true, nil)
-		baseline := requireEnvelope(t, sends, "Output")
+		baseline := requireFrame(t, sends, "Output")
 		baselineOutput := unmarshalTestOutput(t, baseline.Payload)
 		require.Contains(t, string(baselineOutput.Data), "underlying-cell")
 
@@ -551,7 +551,7 @@ func TestFloatingEOFRepaintsVisibleSlotOnly(t *testing.T) {
 			require.Equal(t, floatingUninitialized, tb.floating.state)
 			require.Nil(t, tb.floating.pane)
 			tb.mu.Unlock()
-			repaint := requireEnvelope(t, sends, "Output")
+			repaint := requireFrame(t, sends, "Output")
 			output := unmarshalTestOutput(t, repaint.Payload)
 			require.Zero(t, output.Base, "visible EOF must force a dependency-free full repaint")
 			require.Contains(t, string(output.Data), "underlying-cell", "repaint must restore cells previously covered by the popup")

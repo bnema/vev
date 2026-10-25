@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/mock"
@@ -241,24 +242,26 @@ func TestPerformanceFixtureCounters(t *testing.T) {
 }
 
 func TestRenderStageHooksCountProductionBoundariesOnFailedSend(t *testing.T) {
-	d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
-	d.paint(sess, ac, true, nil)
-	_ = awaitFrame(t, sends, "Output")
-	var captures, compositions, emissions int
-	ac.renderStages = renderStageHooks{
-		capture: func() { captures++ },
-		compose: func() { compositions++ },
-		emit:    func() { emissions++ },
-	}
-	ac.replaceTransport(newFailingConnection(t))
-	p := sess.tabs[0].focusedPane()
-	p.mu.Lock()
-	p.screen.Write([]byte("hook"))
-	p.mu.Unlock()
-	d.paint(sess, ac, false, nil)
-	require.Equal(t, 1, captures, "a completed capture counts even when its emission fails")
-	require.Equal(t, 1, compositions, "a completed composition counts even when its emission fails")
-	require.Zero(t, emissions, "emit counts only prepare and transport success")
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
+		d.paint(sess, ac, true, nil)
+		_ = requireFrame(t, sends, "Output")
+		var captures, compositions, emissions int
+		ac.renderStages = renderStageHooks{
+			capture: func() { captures++ },
+			compose: func() { compositions++ },
+			emit:    func() { emissions++ },
+		}
+		ac.replaceTransport(newFailingConnection(t))
+		p := sess.tabs[0].focusedPane()
+		p.mu.Lock()
+		p.screen.Write([]byte("hook"))
+		p.mu.Unlock()
+		d.paint(sess, ac, false, nil)
+		require.Equal(t, 1, captures, "a completed capture counts even when its emission fails")
+		require.Equal(t, 1, compositions, "a completed composition counts even when its emission fails")
+		require.Zero(t, emissions, "emit counts only prepare and transport success")
+	})
 }
 
 func TestPerformanceFixtureResize(t *testing.T) {

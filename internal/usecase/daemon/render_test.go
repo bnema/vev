@@ -814,31 +814,33 @@ func TestOverlayPaintInvalidationShowsAndRestoresBaseFrame(t *testing.T) {
 }
 
 func TestOverlayPaintBypassesComposedCache(t *testing.T) {
-	p, release := newBlockingPTY(t)
-	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	defer release()
-	pane := sess.tabs[0].focusedPane()
-	pane.screen.Write([]byte("live"))
+	synctest.Test(t, func(t *testing.T) {
+		p, release := newBlockingPTY(t)
+		d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+		defer release()
+		pane := sess.tabs[0].focusedPane()
+		pane.screen.Write([]byte("live"))
 
-	d.paint(sess, ac, true, nil)
-	_ = mustOutputData(t, sends)
-	require.True(t, ac.render.cache.valid)
-	require.NotContains(t, frameText(ac.render.cache.frame), "Rename session")
+		d.paint(sess, ac, true, nil)
+		_ = mustOutputData(t, sends)
+		require.True(t, ac.render.cache.valid)
+		require.NotContains(t, frameText(ac.render.cache.frame), "Rename session")
 
-	d.enterPrompt(sess, ac, " Rename session ", "work", func(string) error { return nil })
-	shown := string(mustOutputData(t, sends))
-	require.Contains(t, shown, "Rename session")
-	require.False(t, ac.render.cache.valid, "overlay paint must not store the modal-mutated frame in the composed cache")
-	require.NotContains(t, frameText(ac.render.cache.frame), "Rename session")
+		d.enterPrompt(sess, ac, " Rename session ", "work", func(string) error { return nil })
+		shown := string(mustOutputData(t, sends))
+		require.Contains(t, shown, "Rename session")
+		require.False(t, ac.render.cache.valid, "overlay paint must not store the modal-mutated frame in the composed cache")
+		require.NotContains(t, frameText(ac.render.cache.frame), "Rename session")
 
-	d.closePrompt(ac)
-	d.paint(sess, ac, false, nil)
-	restored := string(mustOutputData(t, sends))
-	require.NotContains(t, restored, "Rename session")
-	require.True(t, ac.render.cache.valid)
-	cached := frameText(ac.render.cache.frame)
-	require.Contains(t, cached, "live")
-	require.NotContains(t, cached, "Rename session")
+		d.closePrompt(ac)
+		d.paint(sess, ac, false, nil)
+		restored := string(mustOutputData(t, sends))
+		require.NotContains(t, restored, "Rename session")
+		require.True(t, ac.render.cache.valid)
+		cached := frameText(ac.render.cache.frame)
+		require.Contains(t, cached, "live")
+		require.NotContains(t, cached, "Rename session")
+	})
 }
 
 func frameText(frame renderer.Frame) string {
@@ -1080,98 +1082,106 @@ func TestPTYKittyAnimationFallbackKeepsProtocolErrorsOutOfShell(t *testing.T) {
 }
 
 func TestCursorTailVisibleHideAndMoveOnly(t *testing.T) {
-	p, _ := newBlockingPTY(t)
-	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	win := sess.tabs[0]
-	win.focusedPane().screen.Write([]byte("A"))
+	synctest.Test(t, func(t *testing.T) {
+		p, _ := newBlockingPTY(t)
+		d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+		win := sess.tabs[0]
+		win.focusedPane().screen.Write([]byte("A"))
 
-	d.paint(sess, ac, true, nil)
-	data := mustOutputData(t, sends)
-	require.Contains(t, string(data), "\x1b[1 q")
-	require.Contains(t, string(data), "\x1b[?25h")
+		d.paint(sess, ac, true, nil)
+		data := mustOutputData(t, sends)
+		require.Contains(t, string(data), "\x1b[1 q")
+		require.Contains(t, string(data), "\x1b[?25h")
 
-	win.focusedPane().screen.Write([]byte("\x1b[2;3H"))
-	d.paint(sess, ac, false, nil)
-	data = mustOutputData(t, sends)
-	require.Contains(t, string(data), "\x1b[3;3H")
-	require.Contains(t, string(data), "\x1b[?25h")
+		win.focusedPane().screen.Write([]byte("\x1b[2;3H"))
+		d.paint(sess, ac, false, nil)
+		data = mustOutputData(t, sends)
+		require.Contains(t, string(data), "\x1b[3;3H")
+		require.Contains(t, string(data), "\x1b[?25h")
 
-	win.focusedPane().screen.Write([]byte("\x1b[?25l"))
-	d.paint(sess, ac, false, nil)
-	data = mustOutputData(t, sends)
-	require.Contains(t, string(data), "\x1b[?25l")
+		win.focusedPane().screen.Write([]byte("\x1b[?25l"))
+		d.paint(sess, ac, false, nil)
+		data = mustOutputData(t, sends)
+		require.Contains(t, string(data), "\x1b[?25l")
+	})
 }
 
 func TestPaintAlignsFloatingCursorWithCommittedGeometry(t *testing.T) {
-	p, release := newBlockingPTY(t)
-	defer release()
-	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	contentArea := domain.Rect{Y: 1, Width: 80, Height: 23}
-	cfg := d.currentFloatingConfig()
-	committed := calculateContentFloatingGeometry(domain.Size{Cols: contentArea.Width, Rows: contentArea.Height}, cfg)
-	floating := newPane("floating", nil, rectSize(committed.Inner))
-	writeTestRow(floating.screen, 0, "F")
-	floating.popupGeometry = committed
-	installTestFloating(testAttachmentTab(sess), floating, true)
+	synctest.Test(t, func(t *testing.T) {
+		p, release := newBlockingPTY(t)
+		defer release()
+		d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+		contentArea := domain.Rect{Y: 1, Width: 80, Height: 23}
+		cfg := d.currentFloatingConfig()
+		committed := calculateContentFloatingGeometry(domain.Size{Cols: contentArea.Width, Rows: contentArea.Height}, cfg)
+		floating := newPane("floating", nil, rectSize(committed.Inner))
+		writeTestRow(floating.screen, 0, "F")
+		floating.popupGeometry = committed
+		installTestFloating(testAttachmentTab(sess), floating, true)
 
-	d.paint(sess, ac, true, nil)
-	data := mustOutputData(t, sends)
-	want := committed.translate(contentArea.X, contentArea.Y)
-	require.Contains(t, string(data), cursorCSI(want.Inner.Y+1, 1))
-	require.Contains(t, string(data), "F")
-	require.Equal(t, want.Inner.Y, ac.output.lastCursor.row)
-	require.Equal(t, want.Inner.X, ac.output.lastCursor.col)
-	require.Contains(t, string(data), cursorCSI(want.Inner.Y+1, want.Inner.X+1))
+		d.paint(sess, ac, true, nil)
+		data := mustOutputData(t, sends)
+		want := committed.translate(contentArea.X, contentArea.Y)
+		require.Contains(t, string(data), cursorCSI(want.Inner.Y+1, 1))
+		require.Contains(t, string(data), "F")
+		require.Equal(t, want.Inner.Y, ac.output.lastCursor.row)
+		require.Equal(t, want.Inner.X, ac.output.lastCursor.col)
+		require.Contains(t, string(data), cursorCSI(want.Inner.Y+1, want.Inner.X+1))
+	})
 }
 
 func TestCursorTailUsesFocusedPanePlacement(t *testing.T) {
-	d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
-	win := sess.tabs[0]
-	win.size = domain.Size{Cols: 80, Rows: 23}
-	left := win.focusedPane()
-	right := newPane("pane-2", nil, domain.Size{Cols: 39, Rows: 23})
-	win.panes[right.id] = right
-	win.tree = layout.NewTree(left.id)
-	require.NoError(t, win.tree.Split(left.id, layout.Right, true, right.id, domain.Rect{Width: 80, Height: 23}))
-	win.tree.Focus = right.id
-	right.screen.Write([]byte("\x1b[2;3H"))
-	placements, ok := layout.Solve(win.tree.Root, domain.Rect{Width: 80, Height: 23})
-	require.True(t, ok)
-	rightContent := placementContent(placements, right.id)
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
+		win := sess.tabs[0]
+		win.size = domain.Size{Cols: 80, Rows: 23}
+		left := win.focusedPane()
+		right := newPane("pane-2", nil, domain.Size{Cols: 39, Rows: 23})
+		win.panes[right.id] = right
+		win.tree = layout.NewTree(left.id)
+		require.NoError(t, win.tree.Split(left.id, layout.Right, true, right.id, domain.Rect{Width: 80, Height: 23}))
+		win.tree.Focus = right.id
+		right.screen.Write([]byte("\x1b[2;3H"))
+		placements, ok := layout.Solve(win.tree.Root, domain.Rect{Width: 80, Height: 23})
+		require.True(t, ok)
+		rightContent := placementContent(placements, right.id)
 
-	d.paint(sess, ac, true, nil)
-	data := mustOutputData(t, sends)
-	want := cursorCSI(rightContent.Y+right.screen.CursorRow()+2, rightContent.X+right.screen.CursorCol()+1)
-	require.Contains(t, string(data), want)
+		d.paint(sess, ac, true, nil)
+		data := mustOutputData(t, sends)
+		want := cursorCSI(rightContent.Y+right.screen.CursorRow()+2, rightContent.X+right.screen.CursorCol()+1)
+		require.Contains(t, string(data), want)
+	})
 }
 
 func TestCursorTailUsesExpandedStackContentPlacement(t *testing.T) {
-	d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
-	win := sess.tabs[0]
-	win.size = domain.Size{Cols: 80, Rows: 23}
-	one := win.focusedPane()
-	two := newPane("pane-2", nil, domain.Size{Cols: 80, Rows: 20})
-	three := newPane("pane-3", nil, domain.Size{Cols: 80, Rows: 20})
-	win.panes[two.id] = two
-	win.panes[three.id] = three
-	win.tree = &layout.Tree{
-		Root: &layout.Node{Kind: layout.Stack, Children: []*layout.Node{
-			layout.NewLeaf(one.id),
-			layout.NewLeaf(two.id),
-			layout.NewLeaf(three.id),
-		}, Expanded: two.id},
-		Focus: two.id,
-	}
-	two.screen.Write([]byte("\x1b[2;3H"))
-	placements, ok := layout.Solve(win.tree.Root, domain.Rect{Width: 80, Height: 23})
-	require.True(t, ok)
-	twoContent := placementContent(placements, two.id)
-	require.Greater(t, twoContent.Y, 0, "stack title bars should offset content")
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
+		win := sess.tabs[0]
+		win.size = domain.Size{Cols: 80, Rows: 23}
+		one := win.focusedPane()
+		two := newPane("pane-2", nil, domain.Size{Cols: 80, Rows: 20})
+		three := newPane("pane-3", nil, domain.Size{Cols: 80, Rows: 20})
+		win.panes[two.id] = two
+		win.panes[three.id] = three
+		win.tree = &layout.Tree{
+			Root: &layout.Node{Kind: layout.Stack, Children: []*layout.Node{
+				layout.NewLeaf(one.id),
+				layout.NewLeaf(two.id),
+				layout.NewLeaf(three.id),
+			}, Expanded: two.id},
+			Focus: two.id,
+		}
+		two.screen.Write([]byte("\x1b[2;3H"))
+		placements, ok := layout.Solve(win.tree.Root, domain.Rect{Width: 80, Height: 23})
+		require.True(t, ok)
+		twoContent := placementContent(placements, two.id)
+		require.Greater(t, twoContent.Y, 0, "stack title bars should offset content")
 
-	d.paint(sess, ac, true, nil)
-	data := mustOutputData(t, sends)
-	want := cursorCSI(twoContent.Y+two.screen.CursorRow()+2, twoContent.X+two.screen.CursorCol()+1)
-	require.Contains(t, string(data), want)
+		d.paint(sess, ac, true, nil)
+		data := mustOutputData(t, sends)
+		want := cursorCSI(twoContent.Y+two.screen.CursorRow()+2, twoContent.X+two.screen.CursorCol()+1)
+		require.Contains(t, string(data), want)
+	})
 }
 
 func cursorCSI(row, col int) string {
@@ -1206,22 +1216,24 @@ func TestComposeCopyClientFrameOverlaysBaseAtTarget(t *testing.T) {
 }
 
 func TestPaintComposesCopyBodyAboveFloating(t *testing.T) {
-	normal, releaseNormal := newBlockingPTY(t)
-	floatingPTY, releaseFloating := newBlockingPTY(t)
-	defer releaseNormal()
-	defer releaseFloating()
-	d, sess, ac, sends := newManualSessionWithPTYs(t, normal)
-	fp := newPane("floating", floatingPTY, domain.Size{Cols: 20, Rows: 3})
-	appendHistoryRow(t, fp.history, testRow("flt-old"))
-	fp.screen.Write([]byte("flt-live"))
-	installTestFloating(testAttachmentTab(sess), fp, true)
+	synctest.Test(t, func(t *testing.T) {
+		normal, releaseNormal := newBlockingPTY(t)
+		floatingPTY, releaseFloating := newBlockingPTY(t)
+		defer releaseNormal()
+		defer releaseFloating()
+		d, sess, ac, sends := newManualSessionWithPTYs(t, normal)
+		fp := newPane("floating", floatingPTY, domain.Size{Cols: 20, Rows: 3})
+		appendHistoryRow(t, fp.history, testRow("flt-old"))
+		fp.screen.Write([]byte("flt-live"))
+		installTestFloating(testAttachmentTab(sess), fp, true)
 
-	d.enterCopyMode(sess, ac)
-	data := mustOutputData(t, sends)
-	require.Contains(t, string(data), "[SCROLL]")
-	require.Contains(t, string(data), "\x1b[?25l")
+		d.enterCopyMode(sess, ac)
+		data := mustOutputData(t, sends)
+		require.Contains(t, string(data), "[SCROLL]")
+		require.Contains(t, string(data), "\x1b[?25l")
 
-	d.handleInput(sess, ac, []byte("g"))
-	data = mustOutputData(t, sends)
-	require.Contains(t, string(data), "lt-old", "copy viewport of the captured floating pane must compose above the popup")
+		d.handleInput(sess, ac, []byte("g"))
+		data = mustOutputData(t, sends)
+		require.Contains(t, string(data), "lt-old", "copy viewport of the captured floating pane must compose above the popup")
+	})
 }

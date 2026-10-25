@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -69,44 +70,46 @@ func TestPaletteClientPickerFollowsPaletteErasingFrame(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d, source, ac, _, _, releases, sends := setupMovePickerSessionsCore(t, newStubClock(t), 0)
-			defer releaseAll(releases)
-			// Production paints through the coordinator, which retries an
-			// ACK-blocked paint once the client acknowledges.
-			rc := d.attachCoordinator(source, nil, ac, true)
-			t.Cleanup(func() { rc.beginSessionTeardown().finish(); rc.waitForTimerWorkers() })
-			d.handleInput(source, ac, []byte("\x1b "))
-			d.handleInput(source, ac, []byte(tt.command))
-			awaitFrame(t, sends, "Output")
-			var blocking protocol.Output
-			for _, frame := range drainAllFrames(sends) {
-				if output, ok := decodeServerMessage(t, frame).(protocol.Output); ok {
-					blocking = output
+			synctest.Test(t, func(t *testing.T) {
+				d, source, ac, _, _, releases, sends := setupMovePickerSessionsCore(t, newStubClock(t), 0)
+				defer releaseAll(releases)
+				// Production paints through the coordinator, which retries an
+				// ACK-blocked paint once the client acknowledges.
+				rc := d.attachCoordinator(source, nil, ac, true)
+				t.Cleanup(func() { rc.beginSessionTeardown().finish(); rc.waitForTimerWorkers() })
+				d.handleInput(source, ac, []byte("\x1b "))
+				d.handleInput(source, ac, []byte(tt.command))
+				requireFrame(t, sends, "Output")
+				var blocking protocol.Output
+				for _, frame := range drainAllFrames(sends) {
+					if output, ok := decodeServerMessage(t, frame).(protocol.Output); ok {
+						blocking = output
+					}
 				}
-			}
-			if tt.saturated {
-				// The palette frame is still unacknowledged: a one-frame window
-				// blocks every further paint until the client ACKs it.
-				require.NotZero(t, blocking.New)
-				ac.output.setWindow(1)
-				require.True(t, ac.output.atCapacity())
-			}
+				if tt.saturated {
+					// The palette frame is still unacknowledged: a one-frame window
+					// blocks every further paint until the client ACKs it.
+					require.NotZero(t, blocking.New)
+					ac.output.setWindow(1)
+					require.True(t, ac.output.atCapacity())
+				}
 
-			d.handleInput(source, ac, []byte("\r"))
-			require.False(t, ac.overlays.paletteActive())
-			if tt.saturated {
-				// The work runs asynchronously once released, so give a wrong
-				// early release time to reach the wire before asserting.
-				assertNoSentServerMessage(t, sends, 200*time.Millisecond, tt.opens, "picker opened before the palette-erasing frame could be sent")
-				d.handleAttachmentClientMessage(captureAttachmentCapability(source, ac, ac.transport()), protocol.Ack{Epoch: blocking.Epoch, State: blocking.New})
-			}
+				d.handleInput(source, ac, []byte("\r"))
+				require.False(t, ac.overlays.paletteActive())
+				if tt.saturated {
+					// The work runs asynchronously once released, so give a wrong
+					// early release time to reach the wire before asserting.
+					assertNoSentServerMessage(t, sends, 200*time.Millisecond, tt.opens, "picker opened before the palette-erasing frame could be sent")
+					d.handleAttachmentClientMessage(captureAttachmentCapability(source, ac, ac.transport()), protocol.Ack{Epoch: blocking.Epoch, State: blocking.New})
+				}
 
-			first := awaitSentServerMessage(t, sends, "Output or picker", func(message protocol.ServerMessage) bool {
-				_, output := message.(protocol.Output)
-				return output || tt.opens(message)
+				first := awaitSentServerMessage(t, sends, "Output or picker", func(message protocol.ServerMessage) bool {
+					_, output := message.(protocol.Output)
+					return output || tt.opens(message)
+				})
+				require.IsType(t, protocol.Output{}, first, "the palette-erasing frame must precede the picker")
+				awaitSentServerMessage(t, sends, "picker open", tt.opens)
 			})
-			require.IsType(t, protocol.Output{}, first, "the palette-erasing frame must precede the picker")
-			awaitSentServerMessage(t, sends, "picker open", tt.opens)
 		})
 	}
 }

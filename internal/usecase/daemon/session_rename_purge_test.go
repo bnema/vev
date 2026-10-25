@@ -25,7 +25,7 @@ func TestRenamePublishesCommittedRouteIdentityToAttachedClients(t *testing.T) {
 
 		require.NoError(t, d.renameSession(sess, "vps-infra"))
 
-		frame := requireQueuedFrame(t, sends, "CommittedRouteIdentity")
+		frame := requireFrame(t, sends, "CommittedRouteIdentity")
 		identity := decodeServerMessage(t, frame).(protocol.CommittedRouteIdentity)
 		require.Equal(t, protocol.ExactSessionTarget{
 			LifecycleID: domain.IncarnationID{1},
@@ -58,7 +58,7 @@ func TestRenameDefersCommittedRouteIdentityUntilFirstRouteSnapshot(t *testing.T)
 		}
 		require.False(t, d.handleAttachmentClientFrame(token, mustClientEnvelope(snapshot)))
 
-		frame := requireQueuedFrame(t, sends, "CommittedRouteIdentity")
+		frame := requireFrame(t, sends, "CommittedRouteIdentity")
 		identity, ok := decodeServerMessage(t, frame).(protocol.CommittedRouteIdentity)
 		require.True(t, ok)
 		require.Equal(t, protocol.ExactSessionTarget{

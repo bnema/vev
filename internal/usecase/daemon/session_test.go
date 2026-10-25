@@ -46,11 +46,11 @@ func TestHandshakeEphemeralHappy(t *testing.T) {
 		var hg sync.WaitGroup
 		hg.Go(func() { d.handleConn(tr) })
 
-		w := requireQueuedFrame(t, sends, "Welcome")
+		w := requireFrame(t, sends, "Welcome")
 		welcome := decodeServerMessage(t, w).(protocol.Welcome)
 		require.Equal(t, "0", welcome.SessionName)
 		require.True(t, welcome.Ephemeral)
-		requireQueuedFrame(t, sends, "Output") // guaranteed first paint
+		requireFrame(t, sends, "Output") // guaranteed first paint
 		require.Equal(t, 1, sessionCount(d))
 
 		releaseConn()
@@ -69,7 +69,7 @@ func TestHandshakeNewHappy(t *testing.T) {
 		var hg sync.WaitGroup
 		hg.Go(func() { d.handleConn(tr) })
 
-		w := requireQueuedFrame(t, sends, "Welcome")
+		w := requireFrame(t, sends, "Welcome")
 		welcome := decodeServerMessage(t, w).(protocol.Welcome)
 		require.Equal(t, "work", welcome.SessionName)
 		require.False(t, welcome.Ephemeral)
@@ -97,7 +97,7 @@ func TestHandshakeVersionMismatch(t *testing.T) {
 
 		d.handleConn(tr) // returns after the rejection; no session, no goroutines
 
-		e := requireQueuedFrame(t, sends, "Error")
+		e := requireFrame(t, sends, "Error")
 		em, ok := decodeServerMessage(t, e).(protocol.ErrorMsg)
 		require.True(t, ok)
 		require.Equal(t, protocol.ErrVersionMismatch, em.Code)
@@ -113,7 +113,7 @@ func TestHandshakeGarbageFirstFrameReportsInternalError(t *testing.T) {
 		tr, sends, _ := newConn(t, wire.Envelope{Payload: []byte{0x00, byte(protocol.Version - 1), protocol.IntentEphemeral}})
 		d.handleConn(tr)
 
-		e := requireQueuedFrame(t, sends, "Error")
+		e := requireFrame(t, sends, "Error")
 		em, ok := decodeServerMessage(t, e).(protocol.ErrorMsg)
 		require.True(t, ok)
 		require.Equal(t, protocol.ErrInternal, em.Code)
@@ -130,7 +130,7 @@ func TestHandshakeNameTaken(t *testing.T) {
 		tr, sends, _ := newConn(t, mustHello(protocol.IntentNew, "work", domain.Size{Cols: 80, Rows: 24}))
 		d.handleConn(tr)
 
-		e := requireQueuedFrame(t, sends, "Error")
+		e := requireFrame(t, sends, "Error")
 		em, ok := decodeServerMessage(t, e).(protocol.ErrorMsg)
 		require.True(t, ok)
 		require.Equal(t, protocol.ErrNameTaken, em.Code)
@@ -143,7 +143,7 @@ func TestHandshakeNoSuchSession(t *testing.T) {
 		tr, sends, _ := newConn(t, mustHello(protocol.IntentAttach, "ghost", domain.Size{Cols: 80, Rows: 24}))
 		d.handleConn(tr)
 
-		e := requireQueuedFrame(t, sends, "Error")
+		e := requireFrame(t, sends, "Error")
 		em, ok := decodeServerMessage(t, e).(protocol.ErrorMsg)
 		require.True(t, ok)
 		require.Equal(t, protocol.ErrNoSuchSession, em.Code)
@@ -185,9 +185,9 @@ func TestKillAllEmptyDaemonKeepsServing(t *testing.T) {
 		tr2, sends2, releaseConn2 := newConn(t, mustHello(protocol.IntentEphemeral, "", domain.Size{Cols: 80, Rows: 24}))
 		var hg sync.WaitGroup
 		hg.Go(func() { d.handleConn(tr2) })
-		welcome := decodeServerMessage(t, requireQueuedFrame(t, sends2, "Welcome")).(protocol.Welcome)
+		welcome := decodeServerMessage(t, requireFrame(t, sends2, "Welcome")).(protocol.Welcome)
 		require.Equal(t, "0", welcome.SessionName)
-		requireQueuedFrame(t, sends2, "Output")
+		requireFrame(t, sends2, "Output")
 		require.Equal(t, 1, sessionCount(d))
 
 		releaseConn2()
@@ -309,8 +309,8 @@ func TestCreateTabClosesPTYIfSessionKilledDuringOpen(t *testing.T) {
 		tr, sends, releaseConn := newConn(t, mustHello(protocol.IntentNew, "work", domain.Size{Cols: 80, Rows: 24}))
 		var hg sync.WaitGroup
 		hg.Go(func() { d.handleConn(tr) })
-		requireQueuedFrame(t, sends, "Welcome")
-		requireQueuedFrame(t, sends, "Output")
+		requireFrame(t, sends, "Welcome")
+		requireFrame(t, sends, "Output")
 		sess := firstSession(d)
 		require.NotNil(t, sess)
 
@@ -372,8 +372,8 @@ func TestDetachKeepsEphemeralHeadless(t *testing.T) {
 
 		var hg sync.WaitGroup
 		hg.Go(func() { d.handleConn(tr) })
-		requireQueuedFrame(t, sends, "Welcome")
-		requireQueuedFrame(t, sends, "Detached")
+		requireFrame(t, sends, "Welcome")
+		requireFrame(t, sends, "Detached")
 		hg.Wait()
 
 		require.Equal(t, 1, sessionCount(d), "ephemeral session survives explicit detach")
@@ -425,9 +425,9 @@ func TestDetachKeepsNamed(t *testing.T) {
 
 		var hg sync.WaitGroup
 		hg.Go(func() { d.handleConn(tr) })
-		requireQueuedFrame(t, sends, "Welcome")
-		requireQueuedFrame(t, sends, "Detached") // ack for explicit detach
-		hg.Wait()                                // handler returns after detach
+		requireFrame(t, sends, "Welcome")
+		requireFrame(t, sends, "Detached") // ack for explicit detach
+		hg.Wait()                          // handler returns after detach
 
 		require.Equal(t, 1, sessionCount(d), "named session survives detach")
 		sess := firstSession(d)
@@ -466,7 +466,7 @@ func TestReaderEOFRemovesSessionAndDaemonSurvives(t *testing.T) {
 		hg.Go(func() { d.handleConn(tr) })
 
 		// The client is detached with ReasonSessionKilled when the child exits.
-		det := requireQueuedFrame(t, sends, "Detached")
+		det := requireFrame(t, sends, "Detached")
 		dm := decodeServerMessage(t, det).(protocol.Detached)
 		require.Equal(t, protocol.ReasonSessionKilled, dm.Reason)
 
@@ -488,9 +488,9 @@ func TestReaderEOFRemovesSessionAndDaemonSurvives(t *testing.T) {
 		tr2, sends2, releaseConn2 := newConn(t, mustHello(protocol.IntentEphemeral, "", domain.Size{Cols: 80, Rows: 24}))
 		var hg2 sync.WaitGroup
 		hg2.Go(func() { d.handleConn(tr2) })
-		welcome := decodeServerMessage(t, requireQueuedFrame(t, sends2, "Welcome")).(protocol.Welcome)
+		welcome := decodeServerMessage(t, requireFrame(t, sends2, "Welcome")).(protocol.Welcome)
 		require.Equal(t, "0", welcome.SessionName)
-		requireQueuedFrame(t, sends2, "Output")
+		requireFrame(t, sends2, "Output")
 		require.Equal(t, 1, sessionCount(d))
 
 		_ = d.killSession(firstSession(d), protocol.ReasonSessionKilled, true)
@@ -630,19 +630,19 @@ func TestServeSurvivesEmptyRegistryAndAcceptsNewSession(t *testing.T) {
 		served := make(chan error, 1)
 		go func() { served <- d.Serve(ctx, l) }()
 
-		requireQueuedFrame(t, firstSends, "Welcome")
-		requireQueuedFrame(t, firstSends, "Output")
+		requireFrame(t, firstSends, "Welcome")
+		requireFrame(t, firstSends, "Output")
 
 		// Child exits -> session removed -> registry empties -> Serve must survive.
 		releaseFirst()
-		det := requireQueuedFrame(t, firstSends, "Detached")
+		det := requireFrame(t, firstSends, "Detached")
 		require.Equal(t, protocol.ReasonSessionKilled, decodeServerMessage(t, det).(protocol.Detached).Reason)
 		require.Equal(t, 0, sessionCount(d))
 
 		// The same accept loop admits a fresh connection into the empty registry.
 		connCh <- secondTr
-		requireQueuedFrame(t, secondSends, "Welcome")
-		requireQueuedFrame(t, secondSends, "Output")
+		requireFrame(t, secondSends, "Welcome")
+		requireFrame(t, secondSends, "Output")
 		require.Equal(t, 1, sessionCount(d))
 
 		// Only explicit cancellation stops Serve.
@@ -680,12 +680,12 @@ func TestServeGracefulShutdownOnContextCancel(t *testing.T) {
 		served := make(chan error, 1)
 		go func() { served <- d.Serve(ctx, l) }()
 
-		requireQueuedFrame(t, sends, "Welcome")
-		requireQueuedFrame(t, sends, "Output")
+		requireFrame(t, sends, "Welcome")
+		requireFrame(t, sends, "Output")
 
 		cancel() // graceful shutdown
 
-		det := requireQueuedFrame(t, sends, "Detached")
+		det := requireFrame(t, sends, "Detached")
 		dm := decodeServerMessage(t, det).(protocol.Detached)
 		require.Equal(t, protocol.ReasonServerShutdown, dm.Reason)
 
@@ -727,8 +727,8 @@ func TestHelloAfterExplicitShutdownIsRejected(t *testing.T) {
 		tr1, sends1, release1 := newConn(t, mustHello(protocol.IntentEphemeral, "", domain.Size{Cols: 80, Rows: 24}))
 		var hg sync.WaitGroup
 		hg.Go(func() { d.handleConn(tr1) })
-		requireQueuedFrame(t, sends1, "Welcome")
-		requireQueuedFrame(t, sends1, "Output")
+		requireFrame(t, sends1, "Welcome")
+		requireFrame(t, sends1, "Output")
 		require.Equal(t, 1, sessionCount(d))
 
 		// Explicit shutdown begins irreversibly and signals Serve synchronously.
@@ -752,7 +752,7 @@ func TestHelloAfterExplicitShutdownIsRejected(t *testing.T) {
 		} {
 			tr2, sends2, _ := newConn(t, mustHello(intent.intent, intent.sess, domain.Size{Cols: 80, Rows: 24}))
 			d.handleConn(tr2)
-			e := requireQueuedFrame(t, sends2, "Error")
+			e := requireFrame(t, sends2, "Error")
 			em, ok := decodeServerMessage(t, e).(protocol.ErrorMsg)
 			require.True(t, ok)
 			require.Equal(t, protocol.ErrServerShutdown, em.Code, "%s hello after shutdown must be rejected", intent.name)
@@ -817,19 +817,30 @@ func TestServeReturnsDespiteWedgedClientOnShutdown(t *testing.T) {
 		l.EXPECT().Close().RunAndReturn(func() error { lnOnce.Do(func() { close(lnClosed) }); return nil }).Maybe()
 		l.EXPECT().Addr().Return("mock").Maybe()
 
-		d := New(newFactory(t, p), notifyClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		clk, timers := newSignalClock(t, 64)
+		d := New(newFactory(t, p), clk, slog.New(slog.NewTextHandler(io.Discard, nil)))
 		ctx, cancel := context.WithCancel(context.Background())
 
 		served := make(chan error, 1)
 		go func() { served <- d.Serve(ctx, l) }()
 
-		requireQueuedFrame(t, sends, "Welcome")
-		requireQueuedFrame(t, sends, "Output")
+		requireFrame(t, sends, "Welcome")
+		requireFrame(t, sends, "Output")
 
 		cancel() // shutdown with the wedged client still attached
-		// Fake-time advancement: the bounded Detached send gives up after
-		// detachNotifyTimeout on the bubble clock.
-		time.Sleep(detachNotifyTimeout + time.Millisecond) //testpolicy:sleep advances bubble fake time
+		// Fire the bounded Detached send's timer so it gives up and force-closes.
+		synctest.Wait()
+		for fired := false; !fired; {
+			select {
+			case tm := <-timers:
+				if tm.duration == detachNotifyTimeout {
+					tm.fire()
+					fired = true
+				}
+			default:
+				t.Fatal("no Detached notify timer was armed")
+			}
+		}
 
 		err := requireReceived(t, served, "Serve hung on a wedged client during teardown")
 		require.NoError(t, err)

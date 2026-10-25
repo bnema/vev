@@ -205,7 +205,7 @@ func TestProcessPTYDataRetainsCallbacksDuringResizeReplay(t *testing.T) {
 		// normal asynchronous client path, proving replay uses processPTYData.
 		var clipboardOutput string
 		for {
-			frame := requireEnvelope(t, sends, "Output")
+			frame := requireFrame(t, sends, "Output")
 			out := unmarshalTestOutput(t, frame.Payload)
 			clipboardOutput = string(out.Data)
 			if strings.Contains(clipboardOutput, "\x1b]52;c;YQ==\a") {

@@ -2,12 +2,10 @@ package daemon
 
 import (
 	"testing"
-	"testing/synctest"
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/stretchr/testify/require"
 )
 
@@ -161,24 +159,6 @@ func mustLocalSession(t *testing.T, entry *session) *session {
 	t.Helper()
 	require.NotNil(t, entry)
 	return entry
-}
-
-// requireQueuedFrame is the bubble form of awaitFrame: after quiescence it
-// consumes queued envelopes until one decodes to want, failing if none does.
-func requireQueuedFrame(t *testing.T, ch <-chan wire.Envelope, want string) wire.Envelope {
-	t.Helper()
-	synctest.Wait()
-	for {
-		select {
-		case f := <-ch:
-			if envelopeMessageName(t, f.Payload) == want {
-				return f
-			}
-		default:
-			t.Fatalf("envelope %s was not sent", want)
-			return wire.Envelope{}
-		}
-	}
 }
 
 // receiveBounded is for tests that cannot run in a synctest bubble (goroutines

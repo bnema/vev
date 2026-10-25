@@ -108,7 +108,7 @@ func TestCopyModeDocumentCarriesPaneRowIDs(t *testing.T) {
 		require.NotEqual(t, historyID, liveID)
 
 		d.enterCopyMode(sess, ac)
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 		doc := ac.overlays.copyDocument
 
 		require.Equal(t, 0, doc.FindRowID(historyID))
@@ -195,7 +195,7 @@ func TestCopyModePaletteCommandEntersAndDoesNotForward(t *testing.T) {
 		sess.tabs[0].focusedPane().screen.Write([]byte("live"))
 
 		d.handleInput(sess, ac, []byte("\x1b "))
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 		d.handleInput(sess, ac, []byte("VIS\r"))
 
 		if ac.overlays.copyMode == nil {
@@ -206,14 +206,14 @@ func TestCopyModePaletteCommandEntersAndDoesNotForward(t *testing.T) {
 			t.Fatalf("scrollback binding forwarded to PTY: %q", got)
 		default:
 		}
-		out := requireEnvelope(t, sends, "Output")
+		out := requireFrame(t, sends, "Output")
 		msg := unmarshalTestOutput(t, out.Payload)
 		if got := string(msg.Data); !strings.Contains(got, "[SCROLL]") || strings.Contains(got, "[SELECT]") || strings.Contains(got, "[COPY]") {
 			t.Fatalf("passive scrollback paint = %q, want [SCROLL] without [SELECT]/[COPY]", got)
 		}
 
 		d.handleInput(sess, ac, []byte(" "))
-		out = requireEnvelope(t, sends, "Output")
+		out = requireFrame(t, sends, "Output")
 		msg = unmarshalTestOutput(t, out.Payload)
 		if got := string(msg.Data); !strings.Contains(got, "[SELECT]") || strings.Contains(got, "[SCROLL]") {
 			t.Fatalf("visual selection paint = %q, want [SELECT] without [SCROLL]", got)
@@ -232,9 +232,9 @@ func TestCopyModeSearchModalRoutesBatchedInputAfterSlash(t *testing.T) {
 		writeTestRow(pane.screen, 1, "beta alpha")
 
 		d.enterCopyMode(sess, ac)
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 		d.handleInput(sess, ac, []byte("/alpha\r"))
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 
 		require.Nil(t, ac.overlays.copySearch)
 		require.NotNil(t, ac.overlays.copyMode)
@@ -259,30 +259,30 @@ func TestCopyModeSearchModalJumpsAndKeepsNavigation(t *testing.T) {
 		writeTestRow(pane.screen, 2, "gamma")
 
 		d.enterCopyMode(sess, ac)
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 		d.handleInput(sess, ac, []byte("/"))
-		out := requireEnvelope(t, sends, "Output")
+		out := requireFrame(t, sends, "Output")
 		msg := unmarshalTestOutput(t, out.Payload)
 		require.Contains(t, string(msg.Data), "Search")
 		require.NotNil(t, ac.overlays.copySearch)
 
 		d.handleInput(sess, ac, []byte("alpha"))
-		out = requireEnvelope(t, sends, "Output")
+		out = requireFrame(t, sends, "Output")
 		msg = unmarshalTestOutput(t, out.Payload)
 		require.Contains(t, string(msg.Data), "/alpha")
 		require.Contains(t, string(msg.Data), "1:1  alpha")
 		require.Contains(t, string(msg.Data), "2:6  beta alpha")
 
 		d.handleInput(sess, ac, []byte("\r"))
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 		require.Nil(t, ac.overlays.copySearch)
 		require.Equal(t, 0, ac.overlays.copyMode.Cursor().Row)
 
 		d.handleInput(sess, ac, []byte("n"))
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 		require.Equal(t, 1, ac.overlays.copyMode.Cursor().Row)
 		d.handleInput(sess, ac, []byte("N"))
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 		require.Equal(t, 0, ac.overlays.copyMode.Cursor().Row)
 
 		select {
@@ -304,17 +304,17 @@ func TestCopyModeSearchModalSelectionPreviewsBehindModal(t *testing.T) {
 		writeTestRow(pane.screen, 2, "gamma")
 
 		d.enterCopyMode(sess, ac)
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 
 		d.handleInput(sess, ac, []byte("/"))
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 		d.handleInput(sess, ac, []byte("alpha"))
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 		require.NotNil(t, ac.overlays.copySearch)
 		require.Equal(t, 0, ac.overlays.copyMode.Cursor().Row, "typing a query previews the selected first result behind the modal")
 
 		d.handleInput(sess, ac, []byte{0x0e})
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 		require.NotNil(t, ac.overlays.copySearch)
 		require.Equal(t, 1, ac.overlays.copyMode.Cursor().Row, "moving modal selection previews that result without Enter")
 	})
@@ -331,9 +331,9 @@ func TestCopyModeSearchModalCapturesMouseAndClearsOnExit(t *testing.T) {
 		writeTestRow(pane.screen, 0, "live alpha")
 
 		d.enterCopyMode(sess, ac)
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 		d.handleInput(sess, ac, []byte("/alpha"))
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 		require.NotNil(t, ac.overlays.copySearch)
 		cursor := ac.overlays.copyMode.Cursor().Row
 
@@ -342,11 +342,11 @@ func TestCopyModeSearchModalCapturesMouseAndClearsOnExit(t *testing.T) {
 		require.Equal(t, cursor, ac.overlays.copyMode.Cursor().Row)
 
 		d.handleInput(sess, ac, []byte("\x1b"))
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 		require.Nil(t, ac.overlays.copySearch)
 		require.NotNil(t, ac.overlays.copyMode)
 		d.handleInput(sess, ac, []byte("q"))
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 		require.Nil(t, ac.overlays.copySearch)
 		require.Nil(t, ac.overlays.copyMode)
 	})
@@ -364,7 +364,7 @@ func TestCopyModeInputNotForwardedAndOSC52Copy(t *testing.T) {
 		sess.tabs[0].focusedPane().screen.Write([]byte("live"))
 
 		d.enterCopyMode(sess, ac)
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 		d.handleInput(sess, ac, []byte{'g', ' ', 'j', 'y'})
 
 		select {
@@ -372,7 +372,7 @@ func TestCopyModeInputNotForwardedAndOSC52Copy(t *testing.T) {
 			t.Fatalf("copy-mode navigation forwarded to PTY: %q", got)
 		default:
 		}
-		out := requireEnvelope(t, sends, "Output")
+		out := requireFrame(t, sends, "Output")
 		msg := unmarshalTestOutput(t, out.Payload)
 		if got, want := string(msg.Data), "\x1b]52;c;b2xkMQpvbGQy\x07"; got != want {
 			t.Fatalf("OSC52 = %q, want %q", got, want)
@@ -380,7 +380,7 @@ func TestCopyModeInputNotForwardedAndOSC52Copy(t *testing.T) {
 		if ac.overlays.copyMode != nil {
 			t.Fatal("copy mode still active after yank")
 		}
-		live := requireEnvelope(t, sends, "Output")
+		live := requireFrame(t, sends, "Output")
 		liveMsg := unmarshalTestOutput(t, live.Payload)
 		if strings.Contains(string(liveMsg.Data), "[COPY]") || strings.Contains(string(liveMsg.Data), "[SCROLL]") {
 			t.Fatalf("live repaint still contains copy/scroll status: %q", string(liveMsg.Data))
@@ -393,7 +393,7 @@ func TestCopyModeInputNotForwardedAndOSC52Copy(t *testing.T) {
 		}
 
 		d.paint(sess, ac, true, nil)
-		followup := requireEnvelope(t, sends, "Output")
+		followup := requireFrame(t, sends, "Output")
 		followupMsg := unmarshalTestOutput(t, followup.Payload)
 		if strings.Contains(string(followupMsg.Data), "copied 9 chars to clipboard") {
 			t.Fatalf("copy feedback persisted after next repaint: %q", string(followupMsg.Data))
@@ -432,9 +432,9 @@ func TestScrollbackEvictionFeedsCopyModeYank(t *testing.T) {
 		}
 		var hg sync.WaitGroup
 		hg.Go(func() { d.handleConn(tr) })
-		requireEnvelope(t, sends, "Welcome")
+		requireFrame(t, sends, "Welcome")
 		advanceRender() // initial coordinator invalidation
-		initial := unmarshalTestOutput(t, requireEnvelope(t, sends, "Output").Payload)
+		initial := unmarshalTestOutput(t, requireFrame(t, sends, "Output").Payload)
 		require.NotNil(t, initial.Context)
 		require.NotEmpty(t, initial.Context.FocusedPaneID, "a small viewport must retain its input target even when layout cannot place its cells")
 
@@ -469,7 +469,7 @@ func TestScrollbackEvictionFeedsCopyModeYank(t *testing.T) {
 
 		var payload string
 		for !strings.HasPrefix(payload, "\x1b]52;c;") {
-			out := requireEnvelope(t, sends, "Output")
+			out := requireFrame(t, sends, "Output")
 			payload = string(unmarshalTestOutput(t, out.Payload).Data)
 		}
 		require.True(t, strings.HasPrefix(payload, "\x1b]52;c;"), "OSC52 payload = %q", payload)
@@ -495,13 +495,13 @@ func TestCopyModeEscapeRestoresLiveFullRepaint(t *testing.T) {
 		sess.tabs[0].focusedPane().screen.Write([]byte("live"))
 
 		d.enterCopyMode(sess, ac)
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 		d.handleInput(sess, ac, []byte("q"))
 
 		if ac.overlays.copyMode != nil {
 			t.Fatal("copy mode still active after q")
 		}
-		out := requireEnvelope(t, sends, "Output")
+		out := requireFrame(t, sends, "Output")
 		msg := unmarshalTestOutput(t, out.Payload)
 		if strings.Contains(string(msg.Data), "[COPY]") || !strings.Contains(string(msg.Data), "live") {
 			t.Fatalf("exit repaint = %q, want live full repaint without copy status", string(msg.Data))
@@ -533,7 +533,7 @@ func TestCopyModeSplitArrowDoesNotExit(t *testing.T) {
 				sess.tabs[0].focusedPane().screen.Write([]byte("live"))
 
 				d.enterCopyMode(sess, ac)
-				requireEnvelope(t, sends, "Output")
+				requireFrame(t, sends, "Output")
 				for _, input := range tc.input {
 					d.handleInput(sess, ac, input)
 				}
@@ -556,10 +556,10 @@ func TestCopyModeOversizedYankShowsTooLargeFeedback(t *testing.T) {
 		writeTestRow(sess.tabs[0].focusedPane().screen, 0, longLine)
 
 		d.enterCopyMode(sess, ac)
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 		d.handleInput(sess, ac, []byte{' ', 'y'})
 
-		out := requireEnvelope(t, sends, "Output")
+		out := requireFrame(t, sends, "Output")
 		msg := unmarshalTestOutput(t, out.Payload)
 		if strings.Contains(string(msg.Data), "\x1b]52;") {
 			t.Fatalf("oversized yank emitted OSC52: %q", string(msg.Data))
@@ -581,7 +581,7 @@ func TestCopyModeLoneEscapeExitsAfterDelay(t *testing.T) {
 		sess.tabs[0].focusedPane().screen.Write([]byte("live"))
 
 		d.enterCopyMode(sess, ac)
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 		d.handleInput(sess, ac, []byte("\x1b"))
 		timer := requireReceived(t, clkTimers, "copy escape did not arm its timer")
 		ac.overlays.copyMu.Lock()
@@ -607,11 +607,11 @@ func TestCopyModePendingEscapeDoesNotCloseNewMode(t *testing.T) {
 		sess.tabs[0].focusedPane().screen.Write([]byte("live"))
 
 		d.enterCopyMode(sess, ac)
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 		d.handleInput(sess, ac, []byte("\x1b"))
 		timer := requireReceived(t, clkTimers, "copy escape did not arm its timer")
 		d.enterCopyMode(sess, ac)
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 
 		ac.overlays.copyMu.Lock()
 		require.Nil(t, ac.overlays.copyESC.timer)
@@ -650,13 +650,13 @@ func TestCopyModeEmptyYankDoesNotClearClipboard(t *testing.T) {
 				sess.tabs[0].focusedPane().screen.Write([]byte("live"))
 
 				d.enterCopyMode(sess, ac)
-				requireEnvelope(t, sends, "Output")
+				requireFrame(t, sends, "Output")
 				d.handleInput(sess, ac, tc.input)
 
 				if ac.overlays.copyMode != nil {
 					t.Fatal("copy mode still active after empty yank")
 				}
-				out := requireEnvelope(t, sends, "Output")
+				out := requireFrame(t, sends, "Output")
 				msg := unmarshalTestOutput(t, out.Payload)
 				if strings.Contains(string(msg.Data), "\x1b]52;") {
 					t.Fatalf("empty yank emitted OSC52 clipboard clear: %q", string(msg.Data))
@@ -678,7 +678,7 @@ func TestHandleCopyInputUsesImmutableSnapshotWithoutPaneLock(t *testing.T) {
 		pane := testAttachmentTab(sess).focusedPane()
 		pane.screen.Write([]byte("live"))
 		d.enterCopyMode(sess, ac)
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 
 		pane.mu.Lock()
 		defer pane.mu.Unlock()
@@ -789,7 +789,7 @@ func TestCopyModeCapturesSourceAndRetainsItAcrossFocusMove(t *testing.T) {
 				}
 
 				d.enterCopyMode(sess, ac)
-				requireEnvelope(t, sends, "Output")
+				requireFrame(t, sends, "Output")
 				ac.overlays.copyMu.Lock()
 				captured := ac.overlays.copyPane
 				ac.overlays.copyMu.Unlock()
@@ -800,7 +800,7 @@ func TestCopyModeCapturesSourceAndRetainsItAcrossFocusMove(t *testing.T) {
 				tb.mu.Unlock()
 
 				d.handleInput(sess, ac, []byte{'g', ' ', 'j', 'y'})
-				out := requireEnvelope(t, sends, "Output")
+				out := requireFrame(t, sends, "Output")
 				msg := unmarshalTestOutput(t, out.Payload)
 				wantOSC := "\x1b]52;c;" + base64.StdEncoding.EncodeToString([]byte(tc.wantText)) + "\x07"
 				require.Equal(t, wantOSC, string(msg.Data))
@@ -831,15 +831,15 @@ func TestFloatingCopyModeWheelUsesCapturedSnapshot(t *testing.T) {
 		fp.mu.Unlock()
 
 		d.enterCopyMode(sess, ac)
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 		require.Equal(t, total-1, ac.overlays.copyMode.Cursor().Row)
 
 		d.copyWheel(sess, ac, -3)
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 		require.Equal(t, total-4, ac.overlays.copyMode.Cursor().Row)
 
 		d.copyWheel(sess, ac, 3)
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 		require.Nil(t, ac.overlays.copyMode, "wheel down reaching the captured bottom exits copy mode")
 	})
 }
@@ -857,7 +857,7 @@ func TestFloatingCopyModeMouseSelectsFloatingRows(t *testing.T) {
 		fp.screen.Write([]byte("live"))
 
 		d.enterCopyMode(sess, ac)
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 		ac.overlays.copyMu.Lock()
 		viewportTop := ac.overlays.copyMode.ViewportTop
 		ac.overlays.copyMu.Unlock()
@@ -867,12 +867,12 @@ func TestFloatingCopyModeMouseSelectsFloatingRows(t *testing.T) {
 		// offset); clicking a row must select exactly that row.
 		press := fmt.Sprintf("\x1b[<0;%d;%dM", inner.X+3, inner.Y+3)
 		d.handleInput(sess, ac, []byte(press))
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 		require.Equal(t, viewportTop+1, ac.overlays.copyMode.Cursor().Row)
 
 		motion := fmt.Sprintf("\x1b[<32;%d;%dM", inner.X+3, inner.Y+4)
 		d.handleInput(sess, ac, []byte(motion))
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 		selection := ac.overlays.copyMode.Selection()
 		require.True(t, selection.Enabled)
 		require.Equal(t, viewportTop+1, selection.Anchor.Row)
@@ -891,7 +891,7 @@ func TestFloatingExitClearsCopyModeBeforeRepaint(t *testing.T) {
 		fp.screen.Write([]byte("flt-live"))
 
 		d.enterCopyMode(sess, ac)
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 		tb.mu.Lock()
 		generation := tb.floating.generation
 		publishPaneOwner(fp, sess, tb, generation)
@@ -927,7 +927,7 @@ func TestMouseDragCopyEntryCapturesSourceForYank(t *testing.T) {
 		require.Same(t, pane, captured, "drag entry must capture the copy source pane")
 
 		d.handleInput(sess, ac, []byte("y"))
-		out := requireEnvelope(t, sends, "Output")
+		out := requireFrame(t, sends, "Output")
 		msg := unmarshalTestOutput(t, out.Payload)
 		want := "\x1b]52;c;" + base64.StdEncoding.EncodeToString([]byte("alpha\nb")) + "\x07"
 		require.Equal(t, want, string(msg.Data))

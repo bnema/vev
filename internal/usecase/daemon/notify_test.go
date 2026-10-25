@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -333,21 +332,11 @@ func toastLifetimes(ac *attachedClient) []time.Duration {
 	return out
 }
 
-// awaitToastCount asserts, after bubble quiescence when there is a bubble, that
+// awaitToastCount asserts, after bubble quiescence, that
 // the toast slice holds want entries.
 func awaitToastCount(t *testing.T, ac *attachedClient, want int) []domain.Notification {
 	t.Helper()
-	if !settleBubble() {
-		// Callers outside a bubble (notice_render_test.go, control_test.go, ...)
-		// have no quiescence primitive: yield to the timer and render goroutines
-		// a bounded number of times. No wall-clock time is involved.
-		for range 200000 {
-			if got, _ := visibleToasts(ac); len(got) == want {
-				return got
-			}
-			runtime.Gosched()
-		}
-	}
+	synctest.Wait()
 	got, _ := visibleToasts(ac)
 	require.Len(t, got, want, "toast count never reached %d", want)
 	return got
@@ -971,7 +960,7 @@ func TestToastExpiresOnFakeClock(t *testing.T) {
 
 		d.notify(sess, domain.NoticeError, domain.NoticePaneSpawn, "could not open pane", nil)
 		awaitToastCount(t, ac, 1)
-		shown := requireEnvelope(t, sends, "Output")
+		shown := requireFrame(t, sends, "Output")
 		shownOutput := unmarshalTestOutput(t, shown.Payload)
 		terminal := vt.NewScreen(80, 25)
 		terminal.Write(shownOutput.Data)
@@ -986,7 +975,7 @@ func TestToastExpiresOnFakeClock(t *testing.T) {
 		_, overflow := visibleToasts(ac)
 		require.Zero(t, overflow, "overflow resets once no toast is visible")
 
-		expired := requireEnvelope(t, sends, "Output")
+		expired := requireFrame(t, sends, "Output")
 		expiredOutput := unmarshalTestOutput(t, expired.Payload)
 		terminal.Write(expiredOutput.Data)
 		ac.sendMu.Lock()

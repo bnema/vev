@@ -303,11 +303,11 @@ func TestApplyConfigRepaintsActivePaletteWithoutReplacingModel(t *testing.T) {
 		d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 		stopOverlayTimersAtCleanup(t, ac)
 		d.enterPalette(sess, ac)
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 		d.handlePaletteInput(ac, []byte("new"))
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 		d.handlePaletteInput(ac, []byte{0x0e})
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 
 		ac.overlays.paletteMu.Lock()
 		model := ac.overlays.palette
@@ -319,7 +319,7 @@ func TestApplyConfigRepaintsActivePaletteWithoutReplacingModel(t *testing.T) {
 		cfg := domain.Defaults()
 		cfg.Palette = domain.PaletteConfig{Anchor: domain.AnchorTopLeft, AnchorSet: true}
 		d.ApplyConfig(cfg)
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 
 		ac.overlays.paletteMu.Lock()
 		defer ac.overlays.paletteMu.Unlock()

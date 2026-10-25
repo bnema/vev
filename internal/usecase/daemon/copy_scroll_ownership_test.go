@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"testing"
+	"testing/synctest"
 
 	"github.com/stretchr/testify/require"
 
@@ -63,63 +64,67 @@ func TestCopyCacheFailedPublicationAndRetry(t *testing.T) {
 }
 
 func TestCopyCacheSearchTransition(t *testing.T) {
-	d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
-	sess.tabs[0].focusedPane().screen.Write([]byte("alpha"))
-	ack := func() {
-		mustOutputData(t, sends)
-		ac.ackOutputState(ac.output.currentEpoch(), ac.output.next)
-	}
-	d.enterCopyMode(sess, ac)
-	ack()
-	require.True(t, ac.render.cache.valid)
-	base := captureTestFrame(ac.render.cache.frame)
-	d.handleInput(sess, ac, []byte("/"))
-	ack()
-	require.NotNil(t, ac.overlays.copySearch)
-	require.False(t, ac.render.cache.valid)
-	require.Equal(t, base, captureTestFrame(ac.render.cache.frame), "search modal must not contaminate the live base")
-	d.handleInput(sess, ac, []byte("\x1b"))
-	ack()
-	require.Nil(t, ac.overlays.copySearch)
-	require.NotNil(t, ac.overlays.copyMode)
-	require.True(t, ac.render.cache.valid)
-	require.Equal(t, base, captureTestFrame(ac.render.cache.frame))
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
+		sess.tabs[0].focusedPane().screen.Write([]byte("alpha"))
+		ack := func() {
+			mustOutputData(t, sends)
+			ac.ackOutputState(ac.output.currentEpoch(), ac.output.next)
+		}
+		d.enterCopyMode(sess, ac)
+		ack()
+		require.True(t, ac.render.cache.valid)
+		base := captureTestFrame(ac.render.cache.frame)
+		d.handleInput(sess, ac, []byte("/"))
+		ack()
+		require.NotNil(t, ac.overlays.copySearch)
+		require.False(t, ac.render.cache.valid)
+		require.Equal(t, base, captureTestFrame(ac.render.cache.frame), "search modal must not contaminate the live base")
+		d.handleInput(sess, ac, []byte("\x1b"))
+		ack()
+		require.Nil(t, ac.overlays.copySearch)
+		require.NotNil(t, ac.overlays.copyMode)
+		require.True(t, ac.render.cache.valid)
+		require.Equal(t, base, captureTestFrame(ac.render.cache.frame))
+	})
 }
 
 func TestCopyExitRefreshesAfterOtherAttachmentConsumesDamage(t *testing.T) {
-	d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
-	p := sess.tabs[0].focusedPane()
-	p.screen.Write([]byte("before"))
-	d.enterCopyMode(sess, ac)
-	mustOutputData(t, sends)
-	ac.ackOutputState(ac.output.currentEpoch(), ac.output.next)
-	copyBefore := captureTestFrame(ac.render.cache.frame)
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
+		p := sess.tabs[0].focusedPane()
+		p.screen.Write([]byte("before"))
+		d.enterCopyMode(sess, ac)
+		mustOutputData(t, sends)
+		ac.ackOutputState(ac.output.currentEpoch(), ac.output.next)
+		copyBefore := captureTestFrame(ac.render.cache.frame)
 
-	tr, peerSends := newCapturingTransport(t)
-	peer := &attachedClient{tr: tr, output: newOutputStateStream(), geometry: domain.Geometry{Size: ac.geometry.Size}}
-	peer.output.attachment = peer
-	peer.initOverlays()
-	peer.setSession(sess)
-	sess.mu.Lock()
-	require.True(t, sess.registerAttachmentLocked(peer))
-	sess.mu.Unlock()
-	p.mu.Lock()
-	p.screen.Write([]byte("\x1b[1;1Hafter-peer"))
-	p.mu.Unlock()
-	// A real peer capture/emission consumes the shared pane damage first.
-	d.paint(sess, peer, true, nil)
-	mustOutputData(t, peerSends)
-	p.mu.Lock()
-	require.Empty(t, p.screen.Damage())
-	p.mu.Unlock()
-	require.Contains(t, frameText(peer.render.cache.frame), "after-peer")
-	require.Equal(t, copyBefore, captureTestFrame(ac.render.cache.frame), "peer publication cannot mutate another attachment's cache")
+		tr, peerSends := newCapturingTransport(t)
+		peer := &attachedClient{tr: tr, output: newOutputStateStream(), geometry: domain.Geometry{Size: ac.geometry.Size}}
+		peer.output.attachment = peer
+		peer.initOverlays()
+		peer.setSession(sess)
+		sess.mu.Lock()
+		require.True(t, sess.registerAttachmentLocked(peer))
+		sess.mu.Unlock()
+		p.mu.Lock()
+		p.screen.Write([]byte("\x1b[1;1Hafter-peer"))
+		p.mu.Unlock()
+		// A real peer capture/emission consumes the shared pane damage first.
+		d.paint(sess, peer, true, nil)
+		mustOutputData(t, peerSends)
+		p.mu.Lock()
+		require.Empty(t, p.screen.Damage())
+		p.mu.Unlock()
+		require.Contains(t, frameText(peer.render.cache.frame), "after-peer")
+		require.Equal(t, copyBefore, captureTestFrame(ac.render.cache.frame), "peer publication cannot mutate another attachment's cache")
 
-	// The copy document is still frozen, but leaving it must recapture live
-	// cells even though the other attachment already acknowledged the damage.
-	d.copyWheel(sess, ac, 1)
-	mustOutputData(t, sends)
-	require.Nil(t, ac.overlays.copyMode)
-	require.Contains(t, frameText(ac.render.cache.frame), "after-peer")
-	require.NoError(t, ac.render.cache.frame.CheckInvariants())
+		// The copy document is still frozen, but leaving it must recapture live
+		// cells even though the other attachment already acknowledged the damage.
+		d.copyWheel(sess, ac, 1)
+		mustOutputData(t, sends)
+		require.Nil(t, ac.overlays.copyMode)
+		require.Contains(t, frameText(ac.render.cache.frame), "after-peer")
+		require.NoError(t, ac.render.cache.frame.CheckInvariants())
+	})
 }

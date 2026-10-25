@@ -49,9 +49,9 @@ func TestNoticesOpenViaPaletteCommandShowsModalWithHistory(t *testing.T) {
 		d.notices.record(domain.Notification{Code: domain.NoticePaneSpawn, Severity: domain.NoticeError, Message: "couldn't open pane", Time: time.Unix(1, 0)})
 
 		d.enterPalette(sess, ac)
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 		d.handlePaletteInput(ac, []byte("NTC\r"))
-		out := requireEnvelope(t, sends, "Output")
+		out := requireFrame(t, sends, "Output")
 
 		require.False(t, ac.overlays.paletteActive())
 		require.NotNil(t, ac.overlays.noticesOverlay)
@@ -73,32 +73,32 @@ func TestNoticesJKNavigatesSelection(t *testing.T) {
 		d.notices.record(domain.Notification{Code: domain.NoticeInternal, Message: "third", Time: time.Unix(3, 0)})
 
 		d.enterNotices(sess, ac)
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 		selected, ok := ac.overlays.noticesOverlay.Selected()
 		require.True(t, ok)
 		require.Equal(t, "third", selected.Message)
 
 		d.handleInput(sess, ac, []byte("j"))
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 		selected, ok = ac.overlays.noticesOverlay.Selected()
 		require.True(t, ok)
 		require.Equal(t, "second", selected.Message)
 
 		d.handleInput(sess, ac, []byte("j"))
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 		selected, ok = ac.overlays.noticesOverlay.Selected()
 		require.True(t, ok)
 		require.Equal(t, "first", selected.Message)
 
 		// One more 'j' at the bottom must clamp rather than wrap.
 		d.handleInput(sess, ac, []byte("j"))
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 		selected, ok = ac.overlays.noticesOverlay.Selected()
 		require.True(t, ok)
 		require.Equal(t, "first", selected.Message)
 
 		d.handleInput(sess, ac, []byte("k"))
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 		selected, ok = ac.overlays.noticesOverlay.Selected()
 		require.True(t, ok)
 		require.Equal(t, "second", selected.Message)
@@ -116,11 +116,11 @@ func TestNoticesQAndCtrlCCloseImmediatelyAndClearState(t *testing.T) {
 				d.notices.record(domain.Notification{Code: domain.NoticePaneSpawn, Message: "m", Time: time.Unix(1, 0)})
 
 				d.enterNotices(sess, ac)
-				requireEnvelope(t, sends, "Output")
+				requireFrame(t, sends, "Output")
 				require.True(t, ac.overlays.noticesActive())
 
 				d.handleInput(sess, ac, []byte{key})
-				requireEnvelope(t, sends, "Output")
+				requireFrame(t, sends, "Output")
 
 				require.False(t, ac.overlays.noticesActive())
 				require.Nil(t, ac.overlays.noticesOverlay)
@@ -138,7 +138,7 @@ func TestNoticesLoneEscapeClosesAfterDelay(t *testing.T) {
 		d.notices.record(domain.Notification{Code: domain.NoticePaneSpawn, Message: "m", Time: time.Unix(1, 0)})
 
 		d.enterNotices(sess, ac)
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 
 		clk, clkTimers := newSignalClock(t, 1)
 		d.clock = clk
@@ -149,7 +149,7 @@ func TestNoticesLoneEscapeClosesAfterDelay(t *testing.T) {
 		timer.fire()
 		synctest.Wait()
 		require.False(t, ac.overlays.noticesActive(), "the lone escape did not close the notices overlay")
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 	})
 }
 
@@ -175,7 +175,7 @@ func TestNoticesSplitArrowNavigatesWithoutClosing(t *testing.T) {
 				d.notices.record(domain.Notification{Code: domain.NoticeTabSpawn, Message: "second", Time: time.Unix(2, 0)})
 
 				d.enterNotices(sess, ac)
-				requireEnvelope(t, sends, "Output")
+				requireFrame(t, sends, "Output")
 				for _, input := range tc.input {
 					d.handleInput(sess, ac, input)
 				}
@@ -366,7 +366,7 @@ func TestNoticesOpenWithEmptyHistoryShowsPlaceholderWithoutPanic(t *testing.T) {
 		defer release()
 
 		require.NotPanics(t, func() { d.enterNotices(sess, ac) })
-		out := requireEnvelope(t, sends, "Output")
+		out := requireFrame(t, sends, "Output")
 
 		require.NotNil(t, ac.overlays.noticesOverlay)
 		msg := unmarshalTestOutput(t, out.Payload)
@@ -416,10 +416,10 @@ func TestYankLastNotificationCommandCopiesOSC52AndShowsFeedback(t *testing.T) {
 		want := noticeYankPayload(n)
 
 		d.enterPalette(sess, ac)
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 		d.handlePaletteInput(ac, []byte("YLN\r"))
 
-		out := requireEnvelope(t, sends, "Output")
+		out := requireFrame(t, sends, "Output")
 		msg := unmarshalTestOutput(t, out.Payload)
 		payload := string(msg.Data)
 		require.True(t, strings.HasPrefix(payload, "\x1b]52;c;"), "OSC52 payload = %q", payload)
@@ -428,7 +428,7 @@ func TestYankLastNotificationCommandCopiesOSC52AndShowsFeedback(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, want, string(decoded))
 
-		live := requireEnvelope(t, sends, "Output")
+		live := requireFrame(t, sends, "Output")
 		liveMsg := unmarshalTestOutput(t, live.Payload)
 		require.Contains(t, string(liveMsg.Data), "copied notification details")
 	})
@@ -442,10 +442,10 @@ func TestYankLastNotificationWithEmptyHistoryShowsWarnToast(t *testing.T) {
 		defer release()
 
 		d.enterPalette(sess, ac)
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 		d.handlePaletteInput(ac, []byte("YLN\r"))
 
-		out := requireEnvelope(t, sends, "Output")
+		out := requireFrame(t, sends, "Output")
 		msg := unmarshalTestOutput(t, out.Payload)
 		require.Contains(t, string(msg.Data), "no notifications yet")
 
@@ -467,7 +467,7 @@ func TestNoticesYKeyYanksSelectedNotification(t *testing.T) {
 		d.notices.record(domain.Notification{Code: domain.NoticeTabSpawn, Severity: domain.NoticeError, Message: "second", Time: time.Unix(2, 0)})
 
 		d.enterNotices(sess, ac)
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 		selected, ok := ac.overlays.noticesOverlay.Selected()
 		require.True(t, ok)
 		require.Equal(t, "second", selected.Message)
@@ -475,7 +475,7 @@ func TestNoticesYKeyYanksSelectedNotification(t *testing.T) {
 
 		d.handleInput(sess, ac, []byte("y"))
 
-		out := requireEnvelope(t, sends, "Output")
+		out := requireFrame(t, sends, "Output")
 		msg := unmarshalTestOutput(t, out.Payload)
 		payload := string(msg.Data)
 		require.True(t, strings.HasPrefix(payload, "\x1b]52;c;"), "OSC52 payload = %q", payload)
@@ -511,10 +511,10 @@ func TestNoticesBatchedYankCapturesSelectionAtY(t *testing.T) {
 				d.notices.record(domain.Notification{Code: domain.NoticeInternal, Message: "third", Time: time.Unix(3, 0)})
 
 				d.enterNotices(sess, ac)
-				requireEnvelope(t, sends, "Output")
+				requireFrame(t, sends, "Output")
 				d.handleInput(sess, ac, tt.input)
 
-				out := requireEnvelope(t, sends, "Output")
+				out := requireFrame(t, sends, "Output")
 				msg := unmarshalTestOutput(t, out.Payload)
 				payload := strings.TrimSuffix(strings.TrimPrefix(string(msg.Data), "\x1b]52;c;"), "\a")
 				decoded, err := base64.StdEncoding.DecodeString(payload)
@@ -537,7 +537,7 @@ func TestNoticesYKeyWithNoSelectionIsNoOp(t *testing.T) {
 		defer release()
 
 		require.NotPanics(t, func() { d.enterNotices(sess, ac) })
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 
 		require.NotPanics(t, func() { d.handleInput(sess, ac, []byte("y")) })
 		require.True(t, ac.overlays.noticesActive())

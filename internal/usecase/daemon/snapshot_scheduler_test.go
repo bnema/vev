@@ -385,7 +385,7 @@ func TestServeShutdownDeadlineStillJoinsRetainedSessionWriter(t *testing.T) {
 		served := make(chan error, 1)
 		go func() { served <- d.Serve(ctx, listener) }()
 
-		requireQueuedFrame(t, sends, "Welcome")
+		requireFrame(t, sends, "Welcome")
 		sess := firstSession(d)
 		require.NotNil(t, sess)
 
@@ -538,7 +538,7 @@ func TestServeShutdownCheckpointsBeforeStoppingSnapshotWorker(t *testing.T) {
 		served := make(chan error, 1)
 		go func() { served <- d.Serve(ctx, l) }()
 
-		requireQueuedFrame(t, sends, "Welcome")
+		requireFrame(t, sends, "Welcome")
 		markSnapshotDirty(firstSession(d))
 		d.snapshots.wake <- struct{}{}
 		first := <-published
@@ -593,7 +593,7 @@ func TestServeShutdownDeadlineStillJoinsUncooperativeSnapshotRepository(t *testi
 		served := make(chan error, 1)
 		go func() { served <- d.Serve(ctx, l) }()
 
-		requireQueuedFrame(t, sends, "Welcome")
+		requireFrame(t, sends, "Welcome")
 		markSnapshotDirty(firstSession(d))
 		d.snapshots.wake <- struct{}{}
 		requireReceived(t, firstPublicationCompleted, "initial checkpoint did not complete")

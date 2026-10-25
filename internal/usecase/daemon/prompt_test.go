@@ -27,7 +27,7 @@ func TestEnterPromptRendersTitleAndPrefill(t *testing.T) {
 		defer release()
 
 		d.enterPrompt(sess, ac, " Rename session ", "0", func(string) error { return nil })
-		out := requireEnvelope(t, sends, "Output")
+		out := requireFrame(t, sends, "Output")
 		msg := unmarshalTestOutput(t, out.Payload)
 		require.Contains(t, string(msg.Data), "Rename session")
 		require.Contains(t, string(msg.Data), "> 0")
@@ -45,9 +45,9 @@ func TestPromptSubmitRenamesAndPromotesSession(t *testing.T) {
 		sess.ephemeral = true
 
 		d.enterPrompt(sess, ac, " Rename session ", sess.name, func(name string) error { return d.renameSession(sess, name) })
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 		d.handlePromptInput(ac, []byte("work\r"))
-		repaint := requireEnvelope(t, sends, "Output")
+		repaint := requireFrame(t, sends, "Output")
 
 		require.False(t, ac.overlays.promptActive())
 		require.Equal(t, "0work", sess.name)
@@ -71,9 +71,9 @@ func TestPromptSubmitErrorKeepsPromptOpen(t *testing.T) {
 		d.sessions["other"] = &session{sessionCore: sessionCore{id: "other", name: "taken"}, ctx: ctx, cancel: cancel, tabs: []*tab{newTestTabWithContext(p2, ctx, cancel)}}
 
 		d.enterPrompt(sess, ac, " Rename session ", "", func(name string) error { return d.renameSession(sess, name) })
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 		d.handlePromptInput(ac, []byte("taken\r"))
-		repaint := requireEnvelope(t, sends, "Output")
+		repaint := requireFrame(t, sends, "Output")
 
 		require.True(t, ac.overlays.promptActive())
 		require.NotEqual(t, "taken", sess.name)
@@ -102,9 +102,9 @@ func TestTransitionPromptFailuresStayVisible(t *testing.T) {
 				d.enterTransitionPrompt(sess, ac, " Create session ", "", func(string, *attachmentEffect) error {
 					return tt.submit
 				})
-				requireEnvelope(t, sends, "Output")
+				requireFrame(t, sends, "Output")
 				d.handlePromptInput(ac, []byte("example\r"))
-				repaint := requireEnvelope(t, sends, "Output")
+				repaint := requireFrame(t, sends, "Output")
 
 				require.True(t, ac.overlays.promptActive())
 				out := unmarshalTestOutput(t, repaint.Payload)
@@ -130,9 +130,9 @@ func TestPromptSubmitSessionSpawnFailureReportsOneSafeNotice(t *testing.T) {
 		d.enterPrompt(sess, ac, " Create session ", "", func(name string) error {
 			return d.createSessionAndSwitch(sess, ac, name)
 		})
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 		d.handlePromptInput(ac, []byte("new\r"))
-		repaint := requireEnvelope(t, sends, "Output")
+		repaint := requireFrame(t, sends, "Output")
 		output := unmarshalTestOutput(t, repaint.Payload)
 		require.Contains(t, string(output.Data), "couldn't create session: shell failed to start")
 
@@ -180,9 +180,9 @@ func TestPromptSubmitValidationErrorStaysInlineOnly(t *testing.T) {
 				d.enterPrompt(sess, ac, " Create session ", "", func(name string) error {
 					return d.createSessionAndSwitch(sess, ac, name)
 				})
-				requireEnvelope(t, sends, "Output")
+				requireFrame(t, sends, "Output")
 				d.handlePromptInput(ac, tt.input)
-				repaint := requireEnvelope(t, sends, "Output")
+				repaint := requireFrame(t, sends, "Output")
 				output := unmarshalTestOutput(t, repaint.Payload)
 				require.Contains(t, string(output.Data), tt.wantErr.Error())
 
@@ -202,9 +202,9 @@ func TestPromptEscapeCancelsWithoutRename(t *testing.T) {
 		oldName := sess.name
 
 		d.enterPrompt(sess, ac, " Rename session ", oldName, func(name string) error { return d.renameSession(sess, name) })
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 		d.handlePromptInput(ac, []byte("new\x1b"))
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 
 		require.False(t, ac.overlays.promptActive())
 		require.Equal(t, oldName, sess.name)
@@ -221,9 +221,9 @@ func TestPaletteRNSOpensRenamePrompt(t *testing.T) {
 		sess.ephemeral = true
 
 		d.enterPalette(sess, ac)
-		requireEnvelope(t, sends, "Output")
+		requireFrame(t, sends, "Output")
 		d.handlePaletteInput(ac, []byte("RNS\r"))
-		out := requireEnvelope(t, sends, "Output")
+		out := requireFrame(t, sends, "Output")
 
 		require.False(t, ac.overlays.paletteActive())
 		require.True(t, ac.overlays.promptActive())

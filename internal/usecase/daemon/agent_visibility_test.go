@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/mock"
@@ -75,43 +76,45 @@ func (r *agentTestRig) paneDone(tb *tab, p *pane) bool {
 }
 
 func TestAgentActivityCarriedDoneWaitsForNewTabPaint(t *testing.T) {
-	r := newAgentTestRig(t, 3)
-	selectTestAttachmentTab(r.sess, 0)
-	destination := r.sess.tabs[2]
-	moved := r.pane(1)
-	moved.ctx, moved.cancel = context.WithCancel(r.d.paneProcessCtx)
-	t.Cleanup(moved.cancel)
-	r.sched.forget(moved)
-	r.startClaudeTurn()
-	r.endTurn(agentactivity.DefaultMinDoneWorking+time.Second, false)
-	require.Equal(t, agentactivity.IndicatorDone, r.sess.tabs[1].agentIndicator())
+	synctest.Test(t, func(t *testing.T) {
+		r := newAgentTestRig(t, 3)
+		selectTestAttachmentTab(r.sess, 0)
+		destination := r.sess.tabs[2]
+		moved := r.pane(1)
+		moved.ctx, moved.cancel = context.WithCancel(r.d.paneProcessCtx)
+		t.Cleanup(moved.cancel)
+		r.sched.forget(moved)
+		r.startClaudeTurn()
+		r.endTurn(agentactivity.DefaultMinDoneWorking+time.Second, false)
+		require.Equal(t, agentactivity.IndicatorDone, r.sess.tabs[1].agentIndicator())
 
-	require.NoError(t, r.d.movePane(movePaneRequest{
-		Source:           moveSessionLocator{ID: r.sess.id, Incarnation: r.sess.incarnation},
-		SourceTabID:      domain.TabStableID(r.sess.tabs[1].stableID),
-		SourcePaneID:     domain.PaneStableID(moved.stableID),
-		Destination:      moveSessionLocator{ID: r.sess.id, Incarnation: r.sess.incarnation},
-		DestinationTabID: domain.TabStableID(destination.stableID),
-	}))
-	// A paint of the destination captured before the carried Done reached
-	// it: its generation is newer than the Done's old shownGen.
-	staleGen, seq := r.sched.gen, paneVisibilitySeq(destination)
-	r.advance(0)
-	r.settle()
-	require.Equal(t, agentactivity.IndicatorDone, destination.agentIndicator(), "the Done is carried")
+		require.NoError(t, r.d.movePane(movePaneRequest{
+			Source:           moveSessionLocator{ID: r.sess.id, Incarnation: r.sess.incarnation},
+			SourceTabID:      domain.TabStableID(r.sess.tabs[1].stableID),
+			SourcePaneID:     domain.PaneStableID(moved.stableID),
+			Destination:      moveSessionLocator{ID: r.sess.id, Incarnation: r.sess.incarnation},
+			DestinationTabID: domain.TabStableID(destination.stableID),
+		}))
+		// A paint of the destination captured before the carried Done reached
+		// it: its generation is newer than the Done's old shownGen.
+		staleGen, seq := r.sched.gen, paneVisibilitySeq(destination)
+		r.advance(0)
+		r.settle()
+		require.Equal(t, agentactivity.IndicatorDone, destination.agentIndicator(), "the Done is carried")
 
-	r.sched.requestAck(destination, staleGen, seq)
-	r.advance(0)
-	r.d.noteAgentPaneVisibility(destination)
-	r.advance(0)
-	require.True(t, r.paneDone(destination, moved), "an ack older than the carry keeps the Done")
+		r.sched.requestAck(destination, staleGen, seq)
+		r.advance(0)
+		r.d.noteAgentPaneVisibility(destination)
+		r.advance(0)
+		require.True(t, r.paneDone(destination, moved), "an ack older than the carry keeps the Done")
 
-	// The emptied source tab closed, so the destination is now the last tab.
-	selectTestAttachmentTab(r.sess, len(r.sess.tabs)-1)
-	require.Equal(t, destination, r.sess.tabForAttachment(r.ac))
-	r.paintDone(t)
-	r.advance(0)
-	require.False(t, r.paneDone(destination, moved), "the destination's paint acknowledges the Done")
+		// The emptied source tab closed, so the destination is now the last tab.
+		selectTestAttachmentTab(r.sess, len(r.sess.tabs)-1)
+		require.Equal(t, destination, r.sess.tabForAttachment(r.ac))
+		r.paintDone(t)
+		r.advance(0)
+		require.False(t, r.paneDone(destination, moved), "the destination's paint acknowledges the Done")
+	})
 }
 
 func TestAgentActivityStaleAckAfterVisibilityChange(t *testing.T) {
@@ -147,117 +150,127 @@ func TestAgentActivityStaleAckAfterVisibilityChange(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := newAgentTestRig(t, 2)
-			selectTestAttachmentTab(r.sess, 1)
-			tb := r.sess.tabs[0]
-			p := newAgentPane(t, tb, "agent")
-			hide, show := tt.setup(t, r, tb, p)
-			require.True(t, r.paneDone(tb, p))
+			synctest.Test(t, func(t *testing.T) {
+				r := newAgentTestRig(t, 2)
+				selectTestAttachmentTab(r.sess, 1)
+				tb := r.sess.tabs[0]
+				p := newAgentPane(t, tb, "agent")
+				hide, show := tt.setup(t, r, tb, p)
+				require.True(t, r.paneDone(tb, p))
 
-			// The scheduler sees none of these steps until the ack: the
-			// paint between hide and show does not draw the pane.
-			selectTestAttachmentTab(r.sess, 0)
-			hide()
-			r.paintDone(t)
-			show()
-			r.advance(0)
-			require.True(t, r.paneDone(tb, p), "an ack captured while the pane was hidden keeps Done")
+				// The scheduler sees none of these steps until the ack: the
+				// paint between hide and show does not draw the pane.
+				selectTestAttachmentTab(r.sess, 0)
+				hide()
+				r.paintDone(t)
+				show()
+				r.advance(0)
+				require.True(t, r.paneDone(tb, p), "an ack captured while the pane was hidden keeps Done")
 
-			r.paintDone(t)
-			r.advance(0)
-			require.False(t, r.paneDone(tb, p), "the paint that drew the pane acknowledges Done")
+				r.paintDone(t)
+				r.advance(0)
+				require.False(t, r.paneDone(tb, p), "the paint that drew the pane acknowledges Done")
+			})
 		})
 	}
 }
 
 func TestAgentActivityUndrawnPaneDoneSurvivesOtherPanesAck(t *testing.T) {
-	r := newAgentTestRig(t, 1)
-	selectTestAttachmentTab(r.sess, 0)
-	tb := r.sess.tabs[0]
-	floating, stacked := newAgentPane(t, tb, "float"), newAgentPane(t, tb, "stacked")
-	r.floatAgentPane(tb, floating)
-	expand, _ := r.stackAgentPane(tb, stacked)
-	seedAgentStatus(r.d, r.sess, tb, floating, agentPaneStatus{state: agentactivity.Idle, done: true, hidden: true})
-	seedAgentStatus(r.d, r.sess, tb, stacked, agentPaneStatus{state: agentactivity.Idle, done: true, hidden: true})
+	synctest.Test(t, func(t *testing.T) {
+		r := newAgentTestRig(t, 1)
+		selectTestAttachmentTab(r.sess, 0)
+		tb := r.sess.tabs[0]
+		floating, stacked := newAgentPane(t, tb, "float"), newAgentPane(t, tb, "stacked")
+		r.floatAgentPane(tb, floating)
+		expand, _ := r.stackAgentPane(tb, stacked)
+		seedAgentStatus(r.d, r.sess, tb, floating, agentPaneStatus{state: agentactivity.Idle, done: true, hidden: true})
+		seedAgentStatus(r.d, r.sess, tb, stacked, agentPaneStatus{state: agentactivity.Idle, done: true, hidden: true})
 
-	r.proc.EXPECT().Cwd(mock.Anything).Return("", errors.New("no cwd")).Maybe()
-	require.NoError(t, r.d.toggleFloating(r.sess, r.ac))
-	r.advance(0)
-	r.paintDone(t)
-	r.advance(0)
-	require.False(t, r.paneDone(tb, floating), "the drawn floating pane is acknowledged")
-	require.True(t, r.paneDone(tb, stacked), "the collapsed member keeps Done")
-	require.True(t, r.paintDone(t), "the viewed tab still draws Done for the collapsed member")
-	r.advance(0)
-	require.True(t, r.paneDone(tb, stacked))
+		r.proc.EXPECT().Cwd(mock.Anything).Return("", errors.New("no cwd")).Maybe()
+		require.NoError(t, r.d.toggleFloating(r.sess, r.ac))
+		r.advance(0)
+		r.paintDone(t)
+		r.advance(0)
+		require.False(t, r.paneDone(tb, floating), "the drawn floating pane is acknowledged")
+		require.True(t, r.paneDone(tb, stacked), "the collapsed member keeps Done")
+		require.True(t, r.paintDone(t), "the viewed tab still draws Done for the collapsed member")
+		r.advance(0)
+		require.True(t, r.paneDone(tb, stacked))
 
-	expand()
-	r.advance(0)
-	r.paintDone(t)
-	r.advance(0)
-	require.False(t, r.paneDone(tb, stacked))
+		expand()
+		r.advance(0)
+		r.paintDone(t)
+		r.advance(0)
+		require.False(t, r.paneDone(tb, stacked))
+	})
 }
 
 func TestAgentActivityCollapsedAfterDoneOnUnviewedTab(t *testing.T) {
-	r := newAgentTestRig(t, 2)
-	selectTestAttachmentTab(r.sess, 1)
-	tb := r.sess.tabs[0]
-	p := newAgentPane(t, tb, "agent")
-	expand, collapse := r.stackAgentPane(tb, p)
-	expand()
-	r.advance(0)
-	seedAgentStatus(r.d, r.sess, tb, p, agentPaneStatus{state: agentactivity.Idle, done: true})
-
-	collapse()
-	r.advance(0)
-	selectTestAttachmentTab(r.sess, 0)
-	for range 2 {
-		require.True(t, r.paintDone(t), "the viewed tab draws Done for the collapsed member")
+	synctest.Test(t, func(t *testing.T) {
+		r := newAgentTestRig(t, 2)
+		selectTestAttachmentTab(r.sess, 1)
+		tb := r.sess.tabs[0]
+		p := newAgentPane(t, tb, "agent")
+		expand, collapse := r.stackAgentPane(tb, p)
+		expand()
 		r.advance(0)
-		require.True(t, r.paneDone(tb, p))
-	}
+		seedAgentStatus(r.d, r.sess, tb, p, agentPaneStatus{state: agentactivity.Idle, done: true})
+
+		collapse()
+		r.advance(0)
+		selectTestAttachmentTab(r.sess, 0)
+		for range 2 {
+			require.True(t, r.paintDone(t), "the viewed tab draws Done for the collapsed member")
+			r.advance(0)
+			require.True(t, r.paneDone(tb, p))
+		}
+	})
 }
 
 func TestAgentActivityAckSweepKeepsUndrawnDone(t *testing.T) {
-	r := newAgentTestRig(t, 2)
-	selectTestAttachmentTab(r.sess, 0)
-	tb, other := r.sess.tabs[0], r.sess.tabs[1]
-	hidden, drawn := newAgentPane(t, tb, "hidden"), r.pane(0)
-	r.floatAgentPane(tb, hidden)
-	seedAgentStatus(r.d, r.sess, tb, hidden, agentPaneStatus{state: agentactivity.Idle, done: true, hidden: true})
-	seedAgentStatus(r.d, r.sess, tb, drawn, agentPaneStatus{state: agentactivity.Idle, done: true})
-	for len(r.sched.acks) < cap(r.sched.acks) {
-		r.sched.acks <- other
-	}
+	synctest.Test(t, func(t *testing.T) {
+		r := newAgentTestRig(t, 2)
+		selectTestAttachmentTab(r.sess, 0)
+		tb, other := r.sess.tabs[0], r.sess.tabs[1]
+		hidden, drawn := newAgentPane(t, tb, "hidden"), r.pane(0)
+		r.floatAgentPane(tb, hidden)
+		seedAgentStatus(r.d, r.sess, tb, hidden, agentPaneStatus{state: agentactivity.Idle, done: true, hidden: true})
+		seedAgentStatus(r.d, r.sess, tb, drawn, agentPaneStatus{state: agentactivity.Idle, done: true})
+		for len(r.sched.acks) < cap(r.sched.acks) {
+			r.sched.acks <- other
+		}
 
-	r.paintDone(t)
-	require.True(t, r.sched.ackSweep.Load(), "the ack overflowed")
-	r.advance(0)
-	require.False(t, r.paneDone(tb, drawn), "the sweep acknowledges the drawn pane")
-	require.True(t, r.paneDone(tb, hidden), "the sweep keeps the undrawn pane's Done")
+		r.paintDone(t)
+		require.True(t, r.sched.ackSweep.Load(), "the ack overflowed")
+		r.advance(0)
+		require.False(t, r.paneDone(tb, drawn), "the sweep acknowledges the drawn pane")
+		require.True(t, r.paneDone(tb, hidden), "the sweep keeps the undrawn pane's Done")
+	})
 }
 
 func TestAgentActivityCLIFloatingToggleKeepsUnseenDone(t *testing.T) {
-	r := newAgentTestRig(t, 2)
-	// The CLI toggle acts on the first tab, which no attachment views.
-	selectTestAttachmentTab(r.sess, 1)
-	tb := r.sess.tabs[0]
-	p := newAgentPane(t, tb, "agent")
-	r.floatAgentPane(tb, p)
-	seedAgentStatus(r.d, r.sess, tb, p, agentPaneStatus{state: agentactivity.Idle, done: true, hidden: true})
-	r.proc.EXPECT().Cwd(mock.Anything).Return("", errors.New("no cwd")).Maybe()
+	synctest.Test(t, func(t *testing.T) {
+		r := newAgentTestRig(t, 2)
+		// The CLI toggle acts on the first tab, which no attachment views.
+		selectTestAttachmentTab(r.sess, 1)
+		tb := r.sess.tabs[0]
+		p := newAgentPane(t, tb, "agent")
+		r.floatAgentPane(tb, p)
+		seedAgentStatus(r.d, r.sess, tb, p, agentPaneStatus{state: agentactivity.Idle, done: true, hidden: true})
+		r.proc.EXPECT().Cwd(mock.Anything).Return("", errors.New("no cwd")).Maybe()
 
-	for range 3 {
-		require.NoError(t, r.d.toggleFloating(r.sess, nil))
+		for range 3 {
+			require.NoError(t, r.d.toggleFloating(r.sess, nil))
+			r.advance(0)
+			require.True(t, r.paneDone(tb, p), "a CLI toggle does not acknowledge Done")
+		}
+		tb.mu.Lock()
+		require.Equal(t, floatingVisible, tb.floating.state)
+		tb.mu.Unlock()
+
+		selectTestAttachmentTab(r.sess, 0)
+		r.paintDone(t)
 		r.advance(0)
-		require.True(t, r.paneDone(tb, p), "a CLI toggle does not acknowledge Done")
-	}
-	tb.mu.Lock()
-	require.Equal(t, floatingVisible, tb.floating.state)
-	tb.mu.Unlock()
-
-	selectTestAttachmentTab(r.sess, 0)
-	r.paintDone(t)
-	r.advance(0)
-	require.False(t, r.paneDone(tb, p), "the paint that drew the pane acknowledges Done")
+		require.False(t, r.paneDone(tb, p), "the paint that drew the pane acknowledges Done")
+	})
 }

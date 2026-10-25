@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/mock"
@@ -279,24 +280,6 @@ func screenLineText(s *vt.Screen, y int) string {
 	return string(out)
 }
 
-// awaitFrame waits for the next envelope decoding to want on ch, failing
-// on timeout. The type name is the semantic message name ("Output",
-// "Welcome", ...).
-func awaitFrame(t *testing.T, ch chan wire.Envelope, want string) wire.Envelope {
-	t.Helper()
-	deadline := time.After(2 * time.Second)
-	for {
-		select {
-		case f := <-ch:
-			if envelopeMessageName(t, f.Payload) == want {
-				return f
-			}
-		case <-deadline:
-			t.Fatalf("timed out waiting for envelope %s", want)
-		}
-	}
-}
-
 func firstSession(d *Daemon) *session {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -318,7 +301,7 @@ func listSessions(t *testing.T, d *Daemon) protocol.Sessions {
 	t.Helper()
 	tr, sends, _ := newConn(t, mustClientEnvelope(protocol.List{}))
 	d.handleList(tr)
-	f := awaitFrame(t, sends, "Sessions")
+	f := requireFrame(t, sends, "Sessions")
 	sessions, ok := decodeServerMessage(t, f).(protocol.Sessions)
 	require.True(t, ok)
 	return sessions
@@ -655,80 +638,53 @@ func rowText(row []renderer.Cell) string {
 	return string(runes)
 }
 
-// notifyClock stubs debounceInterval so schedulers park, and shortens
-// detachNotifyTimeout to 5ms so a wedged client's Detached send is
-// force-closed quickly. Every other budget, including the handshake deadline,
-// runs at its real length. Timers are matched by duration value, so another
-// budget equal to one of these constants gets the same treatment.
-type notifyClock struct{}
-
-func (notifyClock) Now() time.Time { return time.Now() }
-func (notifyClock) NewTimer(d time.Duration) ports.Timer {
-	switch d {
-	case debounceInterval:
-		timer := &portsmocks.MockTimer{}
-		timer.EXPECT().C().Return(nil).Maybe()
-		timer.EXPECT().Reset(mock.Anything).Return(false).Maybe()
-		timer.EXPECT().Stop().Return(true).Maybe()
-		return timer
-	case detachNotifyTimeout:
-		return realTimer{t: time.NewTimer(5 * time.Millisecond)}
-	default:
-		return realTimer{t: time.NewTimer(d)}
-	}
-}
-
-type realTimer struct{ t *time.Timer }
-
-func (r realTimer) C() <-chan time.Time        { return r.t.C }
-func (r realTimer) Reset(d time.Duration) bool { return r.t.Reset(d) }
-func (r realTimer) Stop() bool                 { return r.t.Stop() }
-
 func TestHandleHelloDefersFreshOutputUntilWelcome(t *testing.T) {
-	pty, releasePTY := newBlockingPTY(t)
-	defer releasePTY()
-	clock := newCoordinatorMockClock(t, 4)
-	d := newTestDaemon(t, newFactory(t, pty), clock.clock)
-	tr := newWelcomeBlockingTransport(t)
-	done := make(chan struct{})
-	go func() {
-		d.handleHelloFrame(tr.tr, mustHello(protocol.IntentNew, "welcome-gate", domain.Size{Cols: 80, Rows: 24}))
-		close(done)
-	}()
+	synctest.Test(t, func(t *testing.T) {
+		pty, releasePTY := newBlockingPTY(t)
+		defer releasePTY()
+		clock := newCoordinatorMockClock(t, 4)
+		d := newTestDaemon(t, newFactory(t, pty), clock.clock)
+		tr := newWelcomeBlockingTransport(t)
+		done := make(chan struct{})
+		go func() {
+			d.handleHelloFrame(tr.tr, mustHello(protocol.IntentNew, "welcome-gate", domain.Size{Cols: 80, Rows: 24}))
+			close(done)
+		}()
 
-	awaitTestCompletion(t, tr.welcomeEntered, "timed out waiting for Welcome send")
-	handshakeTimer := awaitHandshakeTimer(t, clock)
-	welcome := awaitFrame(t, tr.sends, "Welcome")
-	require.Equal(t, "Welcome", envelopeMessageName(t, welcome.Payload))
-	sess := firstSession(d)
-	sess.mu.Lock()
-	ac := sess.snapshotAttachmentsLocked()[0]
-	sess.mu.Unlock()
-	require.NotNil(t, ac, "route must publish the attachment before Welcome returns")
+		requireReceived(t, tr.welcomeEntered, "timed out waiting for Welcome send")
+		handshakeTimer := awaitHandshakeTimer(t, clock)
+		welcome := requireFrame(t, tr.sends, "Welcome")
+		require.Equal(t, "Welcome", envelopeMessageName(t, welcome.Payload))
+		sess := firstSession(d)
+		sess.mu.Lock()
+		ac := sess.snapshotAttachmentsLocked()[0]
+		sess.mu.Unlock()
+		require.NotNil(t, ac, "route must publish the attachment before Welcome returns")
 
-	// Exercise the real producer fan-in after publication. The deadline worker
-	// has completed before asserting the gate, so this is not a timing race.
-	d.invalidateRender(sess, ac, true, "welcome-gate-test")
-	// Attach-time theme setup may have armed an older bulk timer. The fresh
-	// urgent producer replaces it, so advance the newest published deadline.
-	timer := awaitLatestCoordinatorTimer(t, clock)
-	rc := sess.renderCoordinator()
-	rc.mu.Lock()
-	workerDone := rc.normalLane.token.done
-	rc.mu.Unlock()
-	require.NotNil(t, workerDone)
-	timer.ch <- time.Time{}
-	awaitTestCompletion(t, workerDone, "coordinator deadline worker did not complete")
-	requireNoCoordinatorOutputFrame(t, tr.sends)
+		// Exercise the real producer fan-in after publication. The deadline worker
+		// has completed before asserting the gate, so this is not a timing race.
+		d.invalidateRender(sess, ac, true, "welcome-gate-test")
+		// Attach-time theme setup may have armed an older bulk timer. The fresh
+		// urgent producer replaces it, so advance the newest published deadline.
+		timer := awaitLatestCoordinatorTimer(t, clock)
+		rc := sess.renderCoordinator()
+		rc.mu.Lock()
+		workerDone := rc.normalLane.token.done
+		rc.mu.Unlock()
+		require.NotNil(t, workerDone)
+		timer.ch <- time.Time{}
+		requireReceived(t, workerDone, "coordinator deadline worker did not complete")
+		requireNoCoordinatorOutputFrame(t, tr.sends)
 
-	tr.release()
-	output := awaitFrame(t, tr.sends, "Output")
-	first := unmarshalTestOutput(t, output.Payload)
-	require.Zero(t, first.Base, "the first post-Welcome frame is full")
-	tr.finish()
-	awaitTestCompletion(t, done, "timed out waiting for Welcome handler completion")
-	awaitTestCompletion(t, handshakeTimer.stopped, "handshake timer was not canceled after publication")
-	requireNoCoordinatorOutputFrame(t, tr.sends)
+		tr.release()
+		output := requireFrame(t, tr.sends, "Output")
+		first := unmarshalTestOutput(t, output.Payload)
+		require.Zero(t, first.Base, "the first post-Welcome frame is full")
+		tr.finish()
+		requireReceived(t, done, "timed out waiting for Welcome handler completion")
+		requireReceived(t, handshakeTimer.stopped, "handshake timer was not canceled after publication")
+		requireNoCoordinatorOutputFrame(t, tr.sends)
+	})
 }
 
 // TestServeReturnsDespiteWedgedClientOnShutdown: killSession's teardown must
@@ -738,7 +694,7 @@ func TestHandleHelloDefersFreshOutputUntilWelcome(t *testing.T) {
 
 func mustOutputData(t *testing.T, sends chan wire.Envelope) []byte {
 	t.Helper()
-	f := awaitFrame(t, sends, "Output")
+	f := requireFrame(t, sends, "Output")
 	out := unmarshalTestOutput(t, f.Payload)
 	return out.Data
 }

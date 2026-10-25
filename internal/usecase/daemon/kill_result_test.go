@@ -25,7 +25,7 @@ import (
 
 func awaitKillResult(t *testing.T, sends <-chan wire.Envelope, requestID uint64) protocol.KillResult {
 	t.Helper()
-	frame := requireQueuedFrame(t, sends, "KillResult")
+	frame := requireFrame(t, sends, "KillResult")
 	result, ok := decodeServerMessage(t, frame).(protocol.KillResult)
 	require.True(t, ok, "expected a KillResult, got %T", decodeServerMessage(t, frame))
 	require.Equal(t, requestID, result.RequestID, "result must correlate to its request")
