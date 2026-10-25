@@ -6,14 +6,16 @@ import (
 	"io"
 	"sync"
 	"testing"
-	"time"
+	"testing/synctest"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/adapters/brokerwire"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol/wire"
+	wiremocks "github.com/bnema/vev/internal/protocol/wire/mocks"
 )
 
 // Send-uncertainty taxonomy for mutating operations (GO-003). These tests drive
@@ -29,12 +31,13 @@ import (
 // reports for one released attempt.
 var errTestCarriage = errors.New("brokeripc test: carriage write failed")
 
-// gatedTransport is a channel-controlled client carriage. Every Send records its
-// envelope, announces the entered attempt, and then blocks until the test
-// releases it with an explicit result or abandons it. Close deliberately leaves
-// an in-flight Send blocked, so an attempt held inside the carriage observes
-// only the client's own terminal outcome until the test itself decides.
-type gatedTransport struct {
+// gatedState is the plain state behind a channel-controlled client carriage.
+// Every Send records its envelope, announces the entered attempt, and then
+// blocks until the test releases it with an explicit result or abandons it.
+// Close deliberately leaves an in-flight Send blocked, so an attempt held inside
+// the carriage observes only the client's own terminal outcome until the test
+// itself decides. It implements no interface; the mock closures capture it.
+type gatedState struct {
 	entered chan wire.Envelope
 	release chan error
 	abandon chan struct{}
@@ -47,64 +50,67 @@ type gatedTransport struct {
 	sends int
 }
 
-func newGatedTransport() *gatedTransport {
-	return &gatedTransport{
+// newGatedTransportMock builds the gated carriage mock and its state. Options
+// register overrides before the defaults.
+func newGatedTransportMock(t *testing.T, opts ...func(*wiremocks.MockBoundedTransport, *gatedState)) (*wiremocks.MockBoundedTransport, *gatedState) {
+	t.Helper()
+	g := &gatedState{
 		entered: make(chan wire.Envelope, 8),
 		release: make(chan error, 8),
 		abandon: make(chan struct{}),
 		closed:  make(chan struct{}),
 	}
-}
-
-// Send enters one wire attempt and holds it until the test releases it.
-func (t *gatedTransport) Send(envelope wire.Envelope) error {
-	t.mu.Lock()
-	t.sends++
-	t.mu.Unlock()
-	t.entered <- envelope
-	select {
-	case err := <-t.release:
-		return err
-	case <-t.abandon:
-		return io.EOF
+	m := wiremocks.NewMockBoundedTransport(t)
+	for _, opt := range opts {
+		opt(m, g)
 	}
-}
-
-func (t *gatedTransport) RecvBounded(uint64) (wire.Envelope, error) {
-	<-t.closed
-	return wire.Envelope{}, io.EOF
-}
-
-func (t *gatedTransport) Recv() (wire.Envelope, error) { return t.RecvBounded(0) }
-
-// Close ends the carriage without disturbing an in-flight attempt.
-func (t *gatedTransport) Close() error {
-	t.closeOnce.Do(func() { close(t.closed) })
-	return nil
+	m.EXPECT().Send(mock.Anything).RunAndReturn(func(envelope wire.Envelope) error {
+		g.mu.Lock()
+		g.sends++
+		g.mu.Unlock()
+		g.entered <- envelope
+		select {
+		case err := <-g.release:
+			return err
+		case <-g.abandon:
+			return io.EOF
+		}
+	}).Maybe()
+	recv := func() (wire.Envelope, error) {
+		<-g.closed
+		return wire.Envelope{}, io.EOF
+	}
+	m.EXPECT().RecvBounded(mock.Anything).RunAndReturn(func(uint64) (wire.Envelope, error) { return recv() }).Maybe()
+	m.EXPECT().Recv().RunAndReturn(recv).Maybe()
+	m.EXPECT().Close().RunAndReturn(func() error {
+		g.closeOnce.Do(func() { close(g.closed) })
+		return nil
+	}).Maybe()
+	return m, g
 }
 
 // releaseSend hands one blocked attempt its deterministic result.
-func (t *gatedTransport) releaseSend(err error) { t.release <- err }
+func (g *gatedState) releaseSend(err error) { g.release <- err }
 
 // abandonAttempts releases every attempt still blocked in Send, so a test never
 // leaks a send goroutine.
-func (t *gatedTransport) abandonAttempts() {
-	t.abandonOnce.Do(func() { close(t.abandon) })
+func (g *gatedState) abandonAttempts() {
+	g.abandonOnce.Do(func() { close(g.abandon) })
 }
 
-func (t *gatedTransport) sendCount() int {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.sends
+func (g *gatedState) sendCount() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.sends
 }
 
 // newGatedClient builds one ready client adapter over a gated carriage. It never
 // starts the reader goroutine: the reply path is driven by the test, so every
 // observation is deterministic.
-func newGatedClient(t *testing.T, cfg Config) (*client, *gatedTransport) {
+func newGatedClient(t *testing.T, cfg Config) (*client, *gatedState) {
 	t.Helper()
-	transport := newGatedTransport()
-	t.Cleanup(transport.abandonAttempts)
+	transport, state := newGatedTransportMock(t)
+	t.Cleanup(state.abandonAttempts)
 	scope := brokerwire.Scope{
 		Epoch:      ports.BrokerEpoch(0x71),
 		Connection: ports.BrokerConnectionID{0x71, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01},
@@ -128,7 +134,7 @@ func newGatedClient(t *testing.T, cfg Config) (*client, *gatedTransport) {
 		done:      make(chan struct{}),
 	}
 	t.Cleanup(func() { _ = c.Close() })
-	return c, transport
+	return c, state
 }
 
 // mutationOutcome is one membership mutation result: the removal bool, the
@@ -229,27 +235,31 @@ func deliverResult(t *testing.T, c *client, result brokerwire.OperationResult) {
 	require.NoError(t, c.dispatch(result))
 }
 
-// awaitResult waits for one mutation call to return.
+// awaitResult reaches quiescence inside the bubble and takes the finished
+// mutation call's outcome; a call that has not returned is a test failure.
 func awaitResult(t *testing.T, results <-chan mutationOutcome) mutationOutcome {
 	t.Helper()
+	synctest.Wait()
 	select {
 	case got := <-results:
 		return got
-	case <-time.After(5 * time.Second):
+	default:
 		t.Fatal("the mutating operation did not return")
 		return mutationOutcome{}
 	}
 }
 
-// awaitSend waits for one wire attempt to enter the carriage and decodes it.
-func awaitSend(t *testing.T, g *gatedTransport) brokerwire.ClientMessage {
+// awaitSend reaches quiescence inside the bubble and decodes the wire attempt
+// that entered the carriage.
+func awaitSend(t *testing.T, g *gatedState) brokerwire.ClientMessage {
 	t.Helper()
+	synctest.Wait()
 	select {
 	case envelope := <-g.entered:
 		message, err := brokerwire.DecodeClient(envelope.Payload, brokerwire.MaxBrokerEnvelopeBytes, brokerwire.MaxStreamChunkBytes)
 		require.NoError(t, err, "the captured attempt must be a decodable client envelope")
 		return message
-	case <-time.After(5 * time.Second):
+	default:
 		t.Fatal("no wire attempt was entered")
 		return nil
 	}
@@ -354,41 +364,43 @@ func TestPublicMembershipAPIDelegatesExactAuthority(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			call := mutationCalls[tc.index]
-			c, g := newGatedClient(t, Config{})
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
+			synctest.Test(t, func(t *testing.T) {
+				call := mutationCalls[tc.index]
+				c, g := newGatedClient(t, Config{})
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
 
-			results := make(chan mutationOutcome, 1)
-			go func() {
-				removed, registration, err := call.run(ctx, c)
-				results <- mutationOutcome{removed: removed, registration: registration, err: err}
-			}()
+				results := make(chan mutationOutcome, 1)
+				go func() {
+					removed, registration, err := call.run(ctx, c)
+					results <- mutationOutcome{removed: removed, registration: registration, err: err}
+				}()
 
-			request := awaitSend(t, g)
-			operation := operationOf(t, request)
-			require.Equal(t, call.endpoint, endpointOf(t, request), "the captured request is the caller's own")
-			if expected, ok := registrationOf(t, request); ok {
-				require.Equal(t, mutationRegistration(call.endpoint), expected,
-					"the exact expected registration must travel unmodified")
-				require.NotZero(t, expected.Generation, "a removal or update never drops its fencing generation")
-			}
-			if call.kind != brokerwire.MutationKindRemoveHost {
-				require.Equal(t, policy, policyOf(t, request), "the caller's exact policy must travel")
-			}
-			kind, ok := brokerwire.MutationKindOf(request)
-			require.True(t, ok, "the captured request must be a membership mutation")
-			require.Equal(t, call.kind, kind, "the client must emit the request kind the table names")
-			g.releaseSend(nil)
-			call.deliverSuccess(t, c, operation)
+				request := awaitSend(t, g)
+				operation := operationOf(t, request)
+				require.Equal(t, call.endpoint, endpointOf(t, request), "the captured request is the caller's own")
+				if expected, ok := registrationOf(t, request); ok {
+					require.Equal(t, mutationRegistration(call.endpoint), expected,
+						"the exact expected registration must travel unmodified")
+					require.NotZero(t, expected.Generation, "a removal or update never drops its fencing generation")
+				}
+				if call.kind != brokerwire.MutationKindRemoveHost {
+					require.Equal(t, policy, policyOf(t, request), "the caller's exact policy must travel")
+				}
+				kind, ok := brokerwire.MutationKindOf(request)
+				require.True(t, ok, "the captured request must be a membership mutation")
+				require.Equal(t, call.kind, kind, "the client must emit the request kind the table names")
+				g.releaseSend(nil)
+				call.deliverSuccess(t, c, operation)
 
-			got := awaitResult(t, results)
-			require.NoError(t, got.err)
-			require.Equal(t, call.wantRemoved, got.removed)
-			want := call.success(operation).Registration
-			require.Equal(t, want, got.registration, "the client returns the broker's authority verbatim")
-			require.Equal(t, 1, g.sendCount(), "one delegation is exactly one wire request")
-			require.Empty(t, pendingOperations(c))
+				got := awaitResult(t, results)
+				require.NoError(t, got.err)
+				require.Equal(t, call.wantRemoved, got.removed)
+				want := call.success(operation).Registration
+				require.Equal(t, want, got.registration, "the client returns the broker's authority verbatim")
+				require.Equal(t, 1, g.sendCount(), "one delegation is exactly one wire request")
+				require.Empty(t, pendingOperations(c))
+			})
 		})
 	}
 }
@@ -403,7 +415,7 @@ func TestMutationSendUncertaintyTaxonomy(t *testing.T) {
 		// before, when set, runs before the call starts.
 		before func(cancel context.CancelFunc)
 		// drive runs while the call is in flight.
-		drive       func(t *testing.T, c *client, g *gatedTransport, cancel context.CancelFunc)
+		drive       func(t *testing.T, c *client, g *gatedState, cancel context.CancelFunc)
 		wantSends   int
 		wantUnknown bool
 	}{
@@ -414,7 +426,7 @@ func TestMutationSendUncertaintyTaxonomy(t *testing.T) {
 		},
 		{
 			name: "caller cancels while the attempt is blocked in Send",
-			drive: func(t *testing.T, c *client, g *gatedTransport, cancel context.CancelFunc) {
+			drive: func(t *testing.T, c *client, g *gatedState, cancel context.CancelFunc) {
 				_ = awaitSend(t, g)
 				cancel()
 			},
@@ -423,7 +435,7 @@ func TestMutationSendUncertaintyTaxonomy(t *testing.T) {
 		},
 		{
 			name: "connection terminates while the attempt is blocked in Send",
-			drive: func(t *testing.T, c *client, g *gatedTransport, cancel context.CancelFunc) {
+			drive: func(t *testing.T, c *client, g *gatedState, cancel context.CancelFunc) {
 				_ = awaitSend(t, g)
 				require.NoError(t, c.Close())
 			},
@@ -432,7 +444,7 @@ func TestMutationSendUncertaintyTaxonomy(t *testing.T) {
 		},
 		{
 			name: "reply lost after the request was sent",
-			drive: func(t *testing.T, c *client, g *gatedTransport, cancel context.CancelFunc) {
+			drive: func(t *testing.T, c *client, g *gatedState, cancel context.CancelFunc) {
 				_ = awaitSend(t, g)
 				g.releaseSend(nil)
 				// The attempt completed, so the call now waits for its reply; only
@@ -444,7 +456,7 @@ func TestMutationSendUncertaintyTaxonomy(t *testing.T) {
 		},
 		{
 			name: "Send fails after the request was captured",
-			drive: func(t *testing.T, c *client, g *gatedTransport, cancel context.CancelFunc) {
+			drive: func(t *testing.T, c *client, g *gatedState, cancel context.CancelFunc) {
 				_ = awaitSend(t, g)
 				g.releaseSend(errTestCarriage)
 			},
@@ -453,7 +465,7 @@ func TestMutationSendUncertaintyTaxonomy(t *testing.T) {
 		},
 		{
 			name: "carriage EOF after the request was captured",
-			drive: func(t *testing.T, c *client, g *gatedTransport, cancel context.CancelFunc) {
+			drive: func(t *testing.T, c *client, g *gatedState, cancel context.CancelFunc) {
 				_ = awaitSend(t, g)
 				g.releaseSend(io.EOF)
 			},
@@ -464,37 +476,39 @@ func TestMutationSendUncertaintyTaxonomy(t *testing.T) {
 	for _, call := range mutationCalls {
 		for _, tt := range scenarios {
 			t.Run(call.name+"/"+tt.name, func(t *testing.T) {
-				c, g := newGatedClient(t, Config{MaxPendingOperations: 1})
-				ctx, cancel := context.WithCancel(context.Background())
-				defer cancel()
-				if tt.before != nil {
-					tt.before(cancel)
-				}
-				results := make(chan mutationOutcome, 1)
-				go func() {
-					removed, registration, err := call.run(ctx, c)
-					results <- mutationOutcome{removed: removed, registration: registration, err: err}
-				}()
-				if tt.drive != nil {
-					tt.drive(t, c, g, cancel)
-				}
-				got := awaitResult(t, results)
-				require.False(t, got.removed, "no reply means the target is never reported removed")
-				require.Equal(t, domain.RemoteRegistration{}, got.registration,
-					"no reply means no registration authority is invented")
-				if tt.wantUnknown {
-					var failure ports.BrokerError
-					require.ErrorAs(t, got.err, &failure)
-					require.Equal(t, ports.BrokerErrorOutcomeUnknown, failure.Code,
-						"a launched attempt must never look like a definite failure")
-				} else {
-					require.ErrorIs(t, got.err, context.Canceled)
-					var failure ports.BrokerError
-					require.False(t, errors.As(got.err, &failure),
-						"a request that never left must not be reported as a broker outcome")
-				}
-				require.Equal(t, tt.wantSends, g.sendCount(), "the request must travel at most once")
-				requireNoPendingMutationState(t, c)
+				synctest.Test(t, func(t *testing.T) {
+					c, g := newGatedClient(t, Config{MaxPendingOperations: 1})
+					ctx, cancel := context.WithCancel(context.Background())
+					defer cancel()
+					if tt.before != nil {
+						tt.before(cancel)
+					}
+					results := make(chan mutationOutcome, 1)
+					go func() {
+						removed, registration, err := call.run(ctx, c)
+						results <- mutationOutcome{removed: removed, registration: registration, err: err}
+					}()
+					if tt.drive != nil {
+						tt.drive(t, c, g, cancel)
+					}
+					got := awaitResult(t, results)
+					require.False(t, got.removed, "no reply means the target is never reported removed")
+					require.Equal(t, domain.RemoteRegistration{}, got.registration,
+						"no reply means no registration authority is invented")
+					if tt.wantUnknown {
+						var failure ports.BrokerError
+						require.ErrorAs(t, got.err, &failure)
+						require.Equal(t, ports.BrokerErrorOutcomeUnknown, failure.Code,
+							"a launched attempt must never look like a definite failure")
+					} else {
+						require.ErrorIs(t, got.err, context.Canceled)
+						var failure ports.BrokerError
+						require.False(t, errors.As(got.err, &failure),
+							"a request that never left must not be reported as a broker outcome")
+					}
+					require.Equal(t, tt.wantSends, g.sendCount(), "the request must travel at most once")
+					requireNoPendingMutationState(t, c)
+				})
 			})
 		}
 	}
@@ -504,35 +518,37 @@ func TestMutationSendUncertaintyTaxonomy(t *testing.T) {
 // definitely never left is recorded as failed rather than outcome-unknown, so
 // its pending slot is released for the next operation and nothing is resent.
 func TestMutationDefiniteFailureRecordsAndReleases(t *testing.T) {
-	c, g := newGatedClient(t, Config{MaxPendingOperations: 1})
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+	synctest.Test(t, func(t *testing.T) {
+		c, g := newGatedClient(t, Config{MaxPendingOperations: 1})
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
 
-	// Driving the public API with an already-cancelled caller is the definite
-	// no-dispatch case: no request is encoded for the wire.
-	added, err := c.AddHost(ctx, "pre@host:22", testPolicy())
-	require.ErrorIs(t, err, context.Canceled)
-	require.Equal(t, domain.RemoteRegistration{}, added)
-	require.Zero(t, g.sendCount(), "a pre-cancelled caller never enters the carriage")
-	require.Empty(t, pendingOperations(c), "the definite failure releases its pending slot")
+		// Driving the public API with an already-cancelled caller is the definite
+		// no-dispatch case: no request is encoded for the wire.
+		added, err := c.AddHost(ctx, "pre@host:22", testPolicy())
+		require.ErrorIs(t, err, context.Canceled)
+		require.Equal(t, domain.RemoteRegistration{}, added)
+		require.Zero(t, g.sendCount(), "a pre-cancelled caller never enters the carriage")
+		require.Empty(t, pendingOperations(c), "the definite failure releases its pending slot")
 
-	// The bound of one proves the slot is genuinely free: a fresh mutation is
-	// admitted and completes normally.
-	fresh, cancelFresh := context.WithCancel(context.Background())
-	defer cancelFresh()
-	results := make(chan mutationOutcome, 1)
-	go func() {
-		removed, registration, callErr := mutationCalls[1].run(fresh, c)
-		results <- mutationOutcome{removed: removed, registration: registration, err: callErr}
-	}()
-	request := awaitSend(t, g)
-	operation := operationOf(t, request)
-	g.releaseSend(nil)
-	mutationCalls[1].deliverSuccess(t, c, operation)
-	got := awaitResult(t, results)
-	require.NoError(t, got.err)
-	require.True(t, got.removed)
-	require.Equal(t, 1, g.sendCount())
+		// The bound of one proves the slot is genuinely free: a fresh mutation is
+		// admitted and completes normally.
+		fresh, cancelFresh := context.WithCancel(context.Background())
+		defer cancelFresh()
+		results := make(chan mutationOutcome, 1)
+		go func() {
+			removed, registration, callErr := mutationCalls[1].run(fresh, c)
+			results <- mutationOutcome{removed: removed, registration: registration, err: callErr}
+		}()
+		request := awaitSend(t, g)
+		operation := operationOf(t, request)
+		g.releaseSend(nil)
+		mutationCalls[1].deliverSuccess(t, c, operation)
+		got := awaitResult(t, results)
+		require.NoError(t, got.err)
+		require.True(t, got.removed)
+		require.Equal(t, 1, g.sendCount())
+	})
 }
 
 // TestMutationUnknownOutcomeReleasesWithoutResend proves one outcome-unknown
@@ -541,57 +557,59 @@ func TestMutationDefiniteFailureRecordsAndReleases(t *testing.T) {
 func TestMutationUnknownOutcomeReleasesWithoutResend(t *testing.T) {
 	for _, call := range mutationCalls {
 		t.Run(call.name, func(t *testing.T) {
-			c, g := newGatedClient(t, Config{MaxPendingOperations: 1})
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
+			synctest.Test(t, func(t *testing.T) {
+				c, g := newGatedClient(t, Config{MaxPendingOperations: 1})
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
 
-			results := make(chan mutationOutcome, 1)
-			go func() {
-				removed, registration, err := call.run(ctx, c)
-				results <- mutationOutcome{removed: removed, registration: registration, err: err}
-			}()
-			request := awaitSend(t, g)
-			operation := operationOf(t, request)
-			require.Equal(t, call.endpoint, endpointOf(t, request), "the captured request is the caller's own")
-			g.releaseSend(nil)
-			cancel()
-			got := awaitResult(t, results)
-			var failure ports.BrokerError
-			require.ErrorAs(t, got.err, &failure)
-			require.Equal(t, ports.BrokerErrorOutcomeUnknown, failure.Code)
-			require.False(t, got.removed)
-			require.Equal(t, 1, g.sendCount(), "an uncertain attempt is never resent")
+				results := make(chan mutationOutcome, 1)
+				go func() {
+					removed, registration, err := call.run(ctx, c)
+					results <- mutationOutcome{removed: removed, registration: registration, err: err}
+				}()
+				request := awaitSend(t, g)
+				operation := operationOf(t, request)
+				require.Equal(t, call.endpoint, endpointOf(t, request), "the captured request is the caller's own")
+				g.releaseSend(nil)
+				cancel()
+				got := awaitResult(t, results)
+				var failure ports.BrokerError
+				require.ErrorAs(t, got.err, &failure)
+				require.Equal(t, ports.BrokerErrorOutcomeUnknown, failure.Code)
+				require.False(t, got.removed)
+				require.Equal(t, 1, g.sendCount(), "an uncertain attempt is never resent")
 
-			// The identity was completed once, so its pending slot is released
-			// rather than left in flight.
-			require.ErrorIs(t, c.conn.AdmitOperation(operation), brokerwire.ErrOperationCompleted)
-			require.Empty(t, pendingOperations(c))
+				// The identity was completed once, so its pending slot is released
+				// rather than left in flight.
+				require.ErrorIs(t, c.conn.AdmitOperation(operation), brokerwire.ErrOperationCompleted)
+				require.Empty(t, pendingOperations(c))
 
-			// A late legal result for the completed identity is dropped, and it
-			// never provokes another wire attempt.
-			late := call.success(operation)
-			late.Epoch = c.scope.Epoch
-			late.Connection = c.scope.Connection
-			deliverResult(t, c, late)
-			require.Empty(t, pendingOperations(c))
-			require.Equal(t, 1, g.sendCount())
+				// A late legal result for the completed identity is dropped, and it
+				// never provokes another wire attempt.
+				late := call.success(operation)
+				late.Epoch = c.scope.Epoch
+				late.Connection = c.scope.Connection
+				deliverResult(t, c, late)
+				require.Empty(t, pendingOperations(c))
+				require.Equal(t, 1, g.sendCount())
 
-			// The connection stays usable: the next mutation is admitted under
-			// the same bound of one and completes normally.
-			fresh, cancelFresh := context.WithCancel(context.Background())
-			defer cancelFresh()
-			next := make(chan mutationOutcome, 1)
-			go func() {
-				removed, registration, err := call.run(fresh, c)
-				next <- mutationOutcome{removed: removed, registration: registration, err: err}
-			}()
-			second := awaitSend(t, g)
-			g.releaseSend(nil)
-			call.deliverSuccess(t, c, operationOf(t, second))
-			done := awaitResult(t, next)
-			require.NoError(t, done.err)
-			require.Equal(t, call.wantRemoved, done.removed)
-			require.Equal(t, 2, g.sendCount())
+				// The connection stays usable: the next mutation is admitted under
+				// the same bound of one and completes normally.
+				fresh, cancelFresh := context.WithCancel(context.Background())
+				defer cancelFresh()
+				next := make(chan mutationOutcome, 1)
+				go func() {
+					removed, registration, err := call.run(fresh, c)
+					next <- mutationOutcome{removed: removed, registration: registration, err: err}
+				}()
+				second := awaitSend(t, g)
+				g.releaseSend(nil)
+				call.deliverSuccess(t, c, operationOf(t, second))
+				done := awaitResult(t, next)
+				require.NoError(t, done.err)
+				require.Equal(t, call.wantRemoved, done.removed)
+				require.Equal(t, 2, g.sendCount())
+			})
 		})
 	}
 }
@@ -602,33 +620,35 @@ func TestMutationUnknownOutcomeReleasesWithoutResend(t *testing.T) {
 func TestMutationDeliveredReplyIsDefinite(t *testing.T) {
 	for _, call := range mutationCalls {
 		t.Run(call.name, func(t *testing.T) {
-			c, g := newGatedClient(t, Config{})
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
+			synctest.Test(t, func(t *testing.T) {
+				c, g := newGatedClient(t, Config{})
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
 
-			results := make(chan mutationOutcome, 1)
-			go func() {
-				removed, registration, err := call.run(ctx, c)
-				results <- mutationOutcome{removed: removed, registration: registration, err: err}
-			}()
-			request := awaitSend(t, g)
-			operation := operationOf(t, request)
-			require.Equal(t, call.endpoint, endpointOf(t, request))
-			g.releaseSend(nil)
-			call.deliverSuccess(t, c, operation)
-			got := awaitResult(t, results)
-			require.NoError(t, got.err)
-			require.Equal(t, call.wantRemoved, got.removed)
-			require.Equal(t, 1, g.sendCount())
-			require.Empty(t, pendingOperations(c))
+				results := make(chan mutationOutcome, 1)
+				go func() {
+					removed, registration, err := call.run(ctx, c)
+					results <- mutationOutcome{removed: removed, registration: registration, err: err}
+				}()
+				request := awaitSend(t, g)
+				operation := operationOf(t, request)
+				require.Equal(t, call.endpoint, endpointOf(t, request))
+				g.releaseSend(nil)
+				call.deliverSuccess(t, c, operation)
+				got := awaitResult(t, results)
+				require.NoError(t, got.err)
+				require.Equal(t, call.wantRemoved, got.removed)
+				require.Equal(t, 1, g.sendCount())
+				require.Empty(t, pendingOperations(c))
 
-			// A replayed result for an already settled identity is dropped.
-			replay := call.success(operation)
-			replay.Epoch = c.scope.Epoch
-			replay.Connection = c.scope.Connection
-			deliverResult(t, c, replay)
-			require.Empty(t, pendingOperations(c))
-			require.Equal(t, 1, g.sendCount())
+				// A replayed result for an already settled identity is dropped.
+				replay := call.success(operation)
+				replay.Epoch = c.scope.Epoch
+				replay.Connection = c.scope.Connection
+				deliverResult(t, c, replay)
+				require.Empty(t, pendingOperations(c))
+				require.Equal(t, 1, g.sendCount())
+			})
 		})
 	}
 }
@@ -699,41 +719,43 @@ func TestMutationInvalidResultIsOutcomeUnknownAndAbortsProtocol(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			c, g := newGatedClient(t, Config{})
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
+			synctest.Test(t, func(t *testing.T) {
+				c, g := newGatedClient(t, Config{})
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
 
-			results := make(chan mutationOutcome, 1)
-			go func() {
-				removed, registration, err := tc.call.run(ctx, c)
-				results <- mutationOutcome{removed: removed, registration: registration, err: err}
-			}()
-			request := awaitSend(t, g)
-			operation := operationOf(t, request)
-			g.releaseSend(nil)
+				results := make(chan mutationOutcome, 1)
+				go func() {
+					removed, registration, err := tc.call.run(ctx, c)
+					results <- mutationOutcome{removed: removed, registration: registration, err: err}
+				}()
+				request := awaitSend(t, g)
+				operation := operationOf(t, request)
+				g.releaseSend(nil)
 
-			dispatchErr := c.dispatch(tc.result(c, operation))
-			require.Error(t, dispatchErr, "an invalid result must settle the connection")
-			require.ErrorIs(t, dispatchErr, ErrMalformedFrame, "an invalid result is a protocol violation")
+				dispatchErr := c.dispatch(tc.result(c, operation))
+				require.Error(t, dispatchErr, "an invalid result must settle the connection")
+				require.ErrorIs(t, dispatchErr, ErrMalformedFrame, "an invalid result is a protocol violation")
 
-			got := awaitResult(t, results)
-			var failure ports.BrokerError
-			require.ErrorAs(t, got.err, &failure)
-			require.Equal(t, ports.BrokerErrorOutcomeUnknown, failure.Code,
-				"a result that cannot be applied must never look like a definite outcome")
-			require.False(t, got.removed)
-			require.Equal(t, domain.RemoteRegistration{}, got.registration)
-			require.Equal(t, 1, g.sendCount(), "an invalid result must never provoke a replay")
-			require.Empty(t, pendingOperations(c))
+				got := awaitResult(t, results)
+				var failure ports.BrokerError
+				require.ErrorAs(t, got.err, &failure)
+				require.Equal(t, ports.BrokerErrorOutcomeUnknown, failure.Code,
+					"a result that cannot be applied must never look like a definite outcome")
+				require.False(t, got.removed)
+				require.Equal(t, domain.RemoteRegistration{}, got.registration)
+				require.Equal(t, 1, g.sendCount(), "an invalid result must never provoke a replay")
+				require.Empty(t, pendingOperations(c))
+			})
 		})
 	}
 }
 
-// scriptedTransport is a client carriage whose single inbound frame can be
-// injected: the reader goroutine consumes it and then blocks until the test
-// closes the carriage. It lets a test drive the client's real run loop with one
-// malformed frame and observe how a pending mutation is settled.
-type scriptedTransport struct {
+// scriptedState is the plain state behind a client carriage whose single inbound
+// frame can be injected: the reader goroutine consumes it and then blocks until
+// the test closes the carriage. It lets a test drive the client's real run loop
+// with one malformed frame and observe how a pending mutation is settled.
+type scriptedState struct {
 	ready chan wire.Envelope
 	done  chan struct{}
 	once  sync.Once
@@ -742,36 +764,39 @@ type scriptedTransport struct {
 	sends []wire.Envelope
 }
 
-func newScriptedTransport() *scriptedTransport {
-	return &scriptedTransport{ready: make(chan wire.Envelope, 1), done: make(chan struct{})}
-}
-
-func (t *scriptedTransport) deliver(envelope wire.Envelope) { t.ready <- envelope }
-
-func (t *scriptedTransport) Send(envelope wire.Envelope) error {
-	t.mu.Lock()
-	t.sends = append(t.sends, envelope)
-	t.mu.Unlock()
-	return nil
-}
-
-func (t *scriptedTransport) RecvBounded(uint64) (wire.Envelope, error) {
-	select {
-	case envelope := <-t.ready:
-		return envelope, nil
-	case <-t.done:
-		return wire.Envelope{}, io.EOF
+func newScriptedTransportMock(t *testing.T, opts ...func(*wiremocks.MockBoundedTransport, *scriptedState)) (*wiremocks.MockBoundedTransport, *scriptedState) {
+	t.Helper()
+	st := &scriptedState{ready: make(chan wire.Envelope, 1), done: make(chan struct{})}
+	m := wiremocks.NewMockBoundedTransport(t)
+	for _, opt := range opts {
+		opt(m, st)
 	}
+	m.EXPECT().Send(mock.Anything).RunAndReturn(func(envelope wire.Envelope) error {
+		st.mu.Lock()
+		st.sends = append(st.sends, envelope)
+		st.mu.Unlock()
+		return nil
+	}).Maybe()
+	recv := func() (wire.Envelope, error) {
+		select {
+		case envelope := <-st.ready:
+			return envelope, nil
+		case <-st.done:
+			return wire.Envelope{}, io.EOF
+		}
+	}
+	m.EXPECT().RecvBounded(mock.Anything).RunAndReturn(func(uint64) (wire.Envelope, error) { return recv() }).Maybe()
+	m.EXPECT().Recv().RunAndReturn(recv).Maybe()
+	m.EXPECT().Close().RunAndReturn(func() error {
+		st.once.Do(func() { close(st.done) })
+		return nil
+	}).Maybe()
+	return m, st
 }
 
-func (t *scriptedTransport) Recv() (wire.Envelope, error) { return t.RecvBounded(0) }
+func (t *scriptedState) deliver(envelope wire.Envelope) { t.ready <- envelope }
 
-func (t *scriptedTransport) Close() error {
-	t.once.Do(func() { close(t.done) })
-	return nil
-}
-
-func (t *scriptedTransport) sendCount() int {
+func (t *scriptedState) sendCount() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return len(t.sends)
@@ -782,63 +807,66 @@ func (t *scriptedTransport) sendCount() int {
 // pending mutation as outcome-unknown, never as a definite failure: the request
 // was already sent, so the caller must refresh rather than replay it.
 func TestMalformedResultFrameSettlesPendingMutationAsUnknown(t *testing.T) {
-	transport := newScriptedTransport()
-	scope := brokerwire.Scope{
-		Epoch:      ports.BrokerEpoch(0x72),
-		Connection: ports.BrokerConnectionID{0x72, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01},
-	}
-	conn, err := brokerwire.NewConnection(scope)
-	require.NoError(t, err)
-	require.NoError(t, conn.SignalPreamble())
-	require.NoError(t, conn.Register())
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	c := &client{
-		transport: transport,
-		ceilings:  brokerwire.DefaultCeilings(),
-		scope:     scope,
-		conn:      conn,
-		cfg:       Config{}.withDefaults(),
-		ctx:       ctx,
-		cancel:    cancel,
-		pending:   make(map[ports.BrokerOperationID]chan operationResult),
-		kinds:     make(map[ports.BrokerOperationID]brokerwire.RegisterMutationKind),
-		streams:   make(map[ports.BrokerStreamID]*clientStream),
-		done:      make(chan struct{}),
-	}
-	t.Cleanup(func() { _ = c.Close() })
-	go c.run()
+	synctest.Test(t, func(t *testing.T) {
+		transport, scripted := newScriptedTransportMock(t)
+		scope := brokerwire.Scope{
+			Epoch:      ports.BrokerEpoch(0x72),
+			Connection: ports.BrokerConnectionID{0x72, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01},
+		}
+		conn, err := brokerwire.NewConnection(scope)
+		require.NoError(t, err)
+		require.NoError(t, conn.SignalPreamble())
+		require.NoError(t, conn.Register())
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		c := &client{
+			transport: transport,
+			ceilings:  brokerwire.DefaultCeilings(),
+			scope:     scope,
+			conn:      conn,
+			cfg:       Config{}.withDefaults(),
+			ctx:       ctx,
+			cancel:    cancel,
+			pending:   make(map[ports.BrokerOperationID]chan operationResult),
+			kinds:     make(map[ports.BrokerOperationID]brokerwire.RegisterMutationKind),
+			streams:   make(map[ports.BrokerStreamID]*clientStream),
+			done:      make(chan struct{}),
+		}
+		t.Cleanup(func() { _ = c.Close() })
+		go c.run()
 
-	results := make(chan mutationOutcome, 1)
-	go func() {
-		removed, err := c.RemoveHost(context.Background(), mutationRegistration("known"))
-		results <- mutationOutcome{removed: removed, err: err}
-	}()
-	require.Eventually(t, func() bool { return transport.sendCount() == 1 }, 5*time.Second, time.Millisecond,
-		"the mutation request must be launched before the malformed frame arrives")
-	c.mu.Lock()
-	pending := len(c.pending)
-	c.mu.Unlock()
-	require.Equal(t, 1, pending, "the mutation must still be pending when the malformed frame arrives")
+		results := make(chan mutationOutcome, 1)
+		go func() {
+			removed, err := c.RemoveHost(context.Background(), mutationRegistration("known"))
+			results <- mutationOutcome{removed: removed, err: err}
+		}()
+		synctest.Wait()
+		require.Equal(t, 1, scripted.sendCount(), "the mutation request must be launched before the malformed frame arrives")
+		c.mu.Lock()
+		pending := len(c.pending)
+		c.mu.Unlock()
+		require.Equal(t, 1, pending, "the mutation must still be pending when the malformed frame arrives")
 
-	// One frame the strict scanner refuses: a payload that is not a valid server
-	// envelope. The reader settles the connection on it.
-	transport.deliver(wire.Envelope{Payload: []byte{0xFF, 0xFF, 0xFF}})
+		// One frame the strict scanner refuses: a payload that is not a valid server
+		// envelope. The reader settles the connection on it.
+		scripted.deliver(wire.Envelope{Payload: []byte{0xFF, 0xFF, 0xFF}})
 
-	got := awaitResult(t, results)
-	var failure ports.BrokerError
-	require.ErrorAs(t, got.err, &failure)
-	require.Equal(t, ports.BrokerErrorOutcomeUnknown, failure.Code,
-		"a malformed frame after dispatch must never look like a definite outcome")
-	require.False(t, got.removed)
-	require.Equal(t, domain.RemoteRegistration{}, got.registration)
-	require.Equal(t, 1, transport.sendCount(), "the request must have travelled exactly once")
-	select {
-	case <-c.Done():
-	case <-time.After(5 * time.Second):
-		t.Fatal("the malformed frame must settle the connection")
-	}
-	require.ErrorIs(t, c.Err(), ErrMalformedFrame)
+		got := awaitResult(t, results)
+		var failure ports.BrokerError
+		require.ErrorAs(t, got.err, &failure)
+		require.Equal(t, ports.BrokerErrorOutcomeUnknown, failure.Code,
+			"a malformed frame after dispatch must never look like a definite outcome")
+		require.False(t, got.removed)
+		require.Equal(t, domain.RemoteRegistration{}, got.registration)
+		require.Equal(t, 1, scripted.sendCount(), "the request must have travelled exactly once")
+		synctest.Wait()
+		select {
+		case <-c.Done():
+		default:
+			t.Fatal("the malformed frame must settle the connection")
+		}
+		require.ErrorIs(t, c.Err(), ErrMalformedFrame)
+	})
 }
 
 // TestSendContextPreflightClassification pins the private helper's taxonomy
@@ -847,61 +875,70 @@ func TestMalformedResultFrameSettlesPendingMutationAsUnknown(t *testing.T) {
 // attempt is uncertain.
 func TestSendContextPreflightClassification(t *testing.T) {
 	t.Run("unencodable frame is definite", func(t *testing.T) {
-		c, g := newGatedClient(t, Config{})
-		attempted, err := c.sendContext(context.Background(), nil)
-		require.False(t, attempted)
-		require.ErrorIs(t, err, brokerwire.ErrInvalidMessage)
-		require.Zero(t, g.sendCount())
+		synctest.Test(t, func(t *testing.T) {
+			c, g := newGatedClient(t, Config{})
+			attempted, err := c.sendContext(context.Background(), nil)
+			require.False(t, attempted)
+			require.ErrorIs(t, err, brokerwire.ErrInvalidMessage)
+			require.Zero(t, g.sendCount())
+		})
 	})
 
 	t.Run("already-cancelled caller is definite", func(t *testing.T) {
-		c, g := newGatedClient(t, Config{})
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-		attempted, err := c.sendContext(ctx, brokerwire.AddHost{
-			Epoch: c.scope.Epoch, Connection: c.scope.Connection,
-			Operation: ports.BrokerOperationID{0x01}, Endpoint: "pre@host:22", Policy: testPolicy(),
+		synctest.Test(t, func(t *testing.T) {
+			c, g := newGatedClient(t, Config{})
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			attempted, err := c.sendContext(ctx, brokerwire.AddHost{
+				Epoch: c.scope.Epoch, Connection: c.scope.Connection,
+				Operation: ports.BrokerOperationID{0x01}, Endpoint: "pre@host:22", Policy: testPolicy(),
+			})
+			require.False(t, attempted)
+			require.ErrorIs(t, err, context.Canceled)
+			require.Zero(t, g.sendCount())
 		})
-		require.False(t, attempted)
-		require.ErrorIs(t, err, context.Canceled)
-		require.Zero(t, g.sendCount())
 	})
 
 	t.Run("already-terminal connection is definite", func(t *testing.T) {
-		c, g := newGatedClient(t, Config{})
-		require.NoError(t, c.Close())
-		attempted, err := c.sendContext(context.Background(), brokerwire.AddHost{
-			Epoch: c.scope.Epoch, Connection: c.scope.Connection,
-			Operation: ports.BrokerOperationID{0x01}, Endpoint: "pre@host:22", Policy: testPolicy(),
+		synctest.Test(t, func(t *testing.T) {
+			c, g := newGatedClient(t, Config{})
+			require.NoError(t, c.Close())
+			attempted, err := c.sendContext(context.Background(), brokerwire.AddHost{
+				Epoch: c.scope.Epoch, Connection: c.scope.Connection,
+				Operation: ports.BrokerOperationID{0x01}, Endpoint: "pre@host:22", Policy: testPolicy(),
+			})
+			require.False(t, attempted)
+			require.ErrorIs(t, err, ErrConnectionClosed)
+			require.Zero(t, g.sendCount())
 		})
-		require.False(t, attempted)
-		require.ErrorIs(t, err, ErrConnectionClosed)
-		require.Zero(t, g.sendCount())
 	})
 
 	t.Run("launched attempt is uncertain", func(t *testing.T) {
-		c, g := newGatedClient(t, Config{})
-		type sendResult struct {
-			attempted bool
-			err       error
-		}
-		done := make(chan sendResult, 1)
-		go func() {
-			attempted, err := c.sendContext(context.Background(), brokerwire.RemoveHost{
-				Epoch: c.scope.Epoch, Connection: c.scope.Connection,
-				Operation: ports.BrokerOperationID{0x02}, Registration: mutationRegistration("known"),
-			})
-			done <- sendResult{attempted: attempted, err: err}
-		}()
-		_ = awaitSend(t, g)
-		g.releaseSend(errTestCarriage)
-		select {
-		case got := <-done:
-			require.True(t, got.attempted, "a launched attempt is dispatch-uncertain")
-			require.ErrorIs(t, got.err, errTestCarriage)
-		case <-time.After(5 * time.Second):
-			t.Fatal("sendContext did not return")
-		}
-		require.Equal(t, 1, g.sendCount())
+		synctest.Test(t, func(t *testing.T) {
+			c, g := newGatedClient(t, Config{})
+			type sendResult struct {
+				attempted bool
+				err       error
+			}
+			done := make(chan sendResult, 1)
+			go func() {
+				attempted, err := c.sendContext(context.Background(), brokerwire.RemoveHost{
+					Epoch: c.scope.Epoch, Connection: c.scope.Connection,
+					Operation: ports.BrokerOperationID{0x02}, Registration: mutationRegistration("known"),
+				})
+				done <- sendResult{attempted: attempted, err: err}
+			}()
+			_ = awaitSend(t, g)
+			g.releaseSend(errTestCarriage)
+			synctest.Wait()
+			select {
+			case got := <-done:
+				require.True(t, got.attempted, "a launched attempt is dispatch-uncertain")
+				require.ErrorIs(t, got.err, errTestCarriage)
+			default:
+				t.Fatal("sendContext did not return")
+			}
+			require.Equal(t, 1, g.sendCount())
+		})
 	})
 }

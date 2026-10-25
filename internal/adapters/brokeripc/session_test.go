@@ -295,10 +295,11 @@ func subscribeGenerationOf(t *testing.T, message brokerwire.ClientMessage) uint6
 // awaitSubscribe waits for one Subscribe call to return.
 func awaitSubscribe(t *testing.T, results <-chan subscribeResult) subscribeResult {
 	t.Helper()
+	synctest.Wait()
 	select {
 	case got := <-results:
 		return got
-	case <-time.After(5 * time.Second):
+	default:
 		t.Fatal("Subscribe did not return")
 		return subscribeResult{}
 	}
@@ -309,45 +310,48 @@ func awaitSubscribe(t *testing.T, results <-chan subscribeResult) subscribeResul
 // the superseded subscription is retired instead of being restored, so no stale
 // subscription is presented as the live one and none stays current.
 func TestSubscribeSendFailureRetiresPreviousSubscription(t *testing.T) {
-	c, carriage := newGatedClient(t, Config{})
+	synctest.Test(t, func(t *testing.T) {
+		c, carriage := newGatedClient(t, Config{})
 
-	first := make(chan subscribeResult, 1)
-	go func() {
-		sub, err := c.Subscribe()
-		first <- subscribeResult{sub, err}
-	}()
-	require.Equal(t, uint64(1), subscribeGenerationOf(t, awaitSend(t, carriage)))
-	carriage.releaseSend(nil)
-	previous := awaitSubscribe(t, first)
-	require.NoError(t, previous.err)
-	require.NotNil(t, previous.sub)
+		first := make(chan subscribeResult, 1)
+		go func() {
+			sub, err := c.Subscribe()
+			first <- subscribeResult{sub, err}
+		}()
+		require.Equal(t, uint64(1), subscribeGenerationOf(t, awaitSend(t, carriage)))
+		carriage.releaseSend(nil)
+		previous := awaitSubscribe(t, first)
+		require.NoError(t, previous.err)
+		require.NotNil(t, previous.sub)
 
-	// The second Subscribe consumes generation 2 on the connection's tracker
-	// before its carriage write fails.
-	second := make(chan subscribeResult, 1)
-	go func() {
-		sub, err := c.Subscribe()
-		second <- subscribeResult{sub, err}
-	}()
-	require.Equal(t, uint64(2), subscribeGenerationOf(t, awaitSend(t, carriage)))
-	carriage.releaseSend(errTestCarriage)
+		// The second Subscribe consumes generation 2 on the connection's tracker
+		// before its carriage write fails.
+		second := make(chan subscribeResult, 1)
+		go func() {
+			sub, err := c.Subscribe()
+			second <- subscribeResult{sub, err}
+		}()
+		require.Equal(t, uint64(2), subscribeGenerationOf(t, awaitSend(t, carriage)))
+		carriage.releaseSend(errTestCarriage)
 
-	failed := awaitSubscribe(t, second)
-	require.ErrorIs(t, failed.err, errTestCarriage)
-	require.Nil(t, failed.sub, "a failed Subscribe returns no subscription")
+		failed := awaitSubscribe(t, second)
+		require.ErrorIs(t, failed.err, errTestCarriage)
+		require.Nil(t, failed.sub, "a failed Subscribe returns no subscription")
 
-	select {
-	case _, open := <-previous.sub.Changed():
-		require.False(t, open, "the superseded subscription must be closed")
-	case <-time.After(time.Second):
-		t.Fatal("the previous subscription must be closed")
-	}
+		synctest.Wait()
+		select {
+		case _, open := <-previous.sub.Changed():
+			require.False(t, open, "the superseded subscription must be closed")
+		default:
+			t.Fatal("the previous subscription must be closed")
+		}
 
-	c.mu.Lock()
-	current, generation := c.sub, c.generation
-	c.mu.Unlock()
-	require.Nil(t, current, "a failed Subscribe must not leave a current subscription")
-	require.Equal(t, uint64(2), uint64(generation), "the consumed generation is not rolled back")
+		c.mu.Lock()
+		current, generation := c.sub, c.generation
+		c.mu.Unlock()
+		require.Nil(t, current, "a failed Subscribe must not leave a current subscription")
+		require.Equal(t, uint64(2), uint64(generation), "the consumed generation is not rolled back")
+	})
 }
 
 // TestOpenStreamCarriesTypedTraffic proves a logical stream carries the typed
