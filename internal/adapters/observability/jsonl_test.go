@@ -9,11 +9,13 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 )
 
+// real I/O: writes and reads JSONL trace files.
 func TestTransportObservabilityJSONLOwnsTicksAndSchema(t *testing.T) {
 	path := t.TempDir() + "/daemon.jsonl"
-	observer, closer, err := NewJSONL(path, fixedRuntimeClock{now: time.Unix(0, 41)}, "daemon-process")
+	observer, closer, err := NewJSONL(path, newRuntimeClock(t, time.Unix(0, 41)), "daemon-process")
 	if err != nil {
 		t.Fatalf("NewJSONL() error = %v", err)
 	}
@@ -54,6 +56,7 @@ func TestTransportObservabilityJSONLOwnsTicksAndSchema(t *testing.T) {
 	}
 }
 
+// real I/O: writes and reads JSONL trace files.
 func TestTransportObservabilityJSONLRejectsInvalidRequiredFields(t *testing.T) {
 	for _, mark := range []ports.RuntimeMark{
 		{},
@@ -61,7 +64,7 @@ func TestTransportObservabilityJSONLRejectsInvalidRequiredFields(t *testing.T) {
 		{Schema: 2, ProcessID: "p", Component: "daemon", Scenario: "s", Run: 1, Sequence: 1, Kind: ports.RuntimeEmitStart, Valid: true},
 	} {
 		path := t.TempDir() + "/invalid.jsonl"
-		observer, closer, err := NewJSONL(path, fixedRuntimeClock{now: time.Unix(0, 5)}, "p")
+		observer, closer, err := NewJSONL(path, newRuntimeClock(t, time.Unix(0, 5)), "p")
 		if err != nil {
 			t.Fatalf("NewJSONL() error = %v", err)
 		}
@@ -75,10 +78,11 @@ func TestTransportObservabilityJSONLRejectsInvalidRequiredFields(t *testing.T) {
 	}
 }
 
+// real I/O: writes and reads JSONL trace files.
 func TestTransportObservabilityJSONLWriteErrorSurfacesOnClose(t *testing.T) {
 	// /dev/full accepts Open but rejects every write, exercising the concrete
 	// observer lifecycle without changing the one-way RuntimeObserver port.
-	observer, closer, err := NewJSONL("/dev/full", fixedRuntimeClock{now: time.Unix(0, 1)}, "p")
+	observer, closer, err := NewJSONL("/dev/full", newRuntimeClock(t, time.Unix(0, 1)), "p")
 	if err != nil {
 		t.Skipf("/dev/full unavailable: %v", err)
 	}
@@ -88,6 +92,7 @@ func TestTransportObservabilityJSONLWriteErrorSurfacesOnClose(t *testing.T) {
 	}
 }
 
+// real I/O: writes and reads JSONL trace files.
 func TestTransportObservabilitySameProcessSpanClockDomains(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -118,9 +123,10 @@ func TestTransportObservabilitySameProcessSpanClockDomains(t *testing.T) {
 	}
 }
 
+// real I/O: writes and reads JSONL trace files.
 func TestTransportObservabilityJSONLSerializesConcurrentMarks(t *testing.T) {
 	path := t.TempDir() + "/concurrent.jsonl"
-	observer, closer, err := NewJSONL(path, fixedRuntimeClock{now: time.Unix(0, 73)}, "ipc-process")
+	observer, closer, err := NewJSONL(path, newRuntimeClock(t, time.Unix(0, 73)), "ipc-process")
 	if err != nil {
 		t.Fatalf("NewJSONL() error = %v", err)
 	}
@@ -179,15 +185,9 @@ func readJSONLRecords(t *testing.T, path string) []map[string]any {
 	return records
 }
 
-type fixedRuntimeClock struct{ now time.Time }
-
-func (c fixedRuntimeClock) Now() time.Time { return c.now }
-func (c fixedRuntimeClock) NewTimer(d time.Duration) ports.Timer {
-	return fixedRuntimeTimer{timer: time.NewTimer(d)}
+func newRuntimeClock(t *testing.T, now time.Time) *portsmocks.MockClock {
+	t.Helper()
+	clock := portsmocks.NewMockClock(t)
+	clock.EXPECT().Now().Return(now).Maybe()
+	return clock
 }
-
-type fixedRuntimeTimer struct{ timer *time.Timer }
-
-func (t fixedRuntimeTimer) C() <-chan time.Time        { return t.timer.C }
-func (t fixedRuntimeTimer) Reset(d time.Duration) bool { return t.timer.Reset(d) }
-func (t fixedRuntimeTimer) Stop() bool                 { return t.timer.Stop() }
