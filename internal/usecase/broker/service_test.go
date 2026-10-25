@@ -71,7 +71,7 @@ func newServiceMembershipFixture(t testing.TB, store any, mode MembershipMode) (
 	require.NoError(t, err)
 	t.Cleanup(func() { registry.store.close() })
 	registry.jitter = identityJitter
-	authority, _, supervisor, idleClock := composeTestAuthority(t, 1, registry, immediateConnector, clock)
+	authority, _, supervisor, idleClock := composeTestAuthority(t, 1, registry, immediateConnector(t), clock)
 	return authority, registry, supervisor, idleClock
 }
 
@@ -122,8 +122,10 @@ func (s *casThenGateStore) releaseCAS() {
 }
 
 // immediateConnector returns one healthy physical connection for any endpoint.
-func immediateConnector(_ context.Context, e ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
-	return &fakePhysical{endpoint: e, done: make(chan struct{})}, nil
+func immediateConnector(t testing.TB) poolConnector {
+	return func(_ context.Context, e ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
+		return mockPhysical(t, &fakePhysical{endpoint: e, done: make(chan struct{})}), nil
+	}
 }
 
 func poolClientCount(p *Pool) int {
@@ -146,7 +148,7 @@ func registryDemandCount(r *Registry) int {
 
 func TestAuthorityAdmissionRollback(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		authority, _, pool, supervisor, _, _ := newTestAuthority(t, 1, nil, immediateConnector)
+		authority, _, pool, supervisor, _, _ := newTestAuthority(t, 1, nil, immediateConnector(t))
 
 		first, err := authority.AdmitClient(context.Background())
 		require.NoError(t, err)
@@ -190,7 +192,7 @@ func TestAuthorityAdmissionRollback(t *testing.T) {
 
 func TestAuthorityAdmissionContextNotRetained(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		authority, registry, _, _, _, _ := newTestAuthority(t, 1, nil, immediateConnector)
+		authority, registry, _, _, _, _ := newTestAuthority(t, 1, nil, immediateConnector(t))
 		ctx, cancel := context.WithCancel(context.Background())
 		service, err := authority.AdmitClient(ctx)
 		require.NoError(t, err)
@@ -211,7 +213,7 @@ func TestAuthorityAdmissionContextNotRetained(t *testing.T) {
 
 func TestAuthorityValidation(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		_, _, pool, supervisor, clock, _ := newTestAuthority(t, 1, nil, immediateConnector)
+		_, _, pool, supervisor, clock, _ := newTestAuthority(t, 1, nil, immediateConnector(t))
 
 		// Live membership mutation is composed in this slice, so the authority no
 		// longer refuses a registry that owns remote membership its connections can
@@ -299,7 +301,7 @@ func TestServiceOpenStreamScopeFencing(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				authority, _, _, _, _, _ := newTestAuthority(t, 1, nil, immediateConnector)
+				authority, _, _, _, _, _ := newTestAuthority(t, 1, nil, immediateConnector(t))
 				service, err := authority.AdmitClient(context.Background())
 				require.NoError(t, err)
 				t.Cleanup(func() { require.NoError(t, service.Close()) })
@@ -348,7 +350,7 @@ func TestServiceOpenStreamRequestsLocalReprobeOnOpenAndClose(t *testing.T) {
 		})
 		require.NoError(t, err)
 		registry.jitter = identityJitter
-		authority, _, _, _ := composeTestAuthority(t, 1, registry, immediateConnector, clock)
+		authority, _, _, _ := composeTestAuthority(t, 1, registry, immediateConnector(t), clock)
 
 		service, err := authority.AdmitClient(context.Background())
 		require.NoError(t, err)
@@ -381,7 +383,7 @@ func TestServiceNextStreamIDAllocation(t *testing.T) {
 
 	t.Run("monotone, nonzero, and never reused", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			authority, _, _, _, _, _ := newTestAuthority(t, 1, nil, immediateConnector)
+			authority, _, _, _, _, _ := newTestAuthority(t, 1, nil, immediateConnector(t))
 			service, err := authority.AdmitClient(context.Background())
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, service.Close()) })
@@ -403,7 +405,7 @@ func TestServiceNextStreamIDAllocation(t *testing.T) {
 
 	t.Run("concurrent allocation is monotone and collision-free", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			authority, _, _, _, _, _ := newTestAuthority(t, 1, nil, immediateConnector)
+			authority, _, _, _, _, _ := newTestAuthority(t, 1, nil, immediateConnector(t))
 			service, err := authority.AdmitClient(context.Background())
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, service.Close()) })
@@ -433,7 +435,7 @@ func TestServiceNextStreamIDAllocation(t *testing.T) {
 
 	t.Run("exhaustion refuses rather than wrapping", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			authority, _, _, _, _, _ := newTestAuthority(t, 1, nil, immediateConnector)
+			authority, _, _, _, _, _ := newTestAuthority(t, 1, nil, immediateConnector(t))
 			service, err := authority.AdmitClient(context.Background())
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, service.Close()) })
@@ -450,7 +452,7 @@ func TestServiceNextStreamIDAllocation(t *testing.T) {
 
 	t.Run("a closed connection refuses", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			authority, _, _, _, _, _ := newTestAuthority(t, 1, nil, immediateConnector)
+			authority, _, _, _, _, _ := newTestAuthority(t, 1, nil, immediateConnector(t))
 			service, err := authority.AdmitClient(context.Background())
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, service.Close()) })
@@ -466,7 +468,7 @@ func TestServiceNextStreamIDAllocation(t *testing.T) {
 
 	t.Run("an allocated identity is carried on the request", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			authority, _, _, _, _, _ := newTestAuthority(t, 1, nil, immediateConnector)
+			authority, _, _, _, _, _ := newTestAuthority(t, 1, nil, immediateConnector(t))
 			service, err := authority.AdmitClient(context.Background())
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, service.Close()) })
@@ -487,7 +489,7 @@ func TestServiceNextStreamIDAllocation(t *testing.T) {
 }
 
 func TestServiceOpenStreamAdmissionValidatesCallerInput(t *testing.T) {
-	authority, _, _, _, _, _ := newTestAuthority(t, 1, nil, immediateConnector)
+	authority, _, _, _, _, _ := newTestAuthority(t, 1, nil, immediateConnector(t))
 	service, err := authority.AdmitClient(context.Background())
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, service.Close()) })
@@ -515,7 +517,7 @@ func TestServiceOpenStreamAdmissionValidatesCallerInput(t *testing.T) {
 
 func TestServiceCloseStreamScopeFencing(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		authority, _, _, _, _, _ := newTestAuthority(t, 1, nil, immediateConnector)
+		authority, _, _, _, _, _ := newTestAuthority(t, 1, nil, immediateConnector(t))
 		service, err := authority.AdmitClient(context.Background())
 		require.NoError(t, err)
 		t.Cleanup(func() { require.NoError(t, service.Close()) })
@@ -539,7 +541,7 @@ func TestServiceCloseStreamScopeFencing(t *testing.T) {
 
 func TestServiceSubscriptionCleanup(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		authority, registry, _, _, _, _ := newTestAuthority(t, 1, nil, immediateConnector)
+		authority, registry, _, _, _, _ := newTestAuthority(t, 1, nil, immediateConnector(t))
 		service, err := authority.AdmitClient(context.Background())
 		require.NoError(t, err)
 		t.Cleanup(func() { require.NoError(t, service.Close()) })
@@ -571,7 +573,7 @@ func TestServiceSubscriptionCleanup(t *testing.T) {
 // and idempotent Close.
 func TestServiceSubscribeDrivesRegistryDemand(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		authority, registry, _, _, _, _ := newTestAuthority(t, 1, nil, immediateConnector)
+		authority, registry, _, _, _, _ := newTestAuthority(t, 1, nil, immediateConnector(t))
 		service, err := authority.AdmitClient(context.Background())
 		require.NoError(t, err)
 		t.Cleanup(func() { require.NoError(t, service.Close()) })
@@ -614,7 +616,7 @@ func TestServiceSubscribeDemandByReader(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				authority, registry, _, _, _, _ := newTestAuthority(t, 1, nil, immediateConnector)
+				authority, registry, _, _, _, _ := newTestAuthority(t, 1, nil, immediateConnector(t))
 				admitted, err := authority.AdmitClient(context.Background())
 				require.NoError(t, err)
 				t.Cleanup(func() { require.NoError(t, admitted.Close()) })
@@ -646,7 +648,7 @@ func TestServiceSubscribeDemandByReader(t *testing.T) {
 
 func TestServiceSnapshotDelegates(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		authority, registry, _, _, _, _ := newTestAuthority(t, 1, nil, immediateConnector)
+		authority, registry, _, _, _, _ := newTestAuthority(t, 1, nil, immediateConnector(t))
 		service, err := authority.AdmitClient(context.Background())
 		require.NoError(t, err)
 		t.Cleanup(func() { require.NoError(t, service.Close()) })
@@ -677,7 +679,7 @@ func TestServiceOperationLeaseLifetime(t *testing.T) {
 			case <-ctx.Done():
 				return nil, ctx.Err()
 			case <-proceed:
-				return &fakePhysical{endpoint: e, done: make(chan struct{})}, nil
+				return mockPhysical(t, &fakePhysical{endpoint: e, done: make(chan struct{})}), nil
 			}
 		})
 		service, err := authority.AdmitClient(context.Background())
@@ -726,7 +728,7 @@ func TestServiceCloseOpenRace(t *testing.T) {
 					case <-ctx.Done():
 						return nil, ctx.Err()
 					case <-proceed:
-						return &fakePhysical{endpoint: e, done: make(chan struct{})}, nil
+						return mockPhysical(t, &fakePhysical{endpoint: e, done: make(chan struct{})}), nil
 					}
 				})
 				service, err := authority.AdmitClient(context.Background())
@@ -759,7 +761,7 @@ func TestServiceCloseOpenRace(t *testing.T) {
 
 func TestServiceCloseIsIdempotentAndConcurrent(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		authority, registry, pool, supervisor, _, _ := newTestAuthority(t, 1, nil, immediateConnector)
+		authority, registry, pool, supervisor, _, _ := newTestAuthority(t, 1, nil, immediateConnector(t))
 		service, err := authority.AdmitClient(context.Background())
 		require.NoError(t, err)
 		_, err = service.Subscribe()
@@ -798,7 +800,7 @@ func TestServiceCloseIsIdempotentAndConcurrent(t *testing.T) {
 func TestServiceDoneErrContract(t *testing.T) {
 	t.Run("local close is orderly", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			authority, _, _, _, _, _ := newTestAuthority(t, 1, nil, immediateConnector)
+			authority, _, _, _, _, _ := newTestAuthority(t, 1, nil, immediateConnector(t))
 			service, err := authority.AdmitClient(context.Background())
 			require.NoError(t, err)
 
@@ -817,7 +819,7 @@ func TestServiceDoneErrContract(t *testing.T) {
 
 	t.Run("broker shutdown is a typed loss", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			authority, _, _, supervisor, _, _ := newTestAuthority(t, 1, nil, immediateConnector)
+			authority, _, _, supervisor, _, _ := newTestAuthority(t, 1, nil, immediateConnector(t))
 			service, err := authority.AdmitClient(context.Background())
 			require.NoError(t, err)
 
@@ -833,7 +835,7 @@ func TestServiceDoneErrContract(t *testing.T) {
 
 func TestServiceShutdownTerminatesOwnedWork(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		authority, _, _, supervisor, _, _ := newTestAuthority(t, 1, nil, immediateConnector)
+		authority, _, _, supervisor, _, _ := newTestAuthority(t, 1, nil, immediateConnector(t))
 		service, err := authority.AdmitClient(context.Background())
 		require.NoError(t, err)
 
@@ -896,7 +898,7 @@ func TestServiceRequestReconcileDelegatesToRegistry(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() { registry.store.close() })
 		registry.jitter = identityJitter
-		authority, _, _, _ := composeTestAuthority(t, 1, registry, immediateConnector, clock)
+		authority, _, _, _ := composeTestAuthority(t, 1, registry, immediateConnector(t), clock)
 		service, err := authority.AdmitClient(context.Background())
 		require.NoError(t, err)
 		t.Cleanup(func() { require.NoError(t, service.Close()) })

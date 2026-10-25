@@ -566,7 +566,7 @@ func TestPoolLocalStreamsShareOnePhysicalEntry(t *testing.T) {
 		pool, _ := setupPool(t, func(_ context.Context, endpoint ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
 			connects.Add(1)
 			physical = &fakePhysical{endpoint: endpoint, done: make(chan struct{})}
-			return physical, nil
+			return mockPhysical(t, physical), nil
 		})
 		id, err := pool.RegisterClient()
 		require.NoError(t, err)

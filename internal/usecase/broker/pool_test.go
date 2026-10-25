@@ -30,19 +30,21 @@ func (f poolConnector) Connect(c context.Context, r ports.BrokerDialTarget) (por
 	return f(c, r)
 }
 
-type fakeLogical struct {
-	done chan struct{}
-	once sync.Once
+func newFakeLogical(t testing.TB) *portsmocks.MockBrokerEnvelopeStream {
+	t.Helper()
+	done := make(chan struct{})
+	var once sync.Once
+	m := portsmocks.NewMockBrokerEnvelopeStream(t)
+	m.EXPECT().Done().Return((<-chan struct{})(done)).Maybe()
+	m.EXPECT().Err().Return(nil).Maybe()
+	m.EXPECT().Close().RunAndReturn(func() error { once.Do(func() { close(done) }); return nil }).Maybe()
+	m.EXPECT().SendEnvelope(mock.Anything).RunAndReturn(func([]byte) error { <-done; return errors.New("closed") }).Maybe()
+	m.EXPECT().RecvEnvelope().RunAndReturn(func() ([]byte, error) { <-done; return nil, errors.New("closed") }).Maybe()
+	return m
 }
 
-func newFakeLogical() *fakeLogical                   { return &fakeLogical{done: make(chan struct{})} }
-func (f *fakeLogical) Done() <-chan struct{}         { return f.done }
-func (f *fakeLogical) Err() error                    { return nil }
-func (f *fakeLogical) Close() error                  { f.once.Do(func() { close(f.done) }); return nil }
-func (f *fakeLogical) SendEnvelope([]byte) error     { <-f.done; return errors.New("closed") }
-func (f *fakeLogical) RecvEnvelope() ([]byte, error) { <-f.done; return nil, errors.New("closed") }
-
 type fakePhysical struct {
+	mock     *portsmocks.MockBrokerPhysicalConnection
 	endpoint ports.BrokerDialTarget
 	// identity, when set, overrides the endpoint's expected identity so a test
 	// can model a first-contact acquisition whose resolved endpoint binds none.
@@ -52,26 +54,40 @@ type fakePhysical struct {
 	open     func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerEnvelopeStream, error)
 }
 
-func (f *fakePhysical) Identity() ports.BrokerDaemonIdentity {
-	if f.identity != "" {
-		return f.identity
+type physicalOption func(*portsmocks.MockBrokerPhysicalConnection)
+
+func mockPhysical(t testing.TB, f *fakePhysical, options ...physicalOption) *portsmocks.MockBrokerPhysicalConnection {
+	t.Helper()
+	if f.mock != nil {
+		return f.mock
 	}
-	return f.endpoint.ExpectedIdentity.Identity
-}
-func (f *fakePhysical) Policy() ports.BrokerPolicy { return f.endpoint.Policy }
-func (f *fakePhysical) Incarnation() ports.BrokerDaemonIncarnation {
-	return ports.BrokerDaemonIncarnation{1}
-}
-func (f *fakePhysical) FailureKind() domain.RemoteFailureKind { return domain.RemoteFailureTransport }
-func (f *fakePhysical) Done() <-chan struct{}                 { return f.done }
-func (f *fakePhysical) Err() error                            { return errors.New("physical loss") }
-func (f *fakePhysical) Close() error                          { f.once.Do(func() { close(f.done) }); return nil }
-func (f *fakePhysical) OpenStream(c context.Context, r ports.BrokerOpenStreamRequest) (ports.BrokerEnvelopeStream, error) {
-	if f.open != nil {
-		return f.open(c, r)
+	m := portsmocks.NewMockBrokerPhysicalConnection(t)
+	f.mock = m
+	for _, option := range options {
+		option(m)
 	}
-	return newFakeLogical(), nil
+	m.EXPECT().Identity().RunAndReturn(func() ports.BrokerDaemonIdentity {
+		if f.identity != "" {
+			return f.identity
+		}
+		return f.endpoint.ExpectedIdentity.Identity
+	}).Maybe()
+	m.EXPECT().Policy().RunAndReturn(func() ports.BrokerPolicy { return f.endpoint.Policy }).Maybe()
+	m.EXPECT().Incarnation().Return(ports.BrokerDaemonIncarnation{1}).Maybe()
+	m.EXPECT().FailureKind().Return(domain.RemoteFailureTransport).Maybe()
+	m.EXPECT().Done().Return((<-chan struct{})(f.done)).Maybe()
+	m.EXPECT().Err().Return(errors.New("physical loss")).Maybe()
+	m.EXPECT().Close().RunAndReturn(f.Close).Maybe()
+	m.EXPECT().OpenStream(mock.Anything, mock.Anything).RunAndReturn(func(c context.Context, r ports.BrokerOpenStreamRequest) (ports.BrokerEnvelopeStream, error) {
+		if f.open != nil {
+			return f.open(c, r)
+		}
+		return newFakeLogical(t), nil
+	}).Maybe()
+	return m
 }
+func (f *fakePhysical) Close() error { f.once.Do(func() { close(f.done) }); return nil }
+
 func poolPolicy() ports.BrokerPolicy {
 	return ports.BrokerPolicy{ProtocolVersion: 1, CatalogSchemaVersion: 1, Transport: "quic", Trust: "trusted", Launch: "explicit", Isolation: "user", EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned}
 }
@@ -137,14 +153,14 @@ func TestPoolRefusedResolutionNeverDials(t *testing.T) {
 func TestPoolOpenFailureWithTypedNilConnection(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		p, _ := setupPool(t, func(_ context.Context, e ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
-			return &fakePhysical{
+			return mockPhysical(t, &fakePhysical{
 				endpoint: e,
 				done:     make(chan struct{}),
 				open: func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerEnvelopeStream, error) {
-					var absent *fakeLogical
+					var absent *portsmocks.MockBrokerEnvelopeStream
 					return absent, errors.New("open failed")
 				},
-			}, nil
+			}), nil
 		})
 		id, err := p.RegisterClient()
 		require.NoError(t, err)
@@ -165,7 +181,7 @@ func TestPoolHundredStreamsLossAndIsolation(t *testing.T) {
 		p, _ := setupPool(t, func(_ context.Context, e ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
 			calls.Add(1)
 			physical = &fakePhysical{endpoint: e, done: make(chan struct{})}
-			return physical, nil
+			return mockPhysical(t, physical), nil
 		})
 		streams := make([]ports.BrokerEnvelopeStream, 100)
 		var wg sync.WaitGroup
@@ -208,7 +224,7 @@ func TestPoolHundredStreamsLossAndIsolation(t *testing.T) {
 func TestPoolAdmissionAndNonreuse(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		p, _ := setupPool(t, func(_ context.Context, e ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
-			return &fakePhysical{endpoint: e, done: make(chan struct{})}, nil
+			return mockPhysical(t, &fakePhysical{endpoint: e, done: make(chan struct{})}), nil
 		})
 		p.limits.StreamsPerClient = 1
 		id, err := p.RegisterClient()
@@ -237,7 +253,7 @@ func TestPoolAdmissionAndNonreuse(t *testing.T) {
 func TestPoolStreamWindowAdmission(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		p, _ := setupPool(t, func(_ context.Context, e ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
-			return &fakePhysical{endpoint: e, done: make(chan struct{})}, nil
+			return mockPhysical(t, &fakePhysical{endpoint: e, done: make(chan struct{})}), nil
 		})
 		p.limits.StreamsPerClient = ports.BrokerStreamWindowSize + 8
 		id, err := p.RegisterClient()
@@ -280,7 +296,7 @@ func TestPoolPendingAcquisitionSeparatesStartMode(t *testing.T) {
 			modes <- e.StartMode
 			entered <- struct{}{}
 			<-release
-			return &fakePhysical{endpoint: e, identity: "canonical", done: make(chan struct{})}, nil
+			return mockPhysical(t, &fakePhysical{endpoint: e, identity: "canonical", done: make(chan struct{})}), nil
 		})
 		// The endpoint is first-contact: it binds no identity, so acquisition
 		// coalescing is decided by the pending key, which is exactly where the start
@@ -342,7 +358,7 @@ func TestPoolCoalescedCancellation(t *testing.T) {
 			case <-ctx.Done():
 				return nil, ctx.Err()
 			case <-proceed:
-				return &fakePhysical{endpoint: e, done: make(chan struct{})}, nil
+				return mockPhysical(t, &fakePhysical{endpoint: e, done: make(chan struct{})}), nil
 			}
 		})
 		id1, _ := p.RegisterClient()
@@ -408,7 +424,7 @@ func TestPoolIdleEviction(t *testing.T) {
 		p, clock := setupPool(t, func(_ context.Context, e ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
 			f := &fakePhysical{endpoint: e, done: make(chan struct{})}
 			physicals <- f
-			return f, nil
+			return mockPhysical(t, f), nil
 		})
 		id, _ := p.RegisterClient()
 		s, err := p.OpenStream(context.Background(), poolRequest(id, 1))
@@ -442,7 +458,7 @@ func TestPoolPolicyAndIdentityVerification(t *testing.T) {
 					if mode == "policy" {
 						e.Policy.Trust = "other"
 					}
-					return &fakePhysical{endpoint: e, done: make(chan struct{})}, nil
+					return mockPhysical(t, &fakePhysical{endpoint: e, done: make(chan struct{})}), nil
 				})
 				if mode == "resolver" {
 					p.routes = poolResolver(func(_ context.Context, r ports.BrokerOpenStreamRequest) (ports.BrokerDialTarget, error) {
@@ -463,7 +479,7 @@ func TestPoolPolicyAndIdentityVerification(t *testing.T) {
 
 func BenchmarkPoolOpenClose(b *testing.B) {
 	p, _ := setupPool(b, func(_ context.Context, e ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
-		return &fakePhysical{endpoint: e, done: make(chan struct{})}, nil
+		return mockPhysical(b, &fakePhysical{endpoint: e, done: make(chan struct{})}), nil
 	})
 	id, _ := p.RegisterClient()
 	b.ReportAllocs()
@@ -482,7 +498,7 @@ func TestPoolAliasesAndPolicyPartition(t *testing.T) {
 		var calls atomic.Int32
 		p, _ := setupPool(t, func(_ context.Context, e ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
 			calls.Add(1)
-			return &fakePhysical{endpoint: e, done: make(chan struct{})}, nil
+			return mockPhysical(t, &fakePhysical{endpoint: e, done: make(chan struct{})}), nil
 		})
 		id, _ := p.RegisterClient()
 		for i, alias := range []string{"user@first", "user@second"} {
@@ -513,14 +529,14 @@ func TestPoolPendingOpenCancellationDoesNotHoldLock(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		entered := make(chan struct{})
 		p, _ := setupPool(t, func(_ context.Context, e ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
-			return &fakePhysical{endpoint: e, done: make(chan struct{}), open: func(ctx context.Context, r ports.BrokerOpenStreamRequest) (ports.BrokerEnvelopeStream, error) {
+			return mockPhysical(t, &fakePhysical{endpoint: e, done: make(chan struct{}), open: func(ctx context.Context, r ports.BrokerOpenStreamRequest) (ports.BrokerEnvelopeStream, error) {
 				if r.Stream == 1 {
 					close(entered)
 					<-ctx.Done()
 					return nil, ctx.Err()
 				}
-				return newFakeLogical(), nil
-			}}, nil
+				return newFakeLogical(t), nil
+			}}), nil
 		})
 		id, _ := p.RegisterClient()
 		result := make(chan error, 1)

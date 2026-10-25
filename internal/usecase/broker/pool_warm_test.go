@@ -45,7 +45,7 @@ func newWarmHarness(t *testing.T, warm int, idle time.Duration) *warmHarness {
 		h.mu.Lock()
 		h.dials[e.ExpectedIdentity.Identity] = append(h.dials[e.ExpectedIdentity.Identity], f)
 		h.mu.Unlock()
-		return f, nil
+		return mockPhysical(t, f), nil
 	}).Maybe()
 	pool, err := NewPool(1, routes, binder, connector, h.clock.mock, PoolLimits{Physical: 4, Clients: 4, Streams: 16, StreamsPerClient: 16, Warm: warm, Idle: idle})
 	require.NoError(t, err)
@@ -213,17 +213,17 @@ func TestPoolAdoptProbePhysical(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				h := newWarmHarness(t, tt.warm, tt.idle)
 				physical := &fakePhysical{endpoint: ports.BrokerDialTarget{Policy: poolPolicy(), ExpectedIdentity: ports.BrokerExpectedIdentity{Identity: "alpha", Bound: true}}, done: make(chan struct{})}
-				require.Equal(t, tt.want, h.pool.AdoptPhysical(physical, poolPolicy()))
+				require.Equal(t, tt.want, h.pool.AdoptPhysical(mockPhysical(t, physical), poolPolicy()))
 				if !tt.want {
 					require.NoError(t, physical.Close())
 					return
 				}
 				shared, ok := h.pool.SharedPhysical("alpha", poolPolicy())
 				require.True(t, ok)
-				require.Same(t, physical, shared)
+				require.Same(t, mockPhysical(t, physical), shared)
 				h.visit(t, "alpha")
 				require.Empty(t, h.physicals("alpha"), "attach must not redial after a first probe")
-				require.False(t, h.pool.AdoptPhysical(&fakePhysical{endpoint: physical.endpoint, done: make(chan struct{})}, poolPolicy()), "duplicate probe cannot replace the attachment")
+				require.False(t, h.pool.AdoptPhysical(mockPhysical(t, &fakePhysical{endpoint: physical.endpoint, done: make(chan struct{})}), poolPolicy()), "duplicate probe cannot replace the attachment")
 				if tt.idle > 0 {
 					h.reap(t, physical, tt.idle)
 				} else {
@@ -266,7 +266,7 @@ func TestPoolLocalOpenDoesNotWaitForProbeAdoption(t *testing.T) {
 		opened := make(chan error, 1)
 		go func() {
 			<-start
-			adopted <- h.pool.AdoptPhysical(probe, poolPolicy())
+			adopted <- h.pool.AdoptPhysical(mockPhysical(t, probe), poolPolicy())
 		}()
 		go func() {
 			<-start
@@ -318,7 +318,7 @@ func TestPoolSharedPhysical(t *testing.T) {
 				physical, ok := h.pool.SharedPhysical(tt.identity, tt.policy())
 				require.Equal(t, tt.want, ok)
 				if tt.want {
-					require.Same(t, h.physicals("alpha")[0], physical)
+					require.Same(t, mockPhysical(t, h.physicals("alpha")[0]), physical)
 					// Borrowing neither dials nor refreshes warm order: beta still
 					// evicts alpha.
 					h.visit(t, "beta")

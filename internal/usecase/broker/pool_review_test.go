@@ -9,6 +9,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/stretchr/testify/require"
 )
 
@@ -30,9 +31,9 @@ func TestPoolAdapterFailures(t *testing.T) {
 						if stage == "connector" {
 							return nil, tc.err
 						}
-						return &fakePhysical{endpoint: e, done: make(chan struct{}), open: func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerEnvelopeStream, error) {
+						return mockPhysical(t, &fakePhysical{endpoint: e, done: make(chan struct{}), open: func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerEnvelopeStream, error) {
 							return nil, tc.err
-						}}, nil
+						}}), nil
 					})
 					if stage == "resolver" {
 						p.routes = poolResolver(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerDialTarget, error) {
@@ -57,9 +58,9 @@ func TestPoolRejectedPaths(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				p, _ := setupPool(t, func(_ context.Context, e ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
-					return &fakePhysical{endpoint: e, done: make(chan struct{}), open: func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerEnvelopeStream, error) {
+					return mockPhysical(t, &fakePhysical{endpoint: e, done: make(chan struct{}), open: func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerEnvelopeStream, error) {
 						return nil, nil
-					}}, nil
+					}}), nil
 				})
 				id, _ := p.RegisterClient()
 				req := poolRequest(id, 1)
@@ -133,14 +134,14 @@ func TestPoolRedirectRejectsUnavailableWinnerWithoutResurrectingRefs(t *testing.
 
 func TestPoolPostOpenPhysicalLoss(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		raw := newFakeLogical()
+		raw := newFakeLogical(t)
 		p, _ := setupPool(t, func(_ context.Context, e ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
 			f := &fakePhysical{endpoint: e, done: make(chan struct{})}
 			f.open = func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerEnvelopeStream, error) {
 				_ = f.Close()
 				return raw, nil
 			}
-			return f, nil
+			return mockPhysical(t, f), nil
 		})
 		id, _ := p.RegisterClient()
 		_, err := p.OpenStream(context.Background(), poolRequest(id, 1))
@@ -164,7 +165,7 @@ func TestPoolTerminalPrecedence(t *testing.T) {
 				defer cancel()
 				f := &fakePhysical{done: make(chan struct{})}
 				_ = f.Close()
-				e := &poolEntry{ctx: context.Background(), physical: f}
+				e := &poolEntry{ctx: context.Background(), physical: mockPhysical(t, f)}
 				if name == "request over physical" {
 					cancel()
 				}
@@ -205,7 +206,7 @@ func TestPoolRetiredEntryNamesReason(t *testing.T) {
 					panic("unused")
 				})
 				ctx, cancel := context.WithCancelCause(context.Background())
-				e := &poolEntry{ctx: ctx, cancel: cancel, physical: &fakePhysical{done: make(chan struct{})}}
+				e := &poolEntry{ctx: ctx, cancel: cancel, physical: mockPhysical(t, &fakePhysical{done: make(chan struct{})})}
 				e.retire(tc.reason)()
 
 				err := p.streamTerminal(context.Background(), e, poolRequest(ports.BrokerConnectionID{1}, 1), nil)
@@ -253,17 +254,13 @@ func TestPoolTimerStopDrain(t *testing.T) {
 	}
 }
 
-type closeErrorLogical struct {
-	*fakeLogical
-	err error
-}
-
-func (l *closeErrorLogical) Close() error { _ = l.fakeLogical.Close(); return l.err }
 func TestPooledStreamPreservesCloseError(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		cause := errors.New("close failed")
 		calls := 0
-		s := &pooledStream{BrokerEnvelopeStream: &closeErrorLogical{newFakeLogical(), cause}, done: make(chan struct{}), release: func() { calls++ }}
+		logical := portsmocks.NewMockBrokerEnvelopeStream(t)
+		logical.EXPECT().Close().Return(cause).Once()
+		s := &pooledStream{BrokerEnvelopeStream: logical, done: make(chan struct{}), release: func() { calls++ }}
 		require.ErrorIs(t, s.Close(), cause)
 		require.ErrorIs(t, s.Close(), cause)
 		require.Equal(t, 1, calls)
@@ -276,7 +273,7 @@ func TestPoolCaps(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				p, _ := setupPool(t, func(_ context.Context, e ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
-					return &fakePhysical{endpoint: e, done: make(chan struct{})}, nil
+					return mockPhysical(t, &fakePhysical{endpoint: e, done: make(chan struct{})}), nil
 				})
 				p.limits.Clients = 1
 				p.limits.Streams = 1
@@ -307,7 +304,7 @@ func TestPoolCaps(t *testing.T) {
 func TestPoolShutdownStreamsCancelled(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		p, _ := setupPool(t, func(_ context.Context, e ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
-			return &fakePhysical{endpoint: e, done: make(chan struct{})}, nil
+			return mockPhysical(t, &fakePhysical{endpoint: e, done: make(chan struct{})}), nil
 		})
 		id, _ := p.RegisterClient()
 		s, err := p.OpenStream(context.Background(), poolRequest(id, 1))

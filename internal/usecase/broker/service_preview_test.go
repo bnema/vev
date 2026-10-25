@@ -77,6 +77,7 @@ func (c *previewWatchConn) fail(err error) { c.steps <- previewStep{err: err} }
 // previewTestConnector dials one scripted physical whose every logical open
 // yields a fresh watch stream, published on opened for the test to drive.
 type previewTestConnector struct {
+	t        testing.TB
 	opened   chan *previewWatchConn
 	scripted *fakePhysical
 }
@@ -89,7 +90,7 @@ func (c *previewTestConnector) Connect(_ context.Context, e ports.BrokerDialTarg
 			return conn, nil
 		}}
 	}
-	return c.scripted, nil
+	return mockPhysical(c.t, c.scripted), nil
 }
 
 func previewTarget(lifecycle byte, tab string) domain.RemoteSessionTarget {
@@ -123,7 +124,7 @@ type previewFixture struct {
 // fresh authority driven by a manual clock.
 func newPreviewFixture(t *testing.T, target domain.RemoteSessionTarget) *previewFixture {
 	t.Helper()
-	connector := &previewTestConnector{opened: make(chan *previewWatchConn, 8)}
+	connector := &previewTestConnector{t: t, opened: make(chan *previewWatchConn, 8)}
 	clock := newManualClock(t, time.Unix(0, 0))
 	registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, newTestStore()), nil, clock.mock, nil, RegistryConfig{ObservationDisabled: true})
 	require.NoError(t, err)

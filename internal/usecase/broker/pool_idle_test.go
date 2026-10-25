@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/stretchr/testify/require"
 )
 
@@ -21,7 +22,7 @@ func TestPoolIdleEvictionAndReconnect(t *testing.T) {
 		var calls atomic.Int32
 		p, clock := setupPool(t, func(_ context.Context, e ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
 			calls.Add(1)
-			return &fakePhysical{endpoint: e, done: make(chan struct{})}, nil
+			return mockPhysical(t, &fakePhysical{endpoint: e, done: make(chan struct{})}), nil
 		})
 		id, _ := p.RegisterClient()
 		s, err := p.OpenStream(context.Background(), poolRequest(id, 1))
@@ -43,12 +44,6 @@ type retiringPhysical struct {
 	closing, allowClose chan struct{}
 }
 
-func (f *retiringPhysical) Close() error {
-	close(f.closing)
-	<-f.allowClose
-	return f.fakePhysical.Close()
-}
-
 func TestPoolRetiringKeyUntilCloseCompletes(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var calls atomic.Int32
@@ -58,9 +53,11 @@ func TestPoolRetiringKeyUntilCloseCompletes(t *testing.T) {
 			f := &fakePhysical{endpoint: e, done: make(chan struct{})}
 			if calls.Add(1) == 1 {
 				first = &retiringPhysical{fakePhysical: f, closing: make(chan struct{}), allowClose: allow}
-				return first, nil
+				return mockPhysical(t, f, func(m *portsmocks.MockBrokerPhysicalConnection) {
+					m.EXPECT().Close().RunAndReturn(func() error { close(first.closing); <-allow; return f.Close() }).Maybe()
+				}), nil
 			}
-			return f, nil
+			return mockPhysical(t, f), nil
 		})
 		defer func() {
 			select {
@@ -97,7 +94,7 @@ func TestPoolFailedConnectRetry(t *testing.T) {
 			if calls.Add(1) == 1 {
 				return nil, context.DeadlineExceeded
 			}
-			return &fakePhysical{endpoint: e, done: make(chan struct{})}, nil
+			return mockPhysical(t, &fakePhysical{endpoint: e, done: make(chan struct{})}), nil
 		})
 		id, _ := p.RegisterClient()
 		_, err := p.OpenStream(context.Background(), poolRequest(id, 1))
