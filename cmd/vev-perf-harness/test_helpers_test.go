@@ -11,14 +11,18 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/mock"
 )
 
-type fakeClock struct{ tick int64 }
-
-func (c *fakeClock) Now() int64 { c.tick += 10; return c.tick }
-
-func (c *fakeClock) Sleep(d time.Duration) {
-	c.tick += d.Nanoseconds()
+// newClockMock preserves the harness's deterministic nanosecond accounting.
+func newClockMock(t *testing.T) *mockclock {
+	t.Helper()
+	c := newMockclock(t)
+	var tick int64
+	c.EXPECT().Now().RunAndReturn(func() int64 { tick += 10; return tick }).Maybe()
+	c.EXPECT().Sleep(mock.Anything).Run(func(d time.Duration) { tick += d.Nanoseconds() }).Maybe()
+	return c
 }
 
 type fakeProcess struct {
@@ -72,7 +76,7 @@ func (l *fakeLauncher) Launch(m processMapping, command roleCommand) (launchedPr
 	return p, nil
 }
 
-type lateFlushProcess struct{ clock *fakeClock }
+type lateFlushProcess struct{ clock *mockclock }
 
 func (*lateFlushProcess) Warmup([]byte) error { return nil }
 
@@ -80,13 +84,13 @@ func (p *lateFlushProcess) Measure(_ []byte, injected, flushed func() error) err
 	if err := injected(); err != nil {
 		return err
 	}
-	p.clock.tick += minimumDuration.Nanoseconds()
+	p.clock.Sleep(minimumDuration)
 	return flushed()
 }
 
 func (*lateFlushProcess) Close() error { return nil }
 
-type insufficientEventLauncher struct{ clock *fakeClock }
+type insufficientEventLauncher struct{ clock *mockclock }
 
 func (l insufficientEventLauncher) Launch(m processMapping, _ roleCommand) (launchedProcess, error) {
 	if m.Role == "client" {

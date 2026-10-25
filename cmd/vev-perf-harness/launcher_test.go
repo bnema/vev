@@ -510,7 +510,7 @@ func TestHarnessCanonicalLocalSmokeRealRoles(t *testing.T) {
 	}
 	closeTestFile(t, raw)
 	h := defaultHarness()
-	h.clock = &fakeClock{} // injected duration keeps the public 30s contract bounded in test
+	h.clock = newClockMock(t) // injected duration keeps the public 30s contract bounded in test
 	h.launcher = &cliLauncher{bin: bin}
 	result, err := h.runOne(options{vevBin: bin, out: dir, duration: minimumDuration}, m, local, 1, raw)
 	if err != nil {

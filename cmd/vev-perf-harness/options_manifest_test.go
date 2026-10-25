@@ -24,7 +24,7 @@ func TestHarnessScenarioSelectionKeepsCanonicalManifestValidation(t *testing.T) 
 	}
 	selected := m.Scenarios[0]
 	h := defaultHarness()
-	h.clock, h.launcher = &fakeClock{}, &fakeLauncher{}
+	h.clock, h.launcher = newClockMock(t), &fakeLauncher{}
 	out := filepath.Join(t.TempDir(), "out")
 	if err := run([]string{"--vev-bin", "ignored", "--manifest", manifestPath, "--out", out, "--scenario", selected.ID, "--warmup", "0s", "--duration", "30s", "--repetitions", "10"}, h); err != nil {
 		t.Fatal(err)
@@ -61,7 +61,7 @@ func TestHarnessScenarioSelectionRejectsIncompleteCanonicalManifest(t *testing.T
 	}
 	launcher := &fakeLauncher{}
 	h := defaultHarness()
-	h.clock, h.launcher = &fakeClock{}, launcher
+	h.clock, h.launcher = newClockMock(t), launcher
 	out := filepath.Join(dir, "out")
 	err = run([]string{"--vev-bin", "ignored", "--manifest", manifestPath, "--out", out, "--scenario", selected.ID, "--warmup", "0s", "--duration", "30s", "--repetitions", "10"}, h)
 	if err == nil || !strings.Contains(err.Error(), "missing scenario or inapplicable reason") {
@@ -225,7 +225,7 @@ func TestHarnessCreatesExclusiveTraceManifestAndEvidence(t *testing.T) {
 	closeTestFile(t, raw)
 	launcher := &fakeLauncher{}
 	h := defaultHarness()
-	h.clock = &fakeClock{}
+	h.clock = newClockMock(t)
 	h.launcher = launcher
 	o := options{vevBin: "ignored", out: dir, warmup: time.Second, duration: minimumDuration, repetitions: minimumRepetitions}
 	r, err := h.runOne(o, manifest{}, scenario{ID: "4x4-local", Roles: []string{"daemon", "client"}}, 1, raw)

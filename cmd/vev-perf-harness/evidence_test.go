@@ -116,7 +116,7 @@ func TestHarnessRunRejectsStraddlingEventsAsInsufficient(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	clock := &fakeClock{}
+	clock := newClockMock(t)
 	h := defaultHarness()
 	h.clock, h.launcher = clock, insufficientEventLauncher{clock: clock}
 	_, err = h.runOne(options{out: dir, warmup: time.Second, duration: minimumDuration}, manifest{}, scenario{ID: "late", Roles: []string{"daemon", "client"}}, 1, raw)
@@ -186,7 +186,7 @@ func TestHarnessClosesRolesBeforeMergingReceiveSpans(t *testing.T) {
 	})
 	launcher := &closeTraceLauncher{}
 	h := defaultHarness()
-	h.clock, h.launcher = &fakeClock{}, launcher
+	h.clock, h.launcher = newClockMock(t), launcher
 	result, err := h.runOne(options{out: dir, warmup: time.Second, duration: minimumDuration, repetitions: minimumRepetitions}, manifest{}, scenario{ID: "receive-cleanup", Roles: []string{"daemon", "client"}}, 1, raw)
 	if err != nil {
 		t.Fatal(err)
@@ -224,7 +224,7 @@ func TestHarnessWritesRequiredEvidenceWithSufficientSpans(t *testing.T) {
 	}
 	l := &traceLauncher{}
 	h := defaultHarness()
-	h.clock = &fakeClock{}
+	h.clock = newClockMock(t)
 	h.launcher = l
 	h.gitSHA = func() string { return "harness-sha" }
 	h.vevGitSHA = func(path string) string {
