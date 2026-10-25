@@ -145,7 +145,7 @@ func newPreviewFixture(t *testing.T, target domain.RemoteSessionTarget) *preview
 	t.Cleanup(func() { registry.store.close() })
 	authority, _, _, _ := composeTestAuthority(t, 1, registry, connector.connect, clock)
 	codec := portsmocks.NewMockSessionCodec(t)
-	codec.EXPECT().Client(mock.Anything).RunAndReturn(func(stream ports.BrokerEnvelopeStream) ports.ClientConnection {
+	codec.EXPECT().Client(mock.MatchedBy(func(ports.BrokerEnvelopeStream) bool { return true })).RunAndReturn(func(stream ports.BrokerEnvelopeStream) ports.ClientConnection {
 		if pooled, ok := stream.(*pooledStream); ok {
 			stream = pooled.BrokerEnvelopeStream
 		}
@@ -199,17 +199,11 @@ func (f *previewFixture) awaitPublication() ports.BrokerPreviewPublication {
 	}
 }
 
-// advanceUntilOpen drives the manual clock until the reopen backoff fires.
-func (f *previewFixture) advanceUntilOpen(step time.Duration) {
+// advanceUntilOpen advances the expected reopen delay after the failure settles.
+func (f *previewFixture) advanceUntilOpen(delay time.Duration) {
 	f.t.Helper()
 	synctest.Wait()
-	// Advance a bounded backoff budget in exact fake-clock steps.
-	for elapsed := time.Duration(0); elapsed <= previewReopenMax; elapsed += step {
-		if len(f.connector.opened) > 0 {
-			return
-		}
-		f.clock.Advance(step)
-	}
+	f.clock.Advance(delay)
 	require.NotEmpty(f.t, f.connector.opened)
 }
 
@@ -347,7 +341,7 @@ func TestServicePreviewBackoffDoublesUntilCap(t *testing.T) {
 			f.awaitPublication()
 			awaitClosed(t, conn)
 			start := f.clock.Now()
-			f.advanceUntilOpen(previewReopenMin / 5)
+			f.advanceUntilOpen(delay)
 			require.GreaterOrEqual(t, f.clock.Now().Sub(start), delay)
 			conn, _ = f.awaitOpen()
 		}
@@ -427,10 +421,11 @@ func TestServicePreviewRouteValidation(t *testing.T) {
 		{name: "zero generation", mutate: func(r *ports.BrokerPreviewRequest) { r.Generation = 0 }},
 		{name: "invalid viewport", mutate: func(r *ports.BrokerPreviewRequest) { r.Preview.Width = 0 }},
 	}
-	f := newPreviewFixture(t, previewTarget(0x11, "tab-alpha"))
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
+				f := newPreviewFixture(t, previewTarget(0x11, "tab-alpha"))
+				f.awaitOpen()
 				request := previewRequestFor(f.service, 5, previewTarget(0x11, "tab-alpha"))
 				tc.mutate(&request)
 				_, err := f.service.SubscribePreview(request)
@@ -439,9 +434,13 @@ func TestServicePreviewRouteValidation(t *testing.T) {
 			})
 		})
 	}
-	stale := previewRequestFor(f.service, 1, previewTarget(0x11, "tab-alpha"))
-	_, err := f.service.SubscribePreview(stale)
-	require.ErrorIs(t, err, ports.BrokerAdmissionStale, "a generation is never reused")
+	synctest.Test(t, func(t *testing.T) {
+		f := newPreviewFixture(t, previewTarget(0x11, "tab-alpha"))
+		f.awaitOpen()
+		stale := previewRequestFor(f.service, 1, previewTarget(0x11, "tab-alpha"))
+		_, err := f.service.SubscribePreview(stale)
+		require.ErrorIs(t, err, ports.BrokerAdmissionStale, "a generation is never reused")
+	})
 }
 
 func mockPreviewConnector(t testing.TB, c *previewTestConnector) *portsmocks.MockBrokerEndpointConnector {

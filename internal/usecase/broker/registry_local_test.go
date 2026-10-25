@@ -17,6 +17,7 @@ import (
 
 // scriptedLocalProbe scripts one local observation per received call: the test
 // owns the completion, so the local probe never depends on wall time.
+// Missing mock: broker.LocalProbe has no generated mock; retain this local seam.
 type scriptedLocalProbe struct {
 	calls    chan localProbeCall
 	canceled chan struct{}

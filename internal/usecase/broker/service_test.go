@@ -490,10 +490,6 @@ func TestServiceNextStreamIDAllocation(t *testing.T) {
 }
 
 func TestServiceOpenStreamAdmissionValidatesCallerInput(t *testing.T) {
-	authority, _, _, _, _, _ := newTestAuthority(t, 1, nil, immediateConnector(t))
-	service, err := authority.AdmitClient(context.Background())
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, service.Close()) })
 
 	for _, tc := range []struct {
 		name   string
@@ -506,9 +502,14 @@ func TestServiceOpenStreamAdmissionValidatesCallerInput(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
+				authority, _, _, _, _, _ := newTestAuthority(t, 1, nil, immediateConnector(t))
+				service, err := authority.AdmitClient(context.Background())
+				require.NoError(t, err)
+				t.Cleanup(func() { require.NoError(t, service.Close()) })
+
 				request := poolRequest(service.ConnectionID(), 1)
 				tc.mutate(&request)
-				_, err := service.OpenEnvelopeStream(context.Background(), request)
+				_, err = service.OpenEnvelopeStream(context.Background(), request)
 				require.ErrorIs(t, err, ports.BrokerAdmissionInvalid)
 
 			})
@@ -1028,7 +1029,7 @@ func TestServiceCloseCancelsInFlightRegistryMutation(t *testing.T) {
 
 		// Hold the registry lock so the mutation parks before it consults its
 		// context, and Close can cancel the connection context while it waits.
-		gate := &mutationGateContext{Context: context.Background(), entered: make(chan struct{}), release: make(chan struct{}), passed: make(chan struct{})}
+		gate := &mutationGateContext{Context: service.(*Service).ctx, entered: make(chan struct{}), release: make(chan struct{}), passed: make(chan struct{})}
 		registry.mu.Lock()
 		released := false
 		t.Cleanup(func() {
@@ -1064,6 +1065,7 @@ func TestServiceCloseCancelsInFlightRegistryMutation(t *testing.T) {
 
 		// Release the registry lock: the mutation now observes the cancelled
 		// connection context instead of committing.
+		// The service context is now cancelled before the operation proceeds.
 		close(gate.release)
 		<-gate.passed
 		registry.mu.Unlock()
@@ -1335,5 +1337,5 @@ type mutationGateContext struct {
 func (c *mutationGateContext) Done() <-chan struct{} {
 	c.once.Do(func() { close(c.entered); <-c.release })
 	c.passOnce.Do(func() { close(c.passed) })
-	return nil
+	return c.Context.Done()
 }

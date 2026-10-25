@@ -67,12 +67,14 @@ func requireBrokerInvalid(t *testing.T, err error) {
 	require.Equal(t, ports.BrokerAdmissionInvalid, admission)
 }
 
+// Missing mock: broker.Closeable has no generated mock.
 type closeFunc func() error
 
 func (f closeFunc) Close() error { return f() }
 
 // blockingRunner stands in for a broker-owned background component such as the
 // observation Registry: it runs until cancellation and reports what it saw.
+// Missing mock: broker.Runner has no generated mock.
 type blockingRunner struct {
 	started  chan struct{}
 	observed chan error
