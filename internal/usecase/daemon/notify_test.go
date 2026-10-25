@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -332,11 +333,21 @@ func toastLifetimes(ac *attachedClient) []time.Duration {
 	return out
 }
 
-// awaitToastCount runs inside a synctest bubble: after quiescence the toast
-// slice must hold want entries.
+// awaitToastCount asserts, after bubble quiescence when there is a bubble, that
+// the toast slice holds want entries.
 func awaitToastCount(t *testing.T, ac *attachedClient, want int) []domain.Notification {
 	t.Helper()
-	synctest.Wait()
+	if !settleBubble() {
+		// Callers outside a bubble (notice_render_test.go, control_test.go, ...)
+		// have no quiescence primitive: yield to the timer and render goroutines
+		// a bounded number of times. No wall-clock time is involved.
+		for range 200000 {
+			if got, _ := visibleToasts(ac); len(got) == want {
+				return got
+			}
+			runtime.Gosched()
+		}
+	}
 	got, _ := visibleToasts(ac)
 	require.Len(t, got, want, "toast count never reached %d", want)
 	return got

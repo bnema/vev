@@ -764,9 +764,14 @@ func TestOverlayInputPrecedence(t *testing.T) {
 
 // settleBubble waits for bubble quiescence when called from inside a synctest
 // bubble and is a no-op outside one (synctest.Wait panics there).
-func settleBubble() {
-	defer func() { _ = recover() }()
+func settleBubble() (inBubble bool) {
+	defer func() {
+		if recover() != nil {
+			inBubble = false
+		}
+	}()
 	synctest.Wait()
+	return true
 }
 
 // requirePTYWrite asserts the write is already queued, settling the bubble
