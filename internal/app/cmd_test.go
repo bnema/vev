@@ -200,8 +200,7 @@ func TestMoveCmdPreservesPositionalArguments(t *testing.T) {
 }
 
 func TestRemoteCatalogCommandUsesBroker(t *testing.T) {
-	stream := newSeamBrokerStream(protocol.CommandResult{RequestID: 1, Outcome: protocol.CommandSucceeded})
-	service := newSeamBrokerService(stream)
+	service, state, _ := newSeamBroker(t, protocol.CommandResult{RequestID: 1, Outcome: protocol.CommandSucceeded})
 	err := runCmdWithDeps(context.Background(), cmdInvocation{slug: "remote-catalog", jsonOut: true}, cmdDeps{
 		stdout:  io.Discard,
 		getenv:  func(string) string { return "" },
@@ -212,8 +211,8 @@ func TestRemoteCatalogCommandUsesBroker(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
-	require.Len(t, service.openedRequests(), 1)
-	require.Equal(t, ports.BrokerStreamControl, service.openedRequests()[0].Purpose)
+	require.Len(t, state.allOpened(), 1)
+	require.Equal(t, ports.BrokerStreamControl, state.allOpened()[0].Purpose)
 }
 
 func TestMoveCmdInvalidArgumentResultExitsTwo(t *testing.T) {

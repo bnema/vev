@@ -576,7 +576,7 @@ func TestWebGatewayTabClosingIsIsolated(t *testing.T) {
 // selection-unavailable notice, opens no stream, stays usable in the picker, and
 // keeps serving frames.
 func TestWebGatewayTabStaysPickerWhenDestinationIsRefused(t *testing.T) {
-	service := newTerminalCompositionService(ports.BrokerSnapshot{Epoch: terminalCompositionEpoch, Revision: 1})
+	service, state := newTerminalCompositionService(t, ports.BrokerSnapshot{Epoch: terminalCompositionEpoch, Revision: 1}, nil)
 	connector := portsmocks.NewMockBrokerConnector(t)
 	connector.EXPECT().Connect(mock.Anything).Return(service, nil).Maybe()
 	fixture := startWebGatewayFixtureOver(t, offlineClientFixture{}, func() ports.BrokerConnector {
@@ -588,7 +588,7 @@ func TestWebGatewayTabStaysPickerWhenDestinationIsRefused(t *testing.T) {
 	require.Equal(t, client.LifecycleNoticeSelectionUnavailable, fixture.awaitNotice(t).Kind)
 	fixture.awaitFailure(t)
 
-	require.Empty(t, service.openedRequests(), "a refused destination never opens a broker stream")
+	require.Empty(t, state.openedRequests(), "a refused destination never opens a broker stream")
 
 	// The run stays alive in the picker: it keeps painting and never ends the
 	// socket, exactly like the ordinary terminal run.
@@ -606,7 +606,7 @@ func TestWebGatewayTabStaysPickerWhenDestinationIsRefused(t *testing.T) {
 // attached: the supervisor reports the typed broker loss, returns to the picker,
 // and keeps serving frames while it retries.
 func TestWebGatewayTabReturnsToPickerOnBrokerLoss(t *testing.T) {
-	service := newTerminalCompositionService(terminalCompositionSnapshot([]string{"work"}, nil))
+	service, _ := newTerminalCompositionService(t, terminalCompositionSnapshot([]string{"work"}, nil), nil)
 	connector := portsmocks.NewMockBrokerConnector(t)
 	var calls atomic.Int32
 	connector.EXPECT().Connect(mock.Anything).RunAndReturn(func(context.Context) (ports.BrokerNavigator, error) {

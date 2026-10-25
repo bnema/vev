@@ -31,6 +31,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 )
 
@@ -87,175 +88,50 @@ func readyTestSnapshot(mutate func(*ports.BrokerDaemonObservation)) ports.Broker
 	}
 }
 
-// readyScriptedSubscription is one coalescing capacity-one subscription.
-type readyScriptedSubscription struct {
-	mu      sync.Mutex
-	changed chan struct{}
-	closed  int
+// newReadyScriptedService is a scripted ports.BrokerService serving one fixed
+// snapshot. It records every mutating or stream method it is asked for, and a
+// test ends its connection through the state to drive the reconnect path.
+func newReadyScriptedService(t *testing.T, snapshot ports.BrokerSnapshot, opts ...func(*portsmocks.MockBrokerService, *brokerServiceState)) (*portsmocks.MockBrokerService, *brokerServiceState) {
+	t.Helper()
+	opts = append([]func(*portsmocks.MockBrokerService, *brokerServiceState){
+		func(_ *portsmocks.MockBrokerService, state *brokerServiceState) {
+			state.connectionID = ports.BrokerConnectionID{0x2a}
+		},
+	}, opts...)
+	return newBrokerServiceMock(t, snapshot, opts...)
 }
-
-func newReadyScriptedSubscription() *readyScriptedSubscription {
-	return &readyScriptedSubscription{changed: make(chan struct{}, 1)}
-}
-
-func (s *readyScriptedSubscription) Changed() <-chan struct{} { return s.changed }
-
-func (s *readyScriptedSubscription) Close() {
-	s.mu.Lock()
-	s.closed++
-	s.mu.Unlock()
-}
-
-func (s *readyScriptedSubscription) closeCount() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.closed
-}
-
-// readyScriptedService is a scripted ports.BrokerService. It serves one fixed
-// snapshot, records every mutating or stream method it is asked for, and lets a
-// test end its connection to drive the reconnect path.
-type readyScriptedService struct {
-	snapshot ports.BrokerSnapshot
-	subErr   error
-
-	mu        sync.Mutex
-	done      chan struct{}
-	doneOnce  sync.Once
-	subs      []*readyScriptedSubscription
-	closes    int
-	mutations []string
-}
-
-func newReadyScriptedService(snapshot ports.BrokerSnapshot) *readyScriptedService {
-	return &readyScriptedService{snapshot: snapshot, done: make(chan struct{})}
-}
-
-func (s *readyScriptedService) record(name string) {
-	s.mu.Lock()
-	s.mutations = append(s.mutations, name)
-	s.mu.Unlock()
-}
-
-func (s *readyScriptedService) ConnectionID() ports.BrokerConnectionID {
-	return ports.BrokerConnectionID{0x2a}
-}
-
-func (s *readyScriptedService) NextStreamID() (ports.BrokerStreamID, error) { return 1, nil }
-
-func (s *readyScriptedService) Done() <-chan struct{} { return s.done }
-
-func (s *readyScriptedService) Err() error { return nil }
-
-func (s *readyScriptedService) Snapshot() ports.BrokerSnapshot { return s.snapshot.Clone() }
-
-func (s *readyScriptedService) Subscribe() (ports.BrokerSubscription, error) {
-	if s.subErr != nil {
-		return nil, s.subErr
-	}
-	sub := newReadyScriptedSubscription()
-	s.mu.Lock()
-	s.subs = append(s.subs, sub)
-	s.mu.Unlock()
-	return sub, nil
-}
-
-func (s *readyScriptedService) SubscribePreview(ports.BrokerPreviewRequest) (ports.BrokerPreviewSubscription, error) {
-	s.record("SubscribePreview")
-	return nil, errors.New("ready scripted service does not support preview")
-}
-
-func (s *readyScriptedService) OpenStream(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-	s.record("OpenStream")
-	return nil, ports.BrokerAdmissionClosed
-}
-
-func (s *readyScriptedService) CloseStream(ports.BrokerConnectionID, ports.BrokerStreamID) error {
-	s.record("CloseStream")
-	return nil
-}
-
-func (s *readyScriptedService) AddHost(context.Context, string, ports.BrokerPolicy) (domain.RemoteRegistration, error) {
-	s.record("AddHost")
-	return domain.RemoteRegistration{}, nil
-}
-
-func (s *readyScriptedService) RemoveHost(context.Context, domain.RemoteRegistration) (bool, error) {
-	s.record("RemoveHost")
-	return false, nil
-}
-
-func (s *readyScriptedService) UpdateHostPolicy(context.Context, domain.RemoteRegistration, ports.BrokerPolicy) (domain.RemoteRegistration, error) {
-	s.record("UpdateHostPolicy")
-	return domain.RemoteRegistration{}, nil
-}
-
-func (s *readyScriptedService) RequestReconcile(string) { s.record("RequestReconcile") }
-
-func (s *readyScriptedService) Close() error {
-	s.mu.Lock()
-	s.closes++
-	s.mu.Unlock()
-	return nil
-}
-
-// finish closes Done, so the probe observes the connection going terminal.
-func (s *readyScriptedService) finish() { s.doneOnce.Do(func() { close(s.done) }) }
-
-func (s *readyScriptedService) closeCount() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.closes
-}
-
-// mutationNames returns the effectful methods the probe asked for, if any.
-func (s *readyScriptedService) mutationNames() []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return append([]string(nil), s.mutations...)
-}
-
-// subscriptionCloses returns the total Close count across this service's
-// subscriptions.
-func (s *readyScriptedService) subscriptionCloses() int {
-	s.mu.Lock()
-	subs := append([]*readyScriptedSubscription(nil), s.subs...)
-	s.mu.Unlock()
-	total := 0
-	for _, sub := range subs {
-		total += sub.closeCount()
-	}
-	return total
-}
-
-var _ ports.BrokerService = (*readyScriptedService)(nil)
 
 // readyDialScript records every dial the probe performs and serves one fresh
 // scripted service per call, so a probe is proven to reconnect rather than
 // reuse a connection.
 type readyDialScript struct {
+	t        *testing.T
 	mu       sync.Mutex
 	dials    int
-	services []*readyScriptedService
-	produce  func() (ports.BrokerService, error)
+	services []*brokerServiceState
+	produce  func(*readyDialScript) (ports.BrokerService, error)
+}
+
+// newService is the scripted service one dial serves: a fixed snapshot, and a
+// state the probe assertions read back after the run.
+func (s *readyDialScript) newService(snapshot ports.BrokerSnapshot, opts ...func(*portsmocks.MockBrokerService, *brokerServiceState)) ports.BrokerService {
+	service, state := newReadyScriptedService(s.t, snapshot, opts...)
+	s.mu.Lock()
+	s.services = append(s.services, state)
+	s.mu.Unlock()
+	return service
 }
 
 // scriptReadyDial replaces the probe's dial seam for one test.
-func scriptReadyDial(t *testing.T, produce func() (ports.BrokerService, error)) *readyDialScript {
+func scriptReadyDial(t *testing.T, produce func(*readyDialScript) (ports.BrokerService, error)) *readyDialScript {
 	t.Helper()
-	script := &readyDialScript{produce: produce}
+	script := &readyDialScript{t: t, produce: produce}
 	previous := brokerReadyDial
 	brokerReadyDial = func(context.Context, string) (ports.BrokerService, error) {
 		script.mu.Lock()
 		script.dials++
 		script.mu.Unlock()
-		service, err := script.produce()
-		if recorded, ok := service.(*readyScriptedService); ok {
-			script.mu.Lock()
-			script.services = append(script.services, recorded)
-			script.mu.Unlock()
-		}
-		return service, err
+		return script.produce(script)
 	}
 	t.Cleanup(func() { brokerReadyDial = previous })
 	return script
@@ -267,10 +143,10 @@ func (s *readyDialScript) dialCount() int {
 	return s.dials
 }
 
-func (s *readyDialScript) createdServices() []*readyScriptedService {
+func (s *readyDialScript) createdServices() []*brokerServiceState {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return append([]*readyScriptedService(nil), s.services...)
+	return append([]*brokerServiceState(nil), s.services...)
 }
 
 // readyTestOptions builds one parsed probe invocation over a fresh isolated
@@ -581,17 +457,16 @@ func TestBrokerReadyObservationTable(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			service := newReadyScriptedService(tt.snapshot)
-			service.subErr = tt.subErr
+			service, state := newReadyScriptedService(t, tt.snapshot, func(_ *portsmocks.MockBrokerService, state *brokerServiceState) { state.subErr = tt.subErr })
 			ctx, cancel := context.WithTimeout(context.Background(), readyTestObserveMax)
 			defer cancel()
 
 			result := observeBrokerReady(ctx, brokerReadyOptions{require: tt.require, timeout: time.Second, maxAge: time.Second}, service)
-			require.Empty(t, service.mutationNames(), "readiness must never open a stream, reconcile, or mutate membership")
+			require.Empty(t, state.mutationNames(), "readiness must never open a stream, reconcile, or mutate membership")
 			if tt.subErr != nil {
-				require.Zero(t, service.subscriptionCloses(), "a refused subscription is never closed as if it existed")
+				require.Zero(t, state.subscriptionCloses(), "a refused subscription is never closed as if it existed")
 			} else {
-				require.Equal(t, 1, service.subscriptionCloses(), "the probe closes the subscription it opened")
+				require.Equal(t, 1, state.subscriptionCloses(), "the probe closes the subscription it opened")
 			}
 			if tt.wantNil {
 				require.Nil(t, result, "an unsatisfied observation publishes nothing")
@@ -617,25 +492,29 @@ func TestBrokerReadyRunOutcomeTable(t *testing.T) {
 	tests := []struct {
 		name        string
 		require     string
-		produce     func() (ports.BrokerService, error)
+		produce     func(*readyDialScript) (ports.BrokerService, error)
 		wantCode    int
 		wantStatus  string
 		wantReason  string
 		wantPending []string
 	}{
 		{
-			name:        "authority satisfied",
-			require:     "local-authority",
-			produce:     func() (ports.BrokerService, error) { return newReadyScriptedService(readyTestSnapshot(nil)), nil },
+			name:    "authority satisfied",
+			require: "local-authority",
+			produce: func(script *readyDialScript) (ports.BrokerService, error) {
+				return script.newService(readyTestSnapshot(nil)), nil
+			},
 			wantCode:    0,
 			wantStatus:  "ready",
 			wantReason:  "authority",
 			wantPending: []string{},
 		},
 		{
-			name:        "catalogue satisfied by a known empty inventory",
-			require:     "local-catalogue",
-			produce:     func() (ports.BrokerService, error) { return newReadyScriptedService(readyTestSnapshot(nil)), nil },
+			name:    "catalogue satisfied by a known empty inventory",
+			require: "local-catalogue",
+			produce: func(script *readyDialScript) (ports.BrokerService, error) {
+				return script.newService(readyTestSnapshot(nil)), nil
+			},
 			wantCode:    0,
 			wantStatus:  "ready",
 			wantReason:  "catalogue",
@@ -644,8 +523,8 @@ func TestBrokerReadyRunOutcomeTable(t *testing.T) {
 		{
 			name:    "catalogue with an incompatible version times out",
 			require: "local-catalogue",
-			produce: func() (ports.BrokerService, error) {
-				return newReadyScriptedService(readyTestSnapshot(func(local *ports.BrokerDaemonObservation) { local.ProtocolVersion = protocol.Version + 1 })), nil
+			produce: func(script *readyDialScript) (ports.BrokerService, error) {
+				return script.newService(readyTestSnapshot(func(local *ports.BrokerDaemonObservation) { local.ProtocolVersion = protocol.Version + 1 })), nil
 			},
 			wantCode:    3,
 			wantStatus:  "timeout",
@@ -655,8 +534,8 @@ func TestBrokerReadyRunOutcomeTable(t *testing.T) {
 		{
 			name:    "stale catalogue observation times out",
 			require: "local-catalogue",
-			produce: func() (ports.BrokerService, error) {
-				return newReadyScriptedService(readyTestSnapshot(func(local *ports.BrokerDaemonObservation) { local.LastSuccess = time.Now().Add(-time.Hour) })), nil
+			produce: func(script *readyDialScript) (ports.BrokerService, error) {
+				return script.newService(readyTestSnapshot(func(local *ports.BrokerDaemonObservation) { local.LastSuccess = time.Now().Add(-time.Hour) })), nil
 			},
 			wantCode:    3,
 			wantStatus:  "timeout",
@@ -664,9 +543,11 @@ func TestBrokerReadyRunOutcomeTable(t *testing.T) {
 			wantPending: []string{"local-catalogue"},
 		},
 		{
-			name:        "no snapshot times out",
-			require:     "local-authority",
-			produce:     func() (ports.BrokerService, error) { return newReadyScriptedService(ports.BrokerSnapshot{}), nil },
+			name:    "no snapshot times out",
+			require: "local-authority",
+			produce: func(script *readyDialScript) (ports.BrokerService, error) {
+				return script.newService(ports.BrokerSnapshot{}), nil
+			},
 			wantCode:    3,
 			wantStatus:  "timeout",
 			wantReason:  "deadline",
@@ -675,7 +556,7 @@ func TestBrokerReadyRunOutcomeTable(t *testing.T) {
 		{
 			name:    "absent endpoint is retried then times out",
 			require: "local-authority",
-			produce: func() (ports.BrokerService, error) {
+			produce: func(script *readyDialScript) (ports.BrokerService, error) {
 				return nil, &net.OpError{Op: "dial", Net: "unix", Err: syscall.ENOENT}
 			},
 			wantCode:    3,
@@ -686,7 +567,7 @@ func TestBrokerReadyRunOutcomeTable(t *testing.T) {
 		{
 			name:    "refused endpoint is retried then times out",
 			require: "local-authority",
-			produce: func() (ports.BrokerService, error) {
+			produce: func(script *readyDialScript) (ports.BrokerService, error) {
 				return nil, &net.OpError{Op: "dial", Net: "unix", Err: syscall.ECONNREFUSED}
 			},
 			wantCode:    3,
@@ -697,8 +578,8 @@ func TestBrokerReadyRunOutcomeTable(t *testing.T) {
 		{
 			name:    "invalid snapshot is terminal",
 			require: "local-authority",
-			produce: func() (ports.BrokerService, error) {
-				return newReadyScriptedService(ports.BrokerSnapshot{Epoch: readyTestEpoch}), nil
+			produce: func(script *readyDialScript) (ports.BrokerService, error) {
+				return script.newService(ports.BrokerSnapshot{Epoch: readyTestEpoch}), nil
 			},
 			wantCode:    4,
 			wantStatus:  "terminal",
@@ -708,7 +589,7 @@ func TestBrokerReadyRunOutcomeTable(t *testing.T) {
 		{
 			name:        "rejected peer is terminal",
 			require:     "local-authority",
-			produce:     func() (ports.BrokerService, error) { return nil, ipc.ErrMuxPeerRejected },
+			produce:     func(script *readyDialScript) (ports.BrokerService, error) { return nil, ipc.ErrMuxPeerRejected },
 			wantCode:    4,
 			wantStatus:  "terminal",
 			wantReason:  "security",
@@ -717,7 +598,7 @@ func TestBrokerReadyRunOutcomeTable(t *testing.T) {
 		{
 			name:        "permission refusal is terminal",
 			require:     "local-authority",
-			produce:     func() (ports.BrokerService, error) { return nil, os.ErrPermission },
+			produce:     func(script *readyDialScript) (ports.BrokerService, error) { return nil, os.ErrPermission },
 			wantCode:    4,
 			wantStatus:  "terminal",
 			wantReason:  "security",
@@ -726,7 +607,7 @@ func TestBrokerReadyRunOutcomeTable(t *testing.T) {
 		{
 			name:        "invalid configuration is terminal",
 			require:     "local-authority",
-			produce:     func() (ports.BrokerService, error) { return nil, brokeripc.ErrConfig },
+			produce:     func(script *readyDialScript) (ports.BrokerService, error) { return nil, brokeripc.ErrConfig },
 			wantCode:    4,
 			wantStatus:  "terminal",
 			wantReason:  "config",
@@ -735,7 +616,7 @@ func TestBrokerReadyRunOutcomeTable(t *testing.T) {
 		{
 			name:    "broker protocol violation is terminal",
 			require: "local-authority",
-			produce: func() (ports.BrokerService, error) {
+			produce: func(script *readyDialScript) (ports.BrokerService, error) {
 				return nil, errors.Join(brokeripc.ErrMalformedFrame, errors.New("truncated"))
 			},
 			wantCode:    4,
@@ -777,8 +658,8 @@ func TestBrokerReadyRunOutcomeTable(t *testing.T) {
 // reconcile, or membership mutation is ever attempted.
 func TestBrokerReadyNeverEnsuresSpawnsOrMutates(t *testing.T) {
 	options := readyTestOptions(t, "local-authority", 80*time.Millisecond)
-	script := scriptReadyDial(t, func() (ports.BrokerService, error) {
-		return newReadyScriptedService(readyTestSnapshot(nil)), nil
+	script := scriptReadyDial(t, func(script *readyDialScript) (ports.BrokerService, error) {
+		return script.newService(readyTestSnapshot(nil)), nil
 	})
 
 	out, err := runReadyProbe(t, options)
@@ -808,21 +689,22 @@ func TestBrokerReadyReconnectUsesTheNewEpoch(t *testing.T) {
 	options := readyTestOptions(t, "local-authority", 2*time.Second)
 	var (
 		mu       sync.Mutex
-		first    *readyScriptedService
+		first    *brokerServiceState
 		attempts int
 	)
-	scriptReadyDial(t, func() (ports.BrokerService, error) {
+	scriptReadyDial(t, func(script *readyDialScript) (ports.BrokerService, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		attempts++
 		if attempts == 1 {
 			// The first connection commits no snapshot before it retires: the
 			// probe must reconnect rather than report the retired connection.
-			first = newReadyScriptedService(ports.BrokerSnapshot{})
+			service, state := newReadyScriptedService(script.t, ports.BrokerSnapshot{})
+			first = state
 			first.finish()
-			return first, nil
+			return service, nil
 		}
-		return newReadyScriptedService(freshSnapshot), nil
+		return script.newService(freshSnapshot), nil
 	})
 
 	out, err := runReadyProbe(t, options)
@@ -846,8 +728,8 @@ func TestBrokerReadyReconnectUsesTheNewEpoch(t *testing.T) {
 // leaked.
 func TestBrokerReadyCancellationIsExitFiveAndClosesEverything(t *testing.T) {
 	options := readyTestOptions(t, "local-authority", 5*time.Second)
-	script := scriptReadyDial(t, func() (ports.BrokerService, error) {
-		return newReadyScriptedService(ports.BrokerSnapshot{}), nil
+	script := scriptReadyDial(t, func(script *readyDialScript) (ports.BrokerService, error) {
+		return script.newService(ports.BrokerSnapshot{}), nil
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())

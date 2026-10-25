@@ -21,7 +21,7 @@ import (
 // startScriptedUIDriverRun launches one driver run over a scripted broker
 // service, waits for its discovery response, and then waits for the run's single
 // logical stream admission.
-func startScriptedUIDriverRun(t *testing.T, service *terminalCompositionService, navigation client.InitialNavigation, resolver client.InitialNavigationResolver) *uiDriverFixtureRun {
+func startScriptedUIDriverRun(t *testing.T, service ports.BrokerService, state *brokerServiceState, navigation client.InitialNavigation, resolver client.InitialNavigationResolver) *uiDriverFixtureRun {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
 	terminal, err := uiterm.New(ctx, domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}, "")
@@ -54,7 +54,7 @@ func startScriptedUIDriverRun(t *testing.T, service *terminalCompositionService,
 		}, stream)
 	}()
 	run.Ready(t)
-	require.Eventually(t, func() bool { return len(service.openedRequests()) != 0 }, brokerTestWait, 5*time.Millisecond,
+	require.Eventually(t, func() bool { return len(state.openedRequests()) != 0 }, brokerTestWait, 5*time.Millisecond,
 		"the run never admitted its logical stream")
 	return run
 }
@@ -120,11 +120,11 @@ func TestUIDriverNamedAttachLetsTheDaemonResolve(t *testing.T) {
 	require.Nil(t, resolver, "a local name needs no catalogue resolution")
 	require.Equal(t, client.InitialNavigationAttachNamed, navigation.Kind)
 
-	service := newTerminalCompositionService(snapshot)
-	run := startScriptedUIDriverRun(t, service, navigation, resolver)
+	service, state := newTerminalCompositionService(t, snapshot, nil)
+	run := startScriptedUIDriverRun(t, service, state, navigation, resolver)
 	require.NotNil(t, run)
 
-	opened := service.openedRequests()
+	opened := state.openedRequests()
 	require.Len(t, opened, 1, "attach work opens exactly one broker stream")
 	request := opened[0]
 	require.NoError(t, request.Validate())

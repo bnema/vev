@@ -149,8 +149,7 @@ func TestRunEnvWithDeps(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			stream := newSeamBrokerStream(tt.result)
-			service := newSeamBrokerService(stream)
+			service, _, stream := newSeamBroker(t, tt.result)
 			var out bytes.Buffer
 			err := runEnvWithDeps(context.Background(), tt.invocation, cmdDeps{
 				stdout:  &out,
@@ -172,10 +171,9 @@ func TestRunEnvWithDeps(t *testing.T) {
 				require.Zero(t, stream.sentCount())
 				return
 			}
-			stream.mu.Lock()
-			require.Len(t, stream.sent, 1)
-			request, ok := stream.sent[0].(protocol.CommandRequest)
-			stream.mu.Unlock()
+			sent := stream.sentMessages()
+			require.Len(t, sent, 1)
+			request, ok := sent[0].(protocol.CommandRequest)
 			require.True(t, ok)
 			require.Equal(t, tt.wantRequest.Slug, request.Slug)
 			require.Equal(t, tt.wantRequest.JSON, request.JSON)
