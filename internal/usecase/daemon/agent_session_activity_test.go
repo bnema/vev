@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"testing/synctest"
 
 	"github.com/stretchr/testify/require"
 
@@ -148,46 +149,48 @@ func TestFitMRUReservesSessionActivityCell(t *testing.T) {
 }
 
 func TestAnimatorRepaintsAttachmentViewingAgentSession(t *testing.T) {
-	d, sess, ac, sends, releases := newManualTabSession(t, 1)
-	defer releases[0]()
-	other, otherSends := addAgentTestSession(t, d, "other")
-	bystander, bystanderSends := addAgentTestSession(t, d, "bystander")
-	viewOtherSession(ac, other, false)
-	clk := newManualAttentionClock()
-	d.clock = clk
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		d.attentionAnimator(ctx)
-		close(done)
-	}()
-	defer func() {
-		cancel()
-		<-done
-	}()
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, ac, sends, releases := newManualTabSession(t, 1)
+		defer releases[0]()
+		other, otherSends := addAgentTestSession(t, d, "other")
+		bystander, bystanderSends := addAgentTestSession(t, d, "bystander")
+		viewOtherSession(ac, other, false)
+		clk, clkTimers := newSignalClock(t, 8)
+		d.clock = clk
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() {
+			d.attentionAnimator(ctx)
+			close(done)
+		}()
+		defer func() {
+			cancel()
+			<-done
+		}()
 
-	seedAgentStatus(d, other, other.tabs[0], other.tabs[0].focusedPane(), agentPaneStatus{state: agentactivity.Working})
-	targets := d.animationTargets()
-	require.False(t, targets.all)
-	// Compare identities: formatting a live session would race the animator.
-	got := map[*session]bool{}
-	for _, target := range targets.sessions {
-		got[target] = true
-	}
-	require.Len(t, got, 2)
-	require.True(t, got[sess], "the viewer repaints")
-	require.True(t, got[other], "the agent's session repaints")
-	require.False(t, got[bystander], "the bystander does not")
+		seedAgentStatus(d, other, other.tabs[0], other.tabs[0].focusedPane(), agentPaneStatus{state: agentactivity.Working})
+		targets := d.animationTargets()
+		require.False(t, targets.all)
+		// Compare identities: formatting a live session would race the animator.
+		got := map[*session]bool{}
+		for _, target := range targets.sessions {
+			got[target] = true
+		}
+		require.Len(t, got, 2)
+		require.True(t, got[sess], "the viewer repaints")
+		require.True(t, got[other], "the agent's session repaints")
+		require.False(t, got[bystander], "the bystander does not")
 
-	timer := clk.nextTimer(t)
-	for want := uint64(1); want <= 2; want++ {
-		_ = drainAllFrames(bystanderSends)
-		timer.fire()
-		_ = mustOutputData(t, sends)
-		_ = mustOutputData(t, otherSends)
-		require.Equal(t, want, d.animationTick())
-	}
-	require.Empty(t, drainAllFrames(bystanderSends), "an attachment that lists no animating session is not repainted")
+		timer := requireReceived(t, clkTimers, "animator never armed its pulse timer")
+		for want := uint64(1); want <= 2; want++ {
+			_ = drainAllFrames(bystanderSends)
+			timer.fire()
+			_ = mustOutputData(t, sends)
+			_ = mustOutputData(t, otherSends)
+			require.Equal(t, want, d.animationTick())
+		}
+		require.Empty(t, drainAllFrames(bystanderSends), "an attachment that lists no animating session is not repainted")
+	})
 }
 
 func TestRepublishRepaintsOtherSessionViewers(t *testing.T) {

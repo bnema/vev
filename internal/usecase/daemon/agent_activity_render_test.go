@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
-	"time"
+	"testing/synctest"
 
 	"github.com/stretchr/testify/require"
 
@@ -42,7 +42,9 @@ func TestTabActivityPriority(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.want, tabActivityWith(tt.bell, tt.indicator, tt.working, tt.active, tt.seen))
+			synctest.Test(t, func(t *testing.T) {
+				require.Equal(t, tt.want, tabActivityWith(tt.bell, tt.indicator, tt.working, tt.active, tt.seen))
+			})
 		})
 	}
 }
@@ -72,16 +74,18 @@ func TestStatusBarActivityCell(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			styles := resolveStyles(nil)
-			if tt.reduced {
-				styles = themeui.ResolveForColor(themeui.Theme{}, domain.ThemeAccent{}, terminalcap.ColorCapabilities{Mode: terminalcap.ANSI16, Source: terminalcap.SourceDeclared}).Styles
-			}
-			tt.tab.name = "work"
-			row := make([]renderer.Cell, 30)
-			drawTopBarActivity(row, statusSnapshot{tabs: []statusTab{tt.tab}}, tt.frame, tt.tick, tt.spinner, ui.GlyphSet{}, "", styles)
-			// " work " then the cell.
-			require.Equal(t, tt.want, row[6].Rune, rowText(row))
-			require.Equal(t, styles.SurfaceInactive.Background, row[6].Style.Background, "the cell keeps the tab background")
+			synctest.Test(t, func(t *testing.T) {
+				styles := resolveStyles(nil)
+				if tt.reduced {
+					styles = themeui.ResolveForColor(themeui.Theme{}, domain.ThemeAccent{}, terminalcap.ColorCapabilities{Mode: terminalcap.ANSI16, Source: terminalcap.SourceDeclared}).Styles
+				}
+				tt.tab.name = "work"
+				row := make([]renderer.Cell, 30)
+				drawTopBarActivity(row, statusSnapshot{tabs: []statusTab{tt.tab}}, tt.frame, tt.tick, tt.spinner, ui.GlyphSet{}, "", styles)
+				// " work " then the cell.
+				require.Equal(t, tt.want, row[6].Rune, rowText(row))
+				require.Equal(t, styles.SurfaceInactive.Background, row[6].Style.Background, "the cell keeps the tab background")
+			})
 		})
 	}
 }
@@ -112,26 +116,28 @@ func TestStatusBarDoneColor(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			row := make([]renderer.Cell, 30)
-			drawTopBarActivity(row, statusSnapshot{tabs: []statusTab{{name: "work", activity: activityDone}}}, tt.frame, 0, nil, ui.GlyphSet{}, "", tt.styles)
-			got := row[6].Style
-			require.Equal(t, ui.DoneGlyph, row[6].Rune, rowText(row))
-			require.True(t, got.Bold)
-			require.Equal(t, tt.styles.SurfaceInactive.HasBackgroundRGB, got.HasBackgroundRGB)
-			require.Equal(t, tt.styles.SurfaceInactive.BackgroundRGB, got.BackgroundRGB)
-			switch {
-			case tt.wantRGB != nil:
-				require.True(t, got.HasForegroundRGB)
-				require.Equal(t, *tt.wantRGB, got.ForegroundRGB)
-			case tt.styles.AgentDone.HasForegroundRGB:
-				want := themeui.Blend(tt.styles.SurfaceInactive.BackgroundRGB, green, 1-float64(pulseFrameCount/2-tt.frame)/float64(pulseFrameCount/2))
-				require.Equal(t, want, got.ForegroundRGB)
-				require.NotEqual(t, green, got.ForegroundRGB)
-				require.NotEqual(t, themeui.PulseColor(tt.styles.SurfaceInactive, 1-float64(pulseFrameCount/2-tt.frame)/float64(pulseFrameCount/2)).ForegroundRGB, got.ForegroundRGB, "Done is not the bell color")
-			default:
-				require.False(t, got.HasForegroundRGB)
-				require.Equal(t, tt.wantFG, got.Foreground)
-			}
+			synctest.Test(t, func(t *testing.T) {
+				row := make([]renderer.Cell, 30)
+				drawTopBarActivity(row, statusSnapshot{tabs: []statusTab{{name: "work", activity: activityDone}}}, tt.frame, 0, nil, ui.GlyphSet{}, "", tt.styles)
+				got := row[6].Style
+				require.Equal(t, ui.DoneGlyph, row[6].Rune, rowText(row))
+				require.True(t, got.Bold)
+				require.Equal(t, tt.styles.SurfaceInactive.HasBackgroundRGB, got.HasBackgroundRGB)
+				require.Equal(t, tt.styles.SurfaceInactive.BackgroundRGB, got.BackgroundRGB)
+				switch {
+				case tt.wantRGB != nil:
+					require.True(t, got.HasForegroundRGB)
+					require.Equal(t, *tt.wantRGB, got.ForegroundRGB)
+				case tt.styles.AgentDone.HasForegroundRGB:
+					want := themeui.Blend(tt.styles.SurfaceInactive.BackgroundRGB, green, 1-float64(pulseFrameCount/2-tt.frame)/float64(pulseFrameCount/2))
+					require.Equal(t, want, got.ForegroundRGB)
+					require.NotEqual(t, green, got.ForegroundRGB)
+					require.NotEqual(t, themeui.PulseColor(tt.styles.SurfaceInactive, 1-float64(pulseFrameCount/2-tt.frame)/float64(pulseFrameCount/2)).ForegroundRGB, got.ForegroundRGB, "Done is not the bell color")
+				default:
+					require.False(t, got.HasForegroundRGB)
+					require.Equal(t, tt.wantFG, got.Foreground)
+				}
+			})
 		})
 	}
 }
@@ -181,104 +187,112 @@ func TestAnimatorActivePredicate(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d, sess, _, _, releases := newManualTabSession(t, 1)
-			defer releases[0]()
-			if !tt.spinner {
-				cfg := domain.Defaults()
-				cfg.Agents.Spinner, cfg.Agents.SpinnerSet = []rune{}, true
-				d.ApplyConfig(cfg)
-			}
-			seedAgentStatus(d, sess, sess.tabs[0], sess.tabs[0].focusedPane(), tt.status)
-			require.Equal(t, tt.want, d.animatorActive())
+			synctest.Test(t, func(t *testing.T) {
+				d, sess, _, _, releases := newManualTabSession(t, 1)
+				defer releases[0]()
+				if !tt.spinner {
+					cfg := domain.Defaults()
+					cfg.Agents.Spinner, cfg.Agents.SpinnerSet = []rune{}, true
+					d.ApplyConfig(cfg)
+				}
+				seedAgentStatus(d, sess, sess.tabs[0], sess.tabs[0].focusedPane(), tt.status)
+				require.Equal(t, tt.want, d.animatorActive())
+			})
 		})
 	}
 }
 
 func TestAttentionAnimatorTicksForWorkingAgentAndParks(t *testing.T) {
-	d, sess, _, sends, releases := newManualTabSession(t, 2)
-	defer releases[0]()
-	defer releases[1]()
-	clk := newManualAttentionClock()
-	d.clock = clk
-	selectTestAttachmentTab(sess, 0)
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		d.attentionAnimator(ctx)
-		close(done)
-	}()
-	defer func() {
-		cancel()
-		<-done
-	}()
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, _, sends, releases := newManualTabSession(t, 2)
+		defer releases[0]()
+		defer releases[1]()
+		clk, clkTimers := newSignalClock(t, 8)
+		d.clock = clk
+		selectTestAttachmentTab(sess, 0)
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() {
+			d.attentionAnimator(ctx)
+			close(done)
+		}()
+		defer func() {
+			cancel()
+			<-done
+		}()
 
-	tb := sess.tabs[1]
-	p := tb.focusedPane()
-	seedAgentStatus(d, sess, tb, p, agentPaneStatus{state: agentactivity.Working})
+		tb := sess.tabs[1]
+		p := tb.focusedPane()
+		seedAgentStatus(d, sess, tb, p, agentPaneStatus{state: agentactivity.Working})
 
-	// The animator arms one timer and re-arms it with Reset. It advances
-	// the tick before it repaints, so each repaint carries the next tick.
-	timer := clk.nextTimer(t)
-	for want := uint64(1); want <= 3; want++ {
-		timer.fire()
+		// The animator arms one timer and re-arms it with Reset. It advances
+		// the tick before it repaints, so each repaint carries the next tick.
+		timer := requireReceived(t, clkTimers, "animator never armed its pulse timer")
+		for want := uint64(1); want <= 3; want++ {
+			timer.fire()
+			_ = mustOutputData(t, sends)
+			require.Equal(t, want, d.animationTick())
+		}
+
+		// The park repaint follows the reset to frame 0.
+		seedAgentStatus(d, sess, tb, p, agentPaneStatus{state: agentactivity.Idle})
 		_ = mustOutputData(t, sends)
-		require.Equal(t, want, d.animationTick())
-	}
-
-	// The park repaint follows the reset to frame 0.
-	seedAgentStatus(d, sess, tb, p, agentPaneStatus{state: agentactivity.Idle})
-	_ = mustOutputData(t, sends)
-	require.Equal(t, uint64(0), d.animationTick())
-	require.Empty(t, clk.timers, "an idle tab must leave the animator parked")
+		require.Equal(t, uint64(0), d.animationTick())
+		require.Empty(t, clkTimers, "an idle tab must leave the animator parked")
+	})
 }
 
 func TestAttentionAnimatorPulsesDoneUntilAcknowledged(t *testing.T) {
-	d, sess, ac, sends, releases := newManualTabSession(t, 2)
-	defer releases[0]()
-	defer releases[1]()
-	clk := newManualAttentionClock()
-	d.clock = clk
-	selectTestAttachmentTab(sess, 0)
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		d.attentionAnimator(ctx)
-		close(done)
-	}()
-	defer func() {
-		cancel()
-		<-done
-	}()
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, ac, sends, releases := newManualTabSession(t, 2)
+		defer releases[0]()
+		defer releases[1]()
+		clk, clkTimers := newSignalClock(t, 8)
+		d.clock = clk
+		selectTestAttachmentTab(sess, 0)
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() {
+			d.attentionAnimator(ctx)
+			close(done)
+		}()
+		defer func() {
+			cancel()
+			<-done
+		}()
 
-	// Only a Done check is shown: the animator must tick for it.
-	tb := sess.tabs[1]
-	seedAgentStatus(d, sess, tb, tb.focusedPane(), agentPaneStatus{state: agentactivity.Idle, done: true})
-	timer := clk.nextTimer(t)
-	// Frame 1 is the first visible beat: the check appears.
-	timer.fire()
-	require.Contains(t, string(mustOutputData(t, sends)), string(ui.DoneGlyph))
-	// Indexed green does not fade, so the middle beats repaint nothing new;
-	// the animator still ticks through them.
-	for want := uint64(2); want < pulseFrameCount; want++ {
+		// Only a Done check is shown: the animator must tick for it.
+		tb := sess.tabs[1]
+		seedAgentStatus(d, sess, tb, tb.focusedPane(), agentPaneStatus{state: agentactivity.Idle, done: true})
+		timer := requireReceived(t, clkTimers, "animator never armed its pulse timer")
+		// Frame 1 is the first visible beat: the check appears.
 		timer.fire()
-		require.Eventually(t, func() bool { return d.animationTick() == want }, time.Second, time.Millisecond)
-	}
-	_ = drainAllFrames(sends)
-	// Frame 0 of the next cycle is the blank beat: the check disappears.
-	timer.fire()
-	require.NotContains(t, string(mustOutputData(t, sends)), string(ui.DoneGlyph))
-	require.True(t, d.animatorActive(), "Done keeps the animator running")
+		require.Contains(t, string(mustOutputData(t, sends)), string(ui.DoneGlyph))
+		// Indexed green does not fade, so the middle beats repaint nothing new;
+		// the animator still ticks through them.
+		for want := uint64(2); want < pulseFrameCount; want++ {
+			timer.fire()
+			synctest.Wait()
+			require.Equal(t, want, d.animationTick())
+		}
+		_ = drainAllFrames(sends)
+		// Frame 0 of the next cycle is the blank beat: the check disappears.
+		timer.fire()
+		require.NotContains(t, string(mustOutputData(t, sends)), string(ui.DoneGlyph))
+		require.True(t, d.animatorActive(), "Done keeps the animator running")
 
-	// Viewing the tab acknowledges the Done and parks the animator.
-	selectTestAttachmentTab(sess, 1)
-	ac.setTerminalFocus(domain.TerminalFocusFocused)
-	timer.fire()
-	_ = mustOutputData(t, sends)
-	d.agents.step(d.daemonNow())
-	require.Equal(t, agentactivity.IndicatorIdle, tb.agentIndicator())
-	require.False(t, d.animatorActive())
-	// The republish pokes the animator, which parks and resets the tick.
-	require.Eventually(t, func() bool { return d.animationTick() == 0 }, time.Second, time.Millisecond)
+		// Viewing the tab acknowledges the Done and parks the animator.
+		selectTestAttachmentTab(sess, 1)
+		ac.setTerminalFocus(domain.TerminalFocusFocused)
+		timer.fire()
+		_ = mustOutputData(t, sends)
+		d.agents.step(d.daemonNow())
+		require.Equal(t, agentactivity.IndicatorIdle, tb.agentIndicator())
+		require.False(t, d.animatorActive())
+		// The republish pokes the animator, which parks and resets the tick.
+		synctest.Wait()
+		require.Equal(t, uint64(0), d.animationTick())
+	})
 }
 
 func TestAnimationTargetsRepaintOnlyAnimatingSessions(t *testing.T) {
@@ -306,19 +320,21 @@ func TestAnimationTargetsRepaintOnlyAnimatingSessions(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.seed != nil {
-				tt.seed()
-			}
-			_ = drainAllFrames(sends)
-			_ = drainAllFrames(otherSends)
-			targets := d.animationTargets()
-			require.Equal(t, tt.wantAll, targets.all)
-			if !tt.wantAll {
-				require.ElementsMatch(t, tt.wantSess, targets.sessions)
-			}
-			d.repaintAnimationTargets(targets)
-			require.Equal(t, tt.wantPaint[0], len(drainAllFrames(sends)) > 0)
-			require.Equal(t, tt.wantPaint[1], len(drainAllFrames(otherSends)) > 0)
+			synctest.Test(t, func(t *testing.T) {
+				if tt.seed != nil {
+					tt.seed()
+				}
+				_ = drainAllFrames(sends)
+				_ = drainAllFrames(otherSends)
+				targets := d.animationTargets()
+				require.Equal(t, tt.wantAll, targets.all)
+				if !tt.wantAll {
+					require.ElementsMatch(t, tt.wantSess, targets.sessions)
+				}
+				d.repaintAnimationTargets(targets)
+				require.Equal(t, tt.wantPaint[0], len(drainAllFrames(sends)) > 0)
+				require.Equal(t, tt.wantPaint[1], len(drainAllFrames(otherSends)) > 0)
+			})
 		})
 	}
 }
@@ -336,27 +352,29 @@ func TestApplyConfigAgentSpinnerLiveReload(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d, sess, ac, sends, releases := newManualTabSession(t, 2)
-			defer releases[0]()
-			defer releases[1]()
-			selectTestAttachmentTab(sess, 0)
-			tb := sess.tabs[1]
-			seedAgentStatus(d, sess, tb, tb.focusedPane(), agentPaneStatus{state: agentactivity.Working})
-			cfg := domain.Defaults()
-			cfg.Agents = tt.agents
-			d.ApplyConfig(cfg)
-			_ = mustOutputData(t, sends) // ApplyConfig repaints.
+			synctest.Test(t, func(t *testing.T) {
+				d, sess, ac, sends, releases := newManualTabSession(t, 2)
+				defer releases[0]()
+				defer releases[1]()
+				selectTestAttachmentTab(sess, 0)
+				tb := sess.tabs[1]
+				seedAgentStatus(d, sess, tb, tb.focusedPane(), agentPaneStatus{state: agentactivity.Working})
+				cfg := domain.Defaults()
+				cfg.Agents = tt.agents
+				d.ApplyConfig(cfg)
+				_ = mustOutputData(t, sends) // ApplyConfig repaints.
 
-			bars := d.barStateBaseFor(sess, ac, "")
-			for i := range bars.status.tabs {
-				bars.status.tabs[i].paneTitle = ""
-			}
-			row := make([]renderer.Cell, 40)
-			drawTopBarActivity(row, bars.status, bars.attentionFrame, 0, bars.spinner, bars.glyphs, "", resolveStyles(nil))
-			// " 1 " then " 2", a gap, and the cell.
-			x := statusTextWidth(" 1  2 ")
-			require.Equal(t, tt.wantCell, row[x].Rune, rowText(row))
-			require.Equal(t, tt.wantCell != ' ', d.animatorActive())
+				bars := d.barStateBaseFor(sess, ac, "")
+				for i := range bars.status.tabs {
+					bars.status.tabs[i].paneTitle = ""
+				}
+				row := make([]renderer.Cell, 40)
+				drawTopBarActivity(row, bars.status, bars.attentionFrame, 0, bars.spinner, bars.glyphs, "", resolveStyles(nil))
+				// " 1 " then " 2", a gap, and the cell.
+				x := statusTextWidth(" 1  2 ")
+				require.Equal(t, tt.wantCell, row[x].Rune, rowText(row))
+				require.Equal(t, tt.wantCell != ' ', d.animatorActive())
+			})
 		})
 	}
 }
@@ -374,23 +392,25 @@ func TestPaintAcknowledgesDoneOnShownTab(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d, sess, ac, sends, releases := newManualTabSession(t, 2)
-			defer releases[0]()
-			defer releases[1]()
-			tb := sess.tabs[1]
-			seedAgentStatus(d, sess, tb, tb.focusedPane(), agentPaneStatus{state: agentactivity.Idle, done: true})
-			selectTestAttachmentTab(sess, tt.shownTab)
-			ac.setTerminalFocus(tt.focus)
-			_ = drainAllFrames(sends)
-			d.setAttentionFrame(1) // a visible pulse beat
-			d.paint(sess, ac, true, nil)
-			data := string(mustOutputData(t, sends))
-			require.Equal(t, agentactivity.IndicatorDone, tb.agentIndicator(), "paint only requests the acknowledgement")
-			d.agents.step(d.daemonNow())
-			require.Equal(t, tt.wantDone, tb.agentIndicator() == agentactivity.IndicatorDone)
-			if tt.shownTab == 0 {
-				require.Contains(t, data, string(ui.DoneGlyph))
-			}
+			synctest.Test(t, func(t *testing.T) {
+				d, sess, ac, sends, releases := newManualTabSession(t, 2)
+				defer releases[0]()
+				defer releases[1]()
+				tb := sess.tabs[1]
+				seedAgentStatus(d, sess, tb, tb.focusedPane(), agentPaneStatus{state: agentactivity.Idle, done: true})
+				selectTestAttachmentTab(sess, tt.shownTab)
+				ac.setTerminalFocus(tt.focus)
+				_ = drainAllFrames(sends)
+				d.setAttentionFrame(1) // a visible pulse beat
+				d.paint(sess, ac, true, nil)
+				data := string(mustOutputData(t, sends))
+				require.Equal(t, agentactivity.IndicatorDone, tb.agentIndicator(), "paint only requests the acknowledgement")
+				d.agents.step(d.daemonNow())
+				require.Equal(t, tt.wantDone, tb.agentIndicator() == agentactivity.IndicatorDone)
+				if tt.shownTab == 0 {
+					require.Contains(t, data, string(ui.DoneGlyph))
+				}
+			})
 		})
 	}
 }
@@ -430,13 +450,15 @@ func TestStatusBarGlyphSets(t *testing.T) {
 		for _, cell := range cells {
 			for _, styles := range []themeui.Styles{resolveStyles(nil), reduced} {
 				t.Run(fmt.Sprintf("%d/%s/reduced=%t", glyphs.Mode, cell.name, styles.Reduced), func(t *testing.T) {
-					row := make([]renderer.Cell, 30)
-					status := statusSnapshot{tabs: []statusTab{{name: "work", activity: cell.activity}}}
-					// Frame 1 is a visible bell beat; tick 1 the second spinner frame.
-					drawTopBarActivity(row, status, 1, 1, glyphs.Spinner, glyphs, "", styles)
-					require.Equal(t, want[glyphs.Mode][cell.index], row[6].Rune, rowText(row))
-					require.Equal(t, 1, renderer.RuneWidth(row[6].Rune))
-					require.Equal(t, ' ', row[7].Rune, "every glyph is one cell")
+					synctest.Test(t, func(t *testing.T) {
+						row := make([]renderer.Cell, 30)
+						status := statusSnapshot{tabs: []statusTab{{name: "work", activity: cell.activity}}}
+						// Frame 1 is a visible bell beat; tick 1 the second spinner frame.
+						drawTopBarActivity(row, status, 1, 1, glyphs.Spinner, glyphs, "", styles)
+						require.Equal(t, want[glyphs.Mode][cell.index], row[6].Rune, rowText(row))
+						require.Equal(t, 1, renderer.RuneWidth(row[6].Rune))
+						require.Equal(t, ' ', row[7].Rune, "every glyph is one cell")
+					})
 				})
 			}
 		}
@@ -461,18 +483,20 @@ func TestBarGlyphsResolvePerAttachment(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d, sess, ac, _, releases := newManualTabSession(t, 1)
-			defer releases[0]()
-			cfg := domain.Defaults()
-			cfg.UI.Glyphs = tt.mode
-			if tt.spinner != nil {
-				cfg.Agents.Spinner, cfg.Agents.SpinnerSet = tt.spinner, true
-			}
-			d.ApplyConfig(cfg)
-			ac.terminalCapabilities = terminalcap.ResolveTerm(nil, tt.term, terminalcap.ColorCapabilities{})
-			bars := d.barStateBaseFor(sess, ac, "")
-			require.Equal(t, tt.want, bars.glyphs.Mode)
-			require.Equal(t, tt.wantSpn, bars.spinner)
+			synctest.Test(t, func(t *testing.T) {
+				d, sess, ac, _, releases := newManualTabSession(t, 1)
+				defer releases[0]()
+				cfg := domain.Defaults()
+				cfg.UI.Glyphs = tt.mode
+				if tt.spinner != nil {
+					cfg.Agents.Spinner, cfg.Agents.SpinnerSet = tt.spinner, true
+				}
+				d.ApplyConfig(cfg)
+				ac.terminalCapabilities = terminalcap.ResolveTerm(nil, tt.term, terminalcap.ColorCapabilities{})
+				bars := d.barStateBaseFor(sess, ac, "")
+				require.Equal(t, tt.want, bars.glyphs.Mode)
+				require.Equal(t, tt.wantSpn, bars.spinner)
+			})
 		})
 	}
 }

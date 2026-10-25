@@ -854,7 +854,7 @@ func TestResizeOrdersPTYBeforeScreen(t *testing.T) {
 
 	p := portsmocks.NewMockPTY(t)
 	var screenWidthAtResize int
-	win := newTab(newScriptPTY(nil), domain.Size{Cols: 80, Rows: 24})
+	win := newTab(newScriptPTY(t, nil), domain.Size{Cols: 80, Rows: 24})
 	p.EXPECT().Resize(domain.Geometry{Size: domain.Size{Cols: 100, Rows: 28}}).RunAndReturn(func(domain.Geometry) error {
 		// The screen must not yet be resized when the PTY is: proves order.
 		screenWidthAtResize = win.focusedPane().screen.Columns()
