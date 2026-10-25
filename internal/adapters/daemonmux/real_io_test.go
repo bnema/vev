@@ -37,6 +37,8 @@ func newObservedPump(t *testing.T, carrier FramedCarrier) (*Pump, admissions) {
 }
 
 // awaitAdmitted blocks until count admission events arrived.
+//
+//testpolicy:realtime real-socket waits guarded by a bounded deadline; only called from real-I/O tests
 func awaitAdmitted(t *testing.T, admitted admissions, count int) {
 	t.Helper()
 	guard := time.After(realIODeadline)
@@ -52,6 +54,8 @@ func awaitAdmitted(t *testing.T, admitted admissions, count int) {
 // awaitStatus blocks on the pump's per-stream watch channel until cond holds for
 // the stream's status. The watch is taken before the status is read, so a frame
 // applied in between is never missed.
+//
+//testpolicy:realtime real-socket waits guarded by a bounded deadline; only called from real-I/O tests
 func awaitStatus(t *testing.T, pump *Pump, id PhysicalStreamID, cond func(StreamStatus) bool, msg string) StreamStatus {
 	t.Helper()
 	guard := time.After(realIODeadline)
@@ -71,6 +75,8 @@ func awaitStatus(t *testing.T, pump *Pump, id PhysicalStreamID, cond func(Stream
 }
 
 // awaitTake blocks until one stream's inbound queue yields a chunk.
+//
+//testpolicy:realtime real-socket waits guarded by a bounded deadline; only called from real-I/O tests
 func awaitTake(t *testing.T, pump *Pump, id PhysicalStreamID) []byte {
 	t.Helper()
 	guard := time.After(realIODeadline)

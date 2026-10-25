@@ -648,7 +648,7 @@ func receiveCall(t *testing.T, probe *testProbe) probeCall {
 
 func requireNoProbeWithin(t *testing.T, probe *testProbe, window time.Duration) {
 	t.Helper()
-	// Fake time: inside the synctest bubble, Sleep only advances the bubble clock.
+	//testpolicy:sleep fake time: inside the synctest bubble, Sleep only advances the bubble clock
 	time.Sleep(window)
 	synctest.Wait()
 	select {
@@ -681,7 +681,7 @@ func waitHost(t *testing.T, r *Registry, endpoint string, predicate func(ports.B
 // intervening publication fails immediately.
 func requireHostStableWithin(t *testing.T, r *Registry, endpoint string, want ports.BrokerDaemonObservation, window time.Duration) {
 	t.Helper()
-	// Fake time: inside the synctest bubble, Sleep only advances the bubble clock.
+	//testpolicy:sleep fake time: inside the synctest bubble, Sleep only advances the bubble clock
 	time.Sleep(window)
 	synctest.Wait()
 	got, ok := r.Snapshot().Find(endpoint)

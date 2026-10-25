@@ -1380,6 +1380,8 @@ type countingOutputMetrics struct{ frames, bytes, payloadBytes uint64 }
 // TestCopyEnterAllocationBudget) count allocations per paint, and a generated
 // testify mock allocates on every Called, which would swamp the budget. It adds
 // no behavior beyond counting Output frames.
+//
+//testpolicy:double allocation-budget tests cannot afford a testify mock's per-call allocations
 type countingOutputTransport struct {
 	mu sync.Mutex
 	countingOutputMetrics
