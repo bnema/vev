@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/bnema/vev/internal/adapters/sessionwire"
@@ -356,48 +357,50 @@ func TestRunCmdRejectsTooManyArgumentsBeforeDialing(t *testing.T) {
 }
 
 func TestRunCmdTimesOutPendingRequest(t *testing.T) {
-	timerCh := make(chan time.Time, 1)
-	timer := portsmocks.NewMockTimer(t)
-	timer.EXPECT().C().Return(timerCh).Once()
-	timer.EXPECT().Stop().Return(true).Once()
-	delayCh := make(chan time.Duration, 1)
-	clock := portsmocks.NewMockClock(t)
-	clock.EXPECT().NewTimer(mock.Anything).Run(func(delay time.Duration) {
-		delayCh <- delay
-	}).Return(timer).Once()
-	recvStarted := make(chan struct{})
-	recvGate := make(chan struct{})
-	transport, state := newCmdTransportMock(t, func(_ *wiremocks.MockTransport, state *cmdTransportState) {
-		state.recvStarted = recvStarted
-		state.recvGate = recvGate
-	})
-	done := make(chan error, 1)
-	go func() {
-		done <- runCmdWithDeps(context.Background(), cmdInvocation{slug: "split-right"}, cmdDeps{
-			stdout: io.Discard,
-			getenv: func(string) string { return "" },
-			dial:   func(context.Context, string) (wire.Transport, error) { return transport, nil },
-			clock:  clock,
+	synctest.Test(t, func(t *testing.T) {
+		timerCh := make(chan time.Time, 1)
+		timer := portsmocks.NewMockTimer(t)
+		timer.EXPECT().C().Return(timerCh).Once()
+		timer.EXPECT().Stop().Return(true).Once()
+		delayCh := make(chan time.Duration, 1)
+		clock := portsmocks.NewMockClock(t)
+		clock.EXPECT().NewTimer(mock.Anything).Run(func(delay time.Duration) {
+			delayCh <- delay
+		}).Return(timer).Once()
+		recvStarted := make(chan struct{})
+		recvGate := make(chan struct{})
+		transport, state := newCmdTransportMock(t, func(_ *wiremocks.MockTransport, state *cmdTransportState) {
+			state.recvStarted = recvStarted
+			state.recvGate = recvGate
 		})
-	}()
-	<-recvStarted
-	if delay := <-delayCh; delay != daemon.CommandRequestTimeout {
-		t.Fatalf("command timer delay = %s, want %s", delay, daemon.CommandRequestTimeout)
-	}
-	timerCh <- time.Time{}
-	err := <-done
-	close(recvGate)
-	if ExitCode(err) != 3 || !errors.Is(err, daemon.ErrCommandRequestTimeout) {
-		t.Fatalf("timeout error=%v code=%d", err, ExitCode(err))
-	}
-	message, decodeErr := sessionwire.DecodeClientEnvelope(state.sent[1].Payload)
-	if decodeErr != nil {
-		t.Fatalf("decode=%v, want non-zero request ID", decodeErr)
-	}
-	request := message.(protocol.CommandRequest)
-	if request.RequestID == 0 {
-		t.Fatalf("request=%+v, want non-zero request ID", request)
-	}
+		done := make(chan error, 1)
+		go func() {
+			done <- runCmdWithDeps(context.Background(), cmdInvocation{slug: "split-right"}, cmdDeps{
+				stdout: io.Discard,
+				getenv: func(string) string { return "" },
+				dial:   func(context.Context, string) (wire.Transport, error) { return transport, nil },
+				clock:  clock,
+			})
+		}()
+		<-recvStarted
+		if delay := <-delayCh; delay != daemon.CommandRequestTimeout {
+			t.Fatalf("command timer delay = %s, want %s", delay, daemon.CommandRequestTimeout)
+		}
+		timerCh <- time.Time{}
+		err := <-done
+		close(recvGate)
+		if ExitCode(err) != 3 || !errors.Is(err, daemon.ErrCommandRequestTimeout) {
+			t.Fatalf("timeout error=%v code=%d", err, ExitCode(err))
+		}
+		message, decodeErr := sessionwire.DecodeClientEnvelope(state.sent[1].Payload)
+		if decodeErr != nil {
+			t.Fatalf("decode=%v, want non-zero request ID", decodeErr)
+		}
+		request := message.(protocol.CommandRequest)
+		if request.RequestID == 0 {
+			t.Fatalf("request=%+v, want non-zero request ID", request)
+		}
+	})
 }
 
 func TestRunCmdZeroRequestIDReplyIsRejected(t *testing.T) {

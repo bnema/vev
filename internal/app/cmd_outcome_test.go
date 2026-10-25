@@ -14,6 +14,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/mock"
@@ -153,29 +154,31 @@ func TestRunCmdLostUncorrelatedOrWrongTypedReplyIsOutcomeUnknown(t *testing.T) {
 // canceled while awaiting the reply reports outcome-unknown, sends exactly one
 // request, and retires the connection.
 func TestRunCmdCancelAfterSendIsOutcomeUnknownWithoutResend(t *testing.T) {
-	replyStarted := make(chan struct{})
-	recvGate := make(chan struct{})
-	transport, state := newCmdTransportMock(t, func(_ *wiremocks.MockTransport, s *cmdTransportState) {
-		s.replyStarted = replyStarted
-		s.recvGate = recvGate
+	synctest.Test(t, func(t *testing.T) {
+		replyStarted := make(chan struct{})
+		recvGate := make(chan struct{})
+		transport, state := newCmdTransportMock(t, func(_ *wiremocks.MockTransport, s *cmdTransportState) {
+			s.replyStarted = replyStarted
+			s.recvGate = recvGate
+		})
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan error, 1)
+		go func() { done <- runCmdReply(ctx, transport, nil) }()
+
+		// Wait until the reply read is actually parked, then cancel. The gate makes
+		// entry deterministic without sleeping.
+		<-replyStarted
+		cancel()
+		err := <-done
+		close(recvGate)
+
+		require.ErrorIs(t, err, errCommandOutcomeUnknown)
+		require.Equal(t, 3, ExitCode(err))
+		require.Equal(t, 1, countCommandRequests(t, state), "a canceled command must never be resent")
+		require.Equal(t, 1, state.closeCalls, "cancellation after the send must retire the connection")
 	})
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan error, 1)
-	go func() { done <- runCmdReply(ctx, transport, nil) }()
-
-	// Wait until the reply read is actually parked, then cancel. The gate makes
-	// entry deterministic without sleeping.
-	<-replyStarted
-	cancel()
-	err := <-done
-	close(recvGate)
-
-	require.ErrorIs(t, err, errCommandOutcomeUnknown)
-	require.Equal(t, 3, ExitCode(err))
-	require.Equal(t, 1, countCommandRequests(t, state), "a canceled command must never be resent")
-	require.Equal(t, 1, state.closeCalls, "cancellation after the send must retire the connection")
 }
 
 // TestRunCmdTimeoutAfterSendIsOutcomeUnknownWithoutResend proves a request
@@ -183,36 +186,38 @@ func TestRunCmdCancelAfterSendIsOutcomeUnknownWithoutResend(t *testing.T) {
 // outcome-unknown, sends exactly one request, and retires the connection. The
 // fake clock keeps the deadline deterministic.
 func TestRunCmdTimeoutAfterSendIsOutcomeUnknownWithoutResend(t *testing.T) {
-	timerCh := make(chan time.Time, 1)
-	timer := portsmocks.NewMockTimer(t)
-	timer.EXPECT().C().Return(timerCh).Once()
-	timer.EXPECT().Stop().Return(true).Once()
-	delayCh := make(chan time.Duration, 1)
-	clock := portsmocks.NewMockClock(t)
-	clock.EXPECT().NewTimer(mock.Anything).Run(func(delay time.Duration) {
-		delayCh <- delay
-	}).Return(timer).Once()
+	synctest.Test(t, func(t *testing.T) {
+		timerCh := make(chan time.Time, 1)
+		timer := portsmocks.NewMockTimer(t)
+		timer.EXPECT().C().Return(timerCh).Once()
+		timer.EXPECT().Stop().Return(true).Once()
+		delayCh := make(chan time.Duration, 1)
+		clock := portsmocks.NewMockClock(t)
+		clock.EXPECT().NewTimer(mock.Anything).Run(func(delay time.Duration) {
+			delayCh <- delay
+		}).Return(timer).Once()
 
-	replyStarted := make(chan struct{})
-	recvGate := make(chan struct{})
-	transport, state := newCmdTransportMock(t, func(_ *wiremocks.MockTransport, s *cmdTransportState) {
-		s.replyStarted = replyStarted
-		s.recvGate = recvGate
+		replyStarted := make(chan struct{})
+		recvGate := make(chan struct{})
+		transport, state := newCmdTransportMock(t, func(_ *wiremocks.MockTransport, s *cmdTransportState) {
+			s.replyStarted = replyStarted
+			s.recvGate = recvGate
+		})
+		done := make(chan error, 1)
+		go func() { done <- runCmdReply(context.Background(), transport, clock) }()
+
+		<-replyStarted
+		require.Equal(t, daemon.CommandRequestTimeout, <-delayCh)
+		timerCh <- time.Time{}
+		err := <-done
+		close(recvGate)
+
+		require.ErrorIs(t, err, errCommandOutcomeUnknown)
+		require.ErrorContains(t, err, daemon.ErrCommandRequestTimeout.Error())
+		require.Equal(t, 3, ExitCode(err))
+		require.Equal(t, 1, countCommandRequests(t, state), "a timed-out command must never be resent")
+		require.Equal(t, 1, state.closeCalls, "a result timeout must retire the connection")
 	})
-	done := make(chan error, 1)
-	go func() { done <- runCmdReply(context.Background(), transport, clock) }()
-
-	<-replyStarted
-	require.Equal(t, daemon.CommandRequestTimeout, <-delayCh)
-	timerCh <- time.Time{}
-	err := <-done
-	close(recvGate)
-
-	require.ErrorIs(t, err, errCommandOutcomeUnknown)
-	require.ErrorContains(t, err, daemon.ErrCommandRequestTimeout.Error())
-	require.Equal(t, 3, ExitCode(err))
-	require.Equal(t, 1, countCommandRequests(t, state), "a timed-out command must never be resent")
-	require.Equal(t, 1, state.closeCalls, "a result timeout must retire the connection")
 }
 
 // TestRunCmdCancelBeforeSendIsDefiniteNotSent proves a caller already canceled
