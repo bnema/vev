@@ -4,26 +4,17 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
+
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
-	"github.com/stretchr/testify/require"
 )
-
-type committedIdentityErrorTransport struct {
-	closeTrackingTransport
-}
-
-func (t *committedIdentityErrorTransport) Send(frame wire.Envelope) error {
-	if envelopeMessageName(nil, frame.Payload) == "CommittedRouteIdentity" {
-		return errors.New("committed identity send failed")
-	}
-	return t.closeTrackingTransport.Send(frame)
-}
 
 func TestAttachmentTransitionPublishesCommittedRouteIdentity(t *testing.T) {
 	d, source, ac, _ := newManualSessionWithPTYs(t, nil)
-	transport := &closeTrackingTransport{}
+	transport, transportLog := newTrackedConnection(t)
 	ac.replaceTransport(transport)
 	rc := d.attachCoordinator(source, nil, ac, true)
 	token := source.captureAttachmentCapability(ac, transport)
@@ -57,7 +48,7 @@ func TestAttachmentTransitionPublishesCommittedRouteIdentity(t *testing.T) {
 
 	var identity protocol.CommittedRouteIdentity
 	found := false
-	for _, frame := range transport.Sends() {
+	for _, frame := range transportLog.Sends() {
 		decoded, ok := decodeServerMessage(t, frame).(protocol.CommittedRouteIdentity)
 		if !ok {
 			continue
@@ -71,7 +62,11 @@ func TestAttachmentTransitionPublishesCommittedRouteIdentity(t *testing.T) {
 
 func TestAttachmentTransitionTearsDownAfterCommittedIdentitySendFailure(t *testing.T) {
 	d, source, ac, _ := newManualSessionWithPTYs(t, nil)
-	transport := &committedIdentityErrorTransport{}
+	transport, transportLog := newTrackedConnection(t, func(c *mockServerConnection, log *connLog) {
+		c.EXPECT().Send(mock.MatchedBy(func(f wire.Envelope) bool {
+			return envelopeMessageName(nil, f.Payload) == "CommittedRouteIdentity"
+		})).Return(errors.New("committed identity send failed")).Maybe()
+	})
 	ac.replaceTransport(transport)
 	rc := d.attachCoordinator(source, nil, ac, true)
 	token := source.captureAttachmentCapability(ac, transport)
@@ -103,5 +98,5 @@ func TestAttachmentTransitionTearsDownAfterCommittedIdentitySendFailure(t *testi
 	require.ErrorContains(t, err, "committed identity send failed")
 	require.Empty(t, target.snapshotAttachments())
 	require.Empty(t, source.snapshotAttachments())
-	require.True(t, transport.Closed())
+	require.True(t, transportLog.Closed())
 }

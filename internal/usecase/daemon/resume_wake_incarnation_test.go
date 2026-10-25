@@ -18,7 +18,7 @@ func TestParkedResumeRejectsDispatchedWakeFromPriorAttachment(t *testing.T) {
 	defer releasePTY()
 	d := newTestDaemon(t, newFactorySeq(t, pty), newStubClock(t))
 
-	oldTransport := &closeTrackingTransport{}
+	oldTransport := newQuietConnection(t)
 	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTransport)
 	require.NoError(t, err)
 	token := ac.resumeToken
@@ -44,7 +44,7 @@ func TestParkedResumeRejectsDispatchedWakeFromPriorAttachment(t *testing.T) {
 	<-wakeDispatched
 
 	d.clientGone(sess, ac, oldTransport, false)
-	newTransport := &closeTrackingTransport{}
+	newTransport, newTransportLog := newTrackedConnection(t)
 	resumedSess, resumedAC, ok, err := d.resumeParked(helloResumeCapable(protocol.IntentResume, sess.name, token), newTransport, domain.Size{Cols: 80, Rows: 24})
 	require.NoError(t, err)
 	require.True(t, ok)
@@ -53,7 +53,7 @@ func TestParkedResumeRejectsDispatchedWakeFromPriorAttachment(t *testing.T) {
 
 	close(releaseWake)
 	<-wakeDone
-	require.Empty(t, newTransport.Sends(), "a stale pre-resume wake must not emit Output before Welcome")
+	require.Empty(t, newTransportLog.Sends(), "a stale pre-resume wake must not emit Output before Welcome")
 	ac.sendMu.Lock()
 	staleWakeComposed := ac.render.cache.valid
 	ac.sendMu.Unlock()
@@ -64,7 +64,7 @@ func TestParkedResumeRejectsDispatchedWakeFromPriorAttachment(t *testing.T) {
 	rc.opts.wake = originalWake
 	require.True(t, rc.markAttachmentReady(rc.attachmentLease(ac)))
 	d.firstPaint(sess, ac)
-	require.NotEmpty(t, newTransport.Sends())
+	require.NotEmpty(t, newTransportLog.Sends())
 }
 
 func TestSameAttachmentRebindRejectsQueuedWakeAndFansOutFreshGeneration(t *testing.T) {

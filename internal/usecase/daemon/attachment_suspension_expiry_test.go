@@ -11,65 +11,25 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 const testSuspendedExpiry = 7 * time.Second
 
-// expiryAckGateTransport blocks the first suspension ACK until released, so a
-// test can observe the exact window between commit and record publication.
-type expiryAckGateTransport struct {
-	closeTrackingTransport
-	entered chan struct{}
-	release chan struct{}
-	block   atomic.Bool
-	once    sync.Once
-}
-
-func (t *expiryAckGateTransport) SendServer(m protocol.ServerMessage) error {
-	if t.block.Load() {
-		t.once.Do(func() { close(t.entered) })
-		<-t.release
-	}
-	return t.closeTrackingTransport.SendServer(m)
-}
-
-type expiryAckFailureTransport struct{ closeTrackingTransport }
-
-func (*expiryAckFailureTransport) SendServer(protocol.ServerMessage) error {
-	return errors.New("suspension ack failed")
-}
-
-// expiryCloseSignalTransport reports exactly when the daemon physically closes
-// the retained transport, which happens after eviction cleanup runs.
-type expiryCloseSignalTransport struct {
-	closeTrackingTransport
-	closed chan struct{}
-	once   sync.Once
-}
-
-func newExpiryCloseSignalTransport() *expiryCloseSignalTransport {
-	return &expiryCloseSignalTransport{closed: make(chan struct{})}
-}
-
-func (t *expiryCloseSignalTransport) Close() error {
-	err := t.closeTrackingTransport.Close()
-	t.once.Do(func() { close(t.closed) })
-	return err
-}
-
 // newSuspendedExpiryFixture creates one manual session, suspends its sole
 // attachment, and returns the armed fake-clock safety timer plus a transport
 // whose Close call can be observed.
-func newSuspendedExpiryFixture(t *testing.T) (*Daemon, *session, *attachedClient, *testTimer, *expiryCloseSignalTransport) {
+func newSuspendedExpiryFixture(t *testing.T) (*Daemon, *session, *attachedClient, *testTimer, *connLog) {
 	t.Helper()
 	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
 	WithSuspendedSafetyExpiry(testSuspendedExpiry)(d)
 	d.attachCoordinator(sess, nil, ac, true)
-	tr := newExpiryCloseSignalTransport()
+	tr, trLog := newTrackedConnection(t)
 	ac.replaceTransport(tr)
 	ac.resumeCapable, ac.resumeToken = true, 123
 	token := sess.captureAttachmentCapability(ac, tr)
@@ -78,7 +38,7 @@ func newSuspendedExpiryFixture(t *testing.T) (*Daemon, *session, *attachedClient
 	d.clock = clock
 	require.NoError(t, d.suspendAttachment(token, protocol.SuspendAttachment{RequestID: 1}))
 	timer := awaitTimerWithDuration(t, clockTimers, testSuspendedExpiry)
-	return d, sess, ac, timer, tr
+	return d, sess, ac, timer, trLog
 }
 
 // awaitTimerWithDuration drains unrelated watchdog timers (the suspension ACK
@@ -123,7 +83,7 @@ func TestSuspendedAttachmentSafetyExpiryEvictsAfterTimer(t *testing.T) {
 
 		timer.fire()
 		requireReceived(t, evicted, "safety expiry never evicted the suspended attachment")
-		requireReceived(t, tr.closed, "expiry never closed the retained transport")
+		requireReceived(t, tr.Done(), "expiry never closed the retained transport")
 
 		require.Nil(t, ac.currentAttachmentSession())
 		sess.mu.Lock()
@@ -306,37 +266,56 @@ func TestSuspendedAttachmentExpiryRequiresExactRecord(t *testing.T) {
 }
 
 func TestSuspendedAttachmentExpiryArmsOnlyAfterAck(t *testing.T) {
-	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
-	WithSuspendedSafetyExpiry(testSuspendedExpiry)(d)
-	d.attachCoordinator(sess, nil, ac, true)
-	tr := &expiryAckGateTransport{entered: make(chan struct{}), release: make(chan struct{})}
-	tr.block.Store(true)
-	ac.replaceTransport(tr)
-	token := sess.captureAttachmentCapability(ac, tr)
-	ac.installTestAttachmentCapability(token)
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
+		WithSuspendedSafetyExpiry(testSuspendedExpiry)(d)
+		d.attachCoordinator(sess, nil, ac, true)
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		var once sync.Once
+		var block atomic.Bool
+		tr, _ := newTrackedConnection(t, func(c *mockServerConnection, log *connLog) {
+			c.EXPECT().Send(mock.Anything).RunAndReturn(func(f wire.Envelope) error {
+				if block.Load() {
+					once.Do(func() { close(entered) })
+					<-release
+				}
+				log.record(f)
+				return nil
+			}).Maybe()
+		})
+		block.Store(true)
+		ac.replaceTransport(tr)
+		token := sess.captureAttachmentCapability(ac, tr)
+		ac.installTestAttachmentCapability(token)
 
-	done := make(chan error, 1)
-	go func() { done <- d.suspendAttachment(token, protocol.SuspendAttachment{RequestID: 1}) }()
-	awaitTestCompletion(t, tr.entered, "suspension never attempted the ACK")
-	d.mu.Lock()
-	armed := d.suspended[ac] != nil
-	d.mu.Unlock()
-	require.False(t, armed, "the safety expiry must not be armed before the ACK is delivered")
+		done := make(chan error, 1)
+		go func() { done <- d.suspendAttachment(token, protocol.SuspendAttachment{RequestID: 1}) }()
+		synctest.Wait()
+		requireReceived(t, entered, "suspension never attempted the ACK")
+		d.mu.Lock()
+		armed := d.suspended[ac] != nil
+		d.mu.Unlock()
+		require.False(t, armed, "the safety expiry must not be armed before the ACK is delivered")
 
-	close(tr.release)
-	require.NoError(t, awaitTestValue(t, done, "suspension never completed"))
-	d.mu.Lock()
-	armed = d.suspended[ac] != nil
-	d.mu.Unlock()
-	require.True(t, armed, "the safety expiry must be armed once the ACK is delivered")
-	d.clearSuspendedExpiry(ac)
+		close(release)
+		require.NoError(t, requireReceived(t, done, "suspension never completed"))
+		d.mu.Lock()
+		armed = d.suspended[ac] != nil
+		d.mu.Unlock()
+		require.True(t, armed, "the safety expiry must be armed once the ACK is delivered")
+		d.clearSuspendedExpiry(ac)
+		waitForAttachmentCleanup(t, d)
+	})
 }
 
 func TestSuspendedAttachmentExpiryAckFailureArmsNothing(t *testing.T) {
 	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
 	WithSuspendedSafetyExpiry(testSuspendedExpiry)(d)
 	d.attachCoordinator(sess, nil, ac, true)
-	tr := &expiryAckFailureTransport{}
+	tr, _ := newTrackedConnection(t, func(c *mockServerConnection, _ *connLog) {
+		c.EXPECT().Send(mock.Anything).Return(errors.New("suspension ack failed")).Maybe()
+	})
 	ac.replaceTransport(tr)
 	token := sess.captureAttachmentCapability(ac, tr)
 	ac.installTestAttachmentCapability(token)

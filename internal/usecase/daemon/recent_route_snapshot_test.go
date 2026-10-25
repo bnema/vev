@@ -93,7 +93,7 @@ func TestPaletteJumpRecentSessionTargetsHistoryRank(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			d, source, ac, _ := newManualSessionWithPTYs(t, nil)
-			transport := &closeTrackingTransport{}
+			transport, transportLog := newTrackedConnection(t)
 			ac.replaceTransport(transport)
 			rc := d.attachCoordinator(source, nil, ac, true)
 			token := source.captureAttachmentCapability(ac, transport)
@@ -113,7 +113,7 @@ func TestPaletteJumpRecentSessionTargetsHistoryRank(t *testing.T) {
 
 			var action protocol.RouteNavigationAction
 			found := false
-			for _, frame := range transport.Sends() {
+			for _, frame := range transportLog.Sends() {
 				if decoded, ok := decodeServerMessage(t, frame).(protocol.RouteNavigationAction); ok {
 					action, found = decoded, true
 				}
@@ -205,7 +205,7 @@ func TestCtrlDigitSwitchesToRecentHistoryRank(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			d, source, ac, _ := newManualSessionWithPTYs(t, nil)
-			transport := &closeTrackingTransport{}
+			transport, transportLog := newTrackedConnection(t)
 			ac.replaceTransport(transport)
 			rc := d.attachCoordinator(source, nil, ac, true)
 			token := source.captureAttachmentCapability(ac, transport)
@@ -220,7 +220,7 @@ func TestCtrlDigitSwitchesToRecentHistoryRank(t *testing.T) {
 			d.handleInputForAttachment(effect, []byte(tt.input))
 
 			var actions []protocol.RouteNavigationAction
-			for _, frame := range transport.Sends() {
+			for _, frame := range transportLog.Sends() {
 				if decoded, ok := decodeServerMessage(t, frame).(protocol.RouteNavigationAction); ok {
 					actions = append(actions, decoded)
 				}

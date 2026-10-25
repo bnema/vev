@@ -221,7 +221,7 @@ func TestPurgeAdmissionGatesAndReopens(t *testing.T) {
 
 	created := make(chan error, 1)
 	go func() {
-		_, _, err := d.route(helloResumeCapable(protocol.IntentEphemeral, "", 0), &closeTrackingTransport{})
+		_, _, err := d.route(helloResumeCapable(protocol.IntentEphemeral, "", 0), newQuietConnection(t))
 		created <- err
 	}()
 	select {
@@ -269,7 +269,7 @@ func TestPurgeAllLinearizesConcurrentCreate(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			_, _, createErr = d.route(helloResumeCapable(protocol.IntentEphemeral, "", 0), &closeTrackingTransport{})
+			_, _, createErr = d.route(helloResumeCapable(protocol.IntentEphemeral, "", 0), newQuietConnection(t))
 		}()
 		go func() {
 			defer wg.Done()
@@ -326,7 +326,7 @@ func TestPurgeAllLinearizesConcurrentRestore(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			_, _, restoreErr = d.route(helloResumeCapable(protocol.IntentAttach, "work", 0), &closeTrackingTransport{})
+			_, _, restoreErr = d.route(helloResumeCapable(protocol.IntentAttach, "work", 0), newQuietConnection(t))
 		}()
 		go func() {
 			defer wg.Done()
@@ -726,7 +726,7 @@ func TestConcurrentCreateAndExplicitShutdownInterlock(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			_, _, createErr = d.route(helloResumeCapable(protocol.IntentEphemeral, "", 0), &closeTrackingTransport{})
+			_, _, createErr = d.route(helloResumeCapable(protocol.IntentEphemeral, "", 0), newQuietConnection(t))
 		}()
 		go func() {
 			defer wg.Done()
@@ -751,7 +751,7 @@ func TestConcurrentCreateAndExplicitShutdownInterlock(t *testing.T) {
 		default:
 			t.Fatalf("attempt %d: explicit shutdown must signal Serve", attempt)
 		}
-		_, _, afterErr := d.route(helloResumeCapable(protocol.IntentEphemeral, "", 0), &closeTrackingTransport{})
+		_, _, afterErr := d.route(helloResumeCapable(protocol.IntentEphemeral, "", 0), newQuietConnection(t))
 		require.Error(t, afterErr, "attempt %d: a Hello after shutdown must be rejected", attempt)
 
 		releasePTY()
@@ -1506,7 +1506,7 @@ func TestPurgeAllParticipantChangeRetriesOnceAndPurgesExactly(t *testing.T) {
 		{
 			name: "token resume",
 			change: func(d *Daemon, sess *session, ac *attachedClient) {
-				fresh := &closeTrackingTransport{}
+				fresh := newQuietConnection(t)
 				ac.replaceTransport(fresh)
 				ac.installTestAttachmentCapability(sess.captureAttachmentCapability(ac, fresh))
 			},
@@ -2130,7 +2130,7 @@ func TestSessionKillPostQuarantineParticipantMismatchRestoresSurvivingSession(t 
 				// so the teardown must abort and roll the quarantine back. The
 				// attachment gate is frozen here, so only the transport incarnation
 				// changes; the capability is rebound by the next real claim.
-				fresh := &closeTrackingTransport{}
+				fresh := newQuietConnection(t)
 				ac.replaceTransport(fresh)
 			}
 			t.Cleanup(func() { d.afterSessionKillQuarantine = nil })

@@ -441,11 +441,11 @@ func TestGraphicsNamespaceStaysQuarantinedAfterSocketSendSuccessWithoutTerminalF
 	// This transport models only successful delivery to the client socket. It
 	// deliberately provides no evidence that the client flushed the side effect
 	// to its outer terminal before being lost.
-	transport := &closeTrackingTransport{}
+	transport, transportLog := newTrackedConnection(t)
 	ac := &attachedClient{tr: transport, output: attachmentOutputWithGraphics(state)}
 	require.NoError(t, d.cleanupAttachmentOutput(ac))
 	require.Nil(t, ac.output.graphicsOutput)
-	sends := transport.Sends()
+	sends := transportLog.Sends()
 	require.Len(t, sends, 1)
 	cleanup := unmarshalTestOutput(t, sends[0].Payload)
 	require.Zero(t, cleanup.New, "graphics cleanup is an unacknowledged side-effect frame")
@@ -504,7 +504,7 @@ func TestGraphicsNamespacePoolExhaustionFallsBackToText(t *testing.T) {
 	}
 	ac := d.prepareAttachedClientLocked(
 		&session{sessionCore: sessionCore{id: "work"}},
-		&closeTrackingTransport{},
+		newQuietConnection(t),
 		domain.Geometry{Size: defaultSize},
 		attachClientOptions{
 			capabilitiesSet:      true,

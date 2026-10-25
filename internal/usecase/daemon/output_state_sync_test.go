@@ -8,13 +8,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
+
 	vt "github.com/bnema/vev-vt"
 	renderer "github.com/bnema/vev-vt/ansi"
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
-	"github.com/stretchr/testify/require"
 )
 
 type datagramTestTransport struct {
@@ -38,21 +40,6 @@ func (t *asyncPaintTransport) Send(f wire.Envelope) error      { t.syncSends <- 
 func (t *asyncPaintTransport) SendAsync(f wire.Envelope) error { t.asyncSends <- f; return nil }
 func (t *asyncPaintTransport) Recv() (wire.Envelope, error)    { return wire.Envelope{}, io.EOF }
 func (t *asyncPaintTransport) Close() error                    { return nil }
-
-type timedSideEffectTransport struct {
-	closeTrackingTransport
-}
-
-func (t *timedSideEffectTransport) SendSynchronous(f wire.Envelope) error {
-	return t.Send(f)
-}
-
-type noWatchdogClock struct{}
-
-func (noWatchdogClock) Now() time.Time { return time.Time{} }
-func (noWatchdogClock) NewTimer(time.Duration) ports.Timer {
-	panic("owned synchronous send must not install daemon watchdog")
-}
 
 func newDatagramTestTransport() *datagramTestTransport {
 	return &datagramTestTransport{sends: make(chan wire.Envelope, 64), recv: make(chan wire.Envelope, 64)}
@@ -240,14 +227,14 @@ func TestLocalOutputAckDoesNotMoveRendererShadowBackward(t *testing.T) {
 
 func TestRawTerminalSideEffectDoesNotEnterFullOutputWindow(t *testing.T) {
 	d := newTestDaemon(t, nil, newStubClock(t))
-	tr := &closeTrackingTransport{}
+	tr, trLog := newTrackedConnection(t)
 	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.output.next = maxUnackedOutputStates
 
 	require.NoError(t, d.boundedSendOutputErr(ac, []byte("\x1b]52;c;YQ==\x07")))
 	require.Equal(t, uint64(maxUnackedOutputStates), ac.output.next)
 	require.Equal(t, uint64(maxUnackedOutputStates), ac.output.outstanding())
-	sends := tr.Sends()
+	sends := trLog.Sends()
 	require.Len(t, sends, 1)
 	out := unmarshalTestOutput(t, sends[0].Payload)
 	require.Zero(t, out.Base)
@@ -255,12 +242,22 @@ func TestRawTerminalSideEffectDoesNotEnterFullOutputWindow(t *testing.T) {
 }
 
 func TestOwnedSynchronousSideEffectSkipsOuterWatchdog(t *testing.T) {
-	d := newTestDaemon(t, nil, noWatchdogClock{})
-	tr := &timedSideEffectTransport{}
+	// An unexpected NewTimer call fails the mock: no daemon watchdog may be armed.
+	clock := portsmocks.NewMockClock(t)
+	clock.EXPECT().Now().Return(time.Time{}).Maybe()
+	d := newTestDaemon(t, nil, clock)
+	var sent []wire.Envelope
+	tr := portsmocks.NewMockServerConnection(t)
+	tr.EXPECT().Capabilities().Return(protocol.ConnectionCapabilities{OutputDataLimit: protocol.MaxOutputDataLen, PreferredOutputWindow: protocol.MaxOutputWindow, OwnedSynchronousSend: true}).Maybe()
+	tr.EXPECT().SendOutputSynchronous(mock.Anything).RunAndReturn(func(output protocol.Output) error {
+		envelope, err := testServerEnvelope(output)
+		sent = append(sent, envelope)
+		return err
+	}).Maybe()
 	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 
 	require.NoError(t, d.boundedSendOutputErr(ac, make([]byte, 100*1024)))
-	require.Len(t, tr.Sends(), 1)
+	require.Len(t, sent, 1)
 }
 
 func TestFailedPaintSendRollsBackOutputState(t *testing.T) {

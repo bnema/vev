@@ -429,42 +429,6 @@ func (t *teardownBlockingTransport) Capabilities() protocol.ConnectionCapabiliti
 func (t *teardownBlockingTransport) LinkState() ports.LinkState         { return testLinkState(t) }
 func (t *teardownBlockingTransport) LinkEvents() <-chan ports.LinkEvent { return testLinkEvents(t) }
 
-func (t *closeTrackingTransport) ReceiveClient() (protocol.ClientMessage, error) {
-	return testReceiveClient(t)
-}
-func (t *closeTrackingTransport) SendServer(m protocol.ServerMessage) error {
-	return testSendServer(t, m)
-}
-func (t *closeTrackingTransport) SendServerAsync(m protocol.ServerMessage) error {
-	return testSendServerAsync(t, m)
-}
-func (t *closeTrackingTransport) SendServerSynchronous(m protocol.ServerMessage) error {
-	return testSendServerSynchronous(t, m)
-}
-func (t *closeTrackingTransport) Capabilities() protocol.ConnectionCapabilities {
-	return testServerCapabilities(t)
-}
-func (t *closeTrackingTransport) LinkState() ports.LinkState         { return testLinkState(t) }
-func (t *closeTrackingTransport) LinkEvents() <-chan ports.LinkEvent { return testLinkEvents(t) }
-
-func (t *closeCountingBlockedTransport) ReceiveClient() (protocol.ClientMessage, error) {
-	return testReceiveClient(t)
-}
-func (t *closeCountingBlockedTransport) SendServer(m protocol.ServerMessage) error {
-	return testSendServer(t, m)
-}
-func (t *closeCountingBlockedTransport) SendServerAsync(m protocol.ServerMessage) error {
-	return testSendServerAsync(t, m)
-}
-func (t *closeCountingBlockedTransport) SendServerSynchronous(m protocol.ServerMessage) error {
-	return testSendServerSynchronous(t, m)
-}
-func (t *closeCountingBlockedTransport) Capabilities() protocol.ConnectionCapabilities {
-	return testServerCapabilities(t)
-}
-func (t *closeCountingBlockedTransport) LinkState() ports.LinkState         { return testLinkState(t) }
-func (t *closeCountingBlockedTransport) LinkEvents() <-chan ports.LinkEvent { return testLinkEvents(t) }
-
 func (t *handshakeBlockingTransport) ReceiveClient() (protocol.ClientMessage, error) {
 	return testReceiveClient(t)
 }
@@ -534,24 +498,6 @@ func (t *asyncPaintTransport) Capabilities() protocol.ConnectionCapabilities {
 }
 func (t *asyncPaintTransport) LinkState() ports.LinkState         { return testLinkState(t) }
 func (t *asyncPaintTransport) LinkEvents() <-chan ports.LinkEvent { return testLinkEvents(t) }
-
-func (t *timedSideEffectTransport) ReceiveClient() (protocol.ClientMessage, error) {
-	return testReceiveClient(t)
-}
-func (t *timedSideEffectTransport) SendServer(m protocol.ServerMessage) error {
-	return testSendServer(t, m)
-}
-func (t *timedSideEffectTransport) SendServerAsync(m protocol.ServerMessage) error {
-	return testSendServerAsync(t, m)
-}
-func (t *timedSideEffectTransport) SendServerSynchronous(m protocol.ServerMessage) error {
-	return testSendServerSynchronous(t, m)
-}
-func (t *timedSideEffectTransport) Capabilities() protocol.ConnectionCapabilities {
-	return testServerCapabilities(t)
-}
-func (t *timedSideEffectTransport) LinkState() ports.LinkState         { return testLinkState(t) }
-func (t *timedSideEffectTransport) LinkEvents() <-chan ports.LinkEvent { return testLinkEvents(t) }
 
 func (t *scriptedReplayTransport) ReceiveClient() (protocol.ClientMessage, error) {
 	return testReceiveClient(t)
@@ -731,44 +677,6 @@ func (t *blockedAttachmentTransport) Capabilities() protocol.ConnectionCapabilit
 func (t *blockedAttachmentTransport) LinkState() ports.LinkState         { return testLinkState(t) }
 func (t *blockedAttachmentTransport) LinkEvents() <-chan ports.LinkEvent { return testLinkEvents(t) }
 
-func (t *resumeWelcomeFailureTransport) ReceiveClient() (protocol.ClientMessage, error) {
-	return testReceiveClient(t)
-}
-func (t *resumeWelcomeFailureTransport) SendServer(m protocol.ServerMessage) error {
-	return testSendServer(t, m)
-}
-func (t *resumeWelcomeFailureTransport) SendServerAsync(m protocol.ServerMessage) error {
-	return testSendServerAsync(t, m)
-}
-func (t *resumeWelcomeFailureTransport) SendServerSynchronous(m protocol.ServerMessage) error {
-	return testSendServerSynchronous(t, m)
-}
-func (t *resumeWelcomeFailureTransport) Capabilities() protocol.ConnectionCapabilities {
-	return testServerCapabilities(t)
-}
-func (t *resumeWelcomeFailureTransport) LinkState() ports.LinkState         { return testLinkState(t) }
-func (t *resumeWelcomeFailureTransport) LinkEvents() <-chan ports.LinkEvent { return testLinkEvents(t) }
-
-func (t *committedIdentityErrorTransport) ReceiveClient() (protocol.ClientMessage, error) {
-	return testReceiveClient(t)
-}
-func (t *committedIdentityErrorTransport) SendServer(m protocol.ServerMessage) error {
-	return testSendServer(t, m)
-}
-func (t *committedIdentityErrorTransport) SendServerAsync(m protocol.ServerMessage) error {
-	return testSendServerAsync(t, m)
-}
-func (t *committedIdentityErrorTransport) SendServerSynchronous(m protocol.ServerMessage) error {
-	return testSendServerSynchronous(t, m)
-}
-func (t *committedIdentityErrorTransport) Capabilities() protocol.ConnectionCapabilities {
-	return testServerCapabilities(t)
-}
-func (t *committedIdentityErrorTransport) LinkState() ports.LinkState { return testLinkState(t) }
-func (t *committedIdentityErrorTransport) LinkEvents() <-chan ports.LinkEvent {
-	return testLinkEvents(t)
-}
-
 func (t *countingOutputTransport) ReceiveClient() (protocol.ClientMessage, error) {
 	return testReceiveClient(t)
 }
@@ -839,24 +747,6 @@ func (t *teardownBlockingTransport) SendOutputSynchronous(o protocol.Output) err
 	return testSendOutputSynchronous(t, o)
 }
 
-func (t *closeTrackingTransport) SendOutput(o protocol.Output) error { return testSendOutput(t, o) }
-func (t *closeTrackingTransport) SendOutputAsync(o protocol.Output) error {
-	return testSendOutputAsync(t, o)
-}
-func (t *closeTrackingTransport) SendOutputSynchronous(o protocol.Output) error {
-	return testSendOutputSynchronous(t, o)
-}
-
-func (t *closeCountingBlockedTransport) SendOutput(o protocol.Output) error {
-	return testSendOutput(t, o)
-}
-func (t *closeCountingBlockedTransport) SendOutputAsync(o protocol.Output) error {
-	return testSendOutputAsync(t, o)
-}
-func (t *closeCountingBlockedTransport) SendOutputSynchronous(o protocol.Output) error {
-	return testSendOutputSynchronous(t, o)
-}
-
 func (t *handshakeBlockingTransport) SendOutput(o protocol.Output) error { return testSendOutput(t, o) }
 func (t *handshakeBlockingTransport) SendOutputAsync(o protocol.Output) error {
 	return testSendOutputAsync(t, o)
@@ -888,14 +778,6 @@ func (t *asyncPaintTransport) SendOutputAsync(o protocol.Output) error {
 	return testSendOutputAsync(t, o)
 }
 func (t *asyncPaintTransport) SendOutputSynchronous(o protocol.Output) error {
-	return testSendOutputSynchronous(t, o)
-}
-
-func (t *timedSideEffectTransport) SendOutput(o protocol.Output) error { return testSendOutput(t, o) }
-func (t *timedSideEffectTransport) SendOutputAsync(o protocol.Output) error {
-	return testSendOutputAsync(t, o)
-}
-func (t *timedSideEffectTransport) SendOutputSynchronous(o protocol.Output) error {
 	return testSendOutputSynchronous(t, o)
 }
 
@@ -982,26 +864,6 @@ func (t *blockedAttachmentTransport) SendOutputAsync(o protocol.Output) error {
 	return testSendOutputAsync(t, o)
 }
 func (t *blockedAttachmentTransport) SendOutputSynchronous(o protocol.Output) error {
-	return testSendOutputSynchronous(t, o)
-}
-
-func (t *resumeWelcomeFailureTransport) SendOutput(o protocol.Output) error {
-	return testSendOutput(t, o)
-}
-func (t *resumeWelcomeFailureTransport) SendOutputAsync(o protocol.Output) error {
-	return testSendOutputAsync(t, o)
-}
-func (t *resumeWelcomeFailureTransport) SendOutputSynchronous(o protocol.Output) error {
-	return testSendOutputSynchronous(t, o)
-}
-
-func (t *committedIdentityErrorTransport) SendOutput(o protocol.Output) error {
-	return testSendOutput(t, o)
-}
-func (t *committedIdentityErrorTransport) SendOutputAsync(o protocol.Output) error {
-	return testSendOutputAsync(t, o)
-}
-func (t *committedIdentityErrorTransport) SendOutputSynchronous(o protocol.Output) error {
 	return testSendOutputSynchronous(t, o)
 }
 

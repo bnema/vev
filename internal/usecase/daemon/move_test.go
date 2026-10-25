@@ -137,7 +137,7 @@ func TestMovePaneRetiresSourceParkedClients(t *testing.T) {
 	movedTab := source.tabs[0]
 	movedTab.stableID = "source-tab"
 
-	transport := &closeTrackingTransport{}
+	transport, transportLog := newTrackedConnection(t)
 	parked := &attachedClient{tr: transport, output: newOutputStateStream(), geometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}, resumeCapable: true}
 	parked.initOverlays()
 	require.True(t, d.parkAttachment(source, parked))
@@ -158,7 +158,7 @@ func TestMovePaneRetiresSourceParkedClients(t *testing.T) {
 	d.mu.Lock()
 	require.Empty(t, d.resume.parked, "retired source parked clients must leave the daemon registry")
 	d.mu.Unlock()
-	require.True(t, transport.Closed(), "retired source parked transport was not closed")
+	require.True(t, transportLog.Closed(), "retired source parked transport was not closed")
 }
 
 func TestPrepareMovePaneCandidateIsPure(t *testing.T) {

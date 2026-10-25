@@ -608,7 +608,7 @@ func TestRouteRejectsInvalidTerminalSizeBeforeResumeMutation(t *testing.T) {
 			defer release()
 			d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 
-			transport := &closeTrackingTransport{}
+			transport := newQuietConnection(t)
 			sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), transport)
 			require.NoError(t, err)
 			token := ac.resumeToken
@@ -621,7 +621,7 @@ func TestRouteRejectsInvalidTerminalSizeBeforeResumeMutation(t *testing.T) {
 
 			invalid := helloResumeCapable(protocol.IntentResume, "work", token)
 			invalid.Size = tt.size
-			_, _, err = d.route(invalid, &closeTrackingTransport{})
+			_, _, err = d.route(invalid, newQuietConnection(t))
 			var protocolErr *protoErr
 			require.ErrorAs(t, err, &protocolErr)
 			require.Equal(t, protocol.ErrInternal, protocolErr.code)

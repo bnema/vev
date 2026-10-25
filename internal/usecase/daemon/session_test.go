@@ -214,7 +214,7 @@ func TestCreateTabForAttachmentUsesRequestingAttachmentViewportAndTheme(t *testi
 	p, release := newBlockingPTY(t)
 	defer release()
 	d := newTestDaemon(t, newFactory(t, p), newStubClock(t))
-	firstTransport := &closeTrackingTransport{}
+	firstTransport := newQuietConnection(t)
 	sess, first, err := d.route(protocol.Hello{
 		Version:  protocol.Version,
 		Intent:   protocol.IntentNew,
@@ -223,7 +223,7 @@ func TestCreateTabForAttachmentUsesRequestingAttachmentViewportAndTheme(t *testi
 		Size:     domain.Size{Cols: 80, Rows: 24},
 	}, firstTransport)
 	require.NoError(t, err)
-	secondTransport := &closeTrackingTransport{}
+	secondTransport := newQuietConnection(t)
 	_, second, err := d.route(protocol.Hello{
 		Version:  protocol.Version,
 		Intent:   protocol.IntentAttach,
@@ -374,7 +374,7 @@ func TestListShowsDetachedEphemeralSession(t *testing.T) {
 	defer releasePTY()
 	d := newTestDaemon(t, newFactory(t, p), newStubClock(t))
 
-	tr := &closeTrackingTransport{}
+	tr := newQuietConnection(t)
 	sess, ac, err := d.route(helloResumeCapable(protocol.IntentEphemeral, "", 0), tr)
 	require.NoError(t, err)
 	d.clientGone(sess, ac, ac.transport(), true)
@@ -494,7 +494,7 @@ func TestConcurrentFinalRemovalAndCreationLinearize(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			_, _, createErr = d.route(helloResumeCapable(protocol.IntentEphemeral, "", 0), &closeTrackingTransport{})
+			_, _, createErr = d.route(helloResumeCapable(protocol.IntentEphemeral, "", 0), newQuietConnection(t))
 		}()
 		go func() {
 			defer wg.Done()

@@ -51,7 +51,7 @@ func (t *handshakeBlockingTransport) Close() error {
 
 func TestBoundedHandshakeCompletionCancellationDoesNotDoubleReceive(t *testing.T) {
 	ctx := &completionCancellationContext{}
-	tr := &closeTrackingTransport{}
+	tr := newQuietConnection(t)
 	done := make(chan error, 1)
 	go func() {
 		done <- boundedHandshakeOperation(ctx, tr, func() error {
@@ -83,7 +83,7 @@ func (*completionCancellationContext) Value(any) any { return nil }
 func TestBoundedHandshakeCancellationDoesNotWaitForUninterruptibleOperation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	tr := &closeTrackingTransport{}
+	tr := newQuietConnection(t)
 	started := make(chan struct{})
 	release := make(chan struct{})
 	operationDone := make(chan struct{})
@@ -151,14 +151,14 @@ func TestHandshakeFailureAfterWelcomeDoesNotReportExplicitDetach(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
 	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
-	tr := &closeTrackingTransport{}
+	tr, trLog := newTrackedConnection(t)
 	sess, ac, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "welcome-failed", Size: domain.Size{Cols: 80, Rows: 24}, TermEnv: "xterm-256color"}, tr)
 	require.NoError(t, err)
 
 	d.failHandshakeAttachment(sess, ac, tr, true)
 
 	var detached *protocol.Detached
-	for _, frame := range tr.Sends() {
+	for _, frame := range trLog.Sends() {
 		message, decodeErr := sessionwire.DecodeServerEnvelope(frame.Payload)
 		require.NoError(t, decodeErr)
 		if value, ok := message.(protocol.Detached); ok {
@@ -320,7 +320,7 @@ func TestHandshakeTimeoutPreservesUnrelatedAttachment(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
 	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
-	oldTransport := &closeTrackingTransport{}
+	oldTransport, oldTransportLog := newTrackedConnection(t)
 	sess, old, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "shared", Size: domain.Size{Cols: 80, Rows: 24}}, oldTransport)
 	require.NoError(t, err)
 
@@ -339,7 +339,7 @@ func TestHandshakeTimeoutPreservesUnrelatedAttachment(t *testing.T) {
 	timer.ch <- time.Time{}
 	awaitTestCompletion(t, done, "timed-out attachment cleanup did not finish")
 	requireClosedHandshakeTransport(t, tr)
-	require.False(t, oldTransport.Closed(), "cleanup closed an unrelated attachment transport")
+	require.False(t, oldTransportLog.Closed(), "cleanup closed an unrelated attachment transport")
 	require.Same(t, sess, old.currentAttachmentSession())
 	require.Equal(t, []*attachedClient{old}, sess.snapshotAttachments())
 	d.mu.Lock()
@@ -354,7 +354,7 @@ func TestSuccessfulRouteOutlivesStoppedHandshakeContext(t *testing.T) {
 	defer release()
 	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 	ctx, cancel := context.WithCancel(context.Background())
-	sess, ac, err := d.routeWithContext(ctx, protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "lifetime", Size: domain.Size{Cols: 80, Rows: 24}}, &closeTrackingTransport{})
+	sess, ac, err := d.routeWithContext(ctx, protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "lifetime", Size: domain.Size{Cols: 80, Rows: 24}}, newQuietConnection(t))
 	require.NoError(t, err)
 	cancel()
 	select {

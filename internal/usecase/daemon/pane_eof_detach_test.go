@@ -26,7 +26,7 @@ func TestLastPaneEOFRetriesSessionTeardownAfterConcurrentDetach(t *testing.T) {
 				if change == "detach" {
 					require.True(t, d.detachIfCurrentTransport(sess, ac, ac.transportSnapshot()))
 				} else {
-					ac.replaceTransport(&closeTrackingTransport{})
+					ac.replaceTransport(newQuietConnection(t))
 				}
 			}
 

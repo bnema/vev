@@ -203,14 +203,14 @@ func TestResumeReappliesClaimingPixelGeometryBeforeReturn(t *testing.T) {
 	d := newTestDaemon(t, &recordingPTYFactory{pty: pty}, newStubClock(t))
 	firstHello := helloResumeCapable(protocol.IntentNew, "pixels", 0)
 	firstHello.PixelWidth, firstHello.PixelHeight = 800, 480
-	firstTransport := &closeTrackingTransport{}
+	firstTransport := newQuietConnection(t)
 	sess, ac, err := d.route(firstHello, firstTransport)
 	require.NoError(t, err)
 	d.clientGone(sess, ac, firstTransport, false)
 
 	resumeHello := helloResumeCapable(protocol.IntentResume, "pixels", ac.resumeToken)
 	resumeHello.PixelWidth, resumeHello.PixelHeight = 1000, 600
-	resumed, same, ok, err := d.resumeParked(resumeHello, &closeTrackingTransport{}, resumeHello.Size)
+	resumed, same, ok, err := d.resumeParked(resumeHello, newQuietConnection(t), resumeHello.Size)
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Same(t, sess, resumed)

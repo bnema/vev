@@ -32,11 +32,11 @@ func TestEphemeralCloseOnExit(t *testing.T) {
 			d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 			updateRuntimeConfig(d, func(rc *runtimeConfig) { rc.ephemeral = domain.EphemeralConfig{CloseOnExit: tt.closeOnExit} })
 
-			tr := &closeTrackingTransport{}
+			tr := newQuietConnection(t)
 			sess, ac, err := d.route(helloResumeCapable(tt.intent, tt.sessionName, 0), tr)
 			require.NoError(t, err)
 			for i := 1; i < tt.clients; i++ {
-				_, _, err := d.route(helloResumeCapable(protocol.IntentAttach, sess.nameSnapshot(), 0), &closeTrackingTransport{})
+				_, _, err := d.route(helloResumeCapable(protocol.IntentAttach, sess.nameSnapshot(), 0), newQuietConnection(t))
 				require.NoError(t, err)
 			}
 
@@ -71,11 +71,11 @@ func TestEphemeralCloseOnExitWaitsForParkExpiry(t *testing.T) {
 			defer release()
 			d := newTestDaemon(t, newFactory(t, pty), clock)
 
-			tr := &closeTrackingTransport{}
+			tr := newQuietConnection(t)
 			sess, ac, err := d.route(helloResumeCapable(protocol.IntentEphemeral, "", 0), tr)
 			require.NoError(t, err)
 			if tt.otherClient {
-				_, _, err := d.route(helloResumeCapable(protocol.IntentAttach, sess.nameSnapshot(), 0), &closeTrackingTransport{})
+				_, _, err := d.route(helloResumeCapable(protocol.IntentAttach, sess.nameSnapshot(), 0), newQuietConnection(t))
 				require.NoError(t, err)
 			}
 			token := ac.resumeToken

@@ -194,14 +194,14 @@ func attachmentEffectGatePublicationSnapshot(ac *attachedClient) (attachmentEffe
 
 func TestKillSessionAcquisitionTimeoutDoesNotPublishPartialInvalidation(t *testing.T) {
 	d, sess, first, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
-	firstTransport := &closeTrackingTransport{}
+	firstTransport, firstTransportLog := newTrackedConnection(t)
 	first.replaceTransport(firstTransport)
 
-	blockedTransport := &closeTrackingTransport{}
+	blockedTransport, blockedTransportLog := newTrackedConnection(t)
 	blocked := &attachedClient{tr: blockedTransport, output: newOutputStateStream(), geometry: domain.Geometry{Size: first.geometry.Size}}
 	blocked.initOverlays()
 	blocked.setSession(sess)
-	laterTransport := &closeTrackingTransport{}
+	laterTransport, laterTransportLog := newTrackedConnection(t)
 	later := &attachedClient{tr: laterTransport, output: newOutputStateStream(), geometry: domain.Geometry{Size: first.geometry.Size}}
 	later.initOverlays()
 	later.setSession(sess)
@@ -284,9 +284,9 @@ func TestKillSessionAcquisitionTimeoutDoesNotPublishPartialInvalidation(t *testi
 	require.True(t, first.transportSnapshotCurrent(firstSnapshot))
 	require.True(t, blocked.transportSnapshotCurrent(blockedSnapshot))
 	require.True(t, later.transportSnapshotCurrent(laterSnapshot))
-	require.False(t, firstTransport.Closed())
-	require.False(t, blockedTransport.Closed())
-	require.False(t, laterTransport.Closed())
+	require.False(t, firstTransportLog.Closed())
+	require.False(t, blockedTransportLog.Closed())
+	require.False(t, laterTransportLog.Closed())
 
 	firstPhase, gotFirstCapability := attachmentEffectGatePublicationSnapshot(first)
 	blockedPhase, gotBlockedCapability := attachmentEffectGatePublicationSnapshot(blocked)
@@ -328,7 +328,7 @@ func TestKillSessionInterruptsOnlyExactParticipantBlockedSends(t *testing.T) {
 	require.NoError(t, err)
 	defer d.deferAttachmentTransitionCleanups(transition)
 
-	unrelatedTransport := &closeTrackingTransport{}
+	unrelatedTransport, unrelatedTransportLog := newTrackedConnection(t)
 	unrelatedClient := &attachedClient{tr: unrelatedTransport, output: newOutputStateStream(), geometry: domain.Geometry{Size: active.geometry.Size}}
 	unrelatedClient.initOverlays()
 	unrelated := &session{sessionCore: sessionCore{id: "unrelated", name: "unrelated", attachments: map[*attachedClient]struct{}{unrelatedClient: {}}}, ctx: sess.ctx, cancel: func() {}}
@@ -361,7 +361,7 @@ func TestKillSessionInterruptsOnlyExactParticipantBlockedSends(t *testing.T) {
 
 	require.True(t, snatchedTransport.Closed())
 	require.True(t, activeTransport.Closed())
-	require.False(t, unrelatedTransport.Closed(), "unrelated session transport was interrupted")
+	require.False(t, unrelatedTransportLog.Closed(), "unrelated session transport was interrupted")
 	require.Contains(t, unrelated.snapshotAttachments(), unrelatedClient)
 	require.Same(t, unrelated, unrelatedClient.currentSession())
 	requireAttachmentEffectGateRetired(t, snatched)
@@ -378,7 +378,7 @@ func TestKillSessionInterruptsCapturedSendWithoutClosingNewerIncarnation(t *test
 	token := sess.captureAttachmentCapability(ac, stale)
 	sendDone := startBlockedAttachmentSend(t, token)
 	awaitTestCompletion(t, stale.sendEntered, "captured incarnation send did not block")
-	fresh := &closeTrackingTransport{}
+	fresh, freshLog := newTrackedConnection(t)
 	d.afterAttachmentEffectParticipantsSnapshotted = func(string, []*attachedClient) {
 		ac.replaceTransport(fresh)
 	}
@@ -389,7 +389,7 @@ func TestKillSessionInterruptsCapturedSendWithoutClosingNewerIncarnation(t *test
 	require.ErrorIs(t, d.killSession(sess, protocol.ReasonSessionKilled, false), errSessionKillParticipantsChanged)
 	awaitTestCompletion(t, sendDone, "captured incarnation attachment effect ticket did not retire")
 	require.True(t, stale.Closed(), "exact captured in-flight transport was not interrupted")
-	require.False(t, fresh.Closed(), "newer transport incarnation was interrupted")
+	require.False(t, freshLog.Closed(), "newer transport incarnation was interrupted")
 	require.Same(t, fresh, ac.transport())
 	d.mu.Lock()
 	require.Same(t, sess, d.sessions[sess.id], "transport incarnation change should abort stale teardown publication")
@@ -402,7 +402,7 @@ func TestKillSessionInterruptsCapturedSendWithoutClosingNewerIncarnation(t *test
 
 func TestShutdownSignalsServeWhenParticipantGateAcquisitionTimesOut(t *testing.T) {
 	d, sess, active, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
-	transport := &closeTrackingTransport{}
+	transport := newQuietConnection(t)
 	active.replaceTransport(transport)
 	d.attachCoordinator(sess, nil, active, true)
 	active.installTestAttachmentCapability(sess.captureAttachmentCapability(active, transport))
@@ -459,7 +459,7 @@ func TestShutdownInterruptsBlockedParticipantSend(t *testing.T) {
 
 func TestRenderSendFailureCleanupIsDeadlineBoundedWhileAttachmentEffectGateIsBusy(t *testing.T) {
 	d, sess, ac, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
-	transport := &closeTrackingTransport{}
+	transport, transportLog := newTrackedConnection(t)
 	ac.replaceTransport(transport)
 	rc := d.attachCoordinator(sess, nil, ac, true)
 	token := sess.captureAttachmentCapability(ac, transport)
@@ -484,7 +484,7 @@ func TestRenderSendFailureCleanupIsDeadlineBoundedWhileAttachmentEffectGateIsBus
 	sess.mu.Lock()
 	require.Contains(t, sess.snapshotAttachmentsLocked(), ac)
 	sess.mu.Unlock()
-	require.False(t, transport.Closed())
+	require.False(t, transportLog.Closed())
 }
 
 func TestAttachmentEffectGateReplacementInterruptsBlockedOldRenderBeforePublication(t *testing.T) {
@@ -504,7 +504,7 @@ func TestAttachmentEffectGateReplacementInterruptsBlockedOldRenderBeforePublicat
 	}()
 	<-oldTransport.sendEntered
 
-	newTransport := &closeTrackingTransport{}
+	newTransport, newTransportLog := newTrackedConnection(t)
 	next := &attachedClient{tr: newTransport, output: newOutputStateStream(), geometry: domain.Geometry{Size: old.geometry.Size}}
 	next.initOverlays()
 	transitionDone := make(chan attachmentTransitionResult, 1)
@@ -526,7 +526,7 @@ func TestAttachmentEffectGateReplacementInterruptsBlockedOldRenderBeforePublicat
 	require.NoError(t, <-transitionErr)
 	require.True(t, slices.Contains(sess.snapshotAttachments(), next))
 	require.True(t, slices.Contains(sess.snapshotAttachments(), old))
-	require.False(t, newTransport.Closed(), "new attachment transport was affected by publication")
+	require.False(t, newTransportLog.Closed(), "new attachment transport was affected by publication")
 
 	// Generic attachment publication does not interrupt or retire another
 	// registered connection. Release the test transport explicitly.
@@ -539,7 +539,7 @@ func TestAttachmentEffectGateReplacementInterruptsBlockedOldRenderBeforePublicat
 	d.deferAttachmentTransitionCleanups(result)
 	d.attachmentCleanupWg.Wait()
 	require.Same(t, oldTransport, old.transport(), "unrelated attachment link was retired")
-	require.False(t, newTransport.Closed())
+	require.False(t, newTransportLog.Closed())
 }
 
 func TestAttachmentEffectGateAdmittedEffectCompletesBeforeConflictingTransition(t *testing.T) {
@@ -554,7 +554,7 @@ func TestAttachmentEffectGateAdmittedEffectCompletesBeforeConflictingTransition(
 	ticket, ok := old.beginAttachmentEffect(token)
 	require.True(t, ok)
 
-	next := &attachedClient{tr: &closeTrackingTransport{}, output: newOutputStateStream(), geometry: domain.Geometry{Size: old.geometry.Size}}
+	next := &attachedClient{tr: newQuietConnection(t), output: newOutputStateStream(), geometry: domain.Geometry{Size: old.geometry.Size}}
 	next.initOverlays()
 	done := make(chan error, 1)
 	go func() {
@@ -668,7 +668,7 @@ func TestAttachmentEffectGateAdmittedActiveEffectsFinishBeforeReplacement(t *tes
 			}()
 			<-admitted
 
-			next := &attachedClient{tr: &closeTrackingTransport{}, output: newOutputStateStream(), geometry: domain.Geometry{Size: old.geometry.Size}}
+			next := &attachedClient{tr: newQuietConnection(t), output: newOutputStateStream(), geometry: domain.Geometry{Size: old.geometry.Size}}
 			next.initOverlays()
 			transitionDone := make(chan error, 1)
 			go func() {
@@ -687,7 +687,7 @@ func TestAttachmentEffectGateAdmittedActiveEffectsFinishBeforeReplacement(t *tes
 
 func TestAttachedRouteSnapshotIsAcceptedAsAnAttachmentValue(t *testing.T) {
 	d, source, ac, _ := newManualSessionWithPTYs(t, nil)
-	transport := &closeTrackingTransport{}
+	transport := newQuietConnection(t)
 	ac.replaceTransport(transport)
 	rc := d.attachCoordinator(source, nil, ac, true)
 	token := source.captureAttachmentCapability(ac, transport)
@@ -723,7 +723,7 @@ func TestAttachedNavigationCommandSendsResultAfterLocalTransition(t *testing.T) 
 		Entries:     []protocol.RecentRouteEntry{testRouteEntry(1, 1, "target", 1, protocol.RouteKindLocal)},
 	})
 
-	transport := &closeTrackingTransport{}
+	transport, transportLog := newTrackedConnection(t)
 	ac.replaceTransport(transport)
 	rc := d.attachCoordinator(source, nil, ac, true)
 	token := source.captureAttachmentCapability(ac, transport)
@@ -733,7 +733,7 @@ func TestAttachedNavigationCommandSendsResultAfterLocalTransition(t *testing.T) 
 		Version: protocol.Version, RequestID: 1, Slug: "back-session", Attached: true,
 	})))
 	require.Same(t, source, ac.currentAttachmentSession())
-	frames := transport.Sends()
+	frames := transportLog.Sends()
 	require.NotEmpty(t, frames)
 	var result protocol.CommandResult
 	for _, frame := range frames {
@@ -754,7 +754,7 @@ func TestAttachedNavigationCommandSendsResultAfterLocalTransition(t *testing.T) 
 		}
 	}
 	require.Equal(t, protocol.RouteNavigationAction{SnapshotGeneration: 2, Key: 1, Generation: 1}, action)
-	require.False(t, transport.Closed(), "client navigation must not tear down the attachment")
+	require.False(t, transportLog.Closed(), "client navigation must not tear down the attachment")
 }
 
 func TestJumpAttentionAdmittedHandoffCrossesSessions(t *testing.T) {
@@ -817,7 +817,7 @@ func TestPickerDeleteDoesNotDeleteSourceAfterInitiatorReplacement(t *testing.T) 
 	}()
 	<-admissionEnded
 
-	next := &attachedClient{tr: &closeTrackingTransport{}, output: newOutputStateStream(), geometry: domain.Geometry{Size: old.geometry.Size}}
+	next := &attachedClient{tr: newQuietConnection(t), output: newOutputStateStream(), geometry: domain.Geometry{Size: old.geometry.Size}}
 	next.initOverlays()
 	result, err := d.transitionAttachment(attachmentTransitionRequest{
 		target: sess, next: next, expectedTransport: next.transportSnapshot(), ready: true,
@@ -873,7 +873,7 @@ func TestAttachmentEffectGateAdmittedFirstPaintFinishesBeforeReplacement(t *test
 	go func() { paintDone <- d.firstPaintForTransition(token) }()
 	<-admitted
 
-	next := &attachedClient{tr: &closeTrackingTransport{}, output: newOutputStateStream(), geometry: domain.Geometry{Size: old.geometry.Size}}
+	next := &attachedClient{tr: newQuietConnection(t), output: newOutputStateStream(), geometry: domain.Geometry{Size: old.geometry.Size}}
 	next.initOverlays()
 	transitionDone := make(chan error, 1)
 	go func() {

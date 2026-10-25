@@ -987,7 +987,7 @@ func TestControlMoveRejectsMissingAttachmentCapability(t *testing.T) {
 	tb.mu.Lock()
 	pane := tb.focusedPane()
 	tb.mu.Unlock()
-	ac := &attachedClient{tr: &closeTrackingTransport{}}
+	ac := &attachedClient{tr: newQuietConnection(t)}
 	ac.setSession(source)
 
 	source.mu.Lock()
@@ -1526,7 +1526,7 @@ func TestHandleKillSessionParticipantsChangedReportsRetryable(t *testing.T) {
 		d.afterAttachmentEffectParticipantsSnapshotted = nil
 		// A token resume replaces the exact transport after the participant
 		// snapshot was taken, so the kill aborts before removing anything.
-		fresh := &closeTrackingTransport{}
+		fresh := newQuietConnection(t)
 		ac.replaceTransport(fresh)
 		ac.installTestAttachmentCapability(sess.captureAttachmentCapability(ac, fresh))
 	}
@@ -1558,7 +1558,7 @@ func TestCloseTabParticipantsChangedReportsRetryable(t *testing.T) {
 			return
 		}
 		d.afterAttachmentEffectParticipantsSnapshotted = nil
-		fresh := &closeTrackingTransport{}
+		fresh := newQuietConnection(t)
 		ac.replaceTransport(fresh)
 		ac.installTestAttachmentCapability(sess.captureAttachmentCapability(ac, fresh))
 	}

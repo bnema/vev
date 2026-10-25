@@ -185,7 +185,7 @@ func TestFinalCloseDoesNotDeadlockWithMoveDispatchAdmission(t *testing.T) {
 func TestPaletteFinalCloseEndsCurrentEffectBeforeDrainingPeers(t *testing.T) {
 	d, sess, current, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
 	d.attachCoordinator(sess, nil, current, true)
-	otherTransport := &closeTrackingTransport{}
+	otherTransport := newQuietConnection(t)
 	other := &attachedClient{tr: otherTransport, output: newOutputStateStream(), geometry: domain.Geometry{Size: current.geometry.Size}}
 	other.initOverlays()
 	other.setSession(sess)

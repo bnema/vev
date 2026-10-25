@@ -355,7 +355,7 @@ func TestFailedAttachTransitionLeavesSessionEnvironment(t *testing.T) {
 		Origin: ports.SessionOriginLocal, Policy: admissionTestPolicy(ports.SessionOriginLocal),
 		Purpose: ports.BrokerStreamAttachment, Admission: ports.BrokerAdmissionExact, Target: target, Env: env,
 	}
-	_, _, err := d.route(hello, &admittedTransport{ServerConnection: &closeTrackingTransport{}, admission: admission, present: true})
+	_, _, err := d.route(hello, &admittedTransport{ServerConnection: newQuietConnection(t), admission: admission, present: true})
 	require.Error(t, err)
 
 	sess.mu.Lock()

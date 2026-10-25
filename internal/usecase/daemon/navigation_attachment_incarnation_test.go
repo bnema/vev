@@ -68,7 +68,7 @@ func TestNavigationHandoffDoesNotMutateAfterInitiatorIncarnationChanges(t *testi
 		{
 			name: "transport incarnation rebound on same attachment",
 			rebind: func(t *testing.T, _ *Daemon, source *session, ac *attachedClient) {
-				ac.replaceTransport(&closeTrackingTransport{})
+				ac.replaceTransport(newQuietConnection(t))
 				current := source.captureAttachmentCapability(ac, ac.transport())
 				current.lease = source.renderCoordinator().attachmentLease(ac)
 				ac.installTestAttachmentCapability(current)

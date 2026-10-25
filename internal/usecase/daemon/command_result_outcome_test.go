@@ -347,7 +347,7 @@ func TestHandleCommandDefiniteOutcomesPreserveCorrelationAndOutcome(t *testing.T
 // refuse.
 func TestAttachedCommandRefusalSendsDefiniteFailedOutcome(t *testing.T) {
 	d, sess, ac, _ := newManualSessionWithPTYs(t, nil)
-	transport := &closeTrackingTransport{}
+	transport, transportLog := newTrackedConnection(t)
 	ac.replaceTransport(transport)
 	rc := d.attachCoordinator(sess, nil, ac, true)
 	token := sess.captureAttachmentCapability(ac, transport)
@@ -360,7 +360,7 @@ func TestAttachedCommandRefusalSendsDefiniteFailedOutcome(t *testing.T) {
 
 	var result protocol.CommandResult
 	found := false
-	for _, frame := range transport.Sends() {
+	for _, frame := range transportLog.Sends() {
 		message, err := sessionwire.DecodeServerEnvelope(frame.Payload)
 		require.NoError(t, err)
 		if decoded, ok := message.(protocol.CommandResult); ok {

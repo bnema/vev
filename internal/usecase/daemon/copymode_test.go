@@ -32,7 +32,7 @@ func TestBoundedSendOutputErrTransportReturnsTransportUsedBySend(t *testing.T) {
 	d := newTestDaemon(t, nil, newStubClock(t))
 	ac := &attachedClient{output: newOutputStateStream()}
 	ac.initOverlays()
-	replacement := &closeTrackingTransport{}
+	replacement := newQuietConnection(t)
 	sendErr := errors.New("send failed")
 	failed := &swapErrorTransport{ac: ac, replacement: replacement, err: sendErr}
 	ac.replaceTransport(failed)
@@ -46,7 +46,7 @@ func TestBoundedSendOutputErrTransportReturnsTransportUsedBySend(t *testing.T) {
 
 func TestOwnedSynchronousSendReturnsCapturedTransportAcrossReplacement(t *testing.T) {
 	d := newTestDaemon(t, nil, newStubClock(t))
-	replacement := &closeTrackingTransport{}
+	replacement, replacementLog := newTrackedConnection(t)
 	sendErr := errors.New("owned send failed")
 	ac := &attachedClient{output: newOutputStateStream()}
 	failed := &ownedSwapErrorTransport{ac: ac, replacement: replacement, err: sendErr, sent: make(chan wire.Envelope, 1)}
@@ -63,7 +63,7 @@ func TestOwnedSynchronousSendReturnsCapturedTransportAcrossReplacement(t *testin
 	require.Equal(t, []byte("copy"), out.Data)
 	d.detachOnSendError(sess, ac, used)
 	require.True(t, slices.Contains(sess.snapshotAttachments(), ac))
-	require.False(t, replacement.Closed())
+	require.False(t, replacementLog.Closed())
 }
 
 type swapErrorTransport struct {

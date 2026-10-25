@@ -27,7 +27,7 @@ func TestRouteAppliesPreferredTabPerAttachment(t *testing.T) {
 			sess.mu.Lock()
 			sess.tabs = append(sess.tabs, second)
 			sess.mu.Unlock()
-			tr := &closeTrackingTransport{}
+			tr := newQuietConnection(t)
 			target := protocol.ExactSessionTarget{LifecycleID: sess.incarnation, SessionName: sess.name}
 			hello := protocol.Hello{
 				Version: protocol.Version, Intent: protocol.IntentAttach, Name: sess.name,
@@ -48,7 +48,7 @@ func TestResumeAppliesPreferredTabToParkedAttachment(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
 	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
-	oldTransport := &closeTrackingTransport{}
+	oldTransport := newQuietConnection(t)
 	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTransport)
 	require.NoError(t, err)
 	second := newTabWithStableID("tab-2", "pane-2", newQuietPTY(t), domain.Size{Cols: 80, Rows: 22})
@@ -61,7 +61,7 @@ func TestResumeAppliesPreferredTabToParkedAttachment(t *testing.T) {
 
 	hello := helloResumeCapable(protocol.IntentResume, "work", token)
 	hello.PreferredTabID = "tab-2"
-	newTransport := &closeTrackingTransport{}
+	newTransport := newQuietConnection(t)
 	resumedSession, resumed, err := d.route(hello, newTransport)
 	require.NoError(t, err)
 	require.Same(t, ac, resumed)
@@ -77,7 +77,7 @@ func TestPaintPublishesChangedAttachmentRoutePosition(t *testing.T) {
 	sess.mu.Lock()
 	sess.tabs = append(sess.tabs, second)
 	sess.mu.Unlock()
-	tr := &closeTrackingTransport{}
+	tr, trLog := newTrackedConnection(t)
 	target := protocol.ExactSessionTarget{LifecycleID: sess.incarnation, SessionName: sess.name}
 	hello := protocol.Hello{
 		Version: protocol.Version, Intent: protocol.IntentAttach, Name: sess.name,
@@ -94,7 +94,7 @@ func TestPaintPublishesChangedAttachmentRoutePosition(t *testing.T) {
 	d.paint(sess, ac, false, nil)
 
 	var positions []protocol.RoutePosition
-	for _, frame := range tr.Sends() {
+	for _, frame := range trLog.Sends() {
 		position, ok := decodeServerMessage(t, frame).(protocol.RoutePosition)
 		if !ok {
 			continue
@@ -124,7 +124,7 @@ func TestWarmAndColdAttachmentPreferredTab(t *testing.T) {
 			sess.mu.Unlock()
 			target := protocol.ExactSessionTarget{LifecycleID: sess.incarnation, SessionName: sess.name}
 			hello := protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: sess.name, Size: defaultSize, ExactTarget: &target, PreferredTabID: "tab-2", EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned}
-			warmTransport := &closeTrackingTransport{}
+			warmTransport := newQuietConnection(t)
 			_, warm, err := d.routeWithContext(context.Background(), hello, warmTransport)
 			require.NoError(t, err)
 			sess.repairAttachmentView(warm)
@@ -138,7 +138,7 @@ func TestWarmAndColdAttachmentPreferredTab(t *testing.T) {
 				sess.mu.Unlock()
 			}
 			require.NoError(t, d.activateAttachment(warm, warm.transportSnapshot(), protocol.ActivateAttachment{RequestID: 2, Target: target, Size: defaultSize}))
-			coldTransport := &closeTrackingTransport{}
+			coldTransport := newQuietConnection(t)
 			_, cold, err := d.routeWithContext(context.Background(), hello, coldTransport)
 			require.NoError(t, err)
 			sess.repairAttachmentView(cold)

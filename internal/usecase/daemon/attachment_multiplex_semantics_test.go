@@ -188,7 +188,7 @@ func TestMultiplexReconnectGenerationFencesOldEffects(t *testing.T) {
 // on one transport error, or deleting the session, fails the registry checks.
 func TestMultiplexSingleStreamErrorIsolation(t *testing.T) {
 	d, sess, failed, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
-	failedTransport := &closeTrackingTransport{}
+	failedTransport, failedTransportLog := newTrackedConnection(t)
 	failed.replaceTransport(failedTransport)
 	peer := addMultiplexTestAttachment(t, sess, domain.Geometry{Size: domain.Size{Cols: 100, Rows: 30}})
 	d.attachCoordinator(sess, nil, failed, true)
@@ -204,7 +204,7 @@ func TestMultiplexSingleStreamErrorIsolation(t *testing.T) {
 	d.mu.Lock()
 	require.Same(t, sess, d.sessions[sess.id])
 	d.mu.Unlock()
-	require.True(t, failedTransport.Closed())
+	require.True(t, failedTransportLog.Closed())
 }
 
 func addMultiplexTestAttachment(t *testing.T, sess *session, geometry domain.Geometry) *attachedClient {

@@ -10,7 +10,7 @@ import (
 
 func TestBackSessionUsesClientPreviousRouteAfterSnapshotPublication(t *testing.T) {
 	d, source, ac, _ := newManualSessionWithPTYs(t, nil)
-	transport := &closeTrackingTransport{}
+	transport, transportLog := newTrackedConnection(t)
 	ac.replaceTransport(transport)
 	rc := d.attachCoordinator(source, nil, ac, true)
 	token := source.captureAttachmentCapability(ac, transport)
@@ -31,7 +31,7 @@ func TestBackSessionUsesClientPreviousRouteAfterSnapshotPublication(t *testing.T
 	}, ac.transportSnapshot(), d.clock.Now())
 
 	require.NoError(t, d.backSessionForAttachment(effect))
-	frames := transport.Sends()
+	frames := transportLog.Sends()
 	require.NotEmpty(t, frames)
 	var action protocol.RouteNavigationAction
 	found := false
@@ -61,7 +61,7 @@ func TestBackSessionOffersPreviousRouteOnCurrentDaemon(t *testing.T) {
 	d.sessions[target.id] = target
 	d.mu.Unlock()
 
-	transport := &closeTrackingTransport{}
+	transport, transportLog := newTrackedConnection(t)
 	ac.replaceTransport(transport)
 	rc := d.attachCoordinator(source, nil, ac, true)
 	token := source.captureAttachmentCapability(ac, transport)
@@ -83,7 +83,7 @@ func TestBackSessionOffersPreviousRouteOnCurrentDaemon(t *testing.T) {
 	}, ac.transportSnapshot(), d.clock.Now())
 
 	require.NoError(t, d.backSessionForAttachment(effect))
-	frames := transport.Sends()
+	frames := transportLog.Sends()
 	require.Len(t, frames, 1)
 	require.Equal(t, "AttachTarget", envelopeMessageName(t, frames[0].Payload))
 	handoff, ok := decodeServerMessage(t, frames[0]).(protocol.AttachTarget)
