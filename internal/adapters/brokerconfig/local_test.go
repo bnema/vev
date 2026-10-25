@@ -67,6 +67,7 @@ func localRequest() ports.BrokerOpenStreamRequest {
 // TestLoadLocalBinding pins the provisioned local binding: the identity,
 // policy, sanitized display origin, and local Unix route are configuration
 // authority, and the local route is resolvable by its opaque pool address.
+// real I/O: uses real loopback sockets.
 func TestLoadLocalBinding(t *testing.T) {
 	config, err := loadDocument(t, documentWithLocal(t, localTestDocument()), nil)
 	require.NoError(t, err)
@@ -177,6 +178,7 @@ func TestLoadRejectsInvalidLocalBinding(t *testing.T) {
 // the reserved production runtime and state directories exactly like a remote
 // Unix route: an isolated sandbox can never reach a production endpoint
 // through its own local binding.
+// real I/O: reads and writes real files in temp directories.
 func TestLoadLocalRouteFencesProduction(t *testing.T) {
 	reservedDir := t.TempDir()
 	local := localTestDocument()
@@ -222,6 +224,7 @@ func testRegistrationIdentity() string { return "offline-daemon" }
 // no local binding refuses as unavailable, a conflicting policy is refused as
 // such, and a cancelled context is reported as cancellation. Every refusal is
 // typed as a ports.BrokerError so the pool classifies it without text matching.
+// real I/O: uses real loopback sockets.
 func TestResolveLocalSuccessAndRefusals(t *testing.T) {
 	config, err := loadDocument(t, documentWithLocal(t, localTestDocument()), nil)
 	require.NoError(t, err)

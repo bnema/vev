@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// real I/O: reads and writes real files in temp directories.
 func TestCollectGarbageClearsUncommittedCheckpointHead(t *testing.T) {
 	t.Parallel()
 	repository := NewRepository(privateDir(t))
@@ -37,6 +38,7 @@ func TestCollectGarbageClearsUncommittedCheckpointHead(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// real I/O: reads and writes real files in temp directories.
 func TestCollectIncarnationGarbageKeepsHeadPublishable(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -88,6 +90,7 @@ func TestCollectIncarnationGarbageKeepsHeadPublishable(t *testing.T) {
 	}
 }
 
+// real I/O: reads and writes real files in temp directories.
 func TestCollectGarbageRejectsMalformedAuthorityWithoutMutation(t *testing.T) {
 	for _, tt := range []struct {
 		name   string
@@ -131,6 +134,7 @@ func TestCollectGarbageRejectsMalformedAuthorityWithoutMutation(t *testing.T) {
 	}
 }
 
+// real I/O: reads and writes real files in temp directories.
 func TestCollectGarbage(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

@@ -13,6 +13,7 @@ import (
 	codec "github.com/bnema/vev/internal/snapshotcodec"
 )
 
+// real I/O: reads and writes real files in temp directories.
 func TestRepositoryRejectsSymlinkedRoot(t *testing.T) {
 	configuredRoot := filepath.Join(t.TempDir(), "configured")
 	externalRoot := privateDir(t)
@@ -57,6 +58,7 @@ func TestRepositoryRejectsSymlinkedRoot(t *testing.T) {
 	}
 }
 
+// real I/O: reads and writes real files in temp directories.
 func TestOpenRootRejectsUnsafePinnedRoot(t *testing.T) {
 	dir := privateDir(t)
 	if err := os.Mkdir(dir, 0o700); err != nil {
@@ -70,6 +72,7 @@ func TestOpenRootRejectsUnsafePinnedRoot(t *testing.T) {
 	}
 }
 
+// real I/O: reads and writes real files in temp directories.
 func TestRepositoryRejectsSymlinkedGenerationAndObjectShards(t *testing.T) {
 	for _, target := range []string{repositoryGenerations, repositoryObjectsDir} {
 		t.Run(target, func(t *testing.T) {
@@ -105,6 +108,7 @@ func TestRepositoryRejectsSymlinkedGenerationAndObjectShards(t *testing.T) {
 	}
 }
 
+// real I/O: reads and writes real files in temp directories.
 func TestFinalSymlinksRejectedByRootOperations(t *testing.T) {
 	repo := NewRepository(privateDir(t))
 	if err := repo.ensurePrivateDirectory(repo.dir); err != nil {

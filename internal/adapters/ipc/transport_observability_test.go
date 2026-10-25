@@ -11,13 +11,14 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/adapters/observability"
-	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol/wire"
 )
 
+// real I/O: writes and reads JSONL trace files.
 func TestTransportObservabilityIPCEOFAndCloseEndFailedSpans(t *testing.T) {
 	trace := t.TempDir() + "/ipc-shutdown.jsonl"
-	observer, closer, err := observability.NewJSONL(trace, ipcRuntimeClock{now: time.Unix(0, 223)}, "ipc-process")
+	observer, closer, err := observability.NewJSONL(trace, newRuntimeClock(t, time.Unix(0, 223)), "ipc-process")
 	if err != nil {
 		t.Fatalf("NewJSONL() error = %v", err)
 	}
@@ -139,9 +140,10 @@ func assertIPCFailedSpanPairs(t *testing.T, path string) {
 	}
 }
 
+// real I/O: writes and reads JSONL trace files.
 func TestTransportObservabilityIPCMarksCarriageWithoutChangingBytes(t *testing.T) {
 	trace := t.TempDir() + "/ipc.jsonl"
-	observer, closer, err := observability.NewJSONL(trace, ipcRuntimeClock{now: time.Unix(0, 211)}, "ipc-process")
+	observer, closer, err := observability.NewJSONL(trace, newRuntimeClock(t, time.Unix(0, 211)), "ipc-process")
 	if err != nil {
 		t.Fatalf("NewJSONL() error = %v", err)
 	}
@@ -184,15 +186,9 @@ func TestTransportObservabilityIPCMarksCarriageWithoutChangingBytes(t *testing.T
 	}
 }
 
-type ipcRuntimeClock struct{ now time.Time }
-
-func (c ipcRuntimeClock) Now() time.Time { return c.now }
-func (c ipcRuntimeClock) NewTimer(d time.Duration) ports.Timer {
-	return ipcRuntimeTimer{timer: time.NewTimer(d)}
+func newRuntimeClock(t *testing.T, now time.Time) *portsmocks.MockClock {
+	t.Helper()
+	clock := portsmocks.NewMockClock(t)
+	clock.EXPECT().Now().Return(now).Maybe()
+	return clock
 }
-
-type ipcRuntimeTimer struct{ timer *time.Timer }
-
-func (t ipcRuntimeTimer) C() <-chan time.Time        { return t.timer.C }
-func (t ipcRuntimeTimer) Reset(d time.Duration) bool { return t.timer.Reset(d) }
-func (t ipcRuntimeTimer) Stop() bool                 { return t.timer.Stop() }

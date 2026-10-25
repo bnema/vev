@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// real I/O: binds and rebinds real UDP sockets.
 func TestExplicitListenSurvivesRebind(t *testing.T) {
 	for _, ip := range []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback} {
 		t.Run(ip.String(), func(t *testing.T) {

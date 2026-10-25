@@ -40,6 +40,7 @@ func readAllDarwin(t *testing.T, p ports.PTY, deadline time.Duration) []byte {
 	}
 }
 
+// real I/O: spawns real subprocesses or PTYs.
 func TestOpen_DarwinEchoAndOutputEOF(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping pty integration test in -short mode")
@@ -92,6 +93,7 @@ func readUntilDarwin(t *testing.T, p ports.PTY, marker string, deadline time.Dur
 	}
 }
 
+// real I/O: spawns real subprocesses or PTYs.
 func TestOpen_DarwinResizeAndForegroundPgid(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping pty integration test in -short mode")
@@ -112,6 +114,7 @@ func TestOpen_DarwinResizeAndForegroundPgid(t *testing.T) {
 	require.Equal(t, "40 120", strings.TrimSpace(string(readAllDarwin(t, p, 5*time.Second))))
 }
 
+// real I/O: opens a PTY and runs a child process.
 func TestOpen_DarwinContextCancellationEndsStream(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping pty integration test in -short mode")

@@ -30,6 +30,7 @@ func pipeCapture(t *testing.T) (r, w *os.File, captured *bytes.Buffer, done chan
 	return r, w, captured, done
 }
 
+// real I/O: uses OS pipes (os.Pipe) as terminal file descriptors, with SIGWINCH registration.
 func TestTerminal_EnterRaw_NonTTY_EmitsAltScreenAndCursorEscapes(t *testing.T) {
 	inR, inW, err := os.Pipe()
 	if err != nil {
@@ -76,6 +77,7 @@ func TestTerminal_EnterRaw_NonTTY_EmitsAltScreenAndCursorEscapes(t *testing.T) {
 // bar) wraps and paints a second row in the accent colour. vev positions every
 // row explicitly and never relies on the terminal wrapping for it, so autowrap
 // stays off for as long as vev owns the alt screen.
+// real I/O: uses OS pipes (os.Pipe) as terminal file descriptors, with SIGWINCH registration.
 func TestTerminal_EnterRaw_DisablesAutowrapInsideAltScreen(t *testing.T) {
 	const (
 		autowrapOff = "\x1b[?7l"
@@ -174,6 +176,7 @@ func (w *prefixThenFailWriter) Write(p []byte) (int, error) {
 // rather than through the writer that just failed. Poisoning tm.bw while
 // leaving tm.out intact isolates that fallback: the buffered path fails, the
 // real descriptor still records what the fallback attempted.
+// real I/O: uses OS pipes (os.Pipe) as terminal file descriptors, with SIGWINCH registration.
 func TestTerminal_WriteFailure_AttemptsVisualResetOnFd(t *testing.T) {
 	// Every mode EnterRaw can turn on has to be turned back off, not just the
 	// alt screen: a partial emission that got as far as cursorHide/mouseEnable
@@ -246,6 +249,7 @@ func TestTerminal_WriteFailure_AttemptsVisualResetOnFd(t *testing.T) {
 	}
 }
 
+// real I/O: uses OS pipes (os.Pipe) as terminal file descriptors, with SIGWINCH registration.
 func TestTerminal_EnterRaw_IsIdempotentAcrossCalls(t *testing.T) {
 	inR, inW, err := os.Pipe()
 	if err != nil {
@@ -286,6 +290,7 @@ func TestTerminal_EnterRaw_IsIdempotentAcrossCalls(t *testing.T) {
 	}
 }
 
+// real I/O: uses OS pipes (os.Pipe) as terminal file descriptors, with SIGWINCH registration.
 func TestTerminal_InOut(t *testing.T) {
 	inR, inW, err := os.Pipe()
 	if err != nil {
@@ -318,6 +323,7 @@ func TestTerminal_InOut(t *testing.T) {
 	}
 }
 
+// real I/O: uses OS pipes (os.Pipe) as terminal file descriptors, with SIGWINCH registration.
 func TestTerminal_ResizeEvents_ReturnsSameChannelAndClosesOnRestore(t *testing.T) {
 	inR, inW, err := os.Pipe()
 	if err != nil {
@@ -359,6 +365,7 @@ func TestTerminal_ResizeEvents_ReturnsSameChannelAndClosesOnRestore(t *testing.T
 	<-done
 }
 
+// real I/O: uses OS pipes (os.Pipe) as terminal file descriptors, with SIGWINCH registration.
 func TestTerminal_ResizeEvents_AfterRestore_NoWatcherAndClosedChannel(t *testing.T) {
 	inR, inW, err := os.Pipe()
 	if err != nil {
@@ -413,6 +420,7 @@ func TestTerminal_ResizeEvents_AfterRestore_NoWatcherAndClosedChannel(t *testing
 	<-done
 }
 
+// real I/O: uses OS pipes (os.Pipe) as terminal file descriptors, with SIGWINCH registration.
 func TestTerminal_ResizeEvents_ConcurrentWithRestore(t *testing.T) {
 	// Race ResizeEvents against a restore triggered from another
 	// goroutine (the signal-driven shutdown shape). Under -race this
@@ -472,6 +480,7 @@ func TestTerminal_ResizeEvents_ConcurrentWithRestore(t *testing.T) {
 	}
 }
 
+// real I/O: uses OS pipes (os.Pipe) as terminal file descriptors, with SIGWINCH registration.
 func TestTerminal_Size_NonTTY_ReturnsError(t *testing.T) {
 	inR, inW, err := os.Pipe()
 	if err != nil {
@@ -491,6 +500,7 @@ func TestTerminal_Size_NonTTY_ReturnsError(t *testing.T) {
 	}
 }
 
+// real I/O: uses OS pipes (os.Pipe) as terminal file descriptors, with SIGWINCH registration.
 func TestTerminal_KittyKeyboardPushedInsideAltScreenAndPoppedBeforeExit(t *testing.T) {
 	tests := []struct {
 		name   string

@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// real I/O: serves a websocket through an httptest loopback socket.
 func TestRotationRevokesViewsAndCookies(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()

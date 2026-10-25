@@ -45,6 +45,8 @@ func options(t *testing.T) Options {
 	t.Helper()
 	return Options{Dir: filepath.Join(t.TempDir(), "broker"), InitialHosts: []ports.BrokerHostRecord{testHostRecord()}, InitialImportProvided: true}
 }
+
+// real I/O: reads and writes real files in temp directories.
 func TestMigrationFaultRestart(t *testing.T) {
 	for _, file := range []string{"recovery.json", "state.json"} {
 		for _, point := range []string{"write", "sync", "rename", "dirsync"} {
@@ -78,6 +80,8 @@ func TestMigrationFaultRestart(t *testing.T) {
 		}
 	}
 }
+
+// real I/O: flock-based lock lifetime across a re-executed test subprocess.
 func TestLockLifetime(t *testing.T) {
 	if dir := os.Getenv("VEV_BROKERSTORE_LOCK_TEST"); dir != "" {
 		s, err := Open(Options{Dir: dir})
@@ -133,6 +137,7 @@ func TestLockLifetime(t *testing.T) {
 
 // TestLockExcludesLegacyHostWriter holds the lock the way the legacy host
 // writer does and proves the store refuses to own the same directory.
+// real I/O: reads and writes real files in temp directories.
 func TestLockExcludesLegacyHostWriter(t *testing.T) {
 	o := options(t)
 	s, err := Open(o)
@@ -153,6 +158,8 @@ func TestLockExcludesLegacyHostWriter(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, s.Close())
 }
+
+// real I/O: reads and writes real files in temp directories.
 func TestStrictCorruption(t *testing.T) {
 	for _, raw := range []string{`{"version":1,"version":1}`, `{"unknown":1}`, `{} {`, string([]byte{255}), strings.Repeat(" ", MaxFileBytes+1)} {
 		var v state
@@ -166,6 +173,8 @@ func TestStrictCorruption(t *testing.T) {
 	_, err = Open(o)
 	require.Error(t, err)
 }
+
+// real I/O: reads and writes real files in temp directories.
 func TestDurableStateSentinelMapping(t *testing.T) {
 	o := options(t)
 	s, err := Open(o)
@@ -193,6 +202,7 @@ func TestDurableStateSentinelMapping(t *testing.T) {
 // the recovery record with symlinks to valid bytes: the store reads both with
 // O_NOFOLLOW, so a symlink fails closed instead of redirecting a rename or
 // silently adopting attacker-chosen state.
+// real I/O: reads and writes real files in temp directories.
 func TestCommittedStateAndRecoveryAreNeverFollowed(t *testing.T) {
 	t.Run("state", func(t *testing.T) {
 		o := options(t)

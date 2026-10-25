@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/bnema/vev-vt/html/browser"
@@ -63,18 +64,20 @@ func TestTerminalInput(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
-			defer cancel()
-			terminal, err := New(ctx, domain.Geometry{Size: domain.Size{Cols: 10, Rows: 4}})
-			require.NoError(t, err)
-			defer terminal.Close()
-			_, err = terminal.EnterRaw()
-			require.NoError(t, err)
-			require.NoError(t, terminal.Handle(ctx, tt.event))
-			data := make([]byte, len(tt.want))
-			_, err = io.ReadFull(terminal.In(), data)
-			require.NoError(t, err)
-			require.Equal(t, tt.want, string(data))
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+				defer cancel()
+				terminal, err := New(ctx, domain.Geometry{Size: domain.Size{Cols: 10, Rows: 4}})
+				require.NoError(t, err)
+				defer terminal.Close()
+				_, err = terminal.EnterRaw()
+				require.NoError(t, err)
+				require.NoError(t, terminal.Handle(ctx, tt.event))
+				data := make([]byte, len(tt.want))
+				_, err = io.ReadFull(terminal.In(), data)
+				require.NoError(t, err)
+				require.Equal(t, tt.want, string(data))
+			})
 		})
 	}
 }

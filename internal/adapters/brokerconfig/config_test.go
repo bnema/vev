@@ -70,6 +70,7 @@ func writeConfig(t *testing.T, root string, document any, perm os.FileMode) {
 	require.NoError(t, os.WriteFile(filepath.Join(root, ConfigFileName), raw, perm))
 }
 
+// real I/O: reads and writes real files in temp directories.
 func TestResolveLayout(t *testing.T) {
 	base := t.TempDir()
 	linkParent := filepath.Join(t.TempDir(), "link")
@@ -110,6 +111,7 @@ func TestResolveLayout(t *testing.T) {
 	}
 }
 
+// real I/O: uses real loopback sockets.
 func TestLoadValidConfig(t *testing.T) {
 	root := t.TempDir()
 	writeConfig(t, root, registrationDocument(nil), 0o600)
@@ -145,6 +147,7 @@ func TestLoadValidConfig(t *testing.T) {
 	require.False(t, ok)
 }
 
+// real I/O: reads and writes real files in temp directories.
 func TestLoadAcceptsEmptyRegistrations(t *testing.T) {
 	root := t.TempDir()
 	writeConfig(t, root, map[string]any{"marker": Marker, "registrations": []any{}}, 0o600)
@@ -155,6 +158,7 @@ func TestLoadAcceptsEmptyRegistrations(t *testing.T) {
 	require.Empty(t, config.Endpoints())
 }
 
+// real I/O: reads and writes real files in temp directories.
 func TestLoadRejects(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -320,6 +324,7 @@ func TestLoadRejects(t *testing.T) {
 	}
 }
 
+// real I/O: reads and writes real files in temp directories.
 func TestLoadRejectsRouteOverlappingProduction(t *testing.T) {
 	prodRuntime := t.TempDir()
 	prodState := t.TempDir()
@@ -351,6 +356,7 @@ func TestLoadRejectsRouteOverlappingProduction(t *testing.T) {
 	}
 }
 
+// real I/O: reads and writes real files in temp directories.
 func TestLayoutVerifyCreatedDetectsSymlinkedComponent(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "sandbox")
 	layout, err := ResolveLayout(root, nil)
@@ -390,6 +396,7 @@ func registrationEntry(overrides map[string]any) map[string]any {
 // an identical route is accepted; a second route for the same pair is refused,
 // because the pool would otherwise dial one of the two addresses and silently
 // strand the other.
+// real I/O: reads and writes real files in temp directories.
 func TestLoadEnforcesOneRoutePerPooledIdentity(t *testing.T) {
 	const (
 		aliasOne = "alias@daemon:2222"
@@ -463,6 +470,7 @@ func TestLoadEnforcesOneRoutePerPooledIdentity(t *testing.T) {
 // to the identical opaque address and that the shared local route is still
 // reported exactly once, so a remote-side helper is never handed a duplicate of
 // the same carriage.
+// real I/O: uses real loopback sockets.
 func TestLoadAliasesShareOneRoute(t *testing.T) {
 	const (
 		first  = "alias@daemon:2222"
@@ -525,6 +533,7 @@ func testRegistration() domain.RemoteRegistration {
 	return registration
 }
 
+// real I/O: uses real loopback sockets.
 func TestResolverRefusals(t *testing.T) {
 	root := t.TempDir()
 	writeConfig(t, root, registrationDocument(nil), 0o600)
@@ -585,6 +594,7 @@ func TestResolverRefusals(t *testing.T) {
 	})
 }
 
+// real I/O: reads and writes real files in temp directories.
 func TestDecodeStrictRejectsNesting(t *testing.T) {
 	root := t.TempDir()
 	nested := strings.Repeat("[", 130) + strings.Repeat("]", 130)
@@ -596,6 +606,7 @@ func TestDecodeStrictRejectsNesting(t *testing.T) {
 	require.Contains(t, err.Error(), "nesting")
 }
 
+// real I/O: reads and writes real files in temp directories.
 func TestResolveLayoutDoesNotCreatePaths(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "does-not-exist")
 	layout, err := ResolveLayout(root, nil)
@@ -606,6 +617,7 @@ func TestResolveLayoutDoesNotCreatePaths(t *testing.T) {
 	require.ErrorIs(t, statErr, os.ErrNotExist)
 }
 
+// real I/O: reads and writes real files in temp directories.
 func TestLoadIdleGrace(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -657,6 +669,7 @@ func TestLoadIdleGrace(t *testing.T) {
 	}
 }
 
+// real I/O: reads and writes real files in temp directories.
 func TestLoadWarmTransports(t *testing.T) {
 	document := func(extra map[string]any) map[string]any {
 		d := map[string]any{"marker": Marker, "registrations": []any{}}
@@ -749,6 +762,7 @@ func TestResolverDoesNotAliasConfiguration(t *testing.T) {
 	require.Equal(t, original.local.Identity, config.Resolver().local.Identity)
 }
 
+// real I/O: reads and writes real files in temp directories.
 func TestRejectSymlinkedComponentsAllowsRootOwnedSystemLinks(t *testing.T) {
 	var rootLink string
 	for _, candidate := range []string{"/var", "/tmp", "/bin", "/lib", "/sbin"} {

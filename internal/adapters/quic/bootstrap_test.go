@@ -14,9 +14,12 @@ import (
 	"strconv"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/bnema/vev/internal/protocol/wire"
+	wiremocks "github.com/bnema/vev/internal/protocol/wire/mocks"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -34,6 +37,7 @@ func decodeBootstrapFingerprint(t *testing.T, readiness Readiness) ([]byte, erro
 	return hex.DecodeString(readiness.Fingerprint)
 }
 
+// real I/O: opens real QUIC UDP sockets.
 func TestBootstrapRoundTrip(t *testing.T) {
 	server, readiness, err := NewServer()
 	require.NoError(t, err)
@@ -77,6 +81,7 @@ func TestBootstrapRoundTrip(t *testing.T) {
 	}
 }
 
+// real I/O: opens real QUIC UDP sockets.
 func TestBootstrapTokenSingleUse(t *testing.T) {
 	server, readiness, err := NewServer()
 	require.NoError(t, err)
@@ -122,6 +127,7 @@ func TestBootstrapTokenSingleUse(t *testing.T) {
 	}
 }
 
+// real I/O: opens real QUIC UDP sockets.
 func TestBootstrapWrongTokenFails(t *testing.T) {
 	server, readiness, err := NewServer()
 	require.NoError(t, err)
@@ -155,6 +161,7 @@ func TestBootstrapWrongTokenFails(t *testing.T) {
 	_ = server
 }
 
+// real I/O: starts a QUIC server on a real UDP socket.
 func TestBootstrapMalformedReadiness(t *testing.T) {
 	server, readiness, err := NewServer()
 	require.NoError(t, err)
@@ -199,6 +206,7 @@ func TestBootstrapMalformedReadiness(t *testing.T) {
 
 // TestBootstrapConcurrentTokenUse proves the token is consumed exactly
 // once: two simultaneous valid dials admit at most one session.
+// real I/O: opens real QUIC UDP sockets.
 func TestBootstrapConcurrentTokenUse(t *testing.T) {
 	server, readiness, err := NewServer()
 	require.NoError(t, err)
@@ -258,6 +266,7 @@ func TestBootstrapConcurrentTokenUse(t *testing.T) {
 // cannot force a large pre-auth allocation: the bounded auth record is
 // rejected before JSON parsing. The dial bypasses Dial's auth send and
 // emits the oversized record directly on the single stream.
+// real I/O: opens real QUIC UDP sockets.
 func TestBootstrapOversizedAuthRecordFails(t *testing.T) {
 	server, readiness, err := NewServer()
 	require.NoError(t, err)
@@ -325,6 +334,7 @@ func newBootstrapTestServer(t *testing.T, maxPending int, expiry time.Duration) 
 // TestBootstrapListenerIsRemotelyReachable proves the production listener
 // binds the wildcard rather than loopback and serves both address families,
 // so the remote SSH peer that resolved the target host can dial it directly.
+// real I/O: opens real QUIC UDP sockets.
 func TestBootstrapListenerIsRemotelyReachable(t *testing.T) {
 	dialWildcard := func(t *testing.T, host string) {
 		t.Helper()
@@ -384,6 +394,7 @@ func TestBootstrapListenerIsRemotelyReachable(t *testing.T) {
 // TestBootstrapAdmissionHeldThroughAuthentication proves an unauthenticated
 // connection keeps its admission slot: the bound must count peers parked in
 // authentication, not only connections whose stream contract completed.
+// real I/O: opens real QUIC UDP sockets.
 func TestBootstrapAdmissionHeldThroughAuthentication(t *testing.T) {
 	server, readiness := newBootstrapTestServer(t, 1, time.Minute)
 	defer func() { _ = server.Close() }()
@@ -401,11 +412,11 @@ func TestBootstrapAdmissionHeldThroughAuthentication(t *testing.T) {
 	client, err := DialConfig(dialTestAddr(t, readiness), "vev-bootstrap", fingerprint, Config{}, 5*time.Second).Dial(ctx)
 	require.NoError(t, err)
 	defer func() { _ = client.Close() }()
-	require.Eventually(t, func() bool {
+	pollUntil(t, 3*time.Second, func() bool {
 		server.listener.pendingMu.Lock()
 		defer server.listener.pendingMu.Unlock()
 		return server.listener.pending == 1
-	}, 3*time.Second, 10*time.Millisecond, "unauthenticated connection must hold its admission slot")
+	})
 	cancel()
 	<-acceptDone
 }
@@ -414,6 +425,7 @@ func TestBootstrapAdmissionHeldThroughAuthentication(t *testing.T) {
 // auth framing limit is enforced on the length prefix: a peer advertising a
 // huge frame and never sending its body is rejected promptly instead of
 // forcing a large pre-auth allocation and stalling until the auth deadline.
+// real I/O: opens real QUIC UDP sockets.
 func TestBootstrapOversizedAuthHeaderRejectedBeforePayload(t *testing.T) {
 	server, readiness, err := NewServer()
 	require.NoError(t, err)
@@ -451,6 +463,7 @@ func TestBootstrapOversizedAuthHeaderRejectedBeforePayload(t *testing.T) {
 
 // TestBootstrapConsumeIsExpiryGuardedAndAtomic proves the verifier
 // comparison, the locked expiry recheck, and one-time token consumption.
+// real I/O: opens real QUIC UDP sockets.
 func TestBootstrapConsumeIsExpiryGuardedAndAtomic(t *testing.T) {
 	server, readiness := newBootstrapTestServer(t, 1, time.Minute)
 	defer func() { _ = server.Close() }()
@@ -479,6 +492,7 @@ func TestBootstrapConsumeIsExpiryGuardedAndAtomic(t *testing.T) {
 
 // TestBootstrapServerStoresVerifierOnly proves the server keeps a digest of
 // the credential rather than the reusable secret itself.
+// real I/O: opens real QUIC UDP sockets.
 func TestBootstrapServerStoresVerifierOnly(t *testing.T) {
 	server, readiness, err := NewServer()
 	require.NoError(t, err)
@@ -494,65 +508,41 @@ func TestBootstrapServerStoresVerifierOnly(t *testing.T) {
 	require.Equal(t, nonceSum[:], server.nonceVerifier)
 }
 
-// blockingSendTransport is a wire.Transport whose Send blocks until Close,
-// reading the payload in a loop so a caller that erased the record before
-// joining the send goroutine would race the reader.
-type blockingSendTransport struct {
-	closed   chan struct{}
-	sendDone chan struct{}
-}
-
-func newBlockingSendTransport() *blockingSendTransport {
-	return &blockingSendTransport{closed: make(chan struct{}), sendDone: make(chan struct{})}
-}
-
-func (b *blockingSendTransport) Send(envelope wire.Envelope) error {
-	defer close(b.sendDone)
-	for {
-		select {
-		case <-b.closed:
-			return io.EOF
-		default:
-		}
-		var seen byte
-		for _, value := range envelope.Payload {
-			seen ^= value
-		}
-		_ = seen
-		time.Sleep(50 * time.Microsecond)
-	}
-}
-
-func (b *blockingSendTransport) Recv() (wire.Envelope, error) { return wire.Envelope{}, io.EOF }
-
-func (b *blockingSendTransport) Close() error {
-	select {
-	case <-b.closed:
-	default:
-		close(b.closed)
-	}
-	return nil
-}
-
 // TestSendAuthRecordJoinsBlockedSendBeforeErase proves Dial's timeout path
 // closes the transport and joins the blocked send goroutine before returning:
 // the caller's deferred record erase can never race the sender. The join is
 // asserted directly and the payload is erased afterwards, so a missing join is
 // both a test failure and a race-detector report.
 func TestSendAuthRecordJoinsBlockedSendBeforeErase(t *testing.T) {
-	transport := newBlockingSendTransport()
-	record := []byte("one-time-bootstrap-token-and-nonce")
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
-	defer cancel()
+	synctest.Test(t, func(t *testing.T) {
+		closed := make(chan struct{})
+		sendDone := make(chan struct{})
+		transport := wiremocks.NewMockTransport(t)
+		transport.EXPECT().Send(mock.Anything).RunAndReturn(func(envelope wire.Envelope) error {
+			defer close(sendDone)
+			<-closed
+			// Read before completing: erasing before joining races this access.
+			var seen byte
+			for _, value := range envelope.Payload {
+				seen ^= value
+			}
+			_ = seen
+			return io.EOF
+		}).Once()
+		transport.EXPECT().Close().RunAndReturn(func() error { close(closed); return nil }).Once()
+		record := []byte("one-time-bootstrap-token-and-nonce")
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+		defer cancel()
 
-	err := sendAuthRecord(ctx, transport, record)
-	require.ErrorIs(t, err, errBootstrapAuth)
-	require.ErrorIs(t, err, context.DeadlineExceeded)
+		err := sendAuthRecord(ctx, transport, record)
+		require.ErrorIs(t, err, errBootstrapAuth)
+		require.ErrorIs(t, err, context.DeadlineExceeded)
 
-	select {
-	case <-transport.sendDone:
-	default:
-		t.Fatal("sendAuthRecord returned while the send goroutine was still running")
-	}
-	zeroBytes(record)
+		select {
+		case <-sendDone:
+		default:
+			t.Fatal("sendAuthRecord returned while the send goroutine was still running")
+		}
+		zeroBytes(record)
+	})
 }

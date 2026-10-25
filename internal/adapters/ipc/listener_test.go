@@ -12,6 +12,7 @@ import (
 	"github.com/bnema/vev/internal/protocol/wire"
 )
 
+// real I/O: binds and dials real unix sockets in temp directories.
 func TestListenAcceptRoundTrip(t *testing.T) {
 	dir := shortSocketDir(t, "vev")
 
@@ -64,6 +65,7 @@ func TestListenAcceptRoundTrip(t *testing.T) {
 	}
 }
 
+// real I/O: binds and dials real unix sockets in temp directories.
 func TestListenMkdirsSocketDir(t *testing.T) {
 	dir := shortSocketDir(t, "nested", "socketdir")
 
@@ -85,6 +87,7 @@ func TestListenMkdirsSocketDir(t *testing.T) {
 	}
 }
 
+// real I/O: binds and dials real unix sockets in temp directories.
 func TestListenRejectsHostileSocketDir(t *testing.T) {
 	dir := shortSocketDir(t, "socketdir")
 	if err := os.MkdirAll(dir, 0o777); err != nil {
@@ -104,6 +107,7 @@ func TestListenRejectsHostileSocketDir(t *testing.T) {
 	}
 }
 
+// real I/O: binds and dials real unix sockets in temp directories.
 func TestListenStaleSocketCleanedUp(t *testing.T) {
 	dir := shortSocketDir(t, "vev")
 	if err := os.Mkdir(dir, 0o700); err != nil {
@@ -138,6 +142,7 @@ func TestListenStaleSocketCleanedUp(t *testing.T) {
 	defer func() { _ = ln.Close() }()
 }
 
+// real I/O: binds and dials real unix sockets in temp directories.
 func TestListenLiveDaemonRejected(t *testing.T) {
 	dir := shortSocketDir(t, "vev")
 
@@ -163,6 +168,7 @@ func TestSocketDirUsesXDGRuntimeDir(t *testing.T) {
 	}
 }
 
+// real I/O: reads and writes real files in temp directories.
 func TestSocketDirFallsBackWithoutXDGRuntimeDir(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", "")
 

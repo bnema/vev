@@ -38,6 +38,7 @@ func TestDialMuxContextRejectsEmptyCommandSpec(t *testing.T) {
 // TestDialMuxContextCanceledBeforeStart proves one canceled setup context is
 // checked before the subprocess starts: nothing is executed and the cancellation
 // remains recognizable.
+// real I/O: spawns real subprocesses.
 func TestDialMuxContextCanceledBeforeStart(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "started")
 	ctx, cancel := context.WithCancel(context.Background())
@@ -53,6 +54,7 @@ func TestDialMuxContextCanceledBeforeStart(t *testing.T) {
 // leaks raw remote stderr into the public error: the captured text is bounded
 // and sanitized for the logger, and the returned error carries only the typed
 // outcome.
+// real I/O: spawns real subprocesses.
 func TestDialMuxContextBoundedSanitizedStderr(t *testing.T) {
 	const marker = "remote-secret-value"
 	// A terminal-colored diagnostic, and a long tail the ceiling must drop.
@@ -95,6 +97,7 @@ func TestCappedDiagnosticBoundsAndSanitizes(t *testing.T) {
 // TestDialMuxContextCloseTerminatesProcess proves Close owns the subprocess
 // lifetime: it stops a child that ignores its stdin and returns without
 // abandoning the wait.
+// real I/O: spawns real subprocesses.
 func TestDialMuxContextCloseTerminatesProcess(t *testing.T) {
 	transport, err := DialMuxContext(context.Background(), CommandSpec{Path: "sh", Args: []string{"-c", "sleep 30"}}, nil)
 	require.NoError(t, err)
@@ -106,5 +109,4 @@ func TestDialMuxContextCloseTerminatesProcess(t *testing.T) {
 
 	// A second Close is idempotent and joins the same reaped process.
 	require.Error(t, transport.Close())
-	<-time.After(50 * time.Millisecond)
 }

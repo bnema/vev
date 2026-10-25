@@ -10,11 +10,14 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol/wire"
 	quicgo "github.com/quic-go/quic-go"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
+// real I/O: opens real QUIC UDP sockets.
 func TestQUICEnvelopeRoundTrip(t *testing.T) {
 	cert, fingerprint, err := GenerateEphemeralCert()
 	require.NoError(t, err)
@@ -55,6 +58,7 @@ func TestQUICEnvelopeRoundTrip(t *testing.T) {
 	}
 }
 
+// real I/O: opens real QUIC UDP sockets.
 func TestQUICWrongFingerprintFails(t *testing.T) {
 	cert, _, err := GenerateEphemeralCert()
 	require.NoError(t, err)
@@ -79,6 +83,7 @@ func TestQUICConfigUsesTunnelSafeInitialPacketSize(t *testing.T) {
 	}
 }
 
+// real I/O: uses real loopback sockets.
 func TestQUICConfigValidation(t *testing.T) {
 	cert, _, err := GenerateEphemeralCert()
 	require.NoError(t, err)
@@ -99,6 +104,7 @@ func TestQUICConfigValidation(t *testing.T) {
 // orderly close discarding the envelope written immediately before it: the
 // send side must be FINed, not RESET_STREAMed, so the peer still receives the
 // final envelope before observing EOF.
+// real I/O: opens real QUIC UDP sockets.
 func TestQUICOrderlyCloseDeliversFinalEnvelope(t *testing.T) {
 	server, client := dialTestPairWithConfig(t, Config{})
 	payload := []byte("final envelope survives an orderly close")
@@ -112,6 +118,7 @@ func TestQUICOrderlyCloseDeliversFinalEnvelope(t *testing.T) {
 	require.ErrorIs(t, err, io.EOF)
 }
 
+// real I/O: uses real loopback sockets.
 func TestQUICResolveAddrsExpandsLiteralsAndHonorsContext(t *testing.T) {
 	addrs, err := resolveQUICAddrs(context.Background(), "127.0.0.1:4433")
 	require.NoError(t, err)
@@ -136,6 +143,7 @@ func TestQUICResolveAddrsExpandsLiteralsAndHonorsContext(t *testing.T) {
 // TestQUICDialFallsBackAcrossResolvedAddresses proves every resolved address
 // is attempted under the one shared dial deadline: a black-holed first
 // candidate must not prevent the reachable second from being dialed.
+// real I/O: opens real QUIC UDP sockets.
 func TestQUICDialFallsBackAcrossResolvedAddresses(t *testing.T) {
 	cert, fingerprint, err := GenerateEphemeralCert()
 	require.NoError(t, err)
@@ -177,22 +185,28 @@ func TestQUICDialFallsBackAcrossResolvedAddresses(t *testing.T) {
 	}
 }
 
-type markRecorder struct {
-	mu    sync.Mutex
-	marks []ports.RuntimeMark
+func newMarkRecorder(t *testing.T) (*portsmocks.MockSerializedRuntimeObserver, func() []ports.RuntimeMark) {
+	t.Helper()
+	var mu sync.Mutex
+	var marks []ports.RuntimeMark
+	observer := portsmocks.NewMockSerializedRuntimeObserver(t)
+	observer.EXPECT().ObserveRuntime(mock.Anything).Run(func(mark ports.RuntimeMark) {
+		mu.Lock()
+		defer mu.Unlock()
+		marks = append(marks, mark)
+	}).Maybe()
+	observer.EXPECT().Flush().Maybe()
+	observer.EXPECT().Close().Maybe()
+	return observer, func() []ports.RuntimeMark {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]ports.RuntimeMark(nil), marks...)
+	}
 }
-
-func (r *markRecorder) ObserveRuntime(mark ports.RuntimeMark) {
-	r.mu.Lock()
-	r.marks = append(r.marks, mark)
-	r.mu.Unlock()
-}
-
-func (r *markRecorder) Flush() {}
-func (r *markRecorder) Close() {}
 
 // TestQUICDialObserverEmitsAdapterMarks proves the observer threaded through
 // DialConfig reaches the dialed transport and observes its raw carriage.
+// real I/O: opens real QUIC UDP sockets.
 func TestQUICDialObserverEmitsAdapterMarks(t *testing.T) {
 	cert, fingerprint, err := GenerateEphemeralCert()
 	require.NoError(t, err)
@@ -206,7 +220,7 @@ func TestQUICDialObserverEmitsAdapterMarks(t *testing.T) {
 		}
 	}()
 
-	recorder := &markRecorder{}
+	recorder, snapshot := newMarkRecorder(t)
 	client, err := DialConfig(listener.Addr(), "vev-bootstrap", fingerprint, Config{}, 10*time.Second, WithRuntimeObserver(recorder)).Dial(context.Background())
 	require.NoError(t, err)
 	defer func() { _ = client.Close() }()
@@ -221,14 +235,14 @@ func TestQUICDialObserverEmitsAdapterMarks(t *testing.T) {
 		t.Fatal("listener did not accept")
 	}
 
-	recorder.mu.Lock()
-	defer recorder.mu.Unlock()
-	require.NotEmpty(t, recorder.marks, "observer must receive marks from the QUIC transport")
-	for _, mark := range recorder.marks {
+	marks := snapshot()
+	require.NotEmpty(t, marks, "observer must receive marks from the QUIC transport")
+	for _, mark := range marks {
 		require.Equal(t, "quic", mark.Component)
 	}
 }
 
+// real I/O: opens real QUIC UDP sockets.
 func TestQUICTransportCloseReportsEOF(t *testing.T) {
 	cert, fingerprint, err := GenerateEphemeralCert()
 	require.NoError(t, err)
@@ -261,6 +275,7 @@ func TestQUICTransportCloseReportsEOF(t *testing.T) {
 	}
 }
 
+// real I/O: opens real QUIC UDP sockets.
 func TestQUICProbeSkippedOnce(t *testing.T) {
 	cert, fingerprint, err := GenerateEphemeralCert()
 	require.NoError(t, err)
@@ -304,6 +319,7 @@ func TestQUICProbeSkippedOnce(t *testing.T) {
 	}
 }
 
+// real I/O: opens real QUIC UDP sockets.
 func TestQUICCloseUnblocksRecv(t *testing.T) {
 	cert, fingerprint, err := GenerateEphemeralCert()
 	require.NoError(t, err)
@@ -377,6 +393,7 @@ func dialTestPairWithConfig(t *testing.T, config Config) (*Transport, *Transport
 // TestQUICUniStreamsTrulyDisabled proves the zero Config keeps quic-go's
 // 100-stream library default from leaking in: without a negative limit the
 // peer could open unidirectional streams.
+// real I/O: opens real QUIC UDP sockets.
 func TestQUICUniStreamsTrulyDisabled(t *testing.T) {
 	_, client := dialTestPairWithConfig(t, Config{})
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
@@ -388,6 +405,7 @@ func TestQUICUniStreamsTrulyDisabled(t *testing.T) {
 // TestQUICServerCannotOpenStreams proves role-forbidden streams are truly
 // disabled on the dialer side: the server never opens streams toward the
 // client.
+// real I/O: opens real QUIC UDP sockets.
 func TestQUICServerCannotOpenStreams(t *testing.T) {
 	server, _ := dialTestPairWithConfig(t, Config{})
 	openers := map[string]func(context.Context) error{
@@ -415,10 +433,12 @@ func TestQUICServerCannotOpenStreams(t *testing.T) {
 // silently tolerated. The listener's explicit limit of two makes the second
 // stream admissible at the QUIC layer so the test exercises the lifetime
 // guard, not flow control.
+// real I/O: opens real QUIC UDP sockets.
 func TestQUICDelayedExtraStreamEnforced(t *testing.T) {
 	server, client := dialTestPairWithConfig(t, Config{MaxIncomingStreams: 2})
-	// Land the violation long after the handshake has settled.
-	time.Sleep(200 * time.Millisecond)
+	// Land the violation only once the handshake has completed on both sides.
+	<-server.conn.HandshakeComplete()
+	<-client.conn.HandshakeComplete()
 	openCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	extra, err := client.conn.OpenStreamSync(openCtx)
@@ -448,6 +468,7 @@ func TestQUICDelayedExtraStreamEnforced(t *testing.T) {
 // that accumulated cost, even on a loaded race-enabled machine. The bound is
 // deliberately loose (well under the ~1s the removed window alone would add)
 // so it measures the regression without being a tight timing assertion.
+// real I/O: opens real QUIC UDP sockets.
 func TestQUICDialHasNoStartupGraceLatency(t *testing.T) {
 	cert, fingerprint, err := GenerateEphemeralCert()
 	require.NoError(t, err)
@@ -503,6 +524,7 @@ func readLinkEvent(t *testing.T, events <-chan ports.LinkEvent) (ports.LinkEvent
 // honest: the adapter publishes the terminal Offline transition and closes
 // the event stream, locally on Close and remotely when the peer ends the
 // connection, without leaking a QUIC library type in LinkEvent.Err.
+// real I/O: opens real QUIC UDP sockets.
 func TestQUICLinkEventsReportTerminalOffline(t *testing.T) {
 	server, client := dialTestPairWithConfig(t, Config{})
 	require.Equal(t, ports.LinkStateConnected, server.LinkState())
@@ -517,21 +539,13 @@ func TestQUICLinkEventsReportTerminalOffline(t *testing.T) {
 	_, ok = readLinkEvent(t, server.LinkEvents())
 	require.False(t, ok, "local event stream must close after the terminal event")
 
-	require.Eventually(t, func() bool {
-		return client.LinkState() == ports.LinkStateOffline
-	}, 5*time.Second, 10*time.Millisecond, "peer must observe the terminal Offline state")
 	event, ok = readLinkEvent(t, client.LinkEvents())
+	require.Equal(t, ports.LinkStateOffline, client.LinkState(), "peer must observe terminal Offline state")
 	require.True(t, ok)
 	require.Equal(t, ports.LinkStateOffline, event.State)
 	require.ErrorIs(t, event.Err, io.EOF, "peer failure must map to a boundary-safe error")
 	_, ok = readLinkEvent(t, client.LinkEvents())
 	require.False(t, ok, "peer event stream must close after the terminal event")
-}
-
-func (r *markRecorder) snapshot() []ports.RuntimeMark {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return append([]ports.RuntimeMark(nil), r.marks...)
 }
 
 // assertBalancedQUICMarks proves every started adapter operation also closed:
@@ -593,8 +607,9 @@ func dialObservedTestPair(t *testing.T, observer ports.SerializedRuntimeObserver
 
 // TestQUICAcceptObserverEmitsAdapterMarks proves the observer wired through
 // the listener (not just DialConfig) reaches the accepted transport.
+// real I/O: opens real QUIC UDP sockets.
 func TestQUICAcceptObserverEmitsAdapterMarks(t *testing.T) {
-	recorder := &markRecorder{}
+	recorder, snapshot := newMarkRecorder(t)
 	client, server := dialObservedTestPair(t, recorder)
 
 	require.NoError(t, client.Send(wire.Envelope{Payload: []byte("observed")}))
@@ -605,7 +620,7 @@ func TestQUICAcceptObserverEmitsAdapterMarks(t *testing.T) {
 	_, err = client.Recv()
 	require.NoError(t, err)
 
-	marks := recorder.snapshot()
+	marks := snapshot()
 	require.NotEmpty(t, marks, "accept side must observe carriage marks")
 	for _, mark := range marks {
 		require.Equal(t, "quic", mark.Component)
@@ -615,8 +630,9 @@ func TestQUICAcceptObserverEmitsAdapterMarks(t *testing.T) {
 
 // TestQUICObserverMarksBalanceAcrossClose proves Close gates new observed
 // operations and waits for an in-flight blocked Recv to close its mark pair.
+// real I/O: opens real QUIC UDP sockets.
 func TestQUICObserverMarksBalanceAcrossClose(t *testing.T) {
-	recorder := &markRecorder{}
+	recorder, snapshot := newMarkRecorder(t)
 	client, server := dialObservedTestPair(t, recorder)
 
 	require.NoError(t, client.Send(wire.Envelope{Payload: []byte("before close")}))
@@ -631,10 +647,10 @@ func TestQUICObserverMarksBalanceAcrossClose(t *testing.T) {
 	require.NoError(t, server.Close())
 	<-blocked
 
-	before := len(recorder.snapshot())
+	before := len(snapshot())
 	// A Send after Close fails closed without opening a new observed operation.
 	_ = server.Send(wire.Envelope{Payload: []byte("late")})
-	marks := recorder.snapshot()
+	marks := snapshot()
 	require.Equal(t, before, len(marks), "operations after Close must not be observed")
 	assertBalancedQUICMarks(t, marks)
 }

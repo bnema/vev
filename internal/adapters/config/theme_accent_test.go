@@ -105,6 +105,7 @@ func TestDefaultsThemeAccent(t *testing.T) {
 	require.Equal(t, domain.ThemeAccent{Mode: domain.ThemeAccentAuto}, domain.Defaults().ThemeAccent)
 }
 
+// real I/O: reads and writes real files in temp directories.
 func TestWatchThemeAccentInvalidReloadFallsBackToAuto(t *testing.T) {
 	t.Parallel()
 

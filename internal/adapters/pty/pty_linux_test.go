@@ -49,6 +49,7 @@ func TestFactory_ImplementsPort(t *testing.T) {
 	var _ ports.PTYFactory = pty.NewFactory()
 }
 
+// real I/O: opens PTYs and runs child processes.
 func TestOpen_ChildOutputToEOF(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping pty integration test in -short mode")
@@ -66,6 +67,7 @@ func TestOpen_ChildOutputToEOF(t *testing.T) {
 	require.NoError(t, p.Close())
 }
 
+// real I/O: opens PTYs and runs child processes.
 func TestOpen_EchoRoundtrip(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping pty integration test in -short mode")
@@ -99,6 +101,7 @@ func TestOpen_EchoRoundtrip(t *testing.T) {
 	require.NoError(t, p.Close())
 }
 
+// real I/O: opens PTYs and runs child processes.
 func TestForegroundPgid(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping pty integration test in -short mode")
@@ -113,6 +116,7 @@ func TestForegroundPgid(t *testing.T) {
 	require.Greater(t, pgid, 0)
 }
 
+// real I/O: opens PTYs and runs child processes.
 func TestResize_SttySize(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping pty integration test in -short mode")
@@ -156,6 +160,7 @@ func TestResize_SttySize(t *testing.T) {
 	}
 }
 
+// real I/O: opens PTYs and runs child processes.
 func TestClose_ReapsChildNoZombie(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping pty integration test in -short mode")
@@ -187,6 +192,7 @@ func TestClose_ReapsChildNoZombie(t *testing.T) {
 	require.NoError(t, p.Close())
 }
 
+// real I/O: opens PTYs and runs child processes.
 func TestClose_TerminatesLongRunningChild(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping pty integration test in -short mode")
@@ -200,11 +206,12 @@ func TestClose_TerminatesLongRunningChild(t *testing.T) {
 	require.NoError(t, p.Close())
 	require.Less(t, time.Since(start), 3*time.Second, "Close should not block for the full grace period")
 
-	require.Eventually(t, func() bool {
+	pollUntil(t, 3*time.Second, func() bool {
 		return errors.Is(syscall.Kill(pid, 0), syscall.ESRCH)
-	}, 3*time.Second, 20*time.Millisecond)
+	})
 }
 
+// real I/O: opens PTYs and runs child processes.
 func TestOpen_ContextCancellationTerminatesProcessGroup(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping pty integration test in -short mode")
@@ -228,9 +235,9 @@ func TestOpen_ContextCancellationTerminatesProcessGroup(t *testing.T) {
 
 	// The direct shell may remain as a zombie until Close reaps it; a zombie has
 	// exited, so it and the background sleep must not remain running.
-	require.Eventually(t, func() bool {
+	pollUntil(t, 3*time.Second, func() bool {
 		return processTerminated(p.Pid()) && processTerminated(descendantPID)
-	}, 3*time.Second, 20*time.Millisecond)
+	})
 }
 
 func processTerminated(pid int) bool {
@@ -241,6 +248,7 @@ func processTerminated(pid int) bool {
 	return err != nil || strings.Contains(string(status), "State:\tZ")
 }
 
+// real I/O: opens PTYs and runs child processes.
 func TestResize_DeliversSIGWINCH(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping pty integration test in -short mode")

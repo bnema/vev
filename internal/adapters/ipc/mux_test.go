@@ -76,6 +76,7 @@ func awaitMuxDial(t *testing.T, out <-chan struct {
 // TestListenMuxCreatesOwnerOnlyParentAndSocket proves listener setup creates the
 // caller's parent directory owner-only (0700) and tightens the bound socket to
 // 0600, so the private carriage is never exposed through filesystem modes.
+// real I/O: binds and dials real unix sockets with peer-credential checks.
 func TestListenMuxCreatesOwnerOnlyParentAndSocket(t *testing.T) {
 	path := muxTestPath(t)
 	parent := filepath.Dir(path)
@@ -108,6 +109,7 @@ func TestListenMuxCreatesOwnerOnlyParentAndSocket(t *testing.T) {
 // TestListenMuxSameUserRoundTrip proves a real AF_UNIX mux carriage carries
 // bounded framed envelopes both ways after both ends verify the peer is the
 // current user.
+// real I/O: binds and dials real unix sockets with peer-credential checks.
 func TestListenMuxSameUserRoundTrip(t *testing.T) {
 	path := muxTestPath(t)
 	listener := mustListenMux(t, path)
@@ -161,6 +163,7 @@ func TestListenMuxSameUserRoundTrip(t *testing.T) {
 // TestListenMuxRejectsUnverifiedAccept proves the accept side verifies peer
 // credentials before handing out a transport: an injected refusal is observable
 // as ErrMuxPeerRejected and the connection is closed.
+// real I/O: binds and dials real unix sockets with peer-credential checks.
 func TestListenMuxRejectsUnverifiedAccept(t *testing.T) {
 	path := muxTestPath(t)
 	reject := func(*net.UnixConn) error { return ErrMuxPeerRejected }
@@ -190,6 +193,7 @@ func TestListenMuxRejectsUnverifiedAccept(t *testing.T) {
 // TestDialMuxRejectsUnverifiedPeer proves the dial side verifies peer
 // credentials before handing out a transport: an injected refusal fails the
 // dial with ErrMuxPeerRejected and no transport escapes.
+// real I/O: binds and dials real unix sockets with peer-credential checks.
 func TestDialMuxRejectsUnverifiedPeer(t *testing.T) {
 	path := muxTestPath(t)
 	permissive := func(*net.UnixConn) error { return nil }
@@ -257,6 +261,7 @@ func createStaleMuxSocket(t *testing.T, path string) os.FileInfo {
 
 // TestListenMuxStaleSocketRecovered proves a socket file left by a dead owner is
 // recovered race-safely and the carriage binds and serves.
+// real I/O: binds and dials real unix sockets with peer-credential checks.
 func TestListenMuxStaleSocketRecovered(t *testing.T) {
 	path := muxTestPath(t)
 	createStaleMuxSocket(t, path)
@@ -286,6 +291,7 @@ func TestListenMuxStaleSocketRecovered(t *testing.T) {
 // race-safe: concurrent listeners racing over one stale socket produce exactly
 // one winner, and every loser observes the winner's live socket instead of
 // unlinking it.
+// real I/O: binds and dials real unix sockets with peer-credential checks.
 func TestListenMuxStaleRecoveryRacesToOneWinner(t *testing.T) {
 	path := muxTestPath(t)
 	createStaleMuxSocket(t, path)
@@ -330,6 +336,7 @@ func TestListenMuxStaleRecoveryRacesToOneWinner(t *testing.T) {
 
 // TestListenMuxRefusesLiveEndpoint proves a second listener on a live mux path
 // is refused rather than clobbering it.
+// real I/O: binds and dials real unix sockets with peer-credential checks.
 func TestListenMuxRefusesLiveEndpoint(t *testing.T) {
 	path := muxTestPath(t)
 	mustListenMux(t, path)
@@ -346,6 +353,7 @@ func TestListenMuxRefusesLiveEndpoint(t *testing.T) {
 // TestListenMuxRefusesForeignPath proves a path that exists and is not a socket
 // is refused without being removed: a regular file and a directory are left
 // intact.
+// real I/O: binds and dials real unix sockets with peer-credential checks.
 func TestListenMuxRefusesForeignPath(t *testing.T) {
 	t.Run("regular file", func(t *testing.T) {
 		path := muxTestPath(t)
@@ -393,6 +401,7 @@ func TestListenMuxRefusesForeignPath(t *testing.T) {
 
 // TestMuxPathValidation proves invalid caller paths are refused before any
 // filesystem change.
+// real I/O: binds and dials real unix sockets with peer-credential checks.
 func TestMuxPathValidation(t *testing.T) {
 	tests := []struct {
 		name string
@@ -419,6 +428,7 @@ func TestMuxPathValidation(t *testing.T) {
 // TestListenMuxCloseUnblocksAcceptAndCleansSocket proves Close unblocks a
 // blocked Accept, unlinks the socket it created, refuses later dials, and is
 // idempotent.
+// real I/O: binds and dials real unix sockets with peer-credential checks.
 func TestListenMuxCloseUnblocksAcceptAndCleansSocket(t *testing.T) {
 	path := muxTestPath(t)
 	listener := mustListenMux(t, path)
@@ -458,6 +468,7 @@ func TestListenMuxCloseUnblocksAcceptAndCleansSocket(t *testing.T) {
 
 // TestDialMuxCancellationAndCloseUnblocksIO proves a canceled dial fails
 // promptly and that closing one end unblocks a blocked read on the other.
+// real I/O: binds and dials real unix sockets with peer-credential checks.
 func TestDialMuxCancellationAndCloseUnblocksIO(t *testing.T) {
 	t.Run("canceled context", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -506,6 +517,7 @@ func TestDialMuxCancellationAndCloseUnblocksIO(t *testing.T) {
 
 // TestListenMuxConcurrentCloseAndDial proves a Close racing many dials neither
 // panics nor hangs, and every dial result is closed by the test.
+// real I/O: binds and dials real unix sockets with peer-credential checks.
 func TestListenMuxConcurrentCloseAndDial(t *testing.T) {
 	path := muxTestPath(t)
 	listener := mustListenMux(t, path)
@@ -541,6 +553,7 @@ func TestListenMuxConcurrentCloseAndDial(t *testing.T) {
 // IPC adapter consumes behave like the internal ones: the platform default
 // admits a same-user peer, a nil verifier falls back to it, and an injected
 // refusal fails closed without handing out a transport.
+// real I/O: binds and dials real unix sockets with peer-credential checks.
 func TestMuxExportedPeerVerifierSeam(t *testing.T) {
 	path := muxTestPath(t)
 	listener, err := ListenMuxWithPeerVerifier(path, SameUserPeerVerifier())

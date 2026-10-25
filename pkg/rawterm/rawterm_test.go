@@ -31,6 +31,7 @@ func openPTYPair(t *testing.T) (master, slave *os.File) {
 	return master, slave
 }
 
+// real I/O: opens a real PTY and OS pipes.
 func TestIsTerminal(t *testing.T) {
 	master, slave := openPTYPair(t)
 	defer func() { _ = master.Close() }()
@@ -52,6 +53,7 @@ func TestIsTerminal(t *testing.T) {
 	}
 }
 
+// real I/O: opens a real PTY.
 func TestSetWinsizeGetSizeRoundtrip(t *testing.T) {
 	master, slave := openPTYPair(t)
 	defer func() { _ = master.Close() }()
@@ -83,6 +85,7 @@ func TestSetWinsizeGetSizeRoundtrip(t *testing.T) {
 	}
 }
 
+// real I/O: opens a real PTY.
 func TestWinsizeFullRoundtrip(t *testing.T) {
 	master, slave := openPTYPair(t)
 	defer func() { _ = master.Close() }()
@@ -101,6 +104,7 @@ func TestWinsizeFullRoundtrip(t *testing.T) {
 	}
 }
 
+// real I/O: opens a real PTY.
 func TestMakeRawRestore(t *testing.T) {
 	master, slave := openPTYPair(t)
 	defer func() { _ = master.Close() }()
@@ -148,6 +152,7 @@ func TestMakeRawRestore(t *testing.T) {
 	}
 }
 
+// real I/O: opens a real PTY.
 func TestForegroundProcessGroup(t *testing.T) {
 	master, slave := openPTYPair(t)
 	defer func() { _ = master.Close() }()

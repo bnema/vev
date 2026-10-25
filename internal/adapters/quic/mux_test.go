@@ -140,6 +140,7 @@ func awaitBoundedReadError(t *testing.T, carriage wire.BoundedTransport) error {
 // TestMuxDialAcceptHandsOutOneAuthenticatedBoundedCarriage proves the seam
 // hands daemonmux a bounded carriage that carries traffic both ways over
 // exactly one client-initiated bidirectional QUIC stream.
+// real I/O: opens real QUIC UDP sockets.
 func TestMuxDialAcceptHandsOutOneAuthenticatedBoundedCarriage(t *testing.T) {
 	client, daemon := muxTestPair(t)
 
@@ -167,6 +168,7 @@ func TestMuxDialAcceptHandsOutOneAuthenticatedBoundedCarriage(t *testing.T) {
 // TestMuxCarriageRecvBoundedNeverWidensTheFramingCeiling proves the raw
 // bounded transport daemonmux consumes really enforces the caller's ceiling
 // before allocating or reading a body.
+// real I/O: opens real QUIC UDP sockets.
 func TestMuxCarriageRecvBoundedNeverWidensTheFramingCeiling(t *testing.T) {
 	client, daemon := muxTestPair(t)
 
@@ -178,6 +180,7 @@ func TestMuxCarriageRecvBoundedNeverWidensTheFramingCeiling(t *testing.T) {
 // TestMuxDialRejectsBadPinWithoutConsumingTheCredential proves an unpinned
 // peer is refused before authentication and that no bootstrap secret reaches
 // the error, while the one-time credential survives for the legitimate peer.
+// real I/O: opens real QUIC UDP sockets.
 func TestMuxDialRejectsBadPinWithoutConsumingTheCredential(t *testing.T) {
 	server, readiness := muxTestServer(t)
 	ctx, cancel := context.WithTimeout(context.Background(), muxTestDeadline)
@@ -220,6 +223,7 @@ func TestMuxDialRejectsBadPinWithoutConsumingTheCredential(t *testing.T) {
 // TestMuxFailedAuthClosesOnlyThatTransport proves a refused token or nonce
 // closes its own carriage, hands nothing out, and leaves the one-time
 // credential available for the legitimate peer.
+// real I/O: opens real QUIC UDP sockets.
 func TestMuxFailedAuthClosesOnlyThatTransport(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -269,6 +273,7 @@ func TestMuxFailedAuthClosesOnlyThatTransport(t *testing.T) {
 // TestMuxReplayedReadinessYieldsNoSecondCarriage proves the one-time credential
 // admits exactly one physical carriage: a replay fails closed and never
 // disturbs the carriage the legitimate peer already owns.
+// real I/O: opens real QUIC UDP sockets.
 func TestMuxReplayedReadinessYieldsNoSecondCarriage(t *testing.T) {
 	server, readiness := muxTestServer(t)
 	ctx, cancel := context.WithTimeout(context.Background(), muxTestDeadline)
@@ -305,6 +310,7 @@ func TestMuxReplayedReadinessYieldsNoSecondCarriage(t *testing.T) {
 
 // TestMuxAcceptMuxRefusesExpiredBootstrap proves an expired credential admits
 // no carriage even though the listener is still bound.
+// real I/O: opens real QUIC UDP sockets.
 func TestMuxAcceptMuxRefusesExpiredBootstrap(t *testing.T) {
 	server, _ := newBootstrapTestServer(t, bootstrapMaxPending, -time.Minute)
 	defer func() { _ = server.Close() }()
@@ -321,6 +327,7 @@ func TestMuxAcceptMuxRefusesExpiredBootstrap(t *testing.T) {
 // a logical daemonmux attachment, it fails the whole physical carriage. The
 // listener admits two streams at the QUIC layer so the guard, not flow control,
 // is what enforces the contract.
+// real I/O: opens real QUIC UDP sockets.
 func TestMuxCarriageRejectsExtraQuicStream(t *testing.T) {
 	server, readiness := newMuxBootstrapServer(t, Config{
 		HandshakeIdleTimeout: bootstrapAuthDeadline,
@@ -348,10 +355,12 @@ func TestMuxCarriageRejectsExtraQuicStream(t *testing.T) {
 	require.NoError(t, err)
 
 	awaitBoundedReadError(t, daemon)
-	require.Eventually(t, func() bool {
-		return client.(*Transport).LinkState() == ports.LinkStateOffline &&
-			daemon.(*Transport).LinkState() == ports.LinkStateOffline
-	}, muxTestDeadline, 10*time.Millisecond, "the extra stream must fail the whole carriage on both ends")
+	for _, transport := range []*Transport{client.(*Transport), daemon.(*Transport)} {
+		event, ok := readLinkEvent(t, transport.LinkEvents())
+		require.True(t, ok)
+		require.Equal(t, ports.LinkStateOffline, event.State)
+		require.Equal(t, ports.LinkStateOffline, transport.LinkState(), "extra stream must fail the whole carriage")
+	}
 }
 
 // TestMuxNilServerFailsClosed proves a nil bootstrap server hands out no
@@ -366,6 +375,7 @@ func TestMuxNilServerFailsClosed(t *testing.T) {
 // TestMuxSetupCancellationAndCarriageClose proves clean cancellation and
 // teardown: a canceled setup context hands out no carriage on either role, and
 // closing one end unblocks a blocked bounded read on the other.
+// real I/O: opens real QUIC UDP sockets.
 func TestMuxSetupCancellationAndCarriageClose(t *testing.T) {
 	t.Run("canceled dial", func(t *testing.T) {
 		_, readiness := muxTestServer(t)
@@ -405,6 +415,7 @@ func TestMuxSetupCancellationAndCarriageClose(t *testing.T) {
 // TestMuxCarriageErrorsCarryNoSecret proves the sealed-secret invariant for the
 // seam's error surface: no error text contains the token or nonce, whether the
 // refusal is observed by the dial or by the refused carriage's own read.
+// real I/O: opens real QUIC UDP sockets.
 func TestMuxCarriageErrorsCarryNoSecret(t *testing.T) {
 	server, readiness := muxTestServer(t)
 	ctx, cancel := context.WithTimeout(context.Background(), muxTestDeadline)

@@ -14,6 +14,7 @@ import (
 // fails closed on a platform or build without the Linux SO_PEERCRED same-user
 // check: a bound listener refuses every peer instead of admitting an unverified
 // one, and dialing never returns an unverified transport.
+// real I/O: binds and dials real unix sockets.
 func TestMuxFailsClosedWithoutPeerCredentialCheck(t *testing.T) {
 	path := filepath.Join(shortSocketDir(t, "vev"), "mux.sock")
 	listener, err := ListenMux(path)

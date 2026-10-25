@@ -37,6 +37,7 @@ func TestParsePaletteAnchor(t *testing.T) {
 	}
 }
 
+// real I/O: reads and writes real files in temp directories.
 func TestLoadMissingPaletteAnchorDefaultsToCenter(t *testing.T) {
 	t.Parallel()
 	cfg, warnings, err := Load(filepath.Join(t.TempDir(), "missing"))
@@ -45,6 +46,7 @@ func TestLoadMissingPaletteAnchorDefaultsToCenter(t *testing.T) {
 	require.Equal(t, domain.PaletteConfig{Anchor: domain.AnchorCenter, AnchorSet: true}, cfg.Palette)
 }
 
+// real I/O: reads and writes real files in temp directories.
 func TestWatchPaletteAnchorRestoresCenteredDefaultAfterFileRemoval(t *testing.T) {
 	t.Parallel()
 

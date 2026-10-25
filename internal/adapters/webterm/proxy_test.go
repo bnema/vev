@@ -56,6 +56,7 @@ func TestWebProxyTrustBoundary(t *testing.T) {
 	}
 }
 
+// real I/O: serves a websocket through an httptest loopback socket.
 func TestWebProxyWebSocket(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()

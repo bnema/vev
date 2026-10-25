@@ -138,6 +138,7 @@ func TestRouteAddressIsOpaqueAndDeterministic(t *testing.T) {
 
 // TestConfigLocalMuxRouteRules proves a helper only ever bridges to exactly one
 // provisioned Unix route.
+// real I/O: reads and writes real files in temp directories.
 func TestConfigLocalMuxRouteRules(t *testing.T) {
 	t.Parallel()
 

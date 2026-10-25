@@ -14,6 +14,7 @@ import (
 // TestTransportReplay runs the canonical typed transcript over one QUIC
 // stream: transport differences must not alter the application
 // conversation (P7.1).
+// real I/O: one QUIC stream over real UDP sockets.
 func TestTransportReplay(t *testing.T) {
 	replaytest.Run(t, func(t *testing.T, envelopes []wire.Envelope) []wire.Envelope {
 		cert, fingerprint, err := GenerateEphemeralCert()

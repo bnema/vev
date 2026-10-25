@@ -8,6 +8,7 @@ import (
 	"testing"
 )
 
+// real I/O: reads and writes real files in temp directories.
 func TestWriteImmutablePublishesAndReusesIdenticalData(t *testing.T) {
 	repo := NewRepository(privateDir(t))
 	dir := filepath.Join(repo.dir, "immutable")
@@ -38,6 +39,7 @@ func TestWriteImmutablePublishesAndReusesIdenticalData(t *testing.T) {
 	}
 }
 
+// real I/O: reads and writes real files in temp directories.
 func TestWithAtomicTempRemovesPublishedTemporaryFile(t *testing.T) {
 	repo := NewRepository(privateDir(t))
 	dir := filepath.Join(repo.dir, "temporary")
@@ -64,6 +66,7 @@ func TestWithAtomicTempRemovesPublishedTemporaryFile(t *testing.T) {
 	}
 }
 
+// real I/O: reads and writes real files in temp directories.
 func TestWriteMutableConsumesTemporaryFile(t *testing.T) {
 	repo := NewRepository(privateDir(t))
 	path := filepath.Join(repo.dir, "HEAD")
