@@ -139,6 +139,8 @@ func TestSessionCloseStreamFillsConnectionScope(t *testing.T) {
 // TestOpenStreamAdmissionRoundTrips proves the attachment-admission contract
 // travels the IPC wire: a create-named request reaches the core with exactly
 // its admission and validated name.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestOpenStreamAdmissionRoundTrips(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	client, _ := e.pair()
@@ -165,6 +167,8 @@ func TestOpenStreamAdmissionRoundTrips(t *testing.T) {
 // travels the IPC wire: a control stream may carry start-if-needed, while an
 // observation must carry existing-only and a spawn-capable observation is
 // refused before any frame travels.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestObservationForcesExistingOnly(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	client, _ := e.pair()
@@ -190,6 +194,8 @@ func TestObservationForcesExistingOnly(t *testing.T) {
 
 // TestRegistrationAssignsScopeAtAccept proves the client adapter adopts exactly
 // the scope the listener assigned at accept.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestRegistrationAssignsScopeAtAccept(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	client, session := e.pair()
@@ -200,6 +206,8 @@ func TestRegistrationAssignsScopeAtAccept(t *testing.T) {
 // TestSubscribePublishesSnapshot proves subscription traffic: a committed
 // publication reaches the client, wakes its subscription, and round-trips host,
 // session, and tombstone state.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestSubscribePublishesSnapshot(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	client, _ := e.pair()
@@ -222,6 +230,8 @@ func TestSubscribePublishesSnapshot(t *testing.T) {
 // TestSubscribeCarriesPassiveReader proves a client configured as a passive
 // reader reaches the core's passive subscription, while a default client
 // subscribes as a watching client that records observation demand.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestSubscribeCarriesPassiveReader(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -248,6 +258,8 @@ func TestSubscribeCarriesPassiveReader(t *testing.T) {
 // TestSubscribeGenerationAdvancesAndReplaces proves a second Subscribe advances
 // the generation series (refusing reuse) and replaces the previous
 // subscription.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestSubscribeGenerationAdvancesAndReplaces(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	client, _ := e.pair()
@@ -350,6 +362,8 @@ func TestSubscribeSendFailureRetiresPreviousSubscription(t *testing.T) {
 
 // TestOpenStreamCarriesTypedTraffic proves a logical stream carries the typed
 // session protocol in both directions through the broker.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestOpenStreamCarriesTypedTraffic(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	client, _ := e.pair()
@@ -408,6 +422,8 @@ func TestOpenStreamCarriesTypedTraffic(t *testing.T) {
 // before ReceiveServer): a reply pushed before the daemon has even received
 // the request races this fake's own SendClient/Done selection, which is a
 // harness artifact unrelated to the fix under test.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestReplyReachesClientBeforeOrderlyStreamClose(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	const iterations = 200
@@ -451,6 +467,8 @@ func TestReplyReachesClientBeforeOrderlyStreamClose(t *testing.T) {
 
 // TestOpenStreamRefusedByCoreReachesClient proves a core refusal settles only
 // that stream and reaches the caller as a typed failure.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestOpenStreamRefusedByCoreReachesClient(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	client, _ := e.pair()
@@ -476,6 +494,8 @@ func TestOpenStreamRefusedByCoreReachesClient(t *testing.T) {
 
 // TestTerminalStreamFailureFailsOnlyThatStream proves one stream's terminal
 // failure is reported to its owner and leaves a sibling stream usable.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestTerminalStreamFailureFailsOnlyThatStream(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	client, _ := e.pair()
@@ -516,6 +536,8 @@ func TestTerminalStreamFailureFailsOnlyThatStream(t *testing.T) {
 
 // TestCloseStreamRetiresBothSides proves a client close reaches the broker core
 // and retires the stream identity.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestCloseStreamRetiresBothSides(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	client, _ := e.pair()
@@ -538,6 +560,8 @@ func TestCloseStreamRetiresBothSides(t *testing.T) {
 // RemoveHost returns the core's exact bool. Each call delegates exactly once with
 // the caller's own endpoint, policy, and exact registration, so the adapter never
 // re-derives authority on the way.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestMembershipMutationsDelegateEndToEnd(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	client, _ := e.pair()
@@ -593,6 +617,8 @@ func TestMembershipMutationsDelegateEndToEnd(t *testing.T) {
 // as a typed ports.BrokerError carrying the exact code and the matching sentinel
 // as its cause, reports no authority, and never invents a registration or a
 // removal.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestMembershipRefusalCodesEndToEnd(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -651,6 +677,8 @@ func TestMembershipRefusalCodesEndToEnd(t *testing.T) {
 // error and no authority, under the exact code, with the operation identity the
 // caller used. It drives the raw carriage so the frames are observed as a peer
 // would receive them.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestMembershipWireRefusalFraming(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -715,6 +743,8 @@ func TestMembershipWireRefusalFraming(t *testing.T) {
 // pointer form of the store's outcome-unknown error become an outcome-unknown
 // result carrying the outcome-unknown code and no authority, and the caller
 // observes ports.BrokerErrorOutcomeUnknown so it refreshes rather than retries.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestMembershipStoreOutcomeUnknownMapsToOutcomeUnknown(t *testing.T) {
 	cause := errors.New("torn write after the commit point")
 	cases := map[string]error{
@@ -765,6 +795,8 @@ func TestMembershipStoreOutcomeUnknownMapsToOutcomeUnknown(t *testing.T) {
 // admitted core that returns no registration for a successful AddHost is a
 // protocol violation, so the session settles without answering the caller
 // instead of sending a result the peer would refuse.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestServerAbortsResultMissingRequiredAuthority(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	raw := rawDial(t, e, brokerwire.DefaultCeilings())
@@ -793,6 +825,8 @@ func TestServerAbortsResultMissingRequiredAuthority(t *testing.T) {
 // TestDisconnectCleanupReleasesEveryOwnedResource proves a client disconnect
 // deterministically retires its streams, closes its admitted core service, and
 // releases its listener slot.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestDisconnectCleanupReleasesEveryOwnedResource(t *testing.T) {
 	e := startEndpoint(t, Config{MaxClients: 2, HandshakeTimeout: time.Second})
 	client, accepted := e.pair()
@@ -821,6 +855,8 @@ func TestDisconnectCleanupReleasesEveryOwnedResource(t *testing.T) {
 // TestStalledSubscriberDoesNotBlockOtherClients proves publications are
 // per-connection: a client that subscribes and never reads cannot delay another
 // client's publication or operations.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestStalledSubscriberDoesNotBlockOtherClients(t *testing.T) {
 	e := startEndpoint(t, Config{MaxClients: 4})
 	stalled, _ := e.pair()
@@ -854,6 +890,8 @@ func TestStalledSubscriberDoesNotBlockOtherClients(t *testing.T) {
 // messages beyond one stream window wait at the broker, every one is delivered
 // in order once the consumer reads again, and the connection stays usable
 // meanwhile.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestStalledClientStreamWaitsForCredit(t *testing.T) {
 	e := startEndpoint(t, Config{MaxClients: 2})
 	client := e.dial()
@@ -931,6 +969,8 @@ func TestStalledClientStreamWaitsForCredit(t *testing.T) {
 
 // TestOrderlyStreamCloseReportsNoError proves a local close is an orderly end:
 // Done closes and Err stays nil, so a caller can distinguish it from a failure.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestOrderlyStreamCloseReportsNoError(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	client, _ := e.pair()
@@ -952,6 +992,8 @@ func TestOrderlyStreamCloseReportsNoError(t *testing.T) {
 // TestScopeIdentityFencing proves the client adapter refuses a caller-supplied
 // identity that belongs to another connection and stream identities that do not
 // advance.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestScopeIdentityFencing(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	client, _ := e.pair()
@@ -995,6 +1037,8 @@ func TestScopeIdentityFencing(t *testing.T) {
 // TestRequestReconcileIsBoundedHint proves the reconcile hint is sent only for an
 // endpoint the connection already holds a registration for, and that it is
 // otherwise a no-op.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestRequestReconcileIsBoundedHint(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	client, _ := e.pair()
@@ -1024,6 +1068,8 @@ func TestRequestReconcileIsBoundedHint(t *testing.T) {
 
 // TestCoreErrorSurfacesAsTypedFailure proves a typed core failure reaches the
 // client through the stream lifecycle.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestCoreErrorSurfacesAsTypedFailure(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	client, _ := e.pair()
@@ -1049,6 +1095,8 @@ func TestCoreErrorSurfacesAsTypedFailure(t *testing.T) {
 
 // TestSessionHandshakeFailureIsStreamLocal proves a malformed inner session
 // stream settles only that stream.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestSessionHandshakeFailureIsStreamLocal(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	client, _ := e.pair()

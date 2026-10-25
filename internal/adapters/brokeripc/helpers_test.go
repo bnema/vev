@@ -536,7 +536,10 @@ func newCoreMock(t *testing.T, id ports.BrokerConnectionID, hub *snapshotHub, op
 	}).Maybe()
 	m.EXPECT().SubscribePreview(mock.Anything).RunAndReturn(func(ports.BrokerPreviewRequest) (ports.BrokerPreviewSubscription, error) {
 		m, state := newPreviewSubscriptionMock(t)
-		c.previews <- state
+		select {
+		case c.previews <- state:
+		default:
+		}
 		return m, nil
 	}).Maybe()
 	m.EXPECT().OpenEnvelopeStream(mock.Anything, mock.Anything).RunAndReturn(c.openStream).Maybe()
@@ -548,7 +551,10 @@ func newCoreMock(t *testing.T, id ports.BrokerConnectionID, hub *snapshotHub, op
 		c.mu.Lock()
 		c.reconcile = append(c.reconcile, endpoint)
 		c.mu.Unlock()
-		c.reconciled <- endpoint
+		select {
+		case c.reconciled <- endpoint:
+		default:
+		}
 	}).Maybe()
 	m.EXPECT().Close().RunAndReturn(c.closeAll).Maybe()
 	return passiveCore{MockBrokerCoreService: m, state: c}, c
@@ -558,7 +564,10 @@ func (c *coreState) recordSubscribe(passive bool) ports.BrokerSubscription {
 	c.mu.Lock()
 	c.subscribes = append(c.subscribes, passive)
 	c.mu.Unlock()
-	c.subscribed <- passive
+	select {
+	case c.subscribed <- passive:
+	default:
+	}
 	return c.hub.subscribe(c.t)
 }
 
@@ -594,7 +603,10 @@ func (c *coreState) closeStream(connection ports.BrokerConnectionID, stream port
 	}
 	c.closedIDs = append(c.closedIDs, stream)
 	c.mu.Unlock()
-	c.closedStreams <- stream
+	select {
+	case c.closedStreams <- stream:
+	default:
+	}
 	if !ok {
 		return ports.BrokerAdmissionStale
 	}

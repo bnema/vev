@@ -14,6 +14,8 @@ import (
 // credit grant: a grant past the window settles only its stream, a grant for a
 // retired stream is discarded, and a grant for a stream that was never opened
 // fails the whole connection.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestStreamCreditGrantDispatch(t *testing.T) {
 	open := func(t *testing.T, raw *rawCarriage, scope brokerwire.Scope, id ports.BrokerStreamID) {
 		t.Helper()

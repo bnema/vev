@@ -62,6 +62,8 @@ func (r *rawCarriage) register(t *testing.T) brokerwire.Scope {
 
 // TestPreambleNegotiatesEffectiveCeilings proves the broker preamble negotiates
 // the element-wise minima of both offers.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestPreambleNegotiatesEffectiveCeilings(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	offer := brokerwire.Ceilings{MaxReceiveEnvelopeBytes: 2 << 20, StreamChunkLimit: 4096}
@@ -72,6 +74,8 @@ func TestPreambleNegotiatesEffectiveCeilings(t *testing.T) {
 
 // TestOversizePreambleIsDropped proves a preamble whose length prefix exceeds the
 // 4 KiB bound is refused before any body is read or allocated.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestOversizePreambleIsDropped(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -92,6 +96,8 @@ func TestOversizePreambleIsDropped(t *testing.T) {
 
 // TestMalformedPreambleIsRefusedWithTypedCode proves a preamble that fails strict
 // scanning is answered with a typed refusal instead of being tolerated.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestMalformedPreambleIsRefusedWithTypedCode(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -113,6 +119,8 @@ func TestMalformedPreambleIsRefusedWithTypedCode(t *testing.T) {
 
 // TestWrongDirectionFrameClosesConnection proves a server-direction envelope
 // presented as a client frame settles that connection alone.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestWrongDirectionFrameClosesConnection(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	raw := rawDial(t, e, brokerwire.DefaultCeilings())
@@ -134,6 +142,8 @@ func TestWrongDirectionFrameClosesConnection(t *testing.T) {
 
 // TestMalformedApplicationFrameClosesConnection proves a malformed client
 // envelope after registration settles only that connection.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestMalformedApplicationFrameClosesConnection(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	raw := rawDial(t, e, brokerwire.DefaultCeilings())
@@ -149,6 +159,8 @@ func TestMalformedApplicationFrameClosesConnection(t *testing.T) {
 
 // TestNegotiatedChunkCeilingIsEnforced proves a stream chunk above the negotiated
 // ceiling is refused rather than accepted.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestNegotiatedChunkCeilingIsEnforced(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	offer := brokerwire.Ceilings{MaxReceiveEnvelopeBytes: 2 << 20, StreamChunkLimit: 4096}
@@ -179,6 +191,8 @@ func TestNegotiatedChunkCeilingIsEnforced(t *testing.T) {
 // TestScopeMismatchOpenStreamIsRefusedAsStale proves a stream open carrying a
 // connection identity that is not the accepted one is refused as a stale
 // admission rather than applied.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestScopeMismatchOpenStreamIsRefusedAsStale(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	raw := rawDial(t, e, brokerwire.DefaultCeilings())
@@ -206,6 +220,8 @@ func TestScopeMismatchOpenStreamIsRefusedAsStale(t *testing.T) {
 
 // TestDuplicateRegisterClosesConnection proves a second Register is a protocol
 // violation that settles the connection.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestDuplicateRegisterClosesConnection(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	raw := rawDial(t, e, brokerwire.DefaultCeilings())
@@ -218,6 +234,8 @@ func TestDuplicateRegisterClosesConnection(t *testing.T) {
 // TestMismatchedScopeIsFenced proves a frame carrying a connection identity that
 // is not the accepted one is fenced: it is neither applied nor answered, and the
 // connection keeps serving its own scope.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestMismatchedScopeIsFenced(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	raw := rawDial(t, e, brokerwire.DefaultCeilings())
@@ -232,6 +250,8 @@ func TestMismatchedScopeIsFenced(t *testing.T) {
 
 // TestListenerCloseEndsSessions proves Close ends every accepted connection and
 // unblocks a blocked Accept.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestListenerCloseEndsSessions(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	adapter, session := e.pair()
@@ -256,6 +276,8 @@ func TestListenerCloseEndsSessions(t *testing.T) {
 
 // TestDialMissingEndpointFails proves a dial against a missing endpoint is a
 // bounded failure and leaves nothing behind.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestDialMissingEndpointFails(t *testing.T) {
 	path := testSocketPath(t)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -266,6 +288,8 @@ func TestDialMissingEndpointFails(t *testing.T) {
 }
 
 // TestClosedListenerRejectsDial proves a closed endpoint refuses further clients.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestClosedListenerRejectsDial(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	require.NoError(t, e.listener.Close())

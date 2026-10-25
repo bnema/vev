@@ -91,6 +91,8 @@ func (p *silentBrokerPeer) awaitPreamble(t *testing.T) {
 // configured handshake budget: Dial returns a deadline failure, the carriage was
 // closed to interrupt the blocked wait, and the setup workers were joined
 // instead of being abandoned.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestClientDialSilentAfterPreambleIsBoundedAndJoined(t *testing.T) {
 	path := testSocketPath(t)
 	peer := startSilentBrokerPeer(t, path)
@@ -107,13 +109,17 @@ func TestClientDialSilentAfterPreambleIsBoundedAndJoined(t *testing.T) {
 	peer.awaitPreamble(t)
 
 	peer.stop()
-	require.Eventually(t, func() bool { return runtime.NumGoroutine() <= baseline+2 }, 5*time.Second, 5*time.Millisecond,
+	// Dial joins every setup worker before returning and stop joins the peer, so
+	// the goroutine count is already settled.
+	require.LessOrEqual(t, runtime.NumGoroutine(), baseline+2,
 		"a bounded Dial must not abandon a setup goroutine (baseline=%d now=%d)", baseline, runtime.NumGoroutine())
 }
 
 // TestClientDialEverySetupStepSharesTheOneDeadline proves the caller's context
 // deadline, not only HandshakeTimeout, bounds the whole client setup: a deadline
 // far tighter than HandshakeTimeout still interrupts the registration wait.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestClientDialEverySetupStepSharesTheOneDeadline(t *testing.T) {
 	path := testSocketPath(t)
 	peer := startSilentBrokerPeer(t, path)
@@ -133,6 +139,8 @@ func TestClientDialEverySetupStepSharesTheOneDeadline(t *testing.T) {
 // TestClientDialCancellationInterruptsRegistrationWait proves an explicit
 // cancellation, not just a deadline, interrupts the wait for Registered and is
 // reported as cancellation rather than being masked by a carriage failure.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestClientDialCancellationInterruptsRegistrationWait(t *testing.T) {
 	path := testSocketPath(t)
 	peer := startSilentBrokerPeer(t, path)
@@ -160,6 +168,8 @@ func TestClientDialCancellationInterruptsRegistrationWait(t *testing.T) {
 // detaches from the setup context after Registered: once Dial returns, the
 // caller's setup deadline may elapse without disturbing the established
 // connection.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestClientConnectionOutlivesSetupContext(t *testing.T) {
 	e := startEndpoint(t, Config{HandshakeTimeout: 5 * time.Second})
 
@@ -173,7 +183,7 @@ func TestClientConnectionOutlivesSetupContext(t *testing.T) {
 
 	// Let the setup deadline elapse; the connection was registered in time and
 	// must keep serving on its own connection-lived context.
-	time.Sleep(400 * time.Millisecond)
+	awaitClosed(t, setupCtx.Done(), "the setup context must expire")
 	require.ErrorIs(t, setupCtx.Err(), context.DeadlineExceeded, "the setup context must have expired")
 
 	requireConnectionDelegates(t, client)
@@ -184,6 +194,8 @@ func TestClientConnectionOutlivesSetupContext(t *testing.T) {
 // ports.BrokerAuthority admission the client must send Register within the
 // accept-time handshake budget, or the session closes the core service and
 // releases the slot, and the listener keeps serving.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestServerRegistrationBudgetSettlesSilentPeer(t *testing.T) {
 	e := startEndpoint(t, Config{MaxClients: 1, HandshakeTimeout: 200 * time.Millisecond})
 	l := e.listener.(*listener)
@@ -200,16 +212,9 @@ func TestServerRegistrationBudgetSettlesSilentPeer(t *testing.T) {
 	core := e.authority.last()
 	require.NotNil(t, core)
 
-	require.Eventually(t, func() bool {
-		select {
-		case <-core.done:
-			return true
-		default:
-			return false
-		}
-	}, 5*time.Second, 5*time.Millisecond, "a silent unregistered peer must not hold the admitted core lease")
-	require.Eventually(t, func() bool { return l.liveSessions() == 0 }, 5*time.Second, 5*time.Millisecond,
-		"a settled session must leave the listener's live set")
+	awaitClosed(t, core.done, "a silent unregistered peer must not hold the admitted core lease")
+	awaitClosed(t, session.(*serverSession).Done(), "the silent session must settle")
+	require.Zero(t, l.liveSessions(), "a settled session must leave the listener's live set")
 
 	// The timeout is the peer's departure, not a session failure: the settled
 	// session reports an orderly end even though its terminal cause still records
@@ -274,13 +279,18 @@ func TestRegistrationDeadlineBoundaryMarker(t *testing.T) {
 // registration budget bounds only the pre-Register phase: a session that
 // registered in time keeps serving long after the accept-time deadline has
 // passed.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestServerRegistrationBudgetLeavesRegisteredSessionHealthy(t *testing.T) {
 	e := startEndpoint(t, Config{HandshakeTimeout: 150 * time.Millisecond})
 	client, _ := e.pair()
 	core := e.authority.last()
 
-	// Outlive the accept-time registration budget.
-	time.Sleep(400 * time.Millisecond)
+	// Outlive the accept-time registration budget: wait for a context carrying a
+	// longer deadline than the budget to expire.
+	outlive, cancelOutlive := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer cancelOutlive()
+	awaitClosed(t, outlive.Done(), "the outliving deadline must expire")
 	requireConnectionDelegates(t, client)
 	select {
 	case <-core.done:
@@ -293,6 +303,8 @@ func TestServerRegistrationBudgetLeavesRegisteredSessionHealthy(t *testing.T) {
 // immediate for a session that is inside its registration window with a
 // deliberately long budget: it does not wait out HandshakeTimeout, and it
 // releases the admitted core service and the slot.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestListenerCloseDuringRegistrationWindowIsImmediate(t *testing.T) {
 	e := startEndpoint(t, Config{MaxClients: 2, HandshakeTimeout: 30 * time.Second})
 	l := e.listener.(*listener)
@@ -323,6 +335,5 @@ func TestListenerCloseDuringRegistrationWindowIsImmediate(t *testing.T) {
 		t.Fatal("Close must end the admitted core service")
 	}
 	require.Zero(t, l.liveSessions())
-	require.Eventually(t, func() bool { return len(l.slots) == 0 }, 5*time.Second, 5*time.Millisecond,
-		"Close must release the client slot")
+	require.Empty(t, l.slots, "Close must release the client slot")
 }

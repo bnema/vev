@@ -50,6 +50,8 @@ func (a *ctxAuthority) AdmitClient(ctx context.Context) (ports.BrokerCoreService
 // TestCloseRacingBlockedAdmissionDoesNotHang proves a Close that races a blocked
 // admission never calls session.Close before the run loop starts, which would
 // wait forever on an unstarted done channel and hang listener shutdown.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestCloseRacingBlockedAdmissionDoesNotHang(t *testing.T) {
 	const epoch = ports.BrokerEpoch(0x51)
 	path := testSocketPath(t)
@@ -92,6 +94,8 @@ func TestCloseRacingBlockedAdmissionDoesNotHang(t *testing.T) {
 // its preamble is dropped by Listener.Close immediately: Close returns well
 // before HandshakeTimeout, the accepted connection closes so blocked framing
 // I/O unblocks, and the slot and admission goroutine are released.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestCloseCancelsStalledPreamble(t *testing.T) {
 	const epoch = ports.BrokerEpoch(0x51)
 	path := testSocketPath(t)
@@ -144,6 +148,8 @@ func TestCloseCancelsStalledPreamble(t *testing.T) {
 // TestCloseCancelsClientStalledInAdmission proves Listener.Close cancels a
 // client that completed its preamble and is parked in an authority honoring
 // ctx, so Close returns promptly and the accepted carriage is closed.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestCloseCancelsClientStalledInAdmission(t *testing.T) {
 	const epoch = ports.BrokerEpoch(0x51)
 	path := testSocketPath(t)
@@ -181,6 +187,8 @@ func TestCloseCancelsClientStalledInAdmission(t *testing.T) {
 // TestStalledPreambleKeepsHandshakeTimeout proves a stalled preamble with the
 // listener still open keeps its normal handshake-timeout classification rather
 // than being reported as a listener close.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestStalledPreambleKeepsHandshakeTimeout(t *testing.T) {
 	const epoch = ports.BrokerEpoch(0x51)
 	path := testSocketPath(t)
@@ -244,6 +252,8 @@ func TestAcceptTerminalCauseSurvivesInFlightRefusal(t *testing.T) {
 // TestListenCreatesOwnerOnlyDirectoryAndSocket proves the endpoint is placed in
 // an owner-only directory and that the bound socket itself is tightened, so the
 // private carriage is never exposed through filesystem modes.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestListenCreatesOwnerOnlyDirectoryAndSocket(t *testing.T) {
 	path := testSocketPath(t)
 	authority, _ := newAuthorityMock(t, 1, ports.BrokerSnapshot{})
@@ -265,6 +275,8 @@ func TestListenCreatesOwnerOnlyDirectoryAndSocket(t *testing.T) {
 
 // TestListenRecoversStaleSocket proves an endpoint left behind by a dead owner
 // is recovered rather than refused.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestListenRecoversStaleSocket(t *testing.T) {
 	path := testSocketPath(t)
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
@@ -284,6 +296,8 @@ func TestListenRecoversStaleSocket(t *testing.T) {
 }
 
 // TestListenRefusesLiveOwner proves a listener never evicts a live endpoint.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestListenRefusesLiveOwner(t *testing.T) {
 	running := startEndpoint(t, Config{})
 	authority, _ := newAuthorityMock(t, 1, ports.BrokerSnapshot{})
@@ -293,6 +307,8 @@ func TestListenRefusesLiveOwner(t *testing.T) {
 
 // TestListenRefusesForeignPathWithoutRemovingIt proves a path that is not a
 // socket is refused and never unlinked.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestListenRefusesForeignPathWithoutRemovingIt(t *testing.T) {
 	path := testSocketPath(t)
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
@@ -308,6 +324,8 @@ func TestListenRefusesForeignPathWithoutRemovingIt(t *testing.T) {
 
 // TestCloseRemovesOnlyItsOwnSocket proves Close unlinks the inode it created and
 // preserves a replacement at the same path.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestCloseRemovesOnlyItsOwnSocket(t *testing.T) {
 	path := testSocketPath(t)
 	authority, _ := newAuthorityMock(t, 1, ports.BrokerSnapshot{})
@@ -326,6 +344,8 @@ func TestCloseRemovesOnlyItsOwnSocket(t *testing.T) {
 }
 
 // TestListenRejectsInvalidConfig proves a missing epoch or authority is refused.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestListenRejectsInvalidConfig(t *testing.T) {
 	path := testSocketPath(t)
 	authority, _ := newAuthorityMock(t, 1, ports.BrokerSnapshot{})
@@ -338,6 +358,8 @@ func TestListenRejectsInvalidConfig(t *testing.T) {
 // TestAcceptRefusesRejectedPeerAndKeepsServing proves a peer refused by the
 // carriage is isolated: the refusal is recorded, no session is created, and the
 // listener keeps admitting later same-user clients.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestAcceptRefusesRejectedPeerAndKeepsServing(t *testing.T) {
 	path := testSocketPath(t)
 	authority, _ := newAuthorityMock(t, 1, ports.BrokerSnapshot{})
@@ -369,6 +391,8 @@ func TestAcceptRefusesRejectedPeerAndKeepsServing(t *testing.T) {
 
 // TestDialRefusesRejectedPeer proves the client adapter fails closed when the
 // carriage refuses the peer instead of admitting an unverified connection.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestDialRefusesRejectedPeer(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -381,6 +405,8 @@ func TestDialRefusesRejectedPeer(t *testing.T) {
 
 // TestBoundedConcurrentClients proves the listener admits at most MaxClients
 // concurrent connections and recovers a slot when a client disconnects.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestBoundedConcurrentClients(t *testing.T) {
 	e := startEndpoint(t, Config{MaxClients: 1, HandshakeTimeout: 300 * time.Millisecond})
 	first, firstSession := e.pair()
@@ -409,6 +435,8 @@ func TestBoundedConcurrentClients(t *testing.T) {
 // TestStalledHandshakeDoesNotBlockOtherClients proves a peer that connects but
 // never completes its preamble occupies only its own slot and goroutine: another
 // client is admitted while it is still stalled.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestStalledHandshakeDoesNotBlockOtherClients(t *testing.T) {
 	e := startEndpoint(t, Config{MaxClients: 4, HandshakeTimeout: 400 * time.Millisecond})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -427,6 +455,8 @@ func TestStalledHandshakeDoesNotBlockOtherClients(t *testing.T) {
 
 // TestConcurrentDialAndClose proves concurrent clients may dial, register, run
 // one operation, and close without corrupting listener or session state.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestConcurrentDialAndClose(t *testing.T) {
 	e := startEndpoint(t, Config{MaxClients: 8, HandshakeTimeout: 2 * time.Second})
 

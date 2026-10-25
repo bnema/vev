@@ -23,6 +23,8 @@ func awaitDone(t *testing.T, service ports.BrokerService) {
 // TestConnectorConnectReturnsIndependentService proves the ports.BrokerConnector
 // implementation dials one connection per Connect and hands ownership to the
 // caller.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestConnectorConnectReturnsIndependentService(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	connector := NewConnector(e.path, Config{})
@@ -58,6 +60,8 @@ func TestConnectorConnectReturnsIndependentService(t *testing.T) {
 
 // TestConnectorReportsCarriageLoss proves the client service surfaces a broker
 // loss through Done and Err while it holds no logical stream.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestConnectorReportsCarriageLoss(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -90,6 +94,8 @@ func TestConnectorRefusesInvalidConfiguration(t *testing.T) {
 // registration exchange: Connect returns the caller's cancellation instead of
 // waiting out the handshake budget. The supervisor's cancellation lifetime
 // depends on exactly this contract.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestConnectorCancellationInterruptsStalledRegistration(t *testing.T) {
 	path := testSocketPath(t)
 	peer := startSilentBrokerPeer(t, path)
@@ -118,6 +124,8 @@ func TestConnectorCancellationInterruptsStalledRegistration(t *testing.T) {
 // contract that a successful service is independent of the setup context:
 // cancelling that context after Connect returns must not close or disturb the
 // established connection.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestConnectorServiceOutlivesSetupContext(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	ctx, cancel := context.WithCancel(context.Background())

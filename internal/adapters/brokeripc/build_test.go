@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestBuildRegistration(t *testing.T) {
 	for _, tc := range []struct {
 		name           string
@@ -57,6 +58,7 @@ func TestBuildRegistration(t *testing.T) {
 	}
 }
 
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestRetiringRefusesConcurrentAdmission(t *testing.T) {
 	const epoch = ports.BrokerEpoch(0x51)
 	path := testSocketPath(t)
