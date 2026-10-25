@@ -71,13 +71,13 @@ func startInputHarnessOn(t *testing.T, themes *terminalThemeState, request ports
 		stream: stream,
 		pump:   pump,
 		term:   newWorkerTestTerminal(),
-		clock:  newSupervisorTestClock(),
+		clock:  newSupervisorTestClock(t),
 		reader: reader,
 		events: make(chan AttachmentEvent, 1),
 	}
-	host := newAttachmentHost(attachmentHostConfig{Terminal: h.term, Clock: newSupervisorTestClock(), Input: pump})
+	host := newAttachmentHost(attachmentHostConfig{Terminal: h.term, Clock: newSupervisorTestClock(t).port, Input: pump})
 	cfg := sessionTestWorkerConfig(request)
-	cfg.Clock = h.clock
+	cfg.Clock = h.clock.port
 	cfg.Theme = themes
 	cfg.Clipboard = clipboard
 	cfg.Color = terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor}

@@ -285,7 +285,7 @@ func (a *sessionTestAttachments) token(t *testing.T) AttachmentToken {
 // sessionTestRun boots one worker through the real foreground host.
 func sessionTestRun(t *testing.T, stream ports.BrokerLogicalConnection, terminal *workerTestTerminal, cfg sessionAttachmentConfig, attached *sessionTestAttachments) <-chan AttachmentEvent {
 	t.Helper()
-	host := newWorkerTestHost(terminal, nil, attached.record)
+	host := newWorkerTestHost(t, terminal, nil, attached.record)
 	worker, err := newSessionAttachmentWorker(cfg)
 	require.NoError(t, err)
 	events := make(chan AttachmentEvent, 1)
@@ -537,7 +537,7 @@ func TestSessionAttachmentWorkerHelloEnvironment(t *testing.T) {
 			worker, err := supervisor.newAttachmentWorker(request, attachmentTab{}, nil, SessionEnvironment{Provenance: SessionEnvironmentLocalCLI, Cwd: tt.env.Cwd, Env: append([]string(nil), request.Env...)})
 			require.NoError(t, err)
 			events := make(chan AttachmentEvent, 1)
-			host := newWorkerTestHost(terminal, nil, attached.record)
+			host := newWorkerTestHost(t, terminal, nil, attached.record)
 			go func() {
 				event, _ := host.Run(context.Background(), AttachmentToken{Generation: 1, Attempt: 1}, worker, stream.conn)
 				events <- event

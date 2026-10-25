@@ -162,14 +162,14 @@ func startIntegrationBroker(t *testing.T) (*integrationAuthority, ports.BrokerLi
 // connector and a pinned clock with a controlled terminal.
 func integrationSupervisor(t *testing.T, path string) (*Supervisor, *supervisorTestClock, *supervisorTestTerminal) {
 	t.Helper()
-	clock := newSupervisorTestClock()
+	clock := newSupervisorTestClock(t)
 	reader := newSupervisorTestReader()
 	t.Cleanup(reader.unblock)
 	terminal := newSupervisorTestTerminal(reader)
 	sup := mustSupervisor(t, SupervisorConfig{
 		Connector: brokeripc.NewConnector(path, brokeripc.Config{}).Navigator(),
 		Terminal:  terminal,
-		Clock:     clock,
+		Clock:     clock.port,
 		Jitter:    func() float64 { return 0 },
 	})
 	return sup, clock, terminal

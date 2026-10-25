@@ -25,23 +25,28 @@ import (
 // sleep, and Stop is recorded so a test can prove every retry timer was
 // retired.
 type supervisorTestClock struct {
+	port    *portsmocks.MockClock
+	owner   *testing.T
 	mu      sync.Mutex
 	now     time.Time
 	timers  []*supervisorTestTimer
 	created chan *supervisorTestTimer
 }
 
-func newSupervisorTestClock() *supervisorTestClock {
-	return &supervisorTestClock{now: time.Unix(1000, 0), created: make(chan *supervisorTestTimer, 32)}
+func newSupervisorTestClock(t *testing.T) *supervisorTestClock {
+	c := &supervisorTestClock{owner: t, now: time.Unix(1000, 0), created: make(chan *supervisorTestTimer, 32), port: portsmocks.NewMockClock(t)}
+	c.port.EXPECT().Now().RunAndReturn(c.nowValue).Maybe()
+	c.port.EXPECT().NewTimer(mock.Anything).RunAndReturn(c.newTimer).Maybe()
+	return c
 }
 
-func (c *supervisorTestClock) Now() time.Time {
+func (c *supervisorTestClock) nowValue() time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.now
 }
 
-func (c *supervisorTestClock) NewTimer(delay time.Duration) ports.Timer {
+func (c *supervisorTestClock) newTimer(delay time.Duration) ports.Timer {
 	timer := &supervisorTestTimer{ch: make(chan time.Time, 1), delay: delay}
 	c.mu.Lock()
 	c.timers = append(c.timers, timer)
@@ -50,7 +55,11 @@ func (c *supervisorTestClock) NewTimer(delay time.Duration) ports.Timer {
 	case c.created <- timer:
 	default:
 	}
-	return timer
+	m := portsmocks.NewMockTimer(c.owner)
+	m.EXPECT().C().Return((<-chan time.Time)(timer.ch)).Maybe()
+	m.EXPECT().Reset(mock.Anything).Return(false).Maybe()
+	m.EXPECT().Stop().RunAndReturn(timer.stop).Maybe()
+	return m
 }
 
 func (c *supervisorTestClock) awaitTimer(t *testing.T) *supervisorTestTimer {
@@ -100,11 +109,7 @@ type supervisorTestTimer struct {
 	stoppedFlag bool
 }
 
-func (t *supervisorTestTimer) C() <-chan time.Time { return t.ch }
-
-func (t *supervisorTestTimer) Reset(time.Duration) bool { return false }
-
-func (t *supervisorTestTimer) Stop() bool {
+func (t *supervisorTestTimer) stop() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.stoppedFlag {
@@ -664,7 +669,7 @@ func TestSupervisorPickerWithoutBroker(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	clock := newSupervisorTestClock()
+	clock := newSupervisorTestClock(t)
 	reader := newSupervisorTestReader()
 	t.Cleanup(reader.unblock)
 	terminal := newSupervisorTestTerminal(reader)
@@ -679,7 +684,7 @@ func TestSupervisorPickerWithoutBroker(t *testing.T) {
 	sup := mustSupervisor(t, SupervisorConfig{
 		Connector: connector,
 		Terminal:  terminal,
-		Clock:     clock,
+		Clock:     clock.port,
 		Jitter:    func() float64 { return 0 },
 		Render: func(state State) {
 			renderMu.Lock()
@@ -722,7 +727,7 @@ func TestSupervisorPickerPublicationRequestsRepaint(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	clock := newSupervisorTestClock()
+	clock := newSupervisorTestClock(t)
 	reader := newSupervisorTestReader()
 	t.Cleanup(reader.unblock)
 	service := newSupervisorTestService(t, ports.BrokerConnectionID{1})
@@ -734,8 +739,8 @@ func TestSupervisorPickerPublicationRequestsRepaint(t *testing.T) {
 			return service.port, nil
 		}),
 		Terminal: newSupervisorTestTerminal(reader),
-		Clock:    clock,
-		Picker:   newPickerController(clock, pickerTestFreshness, terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor}),
+		Clock:    clock.port,
+		Picker:   newPickerController(clock.port, pickerTestFreshness, terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor}),
 		Render: func(state State) {
 			renders <- state
 		},
@@ -770,7 +775,7 @@ func TestSupervisorBrokerLossReconnectsWithFreshGeneration(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	clock := newSupervisorTestClock()
+	clock := newSupervisorTestClock(t)
 	reader := newSupervisorTestReader()
 	t.Cleanup(reader.unblock)
 	terminal := newSupervisorTestTerminal(reader)
@@ -791,7 +796,7 @@ func TestSupervisorBrokerLossReconnectsWithFreshGeneration(t *testing.T) {
 	sup := mustSupervisor(t, SupervisorConfig{
 		Connector: connector,
 		Terminal:  terminal,
-		Clock:     clock,
+		Clock:     clock.port,
 		Jitter:    func() float64 { return 0 },
 	})
 
@@ -852,7 +857,7 @@ func TestSupervisorBrokerLossReconnectsWithFreshGeneration(t *testing.T) {
 func TestSupervisorCancellationClosesLateConnection(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	clock := newSupervisorTestClock()
+	clock := newSupervisorTestClock(t)
 	reader := newSupervisorTestReader()
 	t.Cleanup(reader.unblock)
 	terminal := newSupervisorTestTerminal(reader)
@@ -868,7 +873,7 @@ func TestSupervisorCancellationClosesLateConnection(t *testing.T) {
 	sup := mustSupervisor(t, SupervisorConfig{
 		Connector: connector,
 		Terminal:  terminal,
-		Clock:     clock,
+		Clock:     clock.port,
 		Jitter:    func() float64 { return 0 },
 	})
 
@@ -895,7 +900,7 @@ func TestSupervisorIncompatibleStopsReconnecting(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	clock := newSupervisorTestClock()
+	clock := newSupervisorTestClock(t)
 	reader := newSupervisorTestReader()
 	t.Cleanup(reader.unblock)
 	terminal := newSupervisorTestTerminal(reader)
@@ -908,7 +913,7 @@ func TestSupervisorIncompatibleStopsReconnecting(t *testing.T) {
 	sup := mustSupervisor(t, SupervisorConfig{
 		Connector: connector,
 		Terminal:  terminal,
-		Clock:     clock,
+		Clock:     clock.port,
 		Jitter:    func() float64 { return 0 },
 		Notify:    func(_ State, err error) { notified <- err },
 	})
@@ -935,7 +940,7 @@ func TestSupervisorIncompatibleStopsReconnecting(t *testing.T) {
 }
 
 func TestSupervisorTerminalEOFRestoresRawOnce(t *testing.T) {
-	clock := newSupervisorTestClock()
+	clock := newSupervisorTestClock(t)
 	terminal := newSupervisorTestTerminal(strings.NewReader(""))
 	connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) {
 		return nil, ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: "down"}
@@ -944,7 +949,7 @@ func TestSupervisorTerminalEOFRestoresRawOnce(t *testing.T) {
 	sup := mustSupervisor(t, SupervisorConfig{
 		Connector: connector,
 		Terminal:  terminal,
-		Clock:     clock,
+		Clock:     clock.port,
 		Jitter:    func() float64 { return 0 },
 	})
 
@@ -954,7 +959,7 @@ func TestSupervisorTerminalEOFRestoresRawOnce(t *testing.T) {
 }
 
 func TestSupervisorRawModePrecedesBroker(t *testing.T) {
-	clock := newSupervisorTestClock()
+	clock := newSupervisorTestClock(t)
 	reader := newSupervisorTestReader()
 	t.Cleanup(reader.unblock)
 	terminal := newSupervisorTestTerminal(reader)
@@ -968,7 +973,7 @@ func TestSupervisorRawModePrecedesBroker(t *testing.T) {
 	sup := mustSupervisor(t, SupervisorConfig{
 		Connector: connector,
 		Terminal:  terminal,
-		Clock:     clock,
+		Clock:     clock.port,
 		Jitter:    func() float64 { return 0 },
 	})
 
@@ -984,7 +989,7 @@ func TestSupervisorRawModePrecedesBroker(t *testing.T) {
 func TestSupervisorSingleAttemptAndTimer(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	clock := newSupervisorTestClock()
+	clock := newSupervisorTestClock(t)
 	reader := newSupervisorTestReader()
 	t.Cleanup(reader.unblock)
 	terminal := newSupervisorTestTerminal(reader)
@@ -995,7 +1000,7 @@ func TestSupervisorSingleAttemptAndTimer(t *testing.T) {
 	sup := mustSupervisor(t, SupervisorConfig{
 		Connector: connector,
 		Terminal:  terminal,
-		Clock:     clock,
+		Clock:     clock.port,
 		Jitter:    func() float64 { return 0 },
 	})
 
@@ -1160,7 +1165,7 @@ func startCancellationRace(t *testing.T, connect func(ctx context.Context, call 
 
 	race := &cancellationRace{
 		cancel:    cancel,
-		clock:     newSupervisorTestClock(),
+		clock:     newSupervisorTestClock(t),
 		terminal:  newSupervisorTestTerminal(reader),
 		recorder:  &cancellationRaceRecorder{},
 		connector: newSupervisorTestConnector(connect),
@@ -1169,7 +1174,7 @@ func startCancellationRace(t *testing.T, connect func(ctx context.Context, call 
 	race.supervisor = mustSupervisor(t, SupervisorConfig{
 		Connector: race.connector,
 		Terminal:  race.terminal,
-		Clock:     race.clock,
+		Clock:     race.clock.port,
 		Jitter:    func() float64 { return 0 },
 		Render:    race.recorder.render,
 		Notify:    race.recorder.notify,
@@ -1238,12 +1243,12 @@ func (r *cancellationRaceRecorder) recorded() ([]State, []error) {
 // superseded completion can reach adoptAttempt in the production driver today;
 // pinning the fence here keeps a future concurrent driver from dropping it.
 func TestSupervisorDefensiveGenerationFenceRejectsSupersededAttempt(t *testing.T) {
-	clock := newSupervisorTestClock()
+	clock := newSupervisorTestClock(t)
 	terminal := newSupervisorTestTerminal(newSupervisorTestReader())
 	sup := mustSupervisor(t, SupervisorConfig{
 		Connector: newSupervisorTestConnector(nil),
 		Terminal:  terminal,
-		Clock:     clock,
+		Clock:     clock.port,
 		Jitter:    func() float64 { return 0 },
 	})
 
@@ -1294,7 +1299,7 @@ func TestSupervisorNormalizesUntypedConnectFailure(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	clock := newSupervisorTestClock()
+	clock := newSupervisorTestClock(t)
 	reader := newSupervisorTestReader()
 	t.Cleanup(reader.unblock)
 	terminal := newSupervisorTestTerminal(reader)
@@ -1307,7 +1312,7 @@ func TestSupervisorNormalizesUntypedConnectFailure(t *testing.T) {
 	sup := mustSupervisor(t, SupervisorConfig{
 		Connector: connector,
 		Terminal:  terminal,
-		Clock:     clock,
+		Clock:     clock.port,
 		Jitter:    func() float64 { return 0 },
 		Notify:    func(_ State, err error) { notified <- err },
 	})
@@ -1342,7 +1347,7 @@ func TestSupervisorNormalizesUntypedLoss(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	clock := newSupervisorTestClock()
+	clock := newSupervisorTestClock(t)
 	reader := newSupervisorTestReader()
 	t.Cleanup(reader.unblock)
 	terminal := newSupervisorTestTerminal(reader)
@@ -1355,7 +1360,7 @@ func TestSupervisorNormalizesUntypedLoss(t *testing.T) {
 	sup := mustSupervisor(t, SupervisorConfig{
 		Connector: connector,
 		Terminal:  terminal,
-		Clock:     clock,
+		Clock:     clock.port,
 		Jitter:    func() float64 { return 0 },
 	})
 
@@ -1393,7 +1398,7 @@ func TestSupervisorNilSubscriptionIsTypedUnavailable(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 
-			clock := newSupervisorTestClock()
+			clock := newSupervisorTestClock(t)
 			reader := newSupervisorTestReader()
 			t.Cleanup(reader.unblock)
 			terminal := newSupervisorTestTerminal(reader)
@@ -1406,7 +1411,7 @@ func TestSupervisorNilSubscriptionIsTypedUnavailable(t *testing.T) {
 			sup := mustSupervisor(t, SupervisorConfig{
 				Connector: connector,
 				Terminal:  terminal,
-				Clock:     clock,
+				Clock:     clock.port,
 				Jitter:    func() float64 { return 0 },
 			})
 
@@ -1479,7 +1484,7 @@ func TestSupervisorPickerCloseWhileOffline(t *testing.T) {
 			reader := newPickerChunkReader()
 			defer reader.close()
 			terminal := newSupervisorTestTerminal(reader)
-			clock := newSupervisorTestClock()
+			clock := newSupervisorTestClock(t)
 			reached := make(chan struct{}, 1)
 			connector := newSupervisorTestConnector(func(ctx context.Context, _ int) (ports.BrokerNavigator, error) {
 				if phase == "connecting" {
@@ -1494,8 +1499,8 @@ func TestSupervisorPickerCloseWhileOffline(t *testing.T) {
 				return nil, ports.BrokerError{Code: code, Text: "test refusal"}
 			})
 			s := mustSupervisor(t, SupervisorConfig{
-				Connector: connector, Terminal: terminal, Clock: clock,
-				Picker: NewPicker(clock, 0, terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor}),
+				Connector: connector, Terminal: terminal, Clock: clock.port,
+				Picker: NewPicker(clock.port, 0, terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor}),
 				Notify: func(State, error) { reached <- struct{}{} },
 			})
 			ctx, cancel := context.WithCancel(context.Background())

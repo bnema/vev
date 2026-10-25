@@ -5,11 +5,16 @@ import (
 	"testing"
 	"time"
 
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/stretchr/testify/mock"
+
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 )
 
 type attachPaletteClock struct {
+	port            *portsmocks.MockClock
+	owner           *testing.T
 	timers          chan *attachPaletteTimer
 	handshakeTimers chan *attachPaletteTimer
 }
@@ -21,15 +26,18 @@ type attachPaletteTimer struct {
 	duration time.Duration
 }
 
-func newAttachPaletteClock() *attachPaletteClock {
-	return &attachPaletteClock{
+func newAttachPaletteClock(t *testing.T) *attachPaletteClock {
+	c := &attachPaletteClock{
+		port: portsmocks.NewMockClock(t), owner: t,
 		timers:          make(chan *attachPaletteTimer, 16),
 		handshakeTimers: make(chan *attachPaletteTimer, 1),
 	}
+	c.port.EXPECT().Now().Return(time.Time{}).Maybe()
+	c.port.EXPECT().NewTimer(mock.Anything).RunAndReturn(c.newTimer).Maybe()
+	return c
 }
 
-func (*attachPaletteClock) Now() time.Time { return time.Time{} }
-func (c *attachPaletteClock) NewTimer(delay time.Duration) ports.Timer {
+func (c *attachPaletteClock) newTimer(delay time.Duration) ports.Timer {
 	timer := &attachPaletteTimer{ch: make(chan time.Time, 1), stopped: make(chan struct{}), duration: delay}
 	if delay == protocol.HandshakeTimeout {
 		select {
@@ -40,11 +48,13 @@ func (c *attachPaletteClock) NewTimer(delay time.Duration) ports.Timer {
 	} else {
 		c.timers <- timer
 	}
-	return timer
+	m := portsmocks.NewMockTimer(c.owner)
+	m.EXPECT().C().Return((<-chan time.Time)(timer.ch)).Maybe()
+	m.EXPECT().Reset(mock.Anything).Return(false).Maybe()
+	m.EXPECT().Stop().RunAndReturn(timer.stop).Maybe()
+	return m
 }
-func (t *attachPaletteTimer) C() <-chan time.Time    { return t.ch }
-func (*attachPaletteTimer) Reset(time.Duration) bool { return false }
-func (t *attachPaletteTimer) Stop() bool {
+func (t *attachPaletteTimer) stop() bool {
 	t.stopOnce.Do(func() { close(t.stopped) })
 	return true
 }

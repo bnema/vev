@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/ports"
@@ -263,8 +265,8 @@ func brokerOpsTestOperation(t *testing.T, snapshot ports.BrokerSnapshot, stream 
 	service.open = func(_ context.Context, _ ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 		return stream, nil
 	}
-	clock := newSupervisorTestClock()
-	ops, err := NewBrokerOperations(service, clock)
+	clock := newSupervisorTestClock(t)
+	ops, err := NewBrokerOperations(service, clock.port)
 	require.NoError(t, err)
 	return ops, service, clock
 }
@@ -272,11 +274,11 @@ func brokerOpsTestOperation(t *testing.T, snapshot ports.BrokerSnapshot, stream 
 // TestBrokerOperationsConstructorRefusesMissingDependencies proves a nil or
 // typed-nil service or clock is refused rather than deferred to a panic.
 func TestBrokerOperationsConstructorRefusesMissingDependencies(t *testing.T) {
-	clock := newSupervisorTestClock()
+	clock := newSupervisorTestClock(t)
 	service := newBrokerOpsTestService(ports.BrokerConnectionID{1}, brokerOpsTestLocalSnapshot())
 
 	var typedNilService *brokerOpsTestService
-	var typedNilClock *supervisorTestClock
+	var typedNilClock *portsmocks.MockClock
 
 	tests := []struct {
 		name    string
@@ -284,9 +286,9 @@ func TestBrokerOperationsConstructorRefusesMissingDependencies(t *testing.T) {
 		clock   ports.Clock
 		wantErr bool
 	}{
-		{name: "valid", service: service, clock: clock},
-		{name: "nil service", service: nil, clock: clock, wantErr: true},
-		{name: "typed nil service", service: typedNilService, clock: clock, wantErr: true},
+		{name: "valid", service: service, clock: clock.port},
+		{name: "nil service", service: nil, clock: clock.port, wantErr: true},
+		{name: "typed nil service", service: typedNilService, clock: clock.port, wantErr: true},
 		{name: "nil clock", service: service, clock: nil, wantErr: true},
 		{name: "typed nil clock", service: service, clock: typedNilClock, wantErr: true},
 	}
@@ -435,7 +437,7 @@ func TestBrokerOperationOpenFailureIsNotSent(t *testing.T) {
 	service.open = func(_ context.Context, _ ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 		return nil, ports.BrokerError{Code: ports.BrokerErrorIncompatible}
 	}
-	ops, err := NewBrokerOperations(service, newSupervisorTestClock())
+	ops, err := NewBrokerOperations(service, newSupervisorTestClock(t).port)
 	require.NoError(t, err)
 
 	_, err = ops.Command(context.Background(), brokerOpsTestLocalRoute(), protocol.CommandRequest{Version: protocol.Version, Slug: "next-tab"})
@@ -929,7 +931,7 @@ func TestBrokerOperationsConcurrentStreamsDoNotCollide(t *testing.T) {
 		stream.deliver(protocol.KillResult{RequestID: 1, Outcome: protocol.KillSucceeded})
 		return stream, nil
 	}
-	ops, err := NewBrokerOperations(service, newSupervisorTestClock())
+	ops, err := NewBrokerOperations(service, newSupervisorTestClock(t).port)
 	require.NoError(t, err)
 
 	var wg sync.WaitGroup
@@ -981,7 +983,7 @@ func TestBrokerOperationsClosingOneStreamPreservesSibling(t *testing.T) {
 		}
 		return sibling, nil
 	}
-	ops, err := NewBrokerOperations(service, newSupervisorTestClock())
+	ops, err := NewBrokerOperations(service, newSupervisorTestClock(t).port)
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1036,7 +1038,7 @@ func TestBrokerOperationsConcurrentSafeAccess(t *testing.T) {
 		stream.deliver(protocol.CommandResult{RequestID: 1, Outcome: protocol.CommandSucceeded})
 		return stream, nil
 	}
-	ops, err := NewBrokerOperations(service, newSupervisorTestClock())
+	ops, err := NewBrokerOperations(service, newSupervisorTestClock(t).port)
 	require.NoError(t, err)
 
 	var wg sync.WaitGroup
@@ -1072,8 +1074,8 @@ func TestBrokerOperationsAcquisitionBoundIsNotSent(t *testing.T) {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
-	clock := newSupervisorTestClock()
-	ops, err := NewBrokerOperations(service, clock)
+	clock := newSupervisorTestClock(t)
+	ops, err := NewBrokerOperations(service, clock.port)
 	require.NoError(t, err)
 
 	done := make(chan error, 1)

@@ -235,7 +235,7 @@ type resizeHarnessOptions struct {
 func startResizeHarness(t *testing.T, options resizeHarnessOptions) *resizeSupervisorHarness {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	clock := newSupervisorTestClock()
+	clock := newSupervisorTestClock(t)
 	reader := newAttachTestReader()
 	geometry := options.geometry
 	if geometry == (domain.Geometry{}) {
@@ -256,7 +256,7 @@ func startResizeHarness(t *testing.T, options resizeHarnessOptions) *resizeSuper
 	sup := mustSupervisor(t, SupervisorConfig{
 		Connector: connector,
 		Terminal:  terminal.port,
-		Clock:     clock,
+		Clock:     clock.port,
 		Jitter:    func() float64 { return 0 },
 		Picker:    options.picker,
 		Render:    recorder.render,
@@ -869,7 +869,7 @@ func TestSupervisorResizeInvalidationRendersOnlyPickerPresentations(t *testing.T
 	sup := mustSupervisor(t, SupervisorConfig{
 		Connector: newSupervisorTestConnector(nil),
 		Terminal:  terminal.port,
-		Clock:     newSupervisorTestClock(),
+		Clock:     newSupervisorTestClock(t).port,
 		Render:    recorder.render,
 	})
 
@@ -934,7 +934,7 @@ func TestSupervisorPresentationInvalidationNilHostIsSafe(t *testing.T) {
 		sup := mustSupervisor(t, SupervisorConfig{
 			Connector: newSupervisorTestConnector(nil),
 			Terminal:  terminal.port,
-			Clock:     newSupervisorTestClock(),
+			Clock:     newSupervisorTestClock(t).port,
 		})
 		require.NotNil(t, sup.presentationInvalidation(), "a live host exposes its coalesced invalidation")
 		sup.attachments = nil
@@ -943,11 +943,11 @@ func TestSupervisorPresentationInvalidationNilHostIsSafe(t *testing.T) {
 
 	t.Run("a wait with a nil host still settles", func(t *testing.T) {
 		terminal := newResizeTestTerminal(t, newAttachTestReader(), domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
-		clock := newSupervisorTestClock()
+		clock := newSupervisorTestClock(t)
 		sup := mustSupervisor(t, SupervisorConfig{
 			Connector: newSupervisorTestConnector(nil),
 			Terminal:  terminal.port,
-			Clock:     clock,
+			Clock:     clock.port,
 			Jitter:    func() float64 { return 0 },
 		})
 		sup.attachments = nil
@@ -985,11 +985,11 @@ func TestSupervisorPresentationInvalidationNilHostIsSafe(t *testing.T) {
 
 	t.Run("a wait with a nil host settles on cancellation", func(t *testing.T) {
 		terminal := newResizeTestTerminal(t, newAttachTestReader(), domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
-		clock := newSupervisorTestClock()
+		clock := newSupervisorTestClock(t)
 		sup := mustSupervisor(t, SupervisorConfig{
 			Connector: newSupervisorTestConnector(nil),
 			Terminal:  terminal.port,
-			Clock:     clock,
+			Clock:     clock.port,
 			Jitter:    func() float64 { return 0 },
 		})
 		sup.attachments = nil

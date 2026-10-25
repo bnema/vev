@@ -127,8 +127,8 @@ func TestResumeWatch(t *testing.T) {
 				close(reader.chunks)
 			})
 			lifetime := &terminalInputLifetime{eof: make(chan error, 1), pump: pump}
-			clock := newSupervisorTestClock()
-			watch := lifetime.watchResume(clock, nil)
+			clock := newSupervisorTestClock(t)
+			watch := lifetime.watchResume(clock.port, nil)
 			for _, read := range tt.reads {
 				reader.chunks <- []byte(read)
 			}
@@ -189,7 +189,7 @@ func TestResumeWatchKeepsBacklogVerbatim(t *testing.T) {
 				}, 5*time.Second, time.Millisecond)
 			}
 			lifetime := &terminalInputLifetime{eof: make(chan error, 1), pump: pump}
-			watch := lifetime.watchResume(newSupervisorTestClock(), nil)
+			watch := lifetime.watchResume(newSupervisorTestClock(t).port, nil)
 			require.Eventually(t, func() bool { return watch.heldLen() == len(tt.residual)+len(tt.pending) }, 5*time.Second, time.Millisecond)
 			if tt.typed != "" {
 				reader.chunks <- []byte(tt.typed)
@@ -235,8 +235,8 @@ func TestResumeWatchResolvesEscapeAtRelease(t *testing.T) {
 				close(reader.chunks)
 			})
 			lifetime := &terminalInputLifetime{eof: make(chan error, 1), pump: pump}
-			clock := newSupervisorTestClock()
-			watch := lifetime.watchResume(clock, nil)
+			clock := newSupervisorTestClock(t)
+			watch := lifetime.watchResume(clock.port, nil)
 			reader.chunks <- []byte("\x1b")
 			escape := clock.awaitTimer(t)
 			released := make(chan struct{})
@@ -296,16 +296,16 @@ func TestResumeWatchOverflowKeepsHeldPrefix(t *testing.T) {
 		close(reader.chunks)
 	})
 	lifetime := &terminalInputLifetime{eof: make(chan error, 1), pump: pump}
-	clock := newSupervisorTestClock()
+	clock := newSupervisorTestClock(t)
 
-	first := lifetime.watchResume(clock, nil)
+	first := lifetime.watchResume(clock.port, nil)
 	reader.chunks <- []byte("ls")
 	require.Eventually(t, func() bool { return first.heldLen() == 2 }, 5*time.Second, time.Millisecond)
 	first.hold(bytes.Repeat([]byte("x"), resumeHeldInputLimit))
 	require.True(t, lifetime.resumeOverflowed.Load())
 	first.release()
 
-	second := lifetime.watchResume(clock, nil)
+	second := lifetime.watchResume(clock.port, nil)
 	require.Eventually(t, func() bool { return second.heldLen() == 2 }, 5*time.Second, time.Millisecond)
 	second.release()
 

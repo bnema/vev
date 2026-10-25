@@ -57,8 +57,8 @@ func TestCtrlReporterReportsHoldsAfterDelayAndReleasesAtOnce(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			state := newTerminalCtrlState()
-			clock := newSupervisorTestClock()
-			r := newCtrlReporter(state, clock)
+			clock := newSupervisorTestClock(t)
+			r := newCtrlReporter(state, clock.port)
 			var timer *supervisorTestTimer
 			for i, s := range tt.steps {
 				var message protocol.ModifierState
@@ -102,10 +102,10 @@ func TestAttachmentReportsHeldCtrl(t *testing.T) {
 	pump.start()
 	defer pump.stop()
 	stream := newSessionStream(t)
-	host := newWorkerTestHost(newWorkerTestTerminal(), pump, nil)
+	host := newWorkerTestHost(t, newWorkerTestTerminal(), pump, nil)
 	cfg := sessionTestWorkerConfig(sessionTestRequest(true))
-	clock := newSupervisorTestClock()
-	cfg.Clock = clock
+	clock := newSupervisorTestClock(t)
+	cfg.Clock = clock.port
 	worker, err := newSessionAttachmentWorker(cfg)
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(context.Background())

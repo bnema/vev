@@ -111,8 +111,8 @@ func advancePickerClock(clock *supervisorTestClock, delta time.Duration) {
 
 func pickerTestCatalogue(t *testing.T) (*pickerCatalogue, *supervisorTestClock) {
 	t.Helper()
-	clock := newSupervisorTestClock()
-	return newPickerCatalogue(pickerCatalogueConfig{Clock: clock, Freshness: pickerTestFreshness}), clock
+	clock := newSupervisorTestClock(t)
+	return newPickerCatalogue(pickerCatalogueConfig{Clock: clock.port, Freshness: pickerTestFreshness}), clock
 }
 
 func pickerLineByLabel(lines []protocol.PickerLine, label string) (protocol.PickerLine, bool) {
@@ -185,8 +185,8 @@ func TestPickerCatalogueEmptySnapshot(t *testing.T) {
 }
 
 func TestPickerCatalogueProjectionCases(t *testing.T) {
-	clock := newSupervisorTestClock()
-	now := clock.Now()
+	clock := newSupervisorTestClock(t)
+	now := clock.port.Now()
 	navigateKill := protocol.PickerCanNavigate | protocol.PickerCanKill
 
 	tests := []struct {
@@ -357,8 +357,8 @@ func TestPickerCatalogueProjectionCases(t *testing.T) {
 }
 
 func TestPickerCatalogueMonotonicUpdates(t *testing.T) {
-	clock := newSupervisorTestClock()
-	now := clock.Now()
+	clock := newSupervisorTestClock(t)
+	now := clock.port.Now()
 	catalogue, _ := pickerTestCatalogue(t)
 
 	newer := ports.BrokerSnapshot{Epoch: 3, Revision: 4, Daemons: []ports.BrokerDaemonObservation{
@@ -392,8 +392,8 @@ const (
 )
 
 func TestPickerCatalogueSlowObservationKeepsNewerState(t *testing.T) {
-	clock := newSupervisorTestClock()
-	now := clock.Now()
+	clock := newSupervisorTestClock(t)
+	now := clock.port.Now()
 	catalogue, _ := pickerTestCatalogue(t)
 
 	fresh := pickerTestRemoteObservation("user@arch", 1, 1, now, pickerTestSession("alpha", 1, catalogue_Up))
@@ -406,8 +406,8 @@ func TestPickerCatalogueSlowObservationKeepsNewerState(t *testing.T) {
 }
 
 func TestPickerCatalogueIdentityReplacement(t *testing.T) {
-	clock := newSupervisorTestClock()
-	now := clock.Now()
+	clock := newSupervisorTestClock(t)
+	now := clock.port.Now()
 	catalogue, _ := pickerTestCatalogue(t)
 
 	original := ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{
@@ -439,8 +439,8 @@ func TestPickerCatalogueIdentityReplacement(t *testing.T) {
 // incarnation is a replacement, so the displayed row cannot silently re-bind
 // to changed authority.
 func TestPickerCatalogueRegistrationGenerationChangeRequiresFreshSelection(t *testing.T) {
-	clock := newSupervisorTestClock()
-	now := clock.Now()
+	clock := newSupervisorTestClock(t)
+	now := clock.port.Now()
 	catalogue, _ := pickerTestCatalogue(t)
 
 	require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{
@@ -459,8 +459,8 @@ func TestPickerCatalogueRegistrationGenerationChangeRequiresFreshSelection(t *te
 }
 
 func TestPickerCatalogueStableRowOrder(t *testing.T) {
-	clock := newSupervisorTestClock()
-	now := clock.Now()
+	clock := newSupervisorTestClock(t)
+	now := clock.port.Now()
 	catalogue, _ := pickerTestCatalogue(t)
 
 	first := ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{
@@ -485,8 +485,8 @@ func TestPickerCatalogueStableRowOrder(t *testing.T) {
 }
 
 func TestPickerCatalogueDeterministicKeys(t *testing.T) {
-	clock := newSupervisorTestClock()
-	now := clock.Now()
+	clock := newSupervisorTestClock(t)
+	now := clock.port.Now()
 	daemons := []ports.BrokerDaemonObservation{
 		pickerTestLocalObservation(now, pickerTestSession("alpha", 1, catalogue_Up)),
 		pickerTestRemoteObservation("host-a", 1, 1, now, pickerTestSession("a-one", 2, catalogue_Up)),
@@ -499,8 +499,8 @@ func TestPickerCatalogueDeterministicKeys(t *testing.T) {
 }
 
 func TestPickerCatalogueSelectionResolution(t *testing.T) {
-	clock := newSupervisorTestClock()
-	now := clock.Now()
+	clock := newSupervisorTestClock(t)
+	now := clock.port.Now()
 	base := pickerTestBase()
 
 	tests := []struct {
@@ -686,8 +686,8 @@ func TestPickerCatalogueSelectionResolution(t *testing.T) {
 }
 
 func TestPickerCatalogueRemoteSelectionCarriesExactIdentity(t *testing.T) {
-	clock := newSupervisorTestClock()
-	now := clock.Now()
+	clock := newSupervisorTestClock(t)
+	now := clock.port.Now()
 	catalogue, _ := pickerTestCatalogue(t)
 	registration := pickerTestRegistration("user@arch", 1)
 	lifecycle := pickerTestLifecycle(2)
@@ -717,8 +717,8 @@ func TestPickerCatalogueUnknownKeyRefused(t *testing.T) {
 // resolve it after the broker process was replaced, even when the endpoint and
 // session lifecycle happen to look the same.
 func TestPickerCatalogueEpochFenceOnCapturedRef(t *testing.T) {
-	clock := newSupervisorTestClock()
-	now := clock.Now()
+	clock := newSupervisorTestClock(t)
+	now := clock.port.Now()
 	catalogue, _ := pickerTestCatalogue(t)
 	require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{
 		pickerTestLocalObservation(now, pickerTestSession("alpha", 1, catalogue_Up)),
@@ -1023,12 +1023,12 @@ func TestPickerCatalogueResolutionAdmission(t *testing.T) {
 // projection is kept intact.
 func TestPickerCatalogueRejectsInvalidSnapshot(t *testing.T) {
 	catalogue, clock := pickerTestCatalogue(t)
-	valid := pickerTestSnapshot(3, 1, clock.Now(), "alpha")
+	valid := pickerTestSnapshot(3, 1, clock.port.Now(), "alpha")
 	require.True(t, catalogue.Apply(valid))
 	validLines := catalogue.Lines()
 	require.Equal(t, ports.BrokerRevision(1), catalogue.Revision())
 
-	invalid := pickerTestSnapshot(3, 2, clock.Now(), "beta")
+	invalid := pickerTestSnapshot(3, 2, clock.port.Now(), "beta")
 	invalid.Daemons[0].Availability = 0 // out of range: availability is never zero
 	require.False(t, catalogue.Apply(invalid), "an invalid snapshot is refused")
 	require.Equal(t, ports.BrokerRevision(1), catalogue.Revision(), "the previous projection is kept")

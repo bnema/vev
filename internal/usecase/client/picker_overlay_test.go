@@ -643,7 +643,7 @@ func TestPickerControllerLoneEscapeResolvesOnItsWindow(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			controller, clock := pickerTestController(t)
-			controller.ApplySnapshot(pickerTestSnapshot(3, 1, clock.Now(), "alpha", "beta"))
+			controller.ApplySnapshot(pickerTestSnapshot(3, 1, clock.port.Now(), "alpha", "beta"))
 
 			require.True(t, controller.ConsumeTerminalRead([]byte("\x1b")))
 			escape := clock.awaitTimer(t)

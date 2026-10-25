@@ -419,7 +419,7 @@ func startAttachHarness(t *testing.T, picker pickerHost) *attachTestHarness {
 func startAttachHarnessConfig(t *testing.T, picker pickerHost, configure func(*SupervisorConfig)) *attachTestHarness {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	clock := newSupervisorTestClock()
+	clock := newSupervisorTestClock(t)
 	reader := newAttachTestReader()
 	// available starts true, exactly like a real composition terminal: a
 	// presentation-only publication is observable before any frame drains.
@@ -433,7 +433,7 @@ func startAttachHarnessConfig(t *testing.T, picker pickerHost, configure func(*S
 	cfg := SupervisorConfig{
 		Connector: connector,
 		Terminal:  terminal.port,
-		Clock:     clock,
+		Clock:     clock.port,
 		Jitter:    func() float64 { return 0 },
 		Picker:    picker,
 	}
@@ -1082,7 +1082,7 @@ func TestSupervisorWithoutUIDoesNotBindActions(t *testing.T) {
 }
 
 func TestUIActionWithoutInputReturnsUnavailable(t *testing.T) {
-	ui := NewUI(newAttachTerminal(t, nil, false).port, newSupervisorTestClock())
+	ui := NewUI(newAttachTerminal(t, nil, false).port, newSupervisorTestClock(t).port)
 	_, err := ui.Action(t.Context(), ports.UIActionRequest{Attachment: ui.Handle(), Generation: 1, Text: "x"})
 	var uiErr *ports.UIError
 	require.ErrorAs(t, err, &uiErr)
@@ -1161,7 +1161,7 @@ func TestSupervisorAttachmentDeadlineElapsedDuringOpenFailsWithoutRestart(t *tes
 	harness.service.setOpenStream(func(_ context.Context, _ ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 		// The accepted absolute deadline elapsed before this client saw it.
 		log := newSessionStream(t)
-		admitted := sessionDeadline(t, log, clock.Now().Add(-time.Second))
+		admitted := sessionDeadline(t, log, clock.port.Now().Add(-time.Second))
 		streamMu.Lock()
 		stream = log
 		streamMu.Unlock()
@@ -1199,7 +1199,7 @@ func TestSupervisorAttachmentDeadlineNotExtendedAcrossStages(t *testing.T) {
 	clock := harness.clock
 	harness.service.setOpenStream(func(_ context.Context, _ ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 		log := newSessionStream(t)
-		admitted := sessionDeadline(t, log, clock.Now().Add(5*time.Second))
+		admitted := sessionDeadline(t, log, clock.port.Now().Add(5*time.Second))
 		streamMu.Lock()
 		stream = log
 		streamMu.Unlock()
@@ -1252,7 +1252,7 @@ func TestSupervisorAttachmentLaterAcceptedDeadlineNeverExtendsBudget(t *testing.
 	clock := harness.clock
 	harness.service.setOpenStream(func(_ context.Context, _ ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 		log := newSessionStream(t)
-		admitted := sessionDeadline(t, log, clock.Now().Add(4*protocol.HandshakeTimeout))
+		admitted := sessionDeadline(t, log, clock.port.Now().Add(4*protocol.HandshakeTimeout))
 		streamMu.Lock()
 		stream = log
 		streamMu.Unlock()
@@ -1360,8 +1360,8 @@ func TestAttachmentDeadlineConcurrentExpiryAndRetirement(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			clock := newSupervisorTestClock()
-			deadline := startAttachmentDeadline(context.Background(), clock)
+			clock := newSupervisorTestClock(t)
+			deadline := startAttachmentDeadline(context.Background(), clock.port)
 			timer := clock.snapshotTimers()[0]
 			done := make(chan struct{})
 			go func() {
@@ -1725,12 +1725,12 @@ func TestSupervisorAttachmentReachableFromRealPicker(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	clock := newSupervisorTestClock()
+	clock := newSupervisorTestClock(t)
 	reader := newPickerChunkReader()
 	t.Cleanup(reader.close)
 	terminal := newAttachTerminal(t, reader, true)
 	service := newSupervisorTestService(t, ports.BrokerConnectionID{1})
-	service.hub.publish(pickerTestSnapshot(3, 1, clock.Now(), "alpha"))
+	service.hub.publish(pickerTestSnapshot(3, 1, clock.port.Now(), "alpha"))
 	admittedStreams := make(chan *streamLog, 1)
 	service.setOpenStream(func(_ context.Context, _ ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 		admitted := newSessionStream(t)
@@ -1738,12 +1738,12 @@ func TestSupervisorAttachmentReachableFromRealPicker(t *testing.T) {
 		return admitted.conn, nil
 	})
 
-	controller := newPickerController(clock, pickerTestFreshness, terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor})
+	controller := newPickerController(clock.port, pickerTestFreshness, terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor})
 	connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) { return service.port, nil })
 	sup := mustSupervisor(t, SupervisorConfig{
 		Connector: connector,
 		Terminal:  terminal.port,
-		Clock:     clock,
+		Clock:     clock.port,
 		Jitter:    func() float64 { return 0 },
 		Picker:    controller,
 	})

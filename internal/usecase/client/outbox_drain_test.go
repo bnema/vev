@@ -18,8 +18,8 @@ func TestOutboxDrain(t *testing.T) {
 			box := newAttachmentOutbox(stream.conn)
 			defer box.join()
 			require.NoError(t, box.SendClient(protocol.Detach{}))
-			clock := newSupervisorTestClock()
-			worker := &sessionAttachmentWorker{cfg: sessionAttachmentConfig{Clock: clock}}
+			clock := newSupervisorTestClock(t)
+			worker := &sessionAttachmentWorker{cfg: sessionAttachmentConfig{Clock: clock.port}}
 			host := newAttachmentHost(attachmentHostConfig{})
 			fg := host.newForeground(AttachmentToken{Generation: 1}, stream.conn)
 			ctx, cancel := context.WithCancel(t.Context())

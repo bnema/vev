@@ -48,10 +48,10 @@ type previewHarness struct {
 
 func newPreviewHarness(t *testing.T, observations ...ports.BrokerDaemonObservation) *previewHarness {
 	t.Helper()
-	clock := newSupervisorTestClock()
+	clock := newSupervisorTestClock(t)
 	h := &previewHarness{
 		t: t, controller: previewTestController(t, observations...), service: portsmocks.NewMockBrokerService(t),
-		clock: clock, manager: &previewManager{clock: clock}, size: domain.Size{Cols: 100, Rows: 40},
+		clock: clock, manager: &previewManager{clock: clock.port}, size: domain.Size{Cols: 100, Rows: 40},
 		connection: ports.BrokerConnectionID{11},
 	}
 	h.service.EXPECT().ConnectionID().Return(h.connection).Maybe()
@@ -342,7 +342,7 @@ func TestSupervisorRefreshPreviewWiresTerminalGeometryToPreviewManager(t *testin
 	h.service.EXPECT().SubscribePreview(expected).Return(sub, nil).Once()
 	sub.EXPECT().Close().Once()
 
-	supervisor := &Supervisor{cfg: SupervisorConfig{Picker: h.controller, Terminal: &pickerRecordingTerminal{}}, picker: pickerSession{preview: previewManager{clock: h.clock}}}
+	supervisor := &Supervisor{cfg: SupervisorConfig{Picker: h.controller, Terminal: &pickerRecordingTerminal{}}, picker: pickerSession{preview: previewManager{clock: h.clock.port}}}
 	supervisor.refreshPreview(h.service)
 	h.clock.awaitTimer(t).fire()
 	select {

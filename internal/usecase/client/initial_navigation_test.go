@@ -332,7 +332,7 @@ func TestInitialNavigationPickerResolveIsRefused(t *testing.T) {
 func TestInitialNavigationResolverIsConsultedAtMostOnce(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	clock := newSupervisorTestClock()
+	clock := newSupervisorTestClock(t)
 	reader := newAttachTestReader()
 	terminal := newAttachTerminal(t, reader, false)
 	picker := newAttachTestPicker()
@@ -357,7 +357,7 @@ func TestInitialNavigationResolverIsConsultedAtMostOnce(t *testing.T) {
 	cfg := SupervisorConfig{
 		Connector: connector,
 		Terminal:  terminal.port,
-		Clock:     clock,
+		Clock:     clock.port,
 		Jitter:    func() float64 { return 0 },
 		Picker:    picker,
 		ResolveInitialNavigation: func(snapshot ports.BrokerSnapshot) (InitialNavigation, error) {
@@ -434,7 +434,7 @@ func TestInitialNavigationPickerIntentOpensNothing(t *testing.T) {
 // configuration carrying both an intent and a resolver, or an invalid intent,
 // is refused at construction instead of at the first connection.
 func TestNewSupervisorRefusesContradictoryInitialConfiguration(t *testing.T) {
-	clock := newSupervisorTestClock()
+	clock := newSupervisorTestClock(t)
 	reader := newSupervisorTestReader()
 	t.Cleanup(reader.unblock)
 	terminal := newSupervisorTestTerminal(reader)
@@ -443,7 +443,7 @@ func TestNewSupervisorRefusesContradictoryInitialConfiguration(t *testing.T) {
 	})
 
 	base := func() SupervisorConfig {
-		return SupervisorConfig{Connector: connector, Terminal: terminal, Clock: clock, Jitter: func() float64 { return 0 }, SessionEnvironment: SessionEnvironment{Provenance: SessionEnvironmentLocalCLI}}
+		return SupervisorConfig{Connector: connector, Terminal: terminal, Clock: clock.port, Jitter: func() float64 { return 0 }, SessionEnvironment: SessionEnvironment{Provenance: SessionEnvironmentLocalCLI}}
 	}
 
 	both := base()
@@ -469,7 +469,7 @@ func TestNewSupervisorRefusesContradictoryInitialConfiguration(t *testing.T) {
 func TestInitialNavigationResolverFailureIsSelectionUnavailable(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	clock := newSupervisorTestClock()
+	clock := newSupervisorTestClock(t)
 	reader := newAttachTestReader()
 	terminal := newAttachTerminal(t, reader, false)
 	picker := newAttachTestPicker()
@@ -485,7 +485,7 @@ func TestInitialNavigationResolverFailureIsSelectionUnavailable(t *testing.T) {
 	resolverErr := errors.New("no such target")
 	sup := mustSupervisor(t, SupervisorConfig{
 		Connector: newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) { return service.port, nil }),
-		Terminal:  terminal.port, Clock: clock, Jitter: func() float64 { return 0 }, Picker: picker,
+		Terminal:  terminal.port, Clock: clock.port, Jitter: func() float64 { return 0 }, Picker: picker,
 		NotifyLifecycle: func(notice LifecycleNotice) { notices <- notice },
 		ResolveInitialNavigation: func(ports.BrokerSnapshot) (InitialNavigation, error) {
 			calls.Add(1)
@@ -524,7 +524,7 @@ func TestInitialNavigationWaitsForTargetObservation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			clock := newSupervisorTestClock()
+			clock := newSupervisorTestClock(t)
 			reader := newAttachTestReader()
 			terminal := newAttachTerminal(t, reader, false)
 			picker := newAttachTestPicker()
@@ -539,7 +539,7 @@ func TestInitialNavigationWaitsForTargetObservation(t *testing.T) {
 			var calls atomic.Int64
 			sup := mustSupervisor(t, SupervisorConfig{
 				Connector: newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) { return service.port, nil }),
-				Terminal:  terminal.port, Clock: clock, Jitter: func() float64 { return 0 }, Picker: picker,
+				Terminal:  terminal.port, Clock: clock.port, Jitter: func() float64 { return 0 }, Picker: picker,
 				NotifyLifecycle: func(notice LifecycleNotice) { notices <- notice },
 				ResolveInitialNavigation: func(snapshot ports.BrokerSnapshot) (InitialNavigation, error) {
 					calls.Add(1)
@@ -615,7 +615,7 @@ func TestInitialNavigationWaitsForTargetObservation(t *testing.T) {
 func TestInitialNavigationDropsDecisionsTakenWhileHidden(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	clock := newSupervisorTestClock()
+	clock := newSupervisorTestClock(t)
 	reader := newAttachTestReader()
 	terminal := newAttachTerminal(t, reader, false)
 	picker := newAttachTestPicker()
@@ -631,7 +631,7 @@ func TestInitialNavigationDropsDecisionsTakenWhileHidden(t *testing.T) {
 	picker.recordOp(pickerOp{commit: true}, "row", ports.BrokerOpenStreamRequest{})
 
 	sup := mustSupervisor(t, SupervisorConfig{
-		Connector: connector, Terminal: terminal.port, Clock: clock,
+		Connector: connector, Terminal: terminal.port, Clock: clock.port,
 		Jitter: func() float64 { return 0 }, Picker: picker,
 		InitialNavigation: InitialNavigation{Kind: InitialNavigationCreateEphemeral, Destination: ports.BrokerEndpointFence{Local: true}},
 	})

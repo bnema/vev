@@ -66,7 +66,7 @@ func TestSessionTabMemorySurvivesAttachmentSwap(t *testing.T) {
 				attachments := newSessionTestAttachments()
 				next, err := supervisor.newAttachmentWorker(request, attachmentTab{preferred: explicit}, nil, environment)
 				require.NoError(t, err)
-				host := newWorkerTestHost(terminal, nil, attachments.record)
+				host := newWorkerTestHost(t, terminal, nil, attachments.record)
 				events := make(chan AttachmentEvent, 1)
 				go func() {
 					event, _ := host.Run(t.Context(), AttachmentToken{Generation: 1, Attempt: 1}, next, stream.conn)

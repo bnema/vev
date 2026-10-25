@@ -110,9 +110,9 @@ func TestP54LocalRefusalIsNotReportedAsDestinationFailure(t *testing.T) {
 // resolution uses the same rules as the interactive picker and applies no
 // privileged initial semantics.
 func TestP54ResolveInitialUsesRealInitialNavigationResolve(t *testing.T) {
-	clock := newSupervisorTestClock()
+	clock := newSupervisorTestClock(t)
 	catalogue, _ := pickerTestCatalogue(t)
-	require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{pickerTestLocalObservation(clock.Now())}}))
+	require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{pickerTestLocalObservation(clock.port.Now())}}))
 	navigation := InitialNavigation{Kind: InitialNavigationCreateEphemeral, Destination: ports.BrokerEndpointFence{Local: true}}
 	request, err := navigation.Resolve(catalogue.Snapshot())
 	require.NoError(t, err)
@@ -127,7 +127,7 @@ func TestP54InitialNavigationCreatesEphemeralThroughBroker(t *testing.T) {
 	navigation := InitialNavigation{Kind: InitialNavigationCreateEphemeral, Destination: ports.BrokerEndpointFence{Local: true}}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	clock := newSupervisorTestClock()
+	clock := newSupervisorTestClock(t)
 	reader := newAttachTestReader()
 	terminal := newAttachTerminal(t, reader, false)
 	service := newSupervisorTestService(t, ports.BrokerConnectionID{1})
@@ -136,7 +136,7 @@ func TestP54InitialNavigationCreatesEphemeralThroughBroker(t *testing.T) {
 	service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 		return stream.conn, nil
 	})
-	sup := mustSupervisor(t, SupervisorConfig{Connector: newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) { return service.port, nil }), Terminal: terminal.port, Clock: clock, Jitter: func() float64 { return 0 }, Picker: picker, InitialNavigation: navigation})
+	sup := mustSupervisor(t, SupervisorConfig{Connector: newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) { return service.port, nil }), Terminal: terminal.port, Clock: clock.port, Jitter: func() float64 { return 0 }, Picker: picker, InitialNavigation: navigation})
 	done := make(chan error, 1)
 	go func() { done <- sup.Run(ctx) }()
 	require.Eventually(t, func() bool { return len(service.openedRequests()) == 1 }, 5*time.Second, time.Millisecond)
@@ -153,7 +153,7 @@ func TestP54InitialNavigationCreatesEphemeralThroughBroker(t *testing.T) {
 func TestP54InitialNavigationIsNotReplayedAfterReconnect(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	clock := newSupervisorTestClock()
+	clock := newSupervisorTestClock(t)
 	reader := newAttachTestReader()
 	terminal := newAttachTerminal(t, reader, false)
 	picker := newAttachTestPicker()
@@ -171,7 +171,7 @@ func TestP54InitialNavigationIsNotReplayedAfterReconnect(t *testing.T) {
 		}
 		return second.port, nil
 	})
-	sup := mustSupervisor(t, SupervisorConfig{Connector: connector, Terminal: terminal.port, Clock: clock, Jitter: func() float64 { return 0 }, Picker: picker, InitialNavigation: navigation})
+	sup := mustSupervisor(t, SupervisorConfig{Connector: connector, Terminal: terminal.port, Clock: clock.port, Jitter: func() float64 { return 0 }, Picker: picker, InitialNavigation: navigation})
 	done := make(chan error, 1)
 	go func() { done <- sup.Run(ctx) }()
 	require.Equal(t, 1, connector.awaitStart(t))
@@ -223,7 +223,7 @@ func TestP54SingleReaderDeliversAttachedByteAfterRealSupervisorHandoff(t *testin
 func TestP54BrokerRestartDoesNotReattachOrReplayUnknownMutation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	clock := newSupervisorTestClock()
+	clock := newSupervisorTestClock(t)
 	reader := newSupervisorTestReader()
 	t.Cleanup(reader.unblock)
 	first := newSupervisorTestService(t, ports.BrokerConnectionID{1})
@@ -236,7 +236,7 @@ func TestP54BrokerRestartDoesNotReattachOrReplayUnknownMutation(t *testing.T) {
 		return second.port, nil
 	})
 	notices := make(chan LifecycleNotice, 4)
-	sup := mustSupervisor(t, SupervisorConfig{Connector: connector, Terminal: newSupervisorTestTerminal(reader), Clock: clock, Jitter: func() float64 { return 0 }, NotifyLifecycle: func(n LifecycleNotice) { notices <- n }})
+	sup := mustSupervisor(t, SupervisorConfig{Connector: connector, Terminal: newSupervisorTestTerminal(reader), Clock: clock.port, Jitter: func() float64 { return 0 }, NotifyLifecycle: func(n LifecycleNotice) { notices <- n }})
 	done := make(chan error, 1)
 	go func() { done <- sup.Run(ctx) }()
 	require.Equal(t, 1, connector.awaitStart(t))

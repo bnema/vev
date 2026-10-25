@@ -313,7 +313,7 @@ func TestPickerCatalogueCursorStartsOnCurrent(t *testing.T) {
 // the presentation on the attached tab and drops a leftover search.
 func TestPickerControllerOverlayOpensOnCurrentTab(t *testing.T) {
 	controller, clock := pickerTestController(t)
-	controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{pickerTestLocalObservation(clock.Now(),
+	controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{pickerTestLocalObservation(clock.port.Now(),
 		pickerTestTabbed("alpha", 1, catalogue_Up, 1, "a1", pickerTestTab("a1", "one", "", false), pickerTestTab("a2", "two", "", false)),
 		pickerTestTabbed("beta", 2, catalogue_Up, 9, "b1", pickerTestTab("b1", "one", "", false)),
 	)}})
@@ -339,7 +339,7 @@ func TestPickerControllerSearchesTabNamesAndPaneTitles(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			controller, clock := pickerTestController(t)
-			controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{pickerTestLocalObservation(clock.Now(),
+			controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{pickerTestLocalObservation(clock.port.Now(),
 				pickerTestTabbed("work", 1, catalogue_Up, 1, "w1",
 					pickerTestTab("w1", "shell", "(zsh)", false),
 					pickerTestTab("w2", "deploy", "(ansible)", false),
@@ -357,8 +357,8 @@ func TestPickerControllerSearchesTabNamesAndPaneTitles(t *testing.T) {
 func TestPickerControllerSortToggleSwitchesProjection(t *testing.T) {
 	controller, clock := pickerTestController(t)
 	controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{
-		pickerTestLocalObservation(clock.Now(), pickerTestTabbed("alpha", 1, catalogue_Up, 5, ""), pickerTestTabbed("gamma", 3, catalogue_Down, 1, "")),
-		pickerTestRemoteObservation("user@arch", 1, 1, clock.Now(), pickerTestTabbed("remote-a", 5, catalogue_Up, 0, "")),
+		pickerTestLocalObservation(clock.port.Now(), pickerTestTabbed("alpha", 1, catalogue_Up, 5, ""), pickerTestTabbed("gamma", 3, catalogue_Down, 1, "")),
+		pickerTestRemoteObservation("user@arch", 1, 1, clock.port.Now(), pickerTestTabbed("remote-a", 5, catalogue_Up, 0, "")),
 	}})
 	order := func() []string {
 		frame := string(controller.Render(domain.Size{Cols: 100, Rows: 30}))
@@ -396,12 +396,12 @@ func TestPickerControllerSortToggleSwitchesProjection(t *testing.T) {
 // publication reaches the rendered picker.
 func TestPickerControllerRendersBellsAndRepaintsOnPublication(t *testing.T) {
 	controller, clock := pickerTestController(t)
-	quiet := pickerTestLocalObservation(clock.Now(), pickerTestTabbed("work", 1, catalogue_Up, 1, "t1", pickerTestTab("t1", "shell", "", false)))
+	quiet := pickerTestLocalObservation(clock.port.Now(), pickerTestTabbed("work", 1, catalogue_Up, 1, "t1", pickerTestTab("t1", "shell", "", false)))
 	controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{quiet}})
 	bell := string(ui.AttentionGlyph)
 	require.NotContains(t, string(controller.Render(domain.Size{Cols: 100, Rows: 30})), bell)
 
-	ringing := pickerTestLocalObservation(clock.Now(), pickerTestTabbed("work", 1, catalogue_Up, 1, "t1", pickerTestTab("t1", "shell", "", true)))
+	ringing := pickerTestLocalObservation(clock.port.Now(), pickerTestTabbed("work", 1, catalogue_Up, 1, "t1", pickerTestTab("t1", "shell", "", true)))
 	controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 2, Daemons: []ports.BrokerDaemonObservation{ringing}})
 	controller.invalidatePresentation()
 	frame := string(controller.Render(domain.Size{Cols: 100, Rows: 30}))
@@ -486,7 +486,7 @@ func TestPickerControllerKillKeyWakesSupervisor(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			controller, clock := pickerTestController(t)
-			controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{tt.daemon(clock.Now())}})
+			controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{tt.daemon(clock.port.Now())}})
 			require.True(t, controller.ConsumeTerminalRead([]byte(tt.input)))
 			if tt.wantKill {
 				select {
@@ -510,15 +510,15 @@ func TestPickerControllerKillKeyWakesSupervisor(t *testing.T) {
 // recovery toast replaces its failure toast and leaves other hosts' toasts.
 func TestPickerControllerRecoveryReplacesVisibleFailure(t *testing.T) {
 	controller, clock := pickerTestController(t)
-	down := pickerTestRemoteObservation("user@arch", 1, 1, clock.Now())
+	down := pickerTestRemoteObservation("user@arch", 1, 1, clock.port.Now())
 	down.Availability = domain.RemoteAvailabilityUnreachable
 	down.FailureEpisode = 1
-	other := pickerTestRemoteObservation("user@mule", 2, 2, clock.Now())
+	other := pickerTestRemoteObservation("user@mule", 2, 2, clock.port.Now())
 	other.Availability = domain.RemoteAvailabilityUnreachable
 	other.FailureEpisode = 1
 	controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{down, other}})
 
-	up := pickerTestRemoteObservation("user@arch", 1, 1, clock.Now())
+	up := pickerTestRemoteObservation("user@arch", 1, 1, clock.port.Now())
 	up.FailureEpisode = 1
 	controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 2, Daemons: []ports.BrokerDaemonObservation{up, other}})
 
@@ -536,7 +536,7 @@ func TestPickerControllerRecoveryReplacesVisibleFailure(t *testing.T) {
 func TestPickerControllerHostFailureToastOncePerEpisode(t *testing.T) {
 	controller, clock := pickerTestController(t)
 	failing := func(endpoint string, seed byte, episode uint64, kind domain.RemoteFailureKind) ports.BrokerDaemonObservation {
-		o := pickerTestRemoteObservation(endpoint, seed, seed, clock.Now())
+		o := pickerTestRemoteObservation(endpoint, seed, seed, clock.port.Now())
 		o.Availability = domain.RemoteAvailabilityUnreachable
 		o.ConsecutiveFailures = 1
 		o.FailureEpisode = episode
@@ -552,7 +552,7 @@ func TestPickerControllerHostFailureToastOncePerEpisode(t *testing.T) {
 		controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: revision, Daemons: daemons})
 		controller.mu.Lock()
 		defer controller.mu.Unlock()
-		return controller.notices.Visible(clock.Now())
+		return controller.notices.Visible(clock.port.Now())
 	}
 
 	toasts := apply(failing("user@arch", 1, 1, domain.RemoteFailureTrust))
@@ -562,7 +562,7 @@ func TestPickerControllerHostFailureToastOncePerEpisode(t *testing.T) {
 	require.Empty(t, apply(failing("user@arch", 1, 1, domain.RemoteFailureTrust)), "the same episode toasts once")
 	require.Len(t, apply(failing("user@arch", 1, 2, domain.RemoteFailureTrust)), 1, "a new episode toasts again")
 
-	recovered := pickerTestRemoteObservation("user@arch", 1, 1, clock.Now().Add(time.Second))
+	recovered := pickerTestRemoteObservation("user@arch", 1, 1, clock.port.Now().Add(time.Second))
 	recovered.FailureEpisode = 2
 	toasts = apply(recovered)
 	require.Len(t, toasts, 1, "a recovery toasts once")
@@ -570,11 +570,11 @@ func TestPickerControllerHostFailureToastOncePerEpisode(t *testing.T) {
 	require.Empty(t, apply(recovered), "a steady healthy host is silent")
 
 	require.Len(t, apply(failing("user@arch", 1, 3, domain.RemoteFailureTimeout)), 1)
-	unknown := pickerTestRemoteObservation("user@arch", 1, 1, clock.Now().Add(2*time.Second))
+	unknown := pickerTestRemoteObservation("user@arch", 1, 1, clock.port.Now().Add(2*time.Second))
 	unknown.Availability = domain.RemoteAvailabilityUnknown
 	unknown.FailureEpisode = 3
 	require.Empty(t, apply(unknown), "an in-between state is silent")
-	recovered = pickerTestRemoteObservation("user@arch", 1, 1, clock.Now().Add(3*time.Second))
+	recovered = pickerTestRemoteObservation("user@arch", 1, 1, clock.port.Now().Add(3*time.Second))
 	recovered.FailureEpisode = 3
 	require.Len(t, apply(recovered), 1, "failing → unknown → reachable still reports recovery")
 	require.Len(t, apply(failing("user@arch", 1, 4, domain.RemoteFailureTimeout)), 1, "an outage after recovery toasts again")
@@ -600,7 +600,7 @@ func TestPickerControllerRefusesFailingRemoteInstantly(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			controller, clock := pickerTestController(t)
-			o := pickerTestRemoteObservation("user@arch", 1, 1, clock.Now().Add(-time.Hour), pickerTestSession("remote-a", 3, catalogue_Up))
+			o := pickerTestRemoteObservation("user@arch", 1, 1, clock.port.Now().Add(-time.Hour), pickerTestSession("remote-a", 3, catalogue_Up))
 			o.Availability = tt.availability
 			controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{o}})
 			controller.mu.Lock()
@@ -614,7 +614,7 @@ func TestPickerControllerRefusesFailingRemoteInstantly(t *testing.T) {
 			}
 			require.True(t, pickerCatalogueErrorIs(err, pickerCatalogueUnavailable))
 			controller.mu.Lock()
-			active := controller.notices.Visible(clock.Now())
+			active := controller.notices.Visible(clock.port.Now())
 			controller.mu.Unlock()
 			require.Len(t, active, 1)
 			require.Equal(t, tt.wantNotice, active[0].Value.Message)
