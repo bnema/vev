@@ -21,6 +21,8 @@ import (
 // startScriptedUIDriverRun launches one driver run over a scripted broker
 // service, waits for its discovery response, and then waits for the run's single
 // logical stream admission.
+//
+//testpolicy:realtime real unix-socket broker/daemon stack and subprocesses
 func startScriptedUIDriverRun(t *testing.T, service ports.BrokerService, state *brokerServiceState, navigation client.InitialNavigation, resolver client.InitialNavigationResolver) *uiDriverFixtureRun {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())

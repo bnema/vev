@@ -317,6 +317,8 @@ func TestBrokerStatusSubprocessSilentEndpointFailsWithoutSpawning(t *testing.T) 
 // deadline/signal bounds the launcher wait. The helper never starts a detached
 // serve, so this is purely the bounded-wait half; other subprocess tests prove a
 // successful launcher's detached serve survives.
+//
+// real I/O: real unix-socket broker/daemon stack and subprocesses
 func TestBrokerLauncherSpawnWaitIsBoundedByContext(t *testing.T) {
 	record := filepath.Join(shortTempDir(t, "vevl"), "launcher.pid")
 	release := filepath.Join(t.TempDir(), "release")

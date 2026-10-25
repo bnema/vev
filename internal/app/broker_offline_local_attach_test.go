@@ -162,6 +162,8 @@ func newBrokerLogicalView(t *testing.T, stream ports.BrokerEnvelopeStream) ports
 }
 
 // awaitWelcome receives server messages until the typed Welcome arrives.
+//
+//testpolicy:realtime real unix-socket broker/daemon stack and subprocesses
 func awaitWelcome(t *testing.T, stream ports.BrokerLogicalConnection) protocol.Welcome {
 	t.Helper()
 	type outcome struct {

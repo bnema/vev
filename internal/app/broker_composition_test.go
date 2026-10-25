@@ -24,6 +24,8 @@ import (
 // startProductionBrokerFixture uses the same private XDG layout and real daemon
 // entry point as a deployed broker. In particular no test provisions a local
 // identity or socket in broker.json: the daemon publishes its own authority.
+//
+//testpolicy:realtime real unix-socket broker/daemon stack and subprocesses
 func startProductionBrokerFixture(t *testing.T) (ports.BrokerService, context.Context) {
 	t.Helper()
 	t.Setenv("VEV_ENV", "")

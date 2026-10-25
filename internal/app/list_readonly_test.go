@@ -118,6 +118,8 @@ func TestHostListUsesExistingConnector(t *testing.T) {
 // with no broker running goes straight to an existing local daemon: the idle
 // broker exits long before the daemon, so its absence never implies that no
 // daemon runs, and nothing is started to find out.
+//
+// real I/O: real unix-socket broker/daemon stack and subprocesses
 func TestStopDaemonWithoutBrokerReachesExistingDaemon(t *testing.T) {
 	tests := []struct {
 		name    string

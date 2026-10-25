@@ -44,6 +44,8 @@ func pollUntil(timeout time.Duration, cond func() bool) bool {
 
 // awaitBrokerSnapshot blocks until pred accepts the connection's committed
 // snapshot. It waits on the broker's own subscription event, so nothing polls.
+//
+//testpolicy:realtime real unix-socket broker/daemon stack and subprocesses
 func awaitBrokerSnapshot(t testing.TB, service interface {
 	Snapshot() ports.BrokerSnapshot
 	Subscribe() (ports.BrokerSubscription, error)

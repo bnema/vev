@@ -175,6 +175,10 @@ func TestPerformanceTraceSetupRollbackJoinsCloseError(t *testing.T) {
 	}
 }
 
+// errorCloser is an io.Closer returning a fixed error. broker.Closeable's
+// generated mock lives in package broker's tests and is not importable here.
+//
+//testpolicy:double no importable generated mock for broker.Closeable; trivial fixed-result io.Closer
 type errorCloser struct{ err error }
 
 func (c errorCloser) Close() error { return c.err }

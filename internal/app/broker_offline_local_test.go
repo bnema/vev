@@ -122,6 +122,8 @@ func (d *scriptedLocalDaemon) signal() {
 
 // awaitState blocks until ready reports true under the daemon lock, waking on
 // every recorded change and failing once brokerTestWait elapses.
+//
+//testpolicy:realtime real unix-socket broker/daemon stack and subprocesses
 func (d *scriptedLocalDaemon) awaitState(t *testing.T, ready func() bool, what string) {
 	t.Helper()
 	deadline := time.After(brokerTestWait)
@@ -833,6 +835,8 @@ func startLocalRegistry(t *testing.T, registry *broker.Registry) {
 
 // waitLocalEntry waits for the published local entry (always index zero) to
 // satisfy predicate and returns it.
+//
+//testpolicy:realtime real unix-socket broker/daemon stack and subprocesses
 func waitLocalEntry(t *testing.T, registry *broker.Registry, predicate func(ports.BrokerDaemonObservation) bool) ports.BrokerDaemonObservation {
 	t.Helper()
 	sub := registry.Subscribe()

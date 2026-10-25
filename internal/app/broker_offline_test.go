@@ -126,6 +126,8 @@ func runSandbox(ctx context.Context, options brokerServeOptions, deps brokerServ
 }
 
 // awaitSandboxCancel cancels the sandbox and requires an orderly shutdown.
+//
+//testpolicy:realtime real unix-socket broker/daemon stack and subprocesses
 func awaitSandboxCancel(t *testing.T, cancel context.CancelFunc, done <-chan error) {
 	t.Helper()
 	cancel()
@@ -280,6 +282,8 @@ func writeProductionBrokerDocument(t *testing.T, document any) {
 
 // awaitSandboxReady waits for the sandbox readiness hook and returns the
 // reported socket path.
+//
+//testpolicy:realtime real unix-socket broker/daemon stack and subprocesses
 func awaitSandboxReady(t *testing.T, ready <-chan string, done <-chan error) string {
 	t.Helper()
 	select {
@@ -304,6 +308,8 @@ func requireSocketRemoved(t *testing.T, socketPath string) {
 
 // waitForSandboxShutdown advances the manual clock until the sandbox has shut
 // down, so a real idle grace is never awaited.
+//
+//testpolicy:realtime real unix-socket broker/daemon stack and subprocesses
 func waitForSandboxShutdown(t *testing.T, clk *sandboxClockState, done <-chan error) {
 	t.Helper()
 	deadline := time.After(brokerTestWait)

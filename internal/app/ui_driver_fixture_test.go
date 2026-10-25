@@ -185,6 +185,8 @@ func (f *uiDriverBrokerFixture) epoch(t *testing.T) ports.BrokerEpoch {
 
 // waitEpoch waits for one broker connection's first committed publication and
 // returns its epoch.
+//
+//testpolicy:realtime real unix-socket broker/daemon stack and subprocesses
 func (f *uiDriverBrokerFixture) waitEpoch(t *testing.T, service ports.BrokerService) ports.BrokerEpoch {
 	t.Helper()
 	sub, err := service.Subscribe()
@@ -218,6 +220,8 @@ func (r *uiDriverFixtureRun) Terminal() *uiterm.Terminal { return r.terminal }
 // EOF closes this run's JSONL stream and joins it. Closing twice is safe: the
 // stream owns its work exactly once, so a duplicate EOF can never end another
 // run.
+//
+//testpolicy:realtime real unix-socket broker/daemon stack and subprocesses
 func (r *uiDriverFixtureRun) EOF(t *testing.T) {
 	t.Helper()
 	require.NoError(t, r.stream.Close())
@@ -313,6 +317,8 @@ func (r *uiDriverFixtureRun) text(t *testing.T, attachment string, generation ui
 
 // stopRuns ends every run the fixture started, before the broker and daemon it
 // created are torn down.
+//
+//testpolicy:realtime real unix-socket broker/daemon stack and subprocesses
 func (f *uiDriverBrokerFixture) stopRuns() {
 	if f == nil {
 		return

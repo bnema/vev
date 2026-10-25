@@ -48,6 +48,8 @@ func failingBrokerConnector(t *testing.T, err error) ports.BrokerConnector {
 // One decoder goroutine owns the single read lifetime of the response pipe and
 // feeds whole envelopes into a channel, so a slow assertion can never make a
 // decoder buffer and silently drop the next response's bytes.
+//
+//testpolicy:double a real pipe-backed carrier (Read/Write/Close), not a stub of broker.Closeable
 type uidriverTestStream struct {
 	requests   *io.PipeReader
 	requestsW  *io.PipeWriter
@@ -144,6 +146,8 @@ func (s *uidriverTestStream) writeRequest(request map[string]any) error {
 
 // awaitEnvelope returns the next response envelope, bounded so a driver that
 // stops answering fails the test instead of blocking it.
+//
+//testpolicy:realtime real unix-socket broker/daemon stack and subprocesses
 func (s *uidriverTestStream) awaitEnvelope(t *testing.T, wantID uint64) driverTestEnvelope {
 	t.Helper()
 	s.decoded.Do(func() {

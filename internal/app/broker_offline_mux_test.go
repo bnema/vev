@@ -657,6 +657,8 @@ func startMuxBrokerServe(t *testing.T) (string, func()) {
 }
 
 // requireBrokerPing opens one control stream and requires one Pong.
+//
+//testpolicy:realtime real unix-socket broker/daemon stack and subprocesses
 func requireBrokerPing(t *testing.T, socketPath string) {
 	t.Helper()
 	clientCtx, clientCancel := context.WithTimeout(context.Background(), brokerTestWait)
