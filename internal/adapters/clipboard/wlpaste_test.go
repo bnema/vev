@@ -59,6 +59,7 @@ func fakeExecCommand(t *testing.T, listTypesOutput, imageData string) (execComma
 	return fn, &got
 }
 
+// real I/O: spawns real subprocesses through exec.CommandContext.
 func TestReadImageConstructsExpectedCommandsAndReturnsData(t *testing.T) {
 	execCommand, calls := fakeExecCommand(t, "text/plain\nimage/png\nimage/jpeg\n", "PNGBYTES")
 	w := &WlPaste{execCommand: execCommand}
@@ -94,6 +95,7 @@ func TestReadImageConstructsExpectedCommandsAndReturnsData(t *testing.T) {
 	}
 }
 
+// real I/O: spawns real subprocesses through exec.CommandContext.
 func TestReadImageNoImageOnClipboard(t *testing.T) {
 	execCommand, _ := fakeExecCommand(t, "text/plain\nUTF8_STRING\n", "")
 	w := &WlPaste{execCommand: execCommand}
