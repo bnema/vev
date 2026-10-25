@@ -53,8 +53,6 @@ Before touching daemon teardown paths, read the lock-ordering notes at the top o
 
 - Define application cross-layer interfaces in `internal/ports`; raw frame carriage interfaces live in `internal/protocol/wire`.
 - Adapters implement ports and raw carriage contracts; use cases consume application connections through `internal/ports` and typed semantic values from `internal/protocol`, never raw carriage contracts.
-- Tests should prefer generated `portsmocks.MockX` with `.EXPECT()`.
-- Hand-written fakes are okay only when mocks make the test harder to understand.
 - After changing a port, run `make mocks` and commit the generated updates.
 - Time-dependent daemon code must use `ports.Clock`/`ports.Timer`, not direct wall-clock APIs.
 
@@ -62,7 +60,19 @@ Before touching daemon teardown paths, read the lock-ordering notes at the top o
 
 - Write Go tests as table-driven tests by default.
 - Keep wire tests byte-for-byte and include truncated-prefix and trailing-garbage coverage.
-- Prefer fake clocks over sleeps.
+
+### Test doubles (enforced by `testpolicy_test.go`)
+
+- Use generated Mockery mocks (`portsmocks.MockX`, `wiremocks.MockX`) with `.EXPECT()` for every interface that has one. Do not write a hand-written fake, stub, or recorder for it.
+- An interface a test needs to double that has no mock gets one: add it to `.mockery.yml`, run `make mocks`, and commit the output.
+- Express blocking, signaling, or recording behavior with `RunAndReturn`/`Run` on the mock, not with a wrapper type.
+
+### Time and concurrency (enforced by `testpolicy_test.go`)
+
+- Run tests that involve timers, timeouts, goroutine coordination, or background work inside `synctest.Test`, and use `synctest.Wait()` to reach a quiescent point instead of waiting with deadlines.
+- Never use `time.Sleep`, `require.Eventually`/`assert.Eventually`, or polling loops in tests.
+- Inside a bubble, drive timers through `portsmocks.MockClock`/`MockTimer` or the real `time` package (the bubble fakes it); never through a hand-written clock.
+- Real OS I/O (PTYs, sockets, pipes, `os/exec`) does not run durably inside a bubble. Keep it at the adapter edge, and test use cases against mocks.
 
 ## Wire protocol
 
