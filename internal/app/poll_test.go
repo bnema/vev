@@ -20,6 +20,8 @@ const pollInterval = 5 * time.Millisecond
 //
 // It evaluates cond immediately and then on every tick, and reports whether
 // cond held before timeout elapsed. Callers assert the result with a message.
+//
+//testpolicy:realtime shared polling helper, only called from real-I/O tests outside synctest
 func pollUntil(timeout time.Duration, cond func() bool) bool {
 	if cond() {
 		return true

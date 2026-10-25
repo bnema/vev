@@ -28,6 +28,8 @@ type mockTestingT interface {
 // no behavior of its own: blocking, failure, gating and recording are
 // registered as RunAndReturn closures on the embedded mock, usually through
 // newTrackedConnection. No other test type may implement ports.ServerConnection.
+//
+//testpolicy:double typed-to-wire bridge over the generated wiremocks.MockTransport; holds no behavior
 type mockServerConnection struct{ *wiremocks.MockTransport }
 
 // admittedConnection and deadlineConnection are the only decorators over the
@@ -35,6 +37,8 @@ type mockServerConnection struct{ *wiremocks.MockTransport }
 // ports.HandshakeDeadlineProvider seams structurally on the connection, so a
 // test has to expose the method; each decorator forwards it to a generated
 // provider mock and adds no behavior.
+//
+//testpolicy:double decorator forwarding to a generated provider mock; adds no behavior
 type admittedConnection struct {
 	*mockServerConnection
 	provider *portsmocks.MockSessionAdmissionProvider
@@ -44,6 +48,9 @@ func (c *admittedConnection) SessionAdmission() (ports.SessionAdmission, bool) {
 	return c.provider.SessionAdmission()
 }
 
+// deadlineConnection forwards HandshakeDeadline to a generated provider mock.
+//
+//testpolicy:double decorator forwarding to a generated provider mock; adds no behavior
 type deadlineConnection struct {
 	*mockServerConnection
 	provider *portsmocks.MockHandshakeDeadlineProvider
