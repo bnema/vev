@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/mock"
@@ -37,104 +38,116 @@ func expectFloatingPrewarmOpen(factory *portsmocks.MockPTYFactory, normalSize do
 // blocks in its debounce loop until the session context is cancelled. Used by
 
 func TestHandshakeEphemeralHappy(t *testing.T) {
-	p, releasePTY := newBlockingPTY(t)
-	d := newTestDaemon(t, newFactory(t, p), newStubClock(t))
-	tr, sends, releaseConn := newConn(t, mustHello(protocol.IntentEphemeral, "", domain.Size{Cols: 80, Rows: 24}))
+	synctest.Test(t, func(t *testing.T) {
+		p, releasePTY := newBlockingPTY(t)
+		d := newTestDaemon(t, newFactory(t, p), newStubClock(t))
+		tr, sends, releaseConn := newConn(t, mustHello(protocol.IntentEphemeral, "", domain.Size{Cols: 80, Rows: 24}))
 
-	var hg sync.WaitGroup
-	hg.Go(func() { d.handleConn(tr) })
+		var hg sync.WaitGroup
+		hg.Go(func() { d.handleConn(tr) })
 
-	w := awaitFrame(t, sends, "Welcome")
-	welcome := decodeServerMessage(t, w).(protocol.Welcome)
-	require.Equal(t, "0", welcome.SessionName)
-	require.True(t, welcome.Ephemeral)
-	awaitFrame(t, sends, "Output") // guaranteed first paint
-	require.Equal(t, 1, sessionCount(d))
+		w := requireQueuedFrame(t, sends, "Welcome")
+		welcome := decodeServerMessage(t, w).(protocol.Welcome)
+		require.Equal(t, "0", welcome.SessionName)
+		require.True(t, welcome.Ephemeral)
+		requireQueuedFrame(t, sends, "Output") // guaranteed first paint
+		require.Equal(t, 1, sessionCount(d))
 
-	releaseConn()
-	releasePTY()
-	hg.Wait()
-	d.sessWg.Wait()
+		releaseConn()
+		releasePTY()
+		hg.Wait()
+		d.sessWg.Wait()
+	})
 }
 
 func TestHandshakeNewHappy(t *testing.T) {
-	p, releasePTY := newBlockingPTY(t)
-	d := newTestDaemon(t, newFactory(t, p), newStubClock(t))
-	tr, sends, releaseConn := newConn(t, mustHello(protocol.IntentNew, "work", domain.Size{Cols: 80, Rows: 24}))
+	synctest.Test(t, func(t *testing.T) {
+		p, releasePTY := newBlockingPTY(t)
+		d := newTestDaemon(t, newFactory(t, p), newStubClock(t))
+		tr, sends, releaseConn := newConn(t, mustHello(protocol.IntentNew, "work", domain.Size{Cols: 80, Rows: 24}))
 
-	var hg sync.WaitGroup
-	hg.Go(func() { d.handleConn(tr) })
+		var hg sync.WaitGroup
+		hg.Go(func() { d.handleConn(tr) })
 
-	w := awaitFrame(t, sends, "Welcome")
-	welcome := decodeServerMessage(t, w).(protocol.Welcome)
-	require.Equal(t, "work", welcome.SessionName)
-	require.False(t, welcome.Ephemeral)
+		w := requireQueuedFrame(t, sends, "Welcome")
+		welcome := decodeServerMessage(t, w).(protocol.Welcome)
+		require.Equal(t, "work", welcome.SessionName)
+		require.False(t, welcome.Ephemeral)
 
-	sess := firstSession(d)
-	require.NotNil(t, sess)
+		sess := firstSession(d)
+		require.NotNil(t, sess)
 
-	releaseConn()
-	_ = d.killSession(sess, protocol.ReasonServerShutdown, false)
-	releasePTY()
-	hg.Wait()
-	d.sessWg.Wait()
-	d.waitNotifies()
+		releaseConn()
+		_ = d.killSession(sess, protocol.ReasonServerShutdown, false)
+		releasePTY()
+		hg.Wait()
+		d.sessWg.Wait()
+		d.waitNotifies()
+	})
 }
 
 func TestHandshakeVersionMismatch(t *testing.T) {
-	// No Open expectation: the factory must never be asked to spawn a PTY.
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
-	bad := mustClientEnvelope(protocol.Hello{
-		Version: protocol.Version + 99, Intent: protocol.IntentEphemeral, Size: domain.Size{Cols: 80, Rows: 24},
+	synctest.Test(t, func(t *testing.T) {
+		// No Open expectation: the factory must never be asked to spawn a PTY.
+		d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
+		bad := mustClientEnvelope(protocol.Hello{
+			Version: protocol.Version + 99, Intent: protocol.IntentEphemeral, Size: domain.Size{Cols: 80, Rows: 24},
+		})
+		tr, sends, _ := newConn(t, bad)
+
+		d.handleConn(tr) // returns after the rejection; no session, no goroutines
+
+		e := requireQueuedFrame(t, sends, "Error")
+		em, ok := decodeServerMessage(t, e).(protocol.ErrorMsg)
+		require.True(t, ok)
+		require.Equal(t, protocol.ErrVersionMismatch, em.Code)
+		require.Equal(t, 0, sessionCount(d))
 	})
-	tr, sends, _ := newConn(t, bad)
-
-	d.handleConn(tr) // returns after the rejection; no session, no goroutines
-
-	e := awaitFrame(t, sends, "Error")
-	em, ok := decodeServerMessage(t, e).(protocol.ErrorMsg)
-	require.True(t, ok)
-	require.Equal(t, protocol.ErrVersionMismatch, em.Code)
-	require.Equal(t, 0, sessionCount(d))
 }
 
 func TestHandshakeGarbageFirstFrameReportsInternalError(t *testing.T) {
-	// The legacy binary layout is gone: an undecodable first envelope is
-	// malformed input, answered without mutation and without a version.
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
-	tr, sends, _ := newConn(t, wire.Envelope{Payload: []byte{0x00, byte(protocol.Version - 1), protocol.IntentEphemeral}})
-	d.handleConn(tr)
+	synctest.Test(t, func(t *testing.T) {
+		// The legacy binary layout is gone: an undecodable first envelope is
+		// malformed input, answered without mutation and without a version.
+		d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
+		tr, sends, _ := newConn(t, wire.Envelope{Payload: []byte{0x00, byte(protocol.Version - 1), protocol.IntentEphemeral}})
+		d.handleConn(tr)
 
-	e := awaitFrame(t, sends, "Error")
-	em, ok := decodeServerMessage(t, e).(protocol.ErrorMsg)
-	require.True(t, ok)
-	require.Equal(t, protocol.ErrInternal, em.Code)
-	require.Equal(t, 0, sessionCount(d))
+		e := requireQueuedFrame(t, sends, "Error")
+		em, ok := decodeServerMessage(t, e).(protocol.ErrorMsg)
+		require.True(t, ok)
+		require.Equal(t, protocol.ErrInternal, em.Code)
+		require.Equal(t, 0, sessionCount(d))
+	})
 }
 
 func TestHandshakeNameTaken(t *testing.T) {
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
-	// Pre-populate a bare session (no goroutines) to collide with.
-	d.sessions[domain.SessionID("x")] = &session{sessionCore: sessionCore{id: "x", name: "work"}}
+	synctest.Test(t, func(t *testing.T) {
+		d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
+		// Pre-populate a bare session (no goroutines) to collide with.
+		d.sessions[domain.SessionID("x")] = &session{sessionCore: sessionCore{id: "x", name: "work"}}
 
-	tr, sends, _ := newConn(t, mustHello(protocol.IntentNew, "work", domain.Size{Cols: 80, Rows: 24}))
-	d.handleConn(tr)
+		tr, sends, _ := newConn(t, mustHello(protocol.IntentNew, "work", domain.Size{Cols: 80, Rows: 24}))
+		d.handleConn(tr)
 
-	e := awaitFrame(t, sends, "Error")
-	em, ok := decodeServerMessage(t, e).(protocol.ErrorMsg)
-	require.True(t, ok)
-	require.Equal(t, protocol.ErrNameTaken, em.Code)
+		e := requireQueuedFrame(t, sends, "Error")
+		em, ok := decodeServerMessage(t, e).(protocol.ErrorMsg)
+		require.True(t, ok)
+		require.Equal(t, protocol.ErrNameTaken, em.Code)
+	})
 }
 
 func TestHandshakeNoSuchSession(t *testing.T) {
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
-	tr, sends, _ := newConn(t, mustHello(protocol.IntentAttach, "ghost", domain.Size{Cols: 80, Rows: 24}))
-	d.handleConn(tr)
+	synctest.Test(t, func(t *testing.T) {
+		d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
+		tr, sends, _ := newConn(t, mustHello(protocol.IntentAttach, "ghost", domain.Size{Cols: 80, Rows: 24}))
+		d.handleConn(tr)
 
-	e := awaitFrame(t, sends, "Error")
-	em, ok := decodeServerMessage(t, e).(protocol.ErrorMsg)
-	require.True(t, ok)
-	require.Equal(t, protocol.ErrNoSuchSession, em.Code)
+		e := requireQueuedFrame(t, sends, "Error")
+		em, ok := decodeServerMessage(t, e).(protocol.ErrorMsg)
+		require.True(t, ok)
+		require.Equal(t, protocol.ErrNoSuchSession, em.Code)
+	})
 }
 
 // TestKillAllEmptyDaemonKeepsServing proves KillAll no longer ends the daemon:
@@ -142,46 +155,48 @@ func TestHandshakeNoSuchSession(t *testing.T) {
 // pane process context, and d.done untouched, and the same daemon then admits a
 // fresh session.
 func TestKillAllEmptyDaemonKeepsServing(t *testing.T) {
-	pty, release := newBlockingPTY(t)
-	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
-	tr, _, _ := newConn(t, mustClientEnvelope(protocol.Kill{RequestID: 1, Scope: protocol.KillAll}))
-	d.handleConn(tr)
+	synctest.Test(t, func(t *testing.T) {
+		pty, release := newBlockingPTY(t)
+		defer release()
+		d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
+		tr, _, _ := newConn(t, mustClientEnvelope(protocol.Kill{RequestID: 1, Scope: protocol.KillAll}))
+		d.handleConn(tr)
 
-	select {
-	case <-d.done:
-		t.Fatal("kill all on empty daemon must not signal shutdown")
-	default:
-	}
-	d.mu.Lock()
-	closing := d.closing
-	d.mu.Unlock()
-	require.False(t, closing, "kill all must not mark the daemon closing")
-	d.moveLifecycleMu.Lock()
-	moveClosing := d.moveLifecycleClosing
-	d.moveLifecycleMu.Unlock()
-	require.False(t, moveClosing, "kill all must not close move admission")
-	select {
-	case <-d.paneProcessCtx.Done():
-		t.Fatal("kill all must not cancel the daemon-wide pane process context")
-	default:
-	}
+		select {
+		case <-d.done:
+			t.Fatal("kill all on empty daemon must not signal shutdown")
+		default:
+		}
+		d.mu.Lock()
+		closing := d.closing
+		d.mu.Unlock()
+		require.False(t, closing, "kill all must not mark the daemon closing")
+		d.moveLifecycleMu.Lock()
+		moveClosing := d.moveLifecycleClosing
+		d.moveLifecycleMu.Unlock()
+		require.False(t, moveClosing, "kill all must not close move admission")
+		select {
+		case <-d.paneProcessCtx.Done():
+			t.Fatal("kill all must not cancel the daemon-wide pane process context")
+		default:
+		}
 
-	// The purge reopened admission: the same daemon creates a fresh session.
-	tr2, sends2, releaseConn2 := newConn(t, mustHello(protocol.IntentEphemeral, "", domain.Size{Cols: 80, Rows: 24}))
-	var hg sync.WaitGroup
-	hg.Go(func() { d.handleConn(tr2) })
-	welcome := decodeServerMessage(t, awaitFrame(t, sends2, "Welcome")).(protocol.Welcome)
-	require.Equal(t, "0", welcome.SessionName)
-	awaitFrame(t, sends2, "Output")
-	require.Equal(t, 1, sessionCount(d))
+		// The purge reopened admission: the same daemon creates a fresh session.
+		tr2, sends2, releaseConn2 := newConn(t, mustHello(protocol.IntentEphemeral, "", domain.Size{Cols: 80, Rows: 24}))
+		var hg sync.WaitGroup
+		hg.Go(func() { d.handleConn(tr2) })
+		welcome := decodeServerMessage(t, requireQueuedFrame(t, sends2, "Welcome")).(protocol.Welcome)
+		require.Equal(t, "0", welcome.SessionName)
+		requireQueuedFrame(t, sends2, "Output")
+		require.Equal(t, 1, sessionCount(d))
 
-	releaseConn2()
-	_ = d.killSession(firstSession(d), protocol.ReasonSessionKilled, true)
-	release()
-	hg.Wait()
-	d.sessWg.Wait()
-	d.waitNotifies()
+		releaseConn2()
+		_ = d.killSession(firstSession(d), protocol.ReasonSessionKilled, true)
+		release()
+		hg.Wait()
+		d.sessWg.Wait()
+		d.waitNotifies()
+	})
 }
 
 func TestBeginTeardownRequestResolvesShutdownPreservation(t *testing.T) {
@@ -197,144 +212,149 @@ func TestBeginTeardownRequestResolvesShutdownPreservation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sess := &session{}
-			if tt.reserve {
-				sess.reserveShutdownTeardown()
-			}
-			reason, purge, acquired := sess.beginTeardownRequest(nil, protocol.ReasonSessionKilled, true)
-			require.True(t, acquired)
-			require.Equal(t, tt.wantReason, reason)
-			require.Equal(t, tt.wantPurge, purge)
-			sess.finishTeardown()
+			synctest.Test(t, func(t *testing.T) {
+				sess := &session{}
+				if tt.reserve {
+					sess.reserveShutdownTeardown()
+				}
+				reason, purge, acquired := sess.beginTeardownRequest(nil, protocol.ReasonSessionKilled, true)
+				require.True(t, acquired)
+				require.Equal(t, tt.wantReason, reason)
+				require.Equal(t, tt.wantPurge, purge)
+				sess.finishTeardown()
+			})
 		})
 	}
 }
 
 func TestCreateTabForAttachmentUsesRequestingAttachmentViewportAndTheme(t *testing.T) {
-	p, release := newBlockingPTY(t)
-	defer release()
-	d := newTestDaemon(t, newFactory(t, p), newStubClock(t))
-	firstTransport := newQuietConnection(t)
-	sess, first, err := d.route(protocol.Hello{
-		Version:  protocol.Version,
-		Intent:   protocol.IntentNew,
-		Name:     "work",
-		ClientID: [16]byte{1},
-		Size:     domain.Size{Cols: 80, Rows: 24},
-	}, firstTransport)
-	require.NoError(t, err)
-	secondTransport := newQuietConnection(t)
-	_, second, err := d.route(protocol.Hello{
-		Version:  protocol.Version,
-		Intent:   protocol.IntentAttach,
-		Name:     "work",
-		ClientID: [16]byte{2},
-		Size:     domain.Size{Cols: 80, Rows: 24},
-	}, secondTransport)
-	require.NoError(t, err)
-	require.NotSame(t, first, second)
+	synctest.Test(t, func(t *testing.T) {
+		p, release := newBlockingPTY(t)
+		defer release()
+		d := newTestDaemon(t, newFactory(t, p), newStubClock(t))
+		firstTransport := newQuietConnection(t)
+		sess, first, err := d.route(protocol.Hello{
+			Version:  protocol.Version,
+			Intent:   protocol.IntentNew,
+			Name:     "work",
+			ClientID: [16]byte{1},
+			Size:     domain.Size{Cols: 80, Rows: 24},
+		}, firstTransport)
+		require.NoError(t, err)
+		secondTransport := newQuietConnection(t)
+		_, second, err := d.route(protocol.Hello{
+			Version:  protocol.Version,
+			Intent:   protocol.IntentAttach,
+			Name:     "work",
+			ClientID: [16]byte{2},
+			Size:     domain.Size{Cols: 80, Rows: 24},
+		}, secondTransport)
+		require.NoError(t, err)
+		require.NotSame(t, first, second)
 
-	requesterTheme := themeui.Theme{
-		Foreground: themeui.BuiltinLight.Foreground,
-		Background: themeui.BuiltinLight.Background,
-		HasFG:      true,
-		HasBG:      true,
-		Known:      true,
-	}
-	second.setClientTheme(requesterTheme)
-	require.NoError(t, d.createTabForAttachment(sess, second, domain.Size{Cols: 80, Rows: 24}))
+		requesterTheme := themeui.Theme{
+			Foreground: themeui.BuiltinLight.Foreground,
+			Background: themeui.BuiltinLight.Background,
+			HasFG:      true,
+			HasBG:      true,
+			Known:      true,
+		}
+		second.setClientTheme(requesterTheme)
+		require.NoError(t, d.createTabForAttachment(sess, second, domain.Size{Cols: 80, Rows: 24}))
 
-	tb := sess.tabs[len(sess.tabs)-1]
-	tb.mu.Lock()
-	gotSize := tb.size
-	pane := tb.focusedPane()
-	tb.mu.Unlock()
-	require.Equal(t, contentSize(domain.Size{Cols: 80, Rows: 24}), gotSize, "sizing must come from the requesting attachment")
-	assertPaneDefaultColors(t, pane, requesterTheme.Foreground, requesterTheme.Background)
+		tb := sess.tabs[len(sess.tabs)-1]
+		tb.mu.Lock()
+		gotSize := tb.size
+		pane := tb.focusedPane()
+		tb.mu.Unlock()
+		require.Equal(t, contentSize(domain.Size{Cols: 80, Rows: 24}), gotSize, "sizing must come from the requesting attachment")
+		assertPaneDefaultColors(t, pane, requesterTheme.Foreground, requesterTheme.Background)
 
-	require.NoError(t, d.killSession(sess, protocol.ReasonSessionKilled, false))
-	d.sessWg.Wait()
+		require.NoError(t, d.killSession(sess, protocol.ReasonSessionKilled, false))
+		d.sessWg.Wait()
+	})
 }
 
 func TestCreateTabClosesPTYIfSessionKilledDuringOpen(t *testing.T) {
-	p1, release1 := newBlockingPTY(t)
-	defer release1()
-	p2 := portsmocks.NewMockPTY(t)
-	openCtx := make(chan context.Context, 1)
-	releaseOpen := make(chan struct{})
-	closed := make(chan struct{})
-	p2.EXPECT().Close().RunAndReturn(func() error {
-		close(closed)
-		return nil
-	}).Once()
-	p2.EXPECT().Pid().Return(4242).Maybe()
+	synctest.Test(t, func(t *testing.T) {
+		p1, release1 := newBlockingPTY(t)
+		defer release1()
+		p2 := portsmocks.NewMockPTY(t)
+		openCtx := make(chan context.Context, 1)
+		releaseOpen := make(chan struct{})
+		closed := make(chan struct{})
+		p2.EXPECT().Close().RunAndReturn(func() error {
+			close(closed)
+			return nil
+		}).Once()
+		p2.EXPECT().Pid().Return(4242).Maybe()
 
-	f := portsmocks.NewMockPTYFactory(t)
-	normalSize := domain.Size{Cols: 80, Rows: 22}
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Geometry) bool { return got.Size == normalSize })).Return(p1, nil).Once()
-	floating := newQuietPTY(t)
-	expectFloatingPrewarmOpen(f, normalSize, floating)
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Geometry) bool { return got.Size == normalSize })).RunAndReturn(
-		func(ctx context.Context, _ string, _ []string, _ []string, _ string, _ domain.Geometry) (ports.PTY, error) {
-			openCtx <- ctx
-			select {
-			case <-ctx.Done():
-			case <-releaseOpen:
-			}
-			return p2, nil
-		},
-	).Once()
+		f := portsmocks.NewMockPTYFactory(t)
+		normalSize := domain.Size{Cols: 80, Rows: 22}
+		f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Geometry) bool { return got.Size == normalSize })).Return(p1, nil).Once()
+		floating := newQuietPTY(t)
+		expectFloatingPrewarmOpen(f, normalSize, floating)
+		f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Geometry) bool { return got.Size == normalSize })).RunAndReturn(
+			func(ctx context.Context, _ string, _ []string, _ []string, _ string, _ domain.Geometry) (ports.PTY, error) {
+				openCtx <- ctx
+				select {
+				case <-ctx.Done():
+				case <-releaseOpen:
+				}
+				return p2, nil
+			},
+		).Once()
 
-	d := newTestDaemon(t, f, newStubClock(t))
-	tr, sends, releaseConn := newConn(t, mustHello(protocol.IntentNew, "work", domain.Size{Cols: 80, Rows: 24}))
-	var hg sync.WaitGroup
-	hg.Go(func() { d.handleConn(tr) })
-	awaitFrame(t, sends, "Welcome")
-	awaitFrame(t, sends, "Output")
-	sess := firstSession(d)
-	require.NotNil(t, sess)
+		d := newTestDaemon(t, f, newStubClock(t))
+		tr, sends, releaseConn := newConn(t, mustHello(protocol.IntentNew, "work", domain.Size{Cols: 80, Rows: 24}))
+		var hg sync.WaitGroup
+		hg.Go(func() { d.handleConn(tr) })
+		requireQueuedFrame(t, sends, "Welcome")
+		requireQueuedFrame(t, sends, "Output")
+		sess := firstSession(d)
+		require.NotNil(t, sess)
 
-	errCh := make(chan error, 1)
-	go func() { errCh <- d.createTab(sess, domain.Size{Cols: 80, Rows: 24}) }()
-	ctx := <-openCtx
-	_ = d.killSession(sess, protocol.ReasonSessionKilled, false)
+		errCh := make(chan error, 1)
+		go func() { errCh <- d.createTab(sess, domain.Size{Cols: 80, Rows: 24}) }()
+		ctx := <-openCtx
+		_ = d.killSession(sess, protocol.ReasonSessionKilled, false)
 
-	cancelled := true
-	select {
-	case <-ctx.Done():
-	case <-time.After(time.Second):
-		cancelled = false
-	}
-	close(releaseOpen)
+		synctest.Wait()
+		cancelled := true
+		select {
+		case <-ctx.Done():
+		default:
+			cancelled = false
+		}
+		close(releaseOpen)
 
-	if !cancelled {
-		t.Error("killSession did not cancel the context passed to PTYFactory.Open")
-	}
-	require.Error(t, <-errCh)
-	select {
-	case <-closed:
-	case <-time.After(time.Second):
-		t.Fatal("new PTY was not closed after session died during tab creation")
-	}
-	require.Equal(t, 0, sessionCount(d))
-	releaseConn()
-	hg.Wait()
-	d.sessWg.Wait()
-	// A queued prewarm may be cancelled before Open during teardown.
+		if !cancelled {
+			t.Error("killSession did not cancel the context passed to PTYFactory.Open")
+		}
+		require.Error(t, <-errCh)
+		requireReceived(t, closed, "new PTY was not closed after session died during tab creation")
+		require.Equal(t, 0, sessionCount(d))
+		releaseConn()
+		hg.Wait()
+		d.sessWg.Wait()
+		// A queued prewarm may be cancelled before Open during teardown.
+	})
 }
 
 // --- ephemeral numbering ----------------------------------------------------
 
 func TestEphemeralNumberingReuse(t *testing.T) {
-	d := New(nil, newStubClock(t), slog.New(slog.NewTextHandler(io.Discard, nil)))
-	// Emulate two ephemeral sessions "0" and "1".
-	d.sessions["a"] = &session{sessionCore: sessionCore{id: "a", name: "0"}}
-	d.sessions["b"] = &session{sessionCore: sessionCore{id: "b", name: "1"}}
-	require.Equal(t, "2", d.allocEphemeralNameLocked())
+	synctest.Test(t, func(t *testing.T) {
+		d := New(nil, newStubClock(t), slog.New(slog.NewTextHandler(io.Discard, nil)))
+		// Emulate two ephemeral sessions "0" and "1".
+		d.sessions["a"] = &session{sessionCore: sessionCore{id: "a", name: "0"}}
+		d.sessions["b"] = &session{sessionCore: sessionCore{id: "b", name: "1"}}
+		require.Equal(t, "2", d.allocEphemeralNameLocked())
 
-	// Kill "0": the freed number is reused before "2".
-	delete(d.sessions, "a")
-	require.Equal(t, "0", d.allocEphemeralNameLocked())
+		// Kill "0": the freed number is reused before "2".
+		delete(d.sessions, "a")
+		require.Equal(t, "0", d.allocEphemeralNameLocked())
+	})
 }
 
 // --- attach replace ---------------------------------------------------------
@@ -342,78 +362,84 @@ func TestEphemeralNumberingReuse(t *testing.T) {
 // --- detach semantics -------------------------------------------------------
 
 func TestDetachKeepsEphemeralHeadless(t *testing.T) {
-	p, releasePTY := newBlockingPTY(t)
-	d := newTestDaemon(t, newFactory(t, p), newStubClock(t))
-	tr, sends, _ := newConn(t,
-		mustHello(protocol.IntentEphemeral, "", domain.Size{Cols: 80, Rows: 24}),
-		mustClientEnvelope(protocol.Detach{}),
-	)
+	synctest.Test(t, func(t *testing.T) {
+		p, releasePTY := newBlockingPTY(t)
+		d := newTestDaemon(t, newFactory(t, p), newStubClock(t))
+		tr, sends, _ := newConn(t,
+			mustHello(protocol.IntentEphemeral, "", domain.Size{Cols: 80, Rows: 24}),
+			mustClientEnvelope(protocol.Detach{}),
+		)
 
-	var hg sync.WaitGroup
-	hg.Go(func() { d.handleConn(tr) })
-	awaitFrame(t, sends, "Welcome")
-	awaitFrame(t, sends, "Detached")
-	hg.Wait()
+		var hg sync.WaitGroup
+		hg.Go(func() { d.handleConn(tr) })
+		requireQueuedFrame(t, sends, "Welcome")
+		requireQueuedFrame(t, sends, "Detached")
+		hg.Wait()
 
-	require.Equal(t, 1, sessionCount(d), "ephemeral session survives explicit detach")
-	sess := firstSession(d)
-	require.NotNil(t, sess)
-	sess.mu.Lock()
-	require.True(t, sess.ephemeral)
-	require.Empty(t, sess.snapshotAttachmentsLocked(), "ephemeral session is headless after detach")
-	sess.mu.Unlock()
+		require.Equal(t, 1, sessionCount(d), "ephemeral session survives explicit detach")
+		sess := firstSession(d)
+		require.NotNil(t, sess)
+		sess.mu.Lock()
+		require.True(t, sess.ephemeral)
+		require.Empty(t, sess.snapshotAttachmentsLocked(), "ephemeral session is headless after detach")
+		sess.mu.Unlock()
 
-	_ = d.killSession(sess, protocol.ReasonServerShutdown, false)
-	releasePTY()
-	d.sessWg.Wait()
-	d.waitNotifies()
+		_ = d.killSession(sess, protocol.ReasonServerShutdown, false)
+		releasePTY()
+		d.sessWg.Wait()
+		d.waitNotifies()
+	})
 }
 
 func TestListShowsDetachedEphemeralSession(t *testing.T) {
-	p, releasePTY := newBlockingPTY(t)
-	defer releasePTY()
-	d := newTestDaemon(t, newFactory(t, p), newStubClock(t))
+	synctest.Test(t, func(t *testing.T) {
+		p, releasePTY := newBlockingPTY(t)
+		defer releasePTY()
+		d := newTestDaemon(t, newFactory(t, p), newStubClock(t))
 
-	tr := newQuietConnection(t)
-	sess, ac, err := d.route(helloResumeCapable(protocol.IntentEphemeral, "", 0), tr)
-	require.NoError(t, err)
-	d.clientGone(sess, ac, ac.transport(), true)
+		tr := newQuietConnection(t)
+		sess, ac, err := d.route(helloResumeCapable(protocol.IntentEphemeral, "", 0), tr)
+		require.NoError(t, err)
+		d.clientGone(sess, ac, ac.transport(), true)
 
-	got := listSessions(t, d)
-	require.Len(t, got.Sessions, 1)
-	require.Equal(t, sess.name, got.Sessions[0].Name)
-	require.True(t, got.Sessions[0].Ephemeral)
-	require.False(t, got.Sessions[0].Attached)
+		got := listSessions(t, d)
+		require.Len(t, got.Sessions, 1)
+		require.Equal(t, sess.name, got.Sessions[0].Name)
+		require.True(t, got.Sessions[0].Ephemeral)
+		require.False(t, got.Sessions[0].Attached)
 
-	_ = d.killSession(sess, protocol.ReasonServerShutdown, false)
-	d.sessWg.Wait()
-	d.waitNotifies()
+		_ = d.killSession(sess, protocol.ReasonServerShutdown, false)
+		d.sessWg.Wait()
+		d.waitNotifies()
+	})
 }
 
 func TestDetachKeepsNamed(t *testing.T) {
-	p, releasePTY := newBlockingPTY(t)
-	d := newTestDaemon(t, newFactory(t, p), newStubClock(t))
-	tr, sends, _ := newConn(t,
-		mustHello(protocol.IntentNew, "keep", domain.Size{Cols: 80, Rows: 24}),
-		mustClientEnvelope(protocol.Detach{}),
-	)
+	synctest.Test(t, func(t *testing.T) {
+		p, releasePTY := newBlockingPTY(t)
+		d := newTestDaemon(t, newFactory(t, p), newStubClock(t))
+		tr, sends, _ := newConn(t,
+			mustHello(protocol.IntentNew, "keep", domain.Size{Cols: 80, Rows: 24}),
+			mustClientEnvelope(protocol.Detach{}),
+		)
 
-	var hg sync.WaitGroup
-	hg.Go(func() { d.handleConn(tr) })
-	awaitFrame(t, sends, "Welcome")
-	awaitFrame(t, sends, "Detached") // ack for explicit detach
-	hg.Wait()                        // handler returns after detach
+		var hg sync.WaitGroup
+		hg.Go(func() { d.handleConn(tr) })
+		requireQueuedFrame(t, sends, "Welcome")
+		requireQueuedFrame(t, sends, "Detached") // ack for explicit detach
+		hg.Wait()                                // handler returns after detach
 
-	require.Equal(t, 1, sessionCount(d), "named session survives detach")
-	sess := firstSession(d)
-	sess.mu.Lock()
-	require.Empty(t, sess.snapshotAttachmentsLocked(), "named session is headless after detach")
-	sess.mu.Unlock()
+		require.Equal(t, 1, sessionCount(d), "named session survives detach")
+		sess := firstSession(d)
+		sess.mu.Lock()
+		require.Empty(t, sess.snapshotAttachmentsLocked(), "named session is headless after detach")
+		sess.mu.Unlock()
 
-	_ = d.killSession(sess, protocol.ReasonServerShutdown, false)
-	releasePTY()
-	d.sessWg.Wait()
-	d.waitNotifies()
+		_ = d.killSession(sess, protocol.ReasonServerShutdown, false)
+		releasePTY()
+		d.sessWg.Wait()
+		d.waitNotifies()
+	})
 }
 
 // --- render scheduler debounce ----------------------------------------------
@@ -423,55 +449,57 @@ func TestDetachKeepsNamed(t *testing.T) {
 // without signalling shutdown or marking the daemon closing, and the same
 // daemon can be occupied again by a fresh session.
 func TestReaderEOFRemovesSessionAndDaemonSurvives(t *testing.T) {
-	eofPTY := portsmocks.NewMockPTY(t)
-	// Read returns EOF immediately (child already gone).
-	eofPTY.EXPECT().Read(mock.Anything).Return(0, io.EOF).Maybe()
-	eofPTY.EXPECT().Close().Return(nil).Maybe()
-	eofPTY.EXPECT().Pid().Return(1).Maybe()
+	synctest.Test(t, func(t *testing.T) {
+		eofPTY := portsmocks.NewMockPTY(t)
+		// Read returns EOF immediately (child already gone).
+		eofPTY.EXPECT().Read(mock.Anything).Return(0, io.EOF).Maybe()
+		eofPTY.EXPECT().Close().Return(nil).Maybe()
+		eofPTY.EXPECT().Pid().Return(1).Maybe()
 
-	secondPTY, releaseSecond := newBlockingPTY(t)
-	defer releaseSecond()
-	d := newTestDaemon(t, newFactorySeq(t, eofPTY, secondPTY), newStubClock(t))
+		secondPTY, releaseSecond := newBlockingPTY(t)
+		defer releaseSecond()
+		d := newTestDaemon(t, newFactorySeq(t, eofPTY, secondPTY), newStubClock(t))
 
-	tr, sends, _ := newConn(t, mustHello(protocol.IntentEphemeral, "", domain.Size{Cols: 80, Rows: 24}))
+		tr, sends, _ := newConn(t, mustHello(protocol.IntentEphemeral, "", domain.Size{Cols: 80, Rows: 24}))
 
-	var hg sync.WaitGroup
-	hg.Go(func() { d.handleConn(tr) })
+		var hg sync.WaitGroup
+		hg.Go(func() { d.handleConn(tr) })
 
-	// The client is detached with ReasonSessionKilled when the child exits.
-	det := awaitFrame(t, sends, "Detached")
-	dm := decodeServerMessage(t, det).(protocol.Detached)
-	require.Equal(t, protocol.ReasonSessionKilled, dm.Reason)
+		// The client is detached with ReasonSessionKilled when the child exits.
+		det := requireQueuedFrame(t, sends, "Detached")
+		dm := decodeServerMessage(t, det).(protocol.Detached)
+		require.Equal(t, protocol.ReasonSessionKilled, dm.Reason)
 
-	// The registry is empty, yet the daemon has not begun shutdown and has not
-	// signalled Serve. The Detached notice is scheduled only after registry
-	// removal has published, so these assertions are deterministic.
-	select {
-	case <-d.done:
-		t.Fatal("final session removal must not signal daemon shutdown")
-	default:
-	}
-	d.mu.Lock()
-	closing := d.closing
-	d.mu.Unlock()
-	require.False(t, closing, "empty registry must not mark the daemon closing")
-	require.Equal(t, 0, sessionCount(d))
+		// The registry is empty, yet the daemon has not begun shutdown and has not
+		// signalled Serve. The Detached notice is scheduled only after registry
+		// removal has published, so these assertions are deterministic.
+		select {
+		case <-d.done:
+			t.Fatal("final session removal must not signal daemon shutdown")
+		default:
+		}
+		d.mu.Lock()
+		closing := d.closing
+		d.mu.Unlock()
+		require.False(t, closing, "empty registry must not mark the daemon closing")
+		require.Equal(t, 0, sessionCount(d))
 
-	// The empty registry can be occupied again by a brand-new session.
-	tr2, sends2, releaseConn2 := newConn(t, mustHello(protocol.IntentEphemeral, "", domain.Size{Cols: 80, Rows: 24}))
-	var hg2 sync.WaitGroup
-	hg2.Go(func() { d.handleConn(tr2) })
-	welcome := decodeServerMessage(t, awaitFrame(t, sends2, "Welcome")).(protocol.Welcome)
-	require.Equal(t, "0", welcome.SessionName)
-	awaitFrame(t, sends2, "Output")
-	require.Equal(t, 1, sessionCount(d))
+		// The empty registry can be occupied again by a brand-new session.
+		tr2, sends2, releaseConn2 := newConn(t, mustHello(protocol.IntentEphemeral, "", domain.Size{Cols: 80, Rows: 24}))
+		var hg2 sync.WaitGroup
+		hg2.Go(func() { d.handleConn(tr2) })
+		welcome := decodeServerMessage(t, requireQueuedFrame(t, sends2, "Welcome")).(protocol.Welcome)
+		require.Equal(t, "0", welcome.SessionName)
+		requireQueuedFrame(t, sends2, "Output")
+		require.Equal(t, 1, sessionCount(d))
 
-	_ = d.killSession(firstSession(d), protocol.ReasonSessionKilled, true)
-	releaseConn2()
-	hg.Wait()
-	hg2.Wait()
-	d.sessWg.Wait()
-	d.waitNotifies()
+		_ = d.killSession(firstSession(d), protocol.ReasonSessionKilled, true)
+		releaseConn2()
+		hg.Wait()
+		hg2.Wait()
+		d.sessWg.Wait()
+		d.waitNotifies()
+	})
 }
 
 // TestConcurrentFinalRemovalAndCreationLinearize proves final-session removal
@@ -479,81 +507,85 @@ func TestReaderEOFRemovesSessionAndDaemonSurvives(t *testing.T) {
 // admitted (never rejected with ErrServerShutdown) and the two registry
 // transitions linearize under d.mu, leaving exactly the newly created session.
 func TestConcurrentFinalRemovalAndCreationLinearize(t *testing.T) {
-	for attempt := 0; attempt < 32; attempt++ {
-		firstPTY, releaseFirst := newBlockingPTY(t)
-		secondPTY, releaseSecond := newBlockingPTY(t)
-		d := newTestDaemon(t, newFactorySeq(t, firstPTY, secondPTY), newStubClock(t))
+	synctest.Test(t, func(t *testing.T) {
+		for attempt := 0; attempt < 32; attempt++ {
+			firstPTY, releaseFirst := newBlockingPTY(t)
+			secondPTY, releaseSecond := newBlockingPTY(t)
+			d := newTestDaemon(t, newFactorySeq(t, firstPTY, secondPTY), newStubClock(t))
 
-		sess, err := createSessionForTest(d, "0", true, "/tmp", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, nil)
-		require.NoError(t, err)
+			sess, err := createSessionForTest(d, "0", true, "/tmp", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, nil)
+			require.NoError(t, err)
 
-		start := make(chan struct{})
-		var wg sync.WaitGroup
-		wg.Add(2)
-		var createErr error
-		go func() {
-			defer wg.Done()
-			<-start
-			_, _, createErr = d.route(helloResumeCapable(protocol.IntentEphemeral, "", 0), newQuietConnection(t))
-		}()
-		go func() {
-			defer wg.Done()
-			<-start
-			_ = d.killSession(sess, protocol.ReasonSessionKilled, true)
-		}()
-		close(start)
-		wg.Wait()
+			start := make(chan struct{})
+			var wg sync.WaitGroup
+			wg.Add(2)
+			var createErr error
+			go func() {
+				defer wg.Done()
+				<-start
+				_, _, createErr = d.route(helloResumeCapable(protocol.IntentEphemeral, "", 0), newQuietConnection(t))
+			}()
+			go func() {
+				defer wg.Done()
+				<-start
+				_ = d.killSession(sess, protocol.ReasonSessionKilled, true)
+			}()
+			close(start)
+			wg.Wait()
 
-		require.NoError(t, createErr, "attempt %d: creation racing final removal must be admitted", attempt)
-		require.Equal(t, 1, sessionCount(d), "attempt %d: exactly the new session must remain", attempt)
-		d.mu.Lock()
-		closing := d.closing
-		d.mu.Unlock()
-		require.False(t, closing, "attempt %d: empty→occupied must not mark the daemon closing", attempt)
+			require.NoError(t, createErr, "attempt %d: creation racing final removal must be admitted", attempt)
+			require.Equal(t, 1, sessionCount(d), "attempt %d: exactly the new session must remain", attempt)
+			d.mu.Lock()
+			closing := d.closing
+			d.mu.Unlock()
+			require.False(t, closing, "attempt %d: empty→occupied must not mark the daemon closing", attempt)
 
-		_ = d.killSession(firstSession(d), protocol.ReasonSessionKilled, true)
-		releaseFirst()
-		releaseSecond()
-		d.sessWg.Wait()
-		d.waitNotifies()
-	}
+			_ = d.killSession(firstSession(d), protocol.ReasonSessionKilled, true)
+			releaseFirst()
+			releaseSecond()
+			d.sessWg.Wait()
+			d.waitNotifies()
+		}
+	})
 }
 
 // TestRestoreAfterEmptyRegistryWorks proves a stopped named session can be
 // restored by a fresh attach once the registry has returned to empty: the
 // daemon kept serving and the inactive authority survived the final removal.
 func TestRestoreAfterEmptyRegistryWorks(t *testing.T) {
-	firstPTY, releaseFirst := newBlockingPTY(t)
-	defer releaseFirst()
-	secondPTY, releaseSecond := newBlockingPTY(t)
-	defer releaseSecond()
-	d := newTestDaemon(t, newFactorySeq(t, firstPTY, secondPTY), newStubClock(t))
+	synctest.Test(t, func(t *testing.T) {
+		firstPTY, releaseFirst := newBlockingPTY(t)
+		defer releaseFirst()
+		secondPTY, releaseSecond := newBlockingPTY(t)
+		defer releaseSecond()
+		d := newTestDaemon(t, newFactorySeq(t, firstPTY, secondPTY), newStubClock(t))
 
-	sess, err := createSessionForTest(d, "work", false, t.TempDir(), domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, d.baseEnv)
-	require.NoError(t, err)
+		sess, err := createSessionForTest(d, "work", false, t.TempDir(), domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, d.baseEnv)
+		require.NoError(t, err)
 
-	// Stop the only session; the registry returns to empty without shutdown.
-	require.NoError(t, d.killSession(sess, protocol.ReasonServerShutdown, false))
-	require.Equal(t, 0, sessionCount(d))
-	select {
-	case <-d.done:
-		t.Fatal("stopped final session must not signal daemon shutdown")
-	default:
-	}
+		// Stop the only session; the registry returns to empty without shutdown.
+		require.NoError(t, d.killSession(sess, protocol.ReasonServerShutdown, false))
+		require.Equal(t, 0, sessionCount(d))
+		select {
+		case <-d.done:
+			t.Fatal("stopped final session must not signal daemon shutdown")
+		default:
+		}
 
-	// Restore it inside the same daemon.
-	tr := newMockServerConnection(t)
-	tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
-	tr.EXPECT().Close().Return(nil).Maybe()
-	restored, ac, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}}, tr)
-	require.NoError(t, err)
-	require.NotNil(t, ac)
-	require.Equal(t, "work", restored.name)
-	require.Equal(t, 1, sessionCount(d))
+		// Restore it inside the same daemon.
+		tr := newMockServerConnection(t)
+		tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
+		tr.EXPECT().Close().Return(nil).Maybe()
+		restored, ac, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}}, tr)
+		require.NoError(t, err)
+		require.NotNil(t, ac)
+		require.Equal(t, "work", restored.name)
+		require.Equal(t, 1, sessionCount(d))
 
-	_ = d.killSession(restored, protocol.ReasonServerShutdown, false)
-	d.sessWg.Wait()
-	d.waitNotifies()
+		_ = d.killSession(restored, protocol.ReasonServerShutdown, false)
+		d.sessWg.Wait()
+		d.waitNotifies()
+	})
 }
 
 // --- full Serve lifecycle ---------------------------------------------------
@@ -563,107 +595,103 @@ func TestRestoreAfterEmptyRegistryWorks(t *testing.T) {
 // exits, the same Serve loop still admits a brand-new session, and only ctx
 // cancellation ends it.
 func TestServeSurvivesEmptyRegistryAndAcceptsNewSession(t *testing.T) {
-	firstPTY, releaseFirst := newBlockingPTY(t)
-	defer releaseFirst()
-	secondPTY, releaseSecond := newBlockingPTY(t)
-	defer releaseSecond()
+	synctest.Test(t, func(t *testing.T) {
+		firstPTY, releaseFirst := newBlockingPTY(t)
+		defer releaseFirst()
+		secondPTY, releaseSecond := newBlockingPTY(t)
+		defer releaseSecond()
 
-	firstTr, firstSends, _ := newConn(t, mustHello(protocol.IntentEphemeral, "", domain.Size{Cols: 80, Rows: 24}))
-	secondTr, secondSends, _ := newConn(t, mustHello(protocol.IntentEphemeral, "", domain.Size{Cols: 80, Rows: 24}))
+		firstTr, firstSends, _ := newConn(t, mustHello(protocol.IntentEphemeral, "", domain.Size{Cols: 80, Rows: 24}))
+		secondTr, secondSends, _ := newConn(t, mustHello(protocol.IntentEphemeral, "", domain.Size{Cols: 80, Rows: 24}))
 
-	l := newMockServerListener(t)
-	// Feed connections one at a time: the second is offered only after the
-	// first session has exited, so the mock factory's PTY order is deterministic
-	// and the reuse handshake proves the accept loop survived.
-	connCh := make(chan wire.Transport, 1)
-	connCh <- firstTr
-	closed := make(chan struct{})
-	var once sync.Once
-	l.EXPECT().Accept().RunAndReturn(func() (wire.Transport, error) {
-		select {
-		case c := <-connCh:
-			return c, nil
-		case <-closed:
-			return nil, io.EOF
-		}
-	}).Maybe()
-	l.EXPECT().Close().RunAndReturn(func() error { once.Do(func() { close(closed) }); return nil }).Maybe()
-	l.EXPECT().Addr().Return("mock").Maybe()
+		l := newMockServerListener(t)
+		// Feed connections one at a time: the second is offered only after the
+		// first session has exited, so the mock factory's PTY order is deterministic
+		// and the reuse handshake proves the accept loop survived.
+		connCh := make(chan wire.Transport, 1)
+		connCh <- firstTr
+		closed := make(chan struct{})
+		var once sync.Once
+		l.EXPECT().Accept().RunAndReturn(func() (wire.Transport, error) {
+			select {
+			case c := <-connCh:
+				return c, nil
+			case <-closed:
+				return nil, io.EOF
+			}
+		}).Maybe()
+		l.EXPECT().Close().RunAndReturn(func() error { once.Do(func() { close(closed) }); return nil }).Maybe()
+		l.EXPECT().Addr().Return("mock").Maybe()
 
-	d := New(newFactorySeq(t, firstPTY, secondPTY), newStubClock(t), slog.New(slog.NewTextHandler(io.Discard, nil)))
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+		d := New(newFactorySeq(t, firstPTY, secondPTY), newStubClock(t), slog.New(slog.NewTextHandler(io.Discard, nil)))
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 
-	served := make(chan error, 1)
-	go func() { served <- d.Serve(ctx, l) }()
+		served := make(chan error, 1)
+		go func() { served <- d.Serve(ctx, l) }()
 
-	awaitFrame(t, firstSends, "Welcome")
-	awaitFrame(t, firstSends, "Output")
+		requireQueuedFrame(t, firstSends, "Welcome")
+		requireQueuedFrame(t, firstSends, "Output")
 
-	// Child exits -> session removed -> registry empties -> Serve must survive.
-	releaseFirst()
-	det := awaitFrame(t, firstSends, "Detached")
-	require.Equal(t, protocol.ReasonSessionKilled, decodeServerMessage(t, det).(protocol.Detached).Reason)
-	require.Equal(t, 0, sessionCount(d))
+		// Child exits -> session removed -> registry empties -> Serve must survive.
+		releaseFirst()
+		det := requireQueuedFrame(t, firstSends, "Detached")
+		require.Equal(t, protocol.ReasonSessionKilled, decodeServerMessage(t, det).(protocol.Detached).Reason)
+		require.Equal(t, 0, sessionCount(d))
 
-	// The same accept loop admits a fresh connection into the empty registry.
-	connCh <- secondTr
-	awaitFrame(t, secondSends, "Welcome")
-	awaitFrame(t, secondSends, "Output")
-	require.Equal(t, 1, sessionCount(d))
+		// The same accept loop admits a fresh connection into the empty registry.
+		connCh <- secondTr
+		requireQueuedFrame(t, secondSends, "Welcome")
+		requireQueuedFrame(t, secondSends, "Output")
+		require.Equal(t, 1, sessionCount(d))
 
-	// Only explicit cancellation stops Serve.
-	cancel()
-	select {
-	case err := <-served:
+		// Only explicit cancellation stops Serve.
+		cancel()
+		err := requireReceived(t, served, "Serve did not return after context cancel")
 		require.NoError(t, err)
-	case <-time.After(3 * time.Second):
-		t.Fatal("Serve did not return after context cancel")
-	}
+	})
 }
 
 func TestServeGracefulShutdownOnContextCancel(t *testing.T) {
-	p, releasePTY := newBlockingPTY(t)
-	defer releasePTY()
-	tr, sends, _ := newConn(t, mustHello(protocol.IntentNew, "long", domain.Size{Cols: 80, Rows: 24}))
+	synctest.Test(t, func(t *testing.T) {
+		p, releasePTY := newBlockingPTY(t)
+		defer releasePTY()
+		tr, sends, _ := newConn(t, mustHello(protocol.IntentNew, "long", domain.Size{Cols: 80, Rows: 24}))
 
-	l := newMockServerListener(t)
-	connCh := make(chan wire.Transport, 1)
-	connCh <- tr
-	closed := make(chan struct{})
-	var once sync.Once
-	l.EXPECT().Accept().RunAndReturn(func() (wire.Transport, error) {
-		select {
-		case c := <-connCh:
-			return c, nil
-		case <-closed:
-			return nil, io.EOF
-		}
-	}).Maybe()
-	l.EXPECT().Close().RunAndReturn(func() error { once.Do(func() { close(closed) }); return nil }).Maybe()
-	l.EXPECT().Addr().Return("mock").Maybe()
+		l := newMockServerListener(t)
+		connCh := make(chan wire.Transport, 1)
+		connCh <- tr
+		closed := make(chan struct{})
+		var once sync.Once
+		l.EXPECT().Accept().RunAndReturn(func() (wire.Transport, error) {
+			select {
+			case c := <-connCh:
+				return c, nil
+			case <-closed:
+				return nil, io.EOF
+			}
+		}).Maybe()
+		l.EXPECT().Close().RunAndReturn(func() error { once.Do(func() { close(closed) }); return nil }).Maybe()
+		l.EXPECT().Addr().Return("mock").Maybe()
 
-	d := New(newFactory(t, p), newStubClock(t), slog.New(slog.NewTextHandler(io.Discard, nil)))
-	ctx, cancel := context.WithCancel(context.Background())
+		d := New(newFactory(t, p), newStubClock(t), slog.New(slog.NewTextHandler(io.Discard, nil)))
+		ctx, cancel := context.WithCancel(context.Background())
 
-	served := make(chan error, 1)
-	go func() { served <- d.Serve(ctx, l) }()
+		served := make(chan error, 1)
+		go func() { served <- d.Serve(ctx, l) }()
 
-	awaitFrame(t, sends, "Welcome")
-	awaitFrame(t, sends, "Output")
+		requireQueuedFrame(t, sends, "Welcome")
+		requireQueuedFrame(t, sends, "Output")
 
-	cancel() // graceful shutdown
+		cancel() // graceful shutdown
 
-	det := awaitFrame(t, sends, "Detached")
-	dm := decodeServerMessage(t, det).(protocol.Detached)
-	require.Equal(t, protocol.ReasonServerShutdown, dm.Reason)
+		det := requireQueuedFrame(t, sends, "Detached")
+		dm := decodeServerMessage(t, det).(protocol.Detached)
+		require.Equal(t, protocol.ReasonServerShutdown, dm.Reason)
 
-	select {
-	case err := <-served:
+		err := requireReceived(t, served, "Serve did not return after context cancel")
 		require.NoError(t, err)
-	case <-time.After(3 * time.Second):
-		t.Fatal("Serve did not return after context cancel")
-	}
+	})
 }
 
 // --- shutdown/create interlock ------------------------------------------------
@@ -674,136 +702,139 @@ func TestServeGracefulShutdownOnContextCancel(t *testing.T) {
 // rejected with a clean typed error instead of creating a session the teardown
 // snapshot missed. Final session removal alone no longer triggers this.
 func TestHelloAfterExplicitShutdownIsRejected(t *testing.T) {
-	p, releasePTY := newBlockingPTY(t)
-	floating := newQuietPTY(t)
-	f := portsmocks.NewMockPTYFactory(t)
-	normalSize := domain.Size{Cols: 80, Rows: 22}
-	var d *Daemon
-	var opensAfterShutdown atomic.Int32
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
-		func(_ context.Context, _ string, _ []string, _ []string, _ string, geometry domain.Geometry) (ports.PTY, error) {
-			select {
-			case <-d.done:
-				opensAfterShutdown.Add(1)
-			default:
-			}
-			if geometry.Size == normalSize {
-				return p, nil
-			}
-			return floating, nil
-		},
-	).Maybe()
-	d = newTestDaemon(t, f, newStubClock(t))
+	synctest.Test(t, func(t *testing.T) {
+		p, releasePTY := newBlockingPTY(t)
+		floating := newQuietPTY(t)
+		f := portsmocks.NewMockPTYFactory(t)
+		normalSize := domain.Size{Cols: 80, Rows: 22}
+		var d *Daemon
+		var opensAfterShutdown atomic.Int32
+		f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+			func(_ context.Context, _ string, _ []string, _ []string, _ string, geometry domain.Geometry) (ports.PTY, error) {
+				select {
+				case <-d.done:
+					opensAfterShutdown.Add(1)
+				default:
+				}
+				if geometry.Size == normalSize {
+					return p, nil
+				}
+				return floating, nil
+			},
+		).Maybe()
+		d = newTestDaemon(t, f, newStubClock(t))
 
-	tr1, sends1, release1 := newConn(t, mustHello(protocol.IntentEphemeral, "", domain.Size{Cols: 80, Rows: 24}))
-	var hg sync.WaitGroup
-	hg.Go(func() { d.handleConn(tr1) })
-	awaitFrame(t, sends1, "Welcome")
-	awaitFrame(t, sends1, "Output")
-	require.Equal(t, 1, sessionCount(d))
+		tr1, sends1, release1 := newConn(t, mustHello(protocol.IntentEphemeral, "", domain.Size{Cols: 80, Rows: 24}))
+		var hg sync.WaitGroup
+		hg.Go(func() { d.handleConn(tr1) })
+		requireQueuedFrame(t, sends1, "Welcome")
+		requireQueuedFrame(t, sends1, "Output")
+		require.Equal(t, 1, sessionCount(d))
 
-	// Explicit shutdown begins irreversibly and signals Serve synchronously.
-	require.False(t, d.shutdownAll(protocol.ReasonServerShutdown))
-	select {
-	case <-d.done:
-	default:
-		t.Fatal("explicit shutdown must signal Serve synchronously")
-	}
-	require.Equal(t, 0, sessionCount(d))
+		// Explicit shutdown begins irreversibly and signals Serve synchronously.
+		require.False(t, d.shutdownAll(protocol.ReasonServerShutdown))
+		select {
+		case <-d.done:
+		default:
+			t.Fatal("explicit shutdown must signal Serve synchronously")
+		}
+		require.Equal(t, 0, sessionCount(d))
 
-	// Hellos after shutdown — both creation intents — must be rejected with a
-	// clean typed error, and nothing may be inserted into the registry.
-	for _, intent := range []struct {
-		name   string
-		intent uint8
-		sess   string
-	}{
-		{"ephemeral", protocol.IntentEphemeral, ""},
-		{"named", protocol.IntentNew, "latecomer"},
-	} {
-		tr2, sends2, _ := newConn(t, mustHello(intent.intent, intent.sess, domain.Size{Cols: 80, Rows: 24}))
-		d.handleConn(tr2)
-		e := awaitFrame(t, sends2, "Error")
-		em, ok := decodeServerMessage(t, e).(protocol.ErrorMsg)
-		require.True(t, ok)
-		require.Equal(t, protocol.ErrServerShutdown, em.Code, "%s hello after shutdown must be rejected", intent.name)
-	}
-	require.Equal(t, 0, sessionCount(d), "no session may be inserted after shutdown began")
+		// Hellos after shutdown — both creation intents — must be rejected with a
+		// clean typed error, and nothing may be inserted into the registry.
+		for _, intent := range []struct {
+			name   string
+			intent uint8
+			sess   string
+		}{
+			{"ephemeral", protocol.IntentEphemeral, ""},
+			{"named", protocol.IntentNew, "latecomer"},
+		} {
+			tr2, sends2, _ := newConn(t, mustHello(intent.intent, intent.sess, domain.Size{Cols: 80, Rows: 24}))
+			d.handleConn(tr2)
+			e := requireQueuedFrame(t, sends2, "Error")
+			em, ok := decodeServerMessage(t, e).(protocol.ErrorMsg)
+			require.True(t, ok)
+			require.Equal(t, protocol.ErrServerShutdown, em.Code, "%s hello after shutdown must be rejected", intent.name)
+		}
+		require.Equal(t, 0, sessionCount(d), "no session may be inserted after shutdown began")
 
-	release1()
-	releasePTY()
-	hg.Wait()
-	d.sessWg.Wait()
-	d.waitNotifies()
-	require.Zero(t, opensAfterShutdown.Load(), "shutdown must not be followed by a PTY launch")
+		release1()
+		releasePTY()
+		hg.Wait()
+		d.sessWg.Wait()
+		d.waitNotifies()
+		require.Zero(t, opensAfterShutdown.Load(), "shutdown must not be followed by a PTY launch")
+	})
 }
 
 // --- wedged-client teardown ---------------------------------------------------
 
 func TestServeReturnsDespiteWedgedClientOnShutdown(t *testing.T) {
-	p, _ := newBlockingPTY(t) // Close unblocks the parked reader
+	synctest.Test(t, func(t *testing.T) {
+		p, _ := newBlockingPTY(t) // Close unblocks the parked reader
 
-	tr := newMockServerConnection(t)
-	sends := make(chan wire.Envelope, 64)
-	recvCh := make(chan wire.Envelope, 1)
-	recvCh <- mustHello(protocol.IntentNew, "wedge", domain.Size{Cols: 80, Rows: 24})
-	connDone := make(chan struct{})
-	var connOnce sync.Once
-	closeConn := func() { connOnce.Do(func() { close(connDone) }) }
+		tr := newMockServerConnection(t)
+		sends := make(chan wire.Envelope, 64)
+		recvCh := make(chan wire.Envelope, 1)
+		recvCh <- mustHello(protocol.IntentNew, "wedge", domain.Size{Cols: 80, Rows: 24})
+		connDone := make(chan struct{})
+		var connOnce sync.Once
+		closeConn := func() { connOnce.Do(func() { close(connDone) }) }
 
-	tr.EXPECT().Recv().RunAndReturn(func() (wire.Envelope, error) {
-		select {
-		case f := <-recvCh:
-			return f, nil
-		case <-connDone:
-			return wire.Envelope{}, io.EOF
-		}
-	}).Maybe()
-	tr.EXPECT().Send(mock.Anything).RunAndReturn(func(f wire.Envelope) error {
-		if envelopeMessageName(nil, f.Payload) == "Detached" {
-			// Wedged: blocks until the transport is force-closed.
-			<-connDone
-			return io.ErrClosedPipe
-		}
-		sends <- f
-		return nil
-	}).Maybe()
-	tr.EXPECT().Close().RunAndReturn(func() error { closeConn(); return nil }).Maybe()
+		tr.EXPECT().Recv().RunAndReturn(func() (wire.Envelope, error) {
+			select {
+			case f := <-recvCh:
+				return f, nil
+			case <-connDone:
+				return wire.Envelope{}, io.EOF
+			}
+		}).Maybe()
+		tr.EXPECT().Send(mock.Anything).RunAndReturn(func(f wire.Envelope) error {
+			if envelopeMessageName(nil, f.Payload) == "Detached" {
+				// Wedged: blocks until the transport is force-closed.
+				<-connDone
+				return io.ErrClosedPipe
+			}
+			sends <- f
+			return nil
+		}).Maybe()
+		tr.EXPECT().Close().RunAndReturn(func() error { closeConn(); return nil }).Maybe()
 
-	l := newMockServerListener(t)
-	connCh := make(chan wire.Transport, 1)
-	connCh <- tr
-	lnClosed := make(chan struct{})
-	var lnOnce sync.Once
-	l.EXPECT().Accept().RunAndReturn(func() (wire.Transport, error) {
-		select {
-		case c := <-connCh:
-			return c, nil
-		case <-lnClosed:
-			return nil, io.EOF
-		}
-	}).Maybe()
-	l.EXPECT().Close().RunAndReturn(func() error { lnOnce.Do(func() { close(lnClosed) }); return nil }).Maybe()
-	l.EXPECT().Addr().Return("mock").Maybe()
+		l := newMockServerListener(t)
+		connCh := make(chan wire.Transport, 1)
+		connCh <- tr
+		lnClosed := make(chan struct{})
+		var lnOnce sync.Once
+		l.EXPECT().Accept().RunAndReturn(func() (wire.Transport, error) {
+			select {
+			case c := <-connCh:
+				return c, nil
+			case <-lnClosed:
+				return nil, io.EOF
+			}
+		}).Maybe()
+		l.EXPECT().Close().RunAndReturn(func() error { lnOnce.Do(func() { close(lnClosed) }); return nil }).Maybe()
+		l.EXPECT().Addr().Return("mock").Maybe()
 
-	d := New(newFactory(t, p), notifyClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	ctx, cancel := context.WithCancel(context.Background())
+		d := New(newFactory(t, p), notifyClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		ctx, cancel := context.WithCancel(context.Background())
 
-	served := make(chan error, 1)
-	go func() { served <- d.Serve(ctx, l) }()
+		served := make(chan error, 1)
+		go func() { served <- d.Serve(ctx, l) }()
 
-	awaitFrame(t, sends, "Welcome")
-	awaitFrame(t, sends, "Output")
+		requireQueuedFrame(t, sends, "Welcome")
+		requireQueuedFrame(t, sends, "Output")
 
-	cancel() // shutdown with the wedged client still attached
+		cancel() // shutdown with the wedged client still attached
+		// Fake-time advancement: the bounded Detached send gives up after
+		// detachNotifyTimeout on the bubble clock.
+		time.Sleep(detachNotifyTimeout + time.Millisecond) //testpolicy:sleep advances bubble fake time
 
-	select {
-	case err := <-served:
+		err := requireReceived(t, served, "Serve hung on a wedged client during teardown")
 		require.NoError(t, err)
-	case <-time.After(3 * time.Second):
-		t.Fatal("Serve hung on a wedged client during teardown")
-	}
-	require.Equal(t, 0, sessionCount(d), "session must be torn down despite the wedged client")
+		require.Equal(t, 0, sessionCount(d), "session must be torn down despite the wedged client")
+	})
 }
 
 type mockStoreState struct {
@@ -929,35 +960,39 @@ func newStaticStore(t testing.TB, data map[string][]byte) *portsmocks.MockStore 
 }
 
 func TestNamedSessionCreationIsAllowedWithNilStore(t *testing.T) {
-	pty, release := newBlockingPTY(t)
-	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
-	WithStore(t, nil)(d)
+	synctest.Test(t, func(t *testing.T) {
+		pty, release := newBlockingPTY(t)
+		defer release()
+		d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
+		WithStore(t, nil)(d)
 
-	sess, err := createSessionForTest(d, "work", false, "/tmp/work", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, d.baseEnv)
-	require.NoError(t, err)
-	require.Equal(t, "work", sess.name)
-	require.False(t, d.persistEnabled)
+		sess, err := createSessionForTest(d, "work", false, "/tmp/work", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, d.baseEnv)
+		require.NoError(t, err)
+		require.Equal(t, "work", sess.name)
+		require.False(t, d.persistEnabled)
+	})
 }
 
 func TestDaemonLoadsPersistedSessionsAsStopped(t *testing.T) {
-	store, _ := newMockStore(t)
-	seed := New(nil, newStubClock(t), slog.New(slog.NewTextHandler(io.Discard, nil)), WithStore(t, store))
-	incarnation := domain.IncarnationID{1}
-	require.NoError(t, testPersister(t, seed).Save(persist.Record{Name: "work", IncarnationID: incarnation, Cwd: "/tmp/work", CreatedAt: 7, UpdatedAt: 8, LastUsedSeq: 9}))
+	synctest.Test(t, func(t *testing.T) {
+		store, _ := newMockStore(t)
+		seed := New(nil, newStubClock(t), slog.New(slog.NewTextHandler(io.Discard, nil)), WithStore(t, store))
+		incarnation := domain.IncarnationID{1}
+		require.NoError(t, testPersister(t, seed).Save(persist.Record{Name: "work", IncarnationID: incarnation, Cwd: "/tmp/work", CreatedAt: 7, UpdatedAt: 8, LastUsedSeq: 9}))
 
-	d := New(nil, newStubClock(t), slog.New(slog.NewTextHandler(io.Discard, nil)), WithStore(t, store))
-	d.mu.Lock()
-	stopped := d.inactive["work"]
-	d.mu.Unlock()
-	require.Equal(t, "work", stopped.name)
-	require.Equal(t, "/tmp/work", stopped.cwd)
-	require.Equal(t, int64(7), stopped.createdAt)
-	require.Equal(t, incarnation, stopped.incarnation)
-	require.Equal(t, uint64(9), stopped.lastUsedSeq)
-	require.Equal(t, protocol.SessionDown, stopped.state)
-	require.NotNil(t, stopped.restoreDone)
-	require.Equal(t, uint64(9), d.mruSeq.Load())
+		d := New(nil, newStubClock(t), slog.New(slog.NewTextHandler(io.Discard, nil)), WithStore(t, store))
+		d.mu.Lock()
+		stopped := d.inactive["work"]
+		d.mu.Unlock()
+		require.Equal(t, "work", stopped.name)
+		require.Equal(t, "/tmp/work", stopped.cwd)
+		require.Equal(t, int64(7), stopped.createdAt)
+		require.Equal(t, incarnation, stopped.incarnation)
+		require.Equal(t, uint64(9), stopped.lastUsedSeq)
+		require.Equal(t, protocol.SessionDown, stopped.state)
+		require.NotNil(t, stopped.restoreDone)
+		require.Equal(t, uint64(9), d.mruSeq.Load())
+	})
 }
 
 // TestDaemonNewWithoutPersistenceLogsNoLoadWarning covers the default,
@@ -967,159 +1002,173 @@ func TestDaemonLoadsPersistedSessionsAsStopped(t *testing.T) {
 // as a "loading persisted sessions failed" warning, since nothing failed —
 // persistence simply was never configured.
 func TestDaemonNewWithoutPersistenceLogsNoLoadWarning(t *testing.T) {
-	var logBuf strings.Builder
-	d := New(nil, newStubClock(t), slog.New(slog.NewTextHandler(&logBuf, nil)))
-	require.NotNil(t, d)
-	require.False(t, d.persistEnabled)
-	require.Empty(t, d.inactive)
-	require.NotContains(t, logBuf.String(), "loading persisted sessions failed")
+	synctest.Test(t, func(t *testing.T) {
+		var logBuf strings.Builder
+		d := New(nil, newStubClock(t), slog.New(slog.NewTextHandler(&logBuf, nil)))
+		require.NotNil(t, d)
+		require.False(t, d.persistEnabled)
+		require.Empty(t, d.inactive)
+		require.NotContains(t, logBuf.String(), "loading persisted sessions failed")
+	})
 }
 
 func TestTouchMRUConcurrentUpdatesRemainMonotonic(t *testing.T) {
-	d := &Daemon{clock: newStubClock(t)}
-	sess := &session{}
-	const goroutines = 16
-	const iterations = 1000
-	start := make(chan struct{})
-	done := make(chan struct{})
-	var decreased atomic.Bool
-	var wg sync.WaitGroup
-	var observer sync.WaitGroup
+	synctest.Test(t, func(t *testing.T) {
+		d := &Daemon{clock: newStubClock(t)}
+		sess := &session{}
+		const goroutines = 16
+		const iterations = 1000
+		start := make(chan struct{})
+		done := make(chan struct{})
+		var decreased atomic.Bool
+		var wg sync.WaitGroup
+		var observer sync.WaitGroup
 
-	observer.Go(func() {
-		previous := sess.mruAt.Load()
-		for {
-			select {
-			case <-done:
-				return
-			default:
-			}
-			current := sess.mruAt.Load()
-			if current < previous {
-				decreased.Store(true)
-				return
-			}
-			previous = current
-		}
-	})
-
-	for range goroutines {
-		wg.Go(func() {
-			<-start
-			for range iterations {
-				d.touchMRU(sess)
+		observer.Go(func() {
+			previous := sess.mruAt.Load()
+			for {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				current := sess.mruAt.Load()
+				if current < previous {
+					decreased.Store(true)
+					return
+				}
+				previous = current
 			}
 		})
-	}
-	close(start)
-	wg.Wait()
-	close(done)
-	observer.Wait()
 
-	require.False(t, decreased.Load())
-	require.Equal(t, d.mruSeq.Load(), sess.mruAt.Load())
+		for range goroutines {
+			wg.Go(func() {
+				<-start
+				for range iterations {
+					d.touchMRU(sess)
+				}
+			})
+		}
+		close(start)
+		wg.Wait()
+		close(done)
+		observer.Wait()
+
+		require.False(t, decreased.Load())
+		require.Equal(t, d.mruSeq.Load(), sess.mruAt.Load())
+	})
 }
 
 func TestTouchMRUPersistsNamedButNotEphemeral(t *testing.T) {
-	store, state := newMockStore(t)
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
-	WithStore(t, store)(d)
-	named := &session{sessionCore: sessionCore{name: "work", createdAt: 1, incarnation: domain.IncarnationID{1}}, tabs: []*tab{{}}}
-	require.NoError(t, testPersister(t, d).Save(persist.Record{Name: "work", IncarnationID: named.incarnation, Cwd: "/work", CreatedAt: 1, UpdatedAt: 1}))
+	synctest.Test(t, func(t *testing.T) {
+		store, state := newMockStore(t)
+		d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
+		WithStore(t, store)(d)
+		named := &session{sessionCore: sessionCore{name: "work", createdAt: 1, incarnation: domain.IncarnationID{1}}, tabs: []*tab{{}}}
+		require.NoError(t, testPersister(t, d).Save(persist.Record{Name: "work", IncarnationID: named.incarnation, Cwd: "/work", CreatedAt: 1, UpdatedAt: 1}))
 
-	d.touchMRU(named)
-	require.Equal(t, named.mruAt.Load(), state.record(t, "work").LastUsedSeq)
-	setsAfterNamed := state.sets
+		d.touchMRU(named)
+		require.Equal(t, named.mruAt.Load(), state.record(t, "work").LastUsedSeq)
+		setsAfterNamed := state.sets
 
-	ephemeral := &session{sessionCore: sessionCore{name: "0", ephemeral: true}, tabs: []*tab{{}}}
-	d.touchMRU(ephemeral)
-	require.False(t, state.has("0"))
-	require.Equal(t, setsAfterNamed, state.sets)
+		ephemeral := &session{sessionCore: sessionCore{name: "0", ephemeral: true}, tabs: []*tab{{}}}
+		d.touchMRU(ephemeral)
+		require.False(t, state.has("0"))
+		require.Equal(t, setsAfterNamed, state.sets)
+	})
 }
 
 func TestCreateSessionSeedsMRUFromStopped(t *testing.T) {
-	sz := domain.Size{Cols: 80, Rows: 24}
-	p, release := newBlockingPTY(t)
-	defer release()
-	store, state := newMockStore(t)
-	d := newTestDaemon(t, newFactory(t, p), newStubClock(t))
-	WithStore(t, store)(d)
-	d.inactive["work"] = inactiveSession{name: "work", cwd: "/tmp/work", createdAt: 1, lastUsedSeq: 42}
-	d.mruSeq.Store(42)
+	synctest.Test(t, func(t *testing.T) {
+		sz := domain.Size{Cols: 80, Rows: 24}
+		p, release := newBlockingPTY(t)
+		defer release()
+		store, state := newMockStore(t)
+		d := newTestDaemon(t, newFactory(t, p), newStubClock(t))
+		WithStore(t, store)(d)
+		d.inactive["work"] = inactiveSession{name: "work", cwd: "/tmp/work", createdAt: 1, lastUsedSeq: 42}
+		d.mruSeq.Store(42)
 
-	sess, err := createSessionForTest(d, "work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
-	require.NoError(t, err)
-	require.Equal(t, uint64(42), sess.mruAt.Load())
-	require.Equal(t, uint64(42), state.record(t, "work").LastUsedSeq)
+		sess, err := createSessionForTest(d, "work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
+		require.NoError(t, err)
+		require.Equal(t, uint64(42), sess.mruAt.Load())
+		require.Equal(t, uint64(42), state.record(t, "work").LastUsedSeq)
+	})
 }
 
 func TestCreateRenameKillPersistenceLifecycle(t *testing.T) {
-	sz := domain.Size{Cols: 80, Rows: 24}
-	p1, release1 := newBlockingPTY(t)
-	p2, release2 := newBlockingPTY(t)
-	defer release1()
-	defer release2()
-	store, state := newMockStore(t)
-	d := newTestDaemon(t, newFactorySeq(t, p1, p2), newStubClock(t))
-	WithStore(t, store)(d)
+	synctest.Test(t, func(t *testing.T) {
+		sz := domain.Size{Cols: 80, Rows: 24}
+		p1, release1 := newBlockingPTY(t)
+		p2, release2 := newBlockingPTY(t)
+		defer release1()
+		defer release2()
+		store, state := newMockStore(t)
+		d := newTestDaemon(t, newFactorySeq(t, p1, p2), newStubClock(t))
+		WithStore(t, store)(d)
 
-	sess, err := createSessionForTest(d, "work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
-	require.NoError(t, err)
-	require.True(t, state.has("work"))
-	created := state.record(t, "work")
-	require.NotEqual(t, domain.IncarnationID{}, created.IncarnationID)
-	require.NoError(t, created.Validate())
-	require.NoError(t, d.renameTab(sess, sess.tabs[0], "shell"))
-	require.NoError(t, d.createTab(sess, sz))
-	require.NoError(t, d.renameTab(sess, sess.tabs[1], "logs"))
+		sess, err := createSessionForTest(d, "work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
+		require.NoError(t, err)
+		require.True(t, state.has("work"))
+		created := state.record(t, "work")
+		require.NotEqual(t, domain.IncarnationID{}, created.IncarnationID)
+		require.NoError(t, created.Validate())
+		require.NoError(t, d.renameTab(sess, sess.tabs[0], "shell"))
+		require.NoError(t, d.createTab(sess, sz))
+		require.NoError(t, d.renameTab(sess, sess.tabs[1], "logs"))
 
-	require.NoError(t, d.renameSession(sess, "renamed"))
-	require.False(t, state.has("work"))
-	require.True(t, state.has("renamed"))
-	renamed := state.record(t, "renamed")
-	require.Equal(t, []string{"shell", "logs"}, renamed.TabNames)
-	require.Equal(t, created.IncarnationID, renamed.IncarnationID)
-	require.NoError(t, renamed.Validate())
+		require.NoError(t, d.renameSession(sess, "renamed"))
+		require.False(t, state.has("work"))
+		require.True(t, state.has("renamed"))
+		renamed := state.record(t, "renamed")
+		require.Equal(t, []string{"shell", "logs"}, renamed.TabNames)
+		require.Equal(t, created.IncarnationID, renamed.IncarnationID)
+		require.NoError(t, renamed.Validate())
 
-	require.NoError(t, d.killSession(sess, protocol.ReasonSessionKilled, true))
-	require.False(t, state.has("renamed"))
+		require.NoError(t, d.killSession(sess, protocol.ReasonSessionKilled, true))
+		require.False(t, state.has("renamed"))
+	})
 }
 
 func TestRenameTabPersistsForNamedSession(t *testing.T) {
-	sz := domain.Size{Cols: 80, Rows: 24}
-	p, release := newBlockingPTY(t)
-	defer release()
-	store, _ := newMockStore(t)
-	d := newTestDaemon(t, newFactory(t, p), newStubClock(t))
-	WithStore(t, store)(d)
+	synctest.Test(t, func(t *testing.T) {
+		sz := domain.Size{Cols: 80, Rows: 24}
+		p, release := newBlockingPTY(t)
+		defer release()
+		store, _ := newMockStore(t)
+		d := newTestDaemon(t, newFactory(t, p), newStubClock(t))
+		WithStore(t, store)(d)
 
-	sess, err := createSessionForTest(d, "work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
-	require.NoError(t, err)
-	require.NoError(t, d.renameTab(sess, sess.tabs[0], "shell"))
+		sess, err := createSessionForTest(d, "work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
+		require.NoError(t, err)
+		require.NoError(t, d.renameTab(sess, sess.tabs[0], "shell"))
 
-	records, err := testPersister(t, d).LoadAll()
-	require.NoError(t, err)
-	require.Len(t, records, 1)
-	require.Equal(t, "work", records[0].Name)
-	require.Equal(t, "/tmp/work", records[0].Cwd)
-	require.Equal(t, sess.createdAt, records[0].CreatedAt)
-	require.GreaterOrEqual(t, records[0].UpdatedAt, records[0].CreatedAt)
-	require.Equal(t, []string{"shell"}, records[0].TabNames)
+		records, err := testPersister(t, d).LoadAll()
+		require.NoError(t, err)
+		require.Len(t, records, 1)
+		require.Equal(t, "work", records[0].Name)
+		require.Equal(t, "/tmp/work", records[0].Cwd)
+		require.Equal(t, sess.createdAt, records[0].CreatedAt)
+		require.GreaterOrEqual(t, records[0].UpdatedAt, records[0].CreatedAt)
+		require.Equal(t, []string{"shell"}, records[0].TabNames)
+	})
 }
 
 func TestRenameTabBuffersMetadataUnderStateLocks(t *testing.T) {
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
-	sess := newSnapshotTestSession(t, "work", false, "/work")
-	d.sessions[sess.id] = sess
-	catalogue := portsmocks.NewMockCatalogue(t)
-	WithCatalogue(catalogue, nil)(d)
-	catalogue.EXPECT().UpdateMetadata(mock.Anything).RunAndReturn(func(domain.CatalogueMetadataUpdate) error {
-		require.False(t, d.mu.TryLock(), "daemon mutex must guard the metadata snapshot")
-		require.False(t, sess.mu.TryLock(), "session mutex must guard the metadata snapshot")
-		return nil
-	}).Once()
+	synctest.Test(t, func(t *testing.T) {
+		d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
+		sess := newSnapshotTestSession(t, "work", false, "/work")
+		d.sessions[sess.id] = sess
+		catalogue := portsmocks.NewMockCatalogue(t)
+		WithCatalogue(catalogue, nil)(d)
+		catalogue.EXPECT().UpdateMetadata(mock.Anything).RunAndReturn(func(domain.CatalogueMetadataUpdate) error {
+			require.False(t, d.mu.TryLock(), "daemon mutex must guard the metadata snapshot")
+			require.False(t, sess.mu.TryLock(), "session mutex must guard the metadata snapshot")
+			return nil
+		}).Once()
 
-	require.NoError(t, d.renameTab(sess, sess.tabs[0], "shell"))
+		require.NoError(t, d.renameTab(sess, sess.tabs[0], "shell"))
+	})
 }
 
 func TestTabNamePersistenceTracksTabIndexShifts(t *testing.T) {
@@ -1134,148 +1183,160 @@ func TestTabNamePersistenceTracksTabIndexShifts(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ptys := make([]ports.PTY, 3)
-			for i := range ptys {
-				p, release := newBlockingPTY(t)
-				ptys[i] = p
-				t.Cleanup(release)
-			}
-			store, _ := newMockStore(t)
-			d := newTestDaemon(t, newFactorySeq(t, ptys...), newStubClock(t))
-			WithStore(t, store)(d)
-			sz := domain.Size{Cols: 80, Rows: 24}
+			synctest.Test(t, func(t *testing.T) {
+				ptys := make([]ports.PTY, 3)
+				for i := range ptys {
+					p, release := newBlockingPTY(t)
+					ptys[i] = p
+					t.Cleanup(release)
+				}
+				store, _ := newMockStore(t)
+				d := newTestDaemon(t, newFactorySeq(t, ptys...), newStubClock(t))
+				WithStore(t, store)(d)
+				sz := domain.Size{Cols: 80, Rows: 24}
 
-			sess, err := createSessionForTest(d, "work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
-			require.NoError(t, err)
-			require.NoError(t, d.createTab(sess, sz))
-			require.NoError(t, d.createTab(sess, sz))
-			for i, name := range tt.tabNames {
-				require.NoError(t, d.renameTab(sess, sess.tabs[i], name))
-			}
+				sess, err := createSessionForTest(d, "work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
+				require.NoError(t, err)
+				require.NoError(t, d.createTab(sess, sz))
+				require.NoError(t, d.createTab(sess, sz))
+				for i, name := range tt.tabNames {
+					require.NoError(t, d.renameTab(sess, sess.tabs[i], name))
+				}
 
-			require.NoError(t, d.closeTab(sess, sess.tabs[tt.closeIndex], false))
-			records, err := testPersister(t, d).LoadAll()
-			require.NoError(t, err)
-			require.Len(t, records, 1)
-			require.Equal(t, tt.want, records[0].TabNames)
+				require.NoError(t, d.closeTab(sess, sess.tabs[tt.closeIndex], false))
+				records, err := testPersister(t, d).LoadAll()
+				require.NoError(t, err)
+				require.Len(t, records, 1)
+				require.Equal(t, tt.want, records[0].TabNames)
+			})
 		})
 	}
 }
 
 func TestRenameTabDoesNotPersistForEphemeralSession(t *testing.T) {
-	sz := domain.Size{Cols: 80, Rows: 24}
-	p, release := newBlockingPTY(t)
-	defer release()
-	store, state := newMockStore(t)
-	d := newTestDaemon(t, newFactory(t, p), newStubClock(t))
-	WithStore(t, store)(d)
+	synctest.Test(t, func(t *testing.T) {
+		sz := domain.Size{Cols: 80, Rows: 24}
+		p, release := newBlockingPTY(t)
+		defer release()
+		store, state := newMockStore(t)
+		d := newTestDaemon(t, newFactory(t, p), newStubClock(t))
+		WithStore(t, store)(d)
 
-	sess, err := createSessionForTest(d, "0", true, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
-	require.NoError(t, err)
-	require.NoError(t, d.renameTab(sess, sess.tabs[0], "shell"))
-	require.Equal(t, "shell", sess.tabs[0].name)
+		sess, err := createSessionForTest(d, "0", true, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
+		require.NoError(t, err)
+		require.NoError(t, d.renameTab(sess, sess.tabs[0], "shell"))
+		require.Equal(t, "shell", sess.tabs[0].name)
 
-	require.False(t, state.has("0"))
-	records, err := testPersister(t, d).LoadAll()
-	require.NoError(t, err)
-	require.Empty(t, records)
+		require.False(t, state.has("0"))
+		records, err := testPersister(t, d).LoadAll()
+		require.NoError(t, err)
+		require.Empty(t, records)
+	})
 }
 
 func TestAttachRestoresPersistedTabNames(t *testing.T) {
-	sz := domain.Size{Cols: 80, Rows: 24}
-	p1, release1 := newBlockingPTY(t)
-	p2, release2 := newBlockingPTY(t)
-	defer release1()
-	defer release2()
-	store, _ := newMockStore(t)
-	d := newTestDaemon(t, newFactorySeq(t, p1, p2), newStubClock(t))
-	WithStore(t, store)(d)
-	require.NoError(t, testPersister(t, d).Save(persist.Record{Name: "work", IncarnationID: domain.IncarnationID{1}, Cwd: "/tmp/work", CreatedAt: 7, UpdatedAt: 8, TabNames: []string{"shell", "logs"}}))
-	record, ok, err := d.catalogueRecord("work")
-	require.NoError(t, err)
-	require.True(t, ok)
-	d.inactive["work"] = inactiveSessionFromRecord(record, protocol.SessionDown, nil)
-	tr := newMockServerConnection(t)
-	tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
-	tr.EXPECT().Close().Return(nil).Maybe()
+	synctest.Test(t, func(t *testing.T) {
+		sz := domain.Size{Cols: 80, Rows: 24}
+		p1, release1 := newBlockingPTY(t)
+		p2, release2 := newBlockingPTY(t)
+		defer release1()
+		defer release2()
+		store, _ := newMockStore(t)
+		d := newTestDaemon(t, newFactorySeq(t, p1, p2), newStubClock(t))
+		WithStore(t, store)(d)
+		require.NoError(t, testPersister(t, d).Save(persist.Record{Name: "work", IncarnationID: domain.IncarnationID{1}, Cwd: "/tmp/work", CreatedAt: 7, UpdatedAt: 8, TabNames: []string{"shell", "logs"}}))
+		record, ok, err := d.catalogueRecord("work")
+		require.NoError(t, err)
+		require.True(t, ok)
+		d.inactive["work"] = inactiveSessionFromRecord(record, protocol.SessionDown, nil)
+		tr := newMockServerConnection(t)
+		tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
+		tr.EXPECT().Close().Return(nil).Maybe()
 
-	sess, ac, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: sz}, tr)
-	require.NoError(t, err)
-	require.NotNil(t, ac)
-	require.Len(t, sess.tabs, 2)
-	require.Equal(t, "shell", sess.tabs[0].name)
-	require.Equal(t, "logs", sess.tabs[1].name)
+		sess, ac, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: sz}, tr)
+		require.NoError(t, err)
+		require.NotNil(t, ac)
+		require.Len(t, sess.tabs, 2)
+		require.Equal(t, "shell", sess.tabs[0].name)
+		require.Equal(t, "logs", sess.tabs[1].name)
+	})
 }
 
 func TestEphemeralRenamePromotesAndStoppedCollisionRejected(t *testing.T) {
-	sz := domain.Size{Cols: 80, Rows: 24}
-	p, release := newBlockingPTY(t)
-	defer release()
-	store, state := newMockStore(t)
-	d := newTestDaemon(t, newFactory(t, p), newStubClock(t))
-	WithStore(t, store)(d)
-	d.inactive["taken"] = inactiveSession{name: "taken", cwd: "/tmp", createdAt: 1}
+	synctest.Test(t, func(t *testing.T) {
+		sz := domain.Size{Cols: 80, Rows: 24}
+		p, release := newBlockingPTY(t)
+		defer release()
+		store, state := newMockStore(t)
+		d := newTestDaemon(t, newFactory(t, p), newStubClock(t))
+		WithStore(t, store)(d)
+		d.inactive["taken"] = inactiveSession{name: "taken", cwd: "/tmp", createdAt: 1}
 
-	sess, err := createSessionForTest(d, "0", true, "/tmp/e", sz, terminalEnv{}, d.baseEnv)
-	require.NoError(t, err)
-	require.False(t, state.has("0"))
-	require.EqualError(t, d.renameSession(sess, "taken"), "name already in use")
-	require.NoError(t, d.renameSession(sess, "named"))
-	require.True(t, state.has("named"))
+		sess, err := createSessionForTest(d, "0", true, "/tmp/e", sz, terminalEnv{}, d.baseEnv)
+		require.NoError(t, err)
+		require.False(t, state.has("0"))
+		require.EqualError(t, d.renameSession(sess, "taken"), "name already in use")
+		require.NoError(t, d.renameSession(sess, "named"))
+		require.True(t, state.has("named"))
+	})
 }
 
 func TestEphemeralPromotionAssignsAndPersistsLifecycleIdentity(t *testing.T) {
-	p, release := newBlockingPTY(t)
-	defer release()
-	store, state := newMockStore(t)
-	clock := newLifecycleClock(t, time.Unix(0, 100))
-	d := newTestDaemon(t, newFactory(t, p), clock)
-	WithStore(t, store)(d)
+	synctest.Test(t, func(t *testing.T) {
+		p, release := newBlockingPTY(t)
+		defer release()
+		store, state := newMockStore(t)
+		clock := newLifecycleClock(t, time.Unix(0, 100))
+		d := newTestDaemon(t, newFactory(t, p), clock)
+		WithStore(t, store)(d)
 
-	sess, err := createSessionForTest(d, "0", true, "/tmp", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, d.baseEnv)
-	require.NoError(t, err)
-	require.Zero(t, sess.createdAt, "regression fixture: ephemerals have no lifecycle identity")
+		sess, err := createSessionForTest(d, "0", true, "/tmp", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, d.baseEnv)
+		require.NoError(t, err)
+		require.Zero(t, sess.createdAt, "regression fixture: ephemerals have no lifecycle identity")
 
-	require.NoError(t, d.renameSession(sess, "named"))
+		require.NoError(t, d.renameSession(sess, "named"))
 
-	require.False(t, sess.ephemeral)
-	require.Equal(t, "named", sess.name)
-	require.Equal(t, int64(100), sess.createdAt)
-	require.Equal(t, sess.createdAt, state.record(t, "named").CreatedAt)
+		require.False(t, sess.ephemeral)
+		require.Equal(t, "named", sess.name)
+		require.Equal(t, int64(100), sess.createdAt)
+		require.Equal(t, sess.createdAt, state.record(t, "named").CreatedAt)
+	})
 }
 
 func TestEphemeralPromotionLifecyclePreventsStaleSameNamePaletteTarget(t *testing.T) {
-	fromPTY, releaseFrom := newBlockingPTY(t)
-	firstPTY, releaseFirst := newBlockingPTY(t)
-	secondPTY, releaseSecond := newBlockingPTY(t)
-	defer releaseFrom()
-	defer releaseFirst()
-	defer releaseSecond()
+	synctest.Test(t, func(t *testing.T) {
+		fromPTY, releaseFrom := newBlockingPTY(t)
+		firstPTY, releaseFirst := newBlockingPTY(t)
+		secondPTY, releaseSecond := newBlockingPTY(t)
+		defer releaseFrom()
+		defer releaseFirst()
+		defer releaseSecond()
 
-	d, from, ac, _ := newManualSessionWithPTYs(t, fromPTY)
-	store, _ := newMockStore(t)
-	clock := newLifecycleClock(t, time.Unix(0, 100), time.Unix(0, 100))
-	d.clock = clock
-	d.ptys = newFactorySeq(t, firstPTY, secondPTY)
-	WithStore(t, store)(d)
+		d, from, ac, _ := newManualSessionWithPTYs(t, fromPTY)
+		store, _ := newMockStore(t)
+		clock := newLifecycleClock(t, time.Unix(0, 100), time.Unix(0, 100))
+		d.clock = clock
+		d.ptys = newFactorySeq(t, firstPTY, secondPTY)
+		WithStore(t, store)(d)
 
-	first, err := createSessionForTest(d, "0", true, "/tmp", ac.geometry.Size, terminalEnv{}, d.baseEnv)
-	require.NoError(t, err)
-	require.NoError(t, d.renameSession(first, "named"))
-	staleCreatedAt := first.createdAt
-	require.NotZero(t, staleCreatedAt)
-	require.NoError(t, d.killSession(first, protocol.ReasonSessionKilled, true))
-	d.sessWg.Wait()
+		first, err := createSessionForTest(d, "0", true, "/tmp", ac.geometry.Size, terminalEnv{}, d.baseEnv)
+		require.NoError(t, err)
+		require.NoError(t, d.renameSession(first, "named"))
+		staleCreatedAt := first.createdAt
+		require.NotZero(t, staleCreatedAt)
+		require.NoError(t, d.killSession(first, protocol.ReasonSessionKilled, true))
+		d.sessWg.Wait()
 
-	second, err := createSessionForTest(d, "0", true, "/tmp", ac.geometry.Size, terminalEnv{}, d.baseEnv)
-	require.NoError(t, err)
-	require.NoError(t, d.renameSession(second, "named"))
-	require.NotEqual(t, staleCreatedAt, second.createdAt)
+		second, err := createSessionForTest(d, "0", true, "/tmp", ac.geometry.Size, terminalEnv{}, d.baseEnv)
+		require.NoError(t, err)
+		require.NoError(t, d.renameSession(second, "named"))
+		require.NotEqual(t, staleCreatedAt, second.createdAt)
 
-	require.Error(t, d.switchToTarget(from, ac, picker.Target{Name: "named", TabIndex: -1, ExpectedCreatedAt: &staleCreatedAt}))
-	require.Same(t, from, ac.currentSession())
-	releaseSecond()
-	d.sessWg.Wait()
+		require.Error(t, d.switchToTarget(from, ac, picker.Target{Name: "named", TabIndex: -1, ExpectedCreatedAt: &staleCreatedAt}))
+		require.Same(t, from, ac.currentSession())
+		releaseSecond()
+		d.sessWg.Wait()
+	})
 }
 
 func TestEphemeralPromotionLifecycleFailuresLeaveStateRollbackSafe(t *testing.T) {
@@ -1333,221 +1394,245 @@ func TestEphemeralPromotionLifecycleFailuresLeaveStateRollbackSafe(t *testing.T)
 }
 
 func TestRefreshSessionCwdTouchesOnlyOnChange(t *testing.T) {
-	sz := domain.Size{Cols: 80, Rows: 24}
-	p, release := newBlockingPTY(t)
-	defer release()
-	store, state := newMockStore(t)
-	d := newTestDaemon(t, newFactory(t, p), newStubClock(t))
-	WithStore(t, store)(d)
-	cwd := "/tmp/work"
-	WithProcessInspector(&processInspectorFake{cwd: func(int) (string, error) { return cwd, nil }})(d)
+	synctest.Test(t, func(t *testing.T) {
+		sz := domain.Size{Cols: 80, Rows: 24}
+		p, release := newBlockingPTY(t)
+		defer release()
+		store, state := newMockStore(t)
+		d := newTestDaemon(t, newFactory(t, p), newStubClock(t))
+		WithStore(t, store)(d)
+		cwd := "/tmp/work"
+		WithProcessInspector(&processInspectorFake{cwd: func(int) (string, error) { return cwd, nil }})(d)
 
-	sess, err := createSessionForTest(d, "work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
-	require.NoError(t, err)
-	state.mu.Lock()
-	setsAfterCreate := state.sets
-	state.mu.Unlock()
+		sess, err := createSessionForTest(d, "work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
+		require.NoError(t, err)
+		state.mu.Lock()
+		setsAfterCreate := state.sets
+		state.mu.Unlock()
 
-	d.refreshSessionCwd(sess)
-	state.mu.Lock()
-	require.Equal(t, setsAfterCreate, state.sets)
-	state.mu.Unlock()
+		d.refreshSessionCwd(sess)
+		state.mu.Lock()
+		require.Equal(t, setsAfterCreate, state.sets)
+		state.mu.Unlock()
 
-	cwd = "/tmp/next"
-	d.refreshSessionCwd(sess)
-	state.mu.Lock()
-	require.Equal(t, setsAfterCreate+1, state.sets)
-	state.mu.Unlock()
+		cwd = "/tmp/next"
+		d.refreshSessionCwd(sess)
+		state.mu.Lock()
+		require.Equal(t, setsAfterCreate+1, state.sets)
+		state.mu.Unlock()
+	})
 }
 
 func TestAttachResumesStoppedSessionFromStoredCwd(t *testing.T) {
-	sz := domain.Size{Cols: 80, Rows: 24}
-	p, release := newBlockingPTY(t)
-	defer release()
-	store, _ := newMockStore(t)
-	d := newTestDaemon(t, newFactory(t, p), newStubClock(t))
-	WithStore(t, store)(d)
-	cwd := t.TempDir()
-	d.inactive["work"] = inactiveSession{name: "work", cwd: cwd, createdAt: 1, state: protocol.SessionDown}
-	tr := newMockServerConnection(t)
-	tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
-	tr.EXPECT().Close().Return(nil).Maybe()
+	synctest.Test(t, func(t *testing.T) {
+		sz := domain.Size{Cols: 80, Rows: 24}
+		p, release := newBlockingPTY(t)
+		defer release()
+		store, _ := newMockStore(t)
+		d := newTestDaemon(t, newFactory(t, p), newStubClock(t))
+		WithStore(t, store)(d)
+		cwd := t.TempDir()
+		d.inactive["work"] = inactiveSession{name: "work", cwd: cwd, createdAt: 1, state: protocol.SessionDown}
+		tr := newMockServerConnection(t)
+		tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
+		tr.EXPECT().Close().Return(nil).Maybe()
 
-	sess, ac, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: sz}, tr)
-	require.NoError(t, err)
-	require.NotNil(t, ac)
-	require.Equal(t, "work", sess.name)
-	require.Equal(t, cwd, sess.cwd)
-	d.mu.Lock()
-	_, stillStopped := d.inactive["work"]
-	d.mu.Unlock()
-	require.False(t, stillStopped)
+		sess, ac, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: sz}, tr)
+		require.NoError(t, err)
+		require.NotNil(t, ac)
+		require.Equal(t, "work", sess.name)
+		require.Equal(t, cwd, sess.cwd)
+		d.mu.Lock()
+		_, stillStopped := d.inactive["work"]
+		d.mu.Unlock()
+		require.False(t, stillStopped)
+	})
 }
 
 func TestAttachStoppedMissingCwdFallsBackToHome(t *testing.T) {
-	sz := domain.Size{Cols: 80, Rows: 24}
-	p, release := newBlockingPTY(t)
-	defer release()
-	store, _ := newMockStore(t)
-	d := newTestDaemon(t, newFactory(t, p), newStubClock(t))
-	WithStore(t, store)(d)
-	d.inactive["work"] = inactiveSession{name: "work", cwd: "/definitely/missing/vev", createdAt: 1, state: protocol.SessionDown}
-	tr := newMockServerConnection(t)
-	tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
-	tr.EXPECT().Close().Return(nil).Maybe()
+	synctest.Test(t, func(t *testing.T) {
+		sz := domain.Size{Cols: 80, Rows: 24}
+		p, release := newBlockingPTY(t)
+		defer release()
+		store, _ := newMockStore(t)
+		d := newTestDaemon(t, newFactory(t, p), newStubClock(t))
+		WithStore(t, store)(d)
+		d.inactive["work"] = inactiveSession{name: "work", cwd: "/definitely/missing/vev", createdAt: 1, state: protocol.SessionDown}
+		tr := newMockServerConnection(t)
+		tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
+		tr.EXPECT().Close().Return(nil).Maybe()
 
-	sess, _, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: sz}, tr)
-	require.NoError(t, err)
-	require.NotEqual(t, "/definitely/missing/vev", sess.cwd)
+		sess, _, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: sz}, tr)
+		require.NoError(t, err)
+		require.NotEqual(t, "/definitely/missing/vev", sess.cwd)
+	})
 }
 
 func TestPickerStoppedTargetKillPurges(t *testing.T) {
-	store, state := newMockStore(t)
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
-	WithStore(t, store)(d)
-	require.NoError(t, testPersister(t, d).Save(persist.Record{Name: "old", IncarnationID: domain.IncarnationID{1}, Cwd: "/tmp", CreatedAt: 1, UpdatedAt: 1}))
-	d.inactive["old"] = inactiveSession{name: "old", cwd: "/tmp", createdAt: 1, incarnation: domain.IncarnationID{1}}
-	require.NoError(t, d.killPickerTarget(picker.Target{Name: "old", Stopped: true}))
-	require.False(t, state.has("old"))
-	d.mu.Lock()
-	_, ok := d.inactive["old"]
-	d.mu.Unlock()
-	require.False(t, ok)
+	synctest.Test(t, func(t *testing.T) {
+		store, state := newMockStore(t)
+		d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
+		WithStore(t, store)(d)
+		require.NoError(t, testPersister(t, d).Save(persist.Record{Name: "old", IncarnationID: domain.IncarnationID{1}, Cwd: "/tmp", CreatedAt: 1, UpdatedAt: 1}))
+		d.inactive["old"] = inactiveSession{name: "old", cwd: "/tmp", createdAt: 1, incarnation: domain.IncarnationID{1}}
+		require.NoError(t, d.killPickerTarget(picker.Target{Name: "old", Stopped: true}))
+		require.False(t, state.has("old"))
+		d.mu.Lock()
+		_, ok := d.inactive["old"]
+		d.mu.Unlock()
+		require.False(t, ok)
+	})
 }
 
 func TestChildEnvEscapesLegacySessionName(t *testing.T) {
-	d := newTestDaemon(t, nil, newStubClock(t))
+	synctest.Test(t, func(t *testing.T) {
+		d := newTestDaemon(t, nil, newStubClock(t))
 
-	got := childEnvFrom(d.baseEnv, "legacy,name=value", "t_alpha", "p_beta")
+		got := childEnvFrom(d.baseEnv, "legacy,name=value", "t_alpha", "p_beta")
 
-	require.Contains(t, got, "VEV=session=legacy%2Cname%3Dvalue,tab=t_alpha,pane=p_beta")
+		require.Contains(t, got, "VEV=session=legacy%2Cname%3Dvalue,tab=t_alpha,pane=p_beta")
+	})
 }
 
 func TestNewSessionAssignsStableIDsAndChildEnv(t *testing.T) {
-	sz := domain.Size{Cols: 80, Rows: 24}
-	p, releasePTY := newBlockingPTY(t)
-	defer releasePTY()
+	synctest.Test(t, func(t *testing.T) {
+		sz := domain.Size{Cols: 80, Rows: 24}
+		p, releasePTY := newBlockingPTY(t)
+		defer releasePTY()
 
-	var gotEnv []string
-	f := portsmocks.NewMockPTYFactory(t)
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
-		func(_ context.Context, _ string, _ []string, env []string, _ string, _ domain.Geometry) (ports.PTY, error) {
-			gotEnv = append([]string(nil), env...)
-			return p, nil
-		},
-	).Once()
-	d := newTestDaemon(t, f, newStubClock(t))
-	d.baseEnv = []string{"KEEP=1", "TERM=old", "COLORTERM=old", "TERM_PROGRAM=old", "VEV=old"}
+		var gotEnv []string
+		f := portsmocks.NewMockPTYFactory(t)
+		f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+			func(_ context.Context, _ string, _ []string, env []string, _ string, _ domain.Geometry) (ports.PTY, error) {
+				gotEnv = append([]string(nil), env...)
+				return p, nil
+			},
+		).Once()
+		d := newTestDaemon(t, f, newStubClock(t))
+		d.baseEnv = []string{"KEEP=1", "TERM=old", "COLORTERM=old", "TERM_PROGRAM=old", "VEV=old"}
 
-	sess, err := createSessionForTest(d, "work", false, "/tmp/work", sz, terminalEnv{TrueColor: true}, d.baseEnv)
-	require.NoError(t, err)
-	defer func() {
-		_ = d.killSession(sess, protocol.ReasonServerShutdown, false)
-		releasePTY()
-		d.sessWg.Wait()
-	}()
+		sess, err := createSessionForTest(d, "work", false, "/tmp/work", sz, terminalEnv{TrueColor: true}, d.baseEnv)
+		require.NoError(t, err)
+		defer func() {
+			_ = d.killSession(sess, protocol.ReasonServerShutdown, false)
+			releasePTY()
+			d.sessWg.Wait()
+		}()
 
-	sess.mu.Lock()
-	require.Len(t, sess.tabs, 1)
-	tb := sess.tabs[0]
-	sess.mu.Unlock()
-	tb.mu.Lock()
-	paneStableID := tb.panes["pane-1"].stableID
-	tabStableID := tb.stableID
-	tb.mu.Unlock()
+		sess.mu.Lock()
+		require.Len(t, sess.tabs, 1)
+		tb := sess.tabs[0]
+		sess.mu.Unlock()
+		tb.mu.Lock()
+		paneStableID := tb.panes["pane-1"].stableID
+		tabStableID := tb.stableID
+		tb.mu.Unlock()
 
-	require.True(t, strings.HasPrefix(tabStableID, "t_"), tabStableID)
-	require.True(t, strings.HasPrefix(paneStableID, "p_"), paneStableID)
-	require.NotEqual(t, tabStableID, paneStableID)
-	require.Contains(t, gotEnv, "KEEP=1")
-	require.NotContains(t, gotEnv, "TERM=old")
-	require.NotContains(t, gotEnv, "COLORTERM=old")
-	require.NotContains(t, gotEnv, "TERM_PROGRAM=old")
-	require.NotContains(t, gotEnv, "VEV=old")
-	require.Contains(t, gotEnv, "TERM=xterm-256color")
-	require.Contains(t, gotEnv, "COLORTERM=truecolor")
-	require.Contains(t, gotEnv, "TERM_PROGRAM=vev")
-	require.Contains(t, gotEnv, "VEV=session=work,tab="+tabStableID+",pane="+paneStableID)
+		require.True(t, strings.HasPrefix(tabStableID, "t_"), tabStableID)
+		require.True(t, strings.HasPrefix(paneStableID, "p_"), paneStableID)
+		require.NotEqual(t, tabStableID, paneStableID)
+		require.Contains(t, gotEnv, "KEEP=1")
+		require.NotContains(t, gotEnv, "TERM=old")
+		require.NotContains(t, gotEnv, "COLORTERM=old")
+		require.NotContains(t, gotEnv, "TERM_PROGRAM=old")
+		require.NotContains(t, gotEnv, "VEV=old")
+		require.Contains(t, gotEnv, "TERM=xterm-256color")
+		require.Contains(t, gotEnv, "COLORTERM=truecolor")
+		require.Contains(t, gotEnv, "TERM_PROGRAM=vev")
+		require.Contains(t, gotEnv, "VEV=session=work,tab="+tabStableID+",pane="+paneStableID)
+	})
 }
 
 func TestIntentNewStoppedNameRejected(t *testing.T) {
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
-	d.inactive["taken"] = inactiveSession{name: "taken", cwd: "/tmp", createdAt: 1}
-	tr := newMockServerConnection(t)
-	_, _, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "taken", Size: domain.Size{Cols: 80, Rows: 24}}, tr)
-	require.ErrorContains(t, err, "name already in use")
+	synctest.Test(t, func(t *testing.T) {
+		d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
+		d.inactive["taken"] = inactiveSession{name: "taken", cwd: "/tmp", createdAt: 1}
+		tr := newMockServerConnection(t)
+		_, _, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "taken", Size: domain.Size{Cols: 80, Rows: 24}}, tr)
+		require.ErrorContains(t, err, "name already in use")
+	})
 }
 
 func TestIntentNewUnsafeNameRejected(t *testing.T) {
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
-	tr := newMockServerConnection(t)
-	_, _, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "my work", Size: domain.Size{Cols: 80, Rows: 24}}, tr)
-	require.ErrorContains(t, err, domain.ErrInvalidSessionName.Error())
+	synctest.Test(t, func(t *testing.T) {
+		d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
+		tr := newMockServerConnection(t)
+		_, _, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "my work", Size: domain.Size{Cols: 80, Rows: 24}}, tr)
+		require.ErrorContains(t, err, domain.ErrInvalidSessionName.Error())
+	})
 }
 
 func TestCreateSessionAndSwitchUnsafeNameRejected(t *testing.T) {
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
-	require.ErrorIs(t, d.createSessionAndSwitch(nil, nil, "my work"), domain.ErrInvalidSessionName)
+	synctest.Test(t, func(t *testing.T) {
+		d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
+		require.ErrorIs(t, d.createSessionAndSwitch(nil, nil, "my work"), domain.ErrInvalidSessionName)
+	})
 }
 
 func TestRenameSessionUnsafeNameRejected(t *testing.T) {
-	sz := domain.Size{Cols: 80, Rows: 24}
-	p, release := newBlockingPTY(t)
-	defer release()
-	d := newTestDaemon(t, newFactory(t, p), newStubClock(t))
-	sess, err := createSessionForTest(d, "work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
-	require.NoError(t, err)
-	require.ErrorIs(t, d.renameSession(sess, "my work"), domain.ErrInvalidSessionName)
+	synctest.Test(t, func(t *testing.T) {
+		sz := domain.Size{Cols: 80, Rows: 24}
+		p, release := newBlockingPTY(t)
+		defer release()
+		d := newTestDaemon(t, newFactory(t, p), newStubClock(t))
+		sess, err := createSessionForTest(d, "work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
+		require.NoError(t, err)
+		require.ErrorIs(t, d.renameSession(sess, "my work"), domain.ErrInvalidSessionName)
+	})
 }
 
 func TestCreateTabPtyFailureIsUserError(t *testing.T) {
-	sz := domain.Size{Cols: 80, Rows: 24}
-	p, release := newBlockingPTY(t)
-	defer release()
-	d := newTestDaemon(t, newFactory(t, p), newStubClock(t))
-	sess, err := createSessionForTest(d, "work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
-	require.NoError(t, err)
+	synctest.Test(t, func(t *testing.T) {
+		sz := domain.Size{Cols: 80, Rows: 24}
+		p, release := newBlockingPTY(t)
+		defer release()
+		d := newTestDaemon(t, newFactory(t, p), newStubClock(t))
+		sess, err := createSessionForTest(d, "work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
+		require.NoError(t, err)
 
-	cause := errors.New("fork/exec: no such file")
-	failing := portsmocks.NewMockPTYFactory(t)
-	failing.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil, cause).Once()
-	d.ptys = failing
+		cause := errors.New("fork/exec: no such file")
+		failing := portsmocks.NewMockPTYFactory(t)
+		failing.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil, cause).Once()
+		d.ptys = failing
 
-	err = d.createTab(sess, sz)
+		err = d.createTab(sess, sz)
 
-	var ue *domain.UserError
-	require.ErrorAs(t, err, &ue)
-	require.Equal(t, domain.NoticeTabSpawn, ue.Code)
-	require.Equal(t, domain.NoticeError, ue.Severity)
-	require.Equal(t, "couldn't open tab: shell failed to start", ue.Msg)
-	require.ErrorIs(t, err, cause)
-	require.NotContains(t, ue.Msg, cause.Error())
+		var ue *domain.UserError
+		require.ErrorAs(t, err, &ue)
+		require.Equal(t, domain.NoticeTabSpawn, ue.Code)
+		require.Equal(t, domain.NoticeError, ue.Severity)
+		require.Equal(t, "couldn't open tab: shell failed to start", ue.Msg)
+		require.ErrorIs(t, err, cause)
+		require.NotContains(t, ue.Msg, cause.Error())
+	})
 }
 
 func TestNaturalExitStoppedButExplicitKillPurges(t *testing.T) {
-	sz := domain.Size{Cols: 80, Rows: 24}
-	p1, release1 := newBlockingPTY(t)
-	defer release1()
-	p2, release2 := newBlockingPTY(t)
-	defer release2()
-	store, state := newMockStore(t)
-	d := newTestDaemon(t, newFactorySeq(t, p1, p2), newStubClock(t))
-	WithStore(t, store)(d)
-	WithProcessInspector(&processInspectorFake{cwd: func(int) (string, error) { return "/tmp/latest", nil }})(d)
+	synctest.Test(t, func(t *testing.T) {
+		sz := domain.Size{Cols: 80, Rows: 24}
+		p1, release1 := newBlockingPTY(t)
+		defer release1()
+		p2, release2 := newBlockingPTY(t)
+		defer release2()
+		store, state := newMockStore(t)
+		d := newTestDaemon(t, newFactorySeq(t, p1, p2), newStubClock(t))
+		WithStore(t, store)(d)
+		WithProcessInspector(&processInspectorFake{cwd: func(int) (string, error) { return "/tmp/latest", nil }})(d)
 
-	natural, err := createSessionForTest(d, "natural", false, "/tmp/old", sz, terminalEnv{}, d.baseEnv)
-	require.NoError(t, err)
-	other, err := createSessionForTest(d, "other", false, "/tmp/other", sz, terminalEnv{}, d.baseEnv)
-	require.NoError(t, err)
-	_ = d.killSession(natural, protocol.ReasonSessionKilled, false)
-	require.True(t, state.has("natural"))
-	d.mu.Lock()
-	stopped := d.inactive["natural"]
-	d.mu.Unlock()
-	require.Equal(t, "/tmp/latest", stopped.cwd)
+		natural, err := createSessionForTest(d, "natural", false, "/tmp/old", sz, terminalEnv{}, d.baseEnv)
+		require.NoError(t, err)
+		other, err := createSessionForTest(d, "other", false, "/tmp/other", sz, terminalEnv{}, d.baseEnv)
+		require.NoError(t, err)
+		_ = d.killSession(natural, protocol.ReasonSessionKilled, false)
+		require.True(t, state.has("natural"))
+		d.mu.Lock()
+		stopped := d.inactive["natural"]
+		d.mu.Unlock()
+		require.Equal(t, "/tmp/latest", stopped.cwd)
 
-	_ = d.killSession(other, protocol.ReasonSessionKilled, true)
-	require.False(t, state.has("other"))
+		_ = d.killSession(other, protocol.ReasonSessionKilled, true)
+		require.False(t, state.has("other"))
+	})
 }
 
 func TestChildEnvTrueColorCapability(t *testing.T) {
@@ -1581,237 +1666,256 @@ func TestChildEnvTrueColorCapability(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d := newTestDaemon(t, nil, newStubClock(t))
-			d.baseEnv = tt.baseEnv
+			synctest.Test(t, func(t *testing.T) {
+				d := newTestDaemon(t, nil, newStubClock(t))
+				d.baseEnv = tt.baseEnv
 
-			got := childEnvFrom(d.baseEnv, "work", "t_alpha", "p_beta")
+				got := childEnvFrom(d.baseEnv, "work", "t_alpha", "p_beta")
 
-			for _, want := range tt.wantContain {
-				require.Contains(t, got, want)
-			}
-			for _, notWant := range tt.wantNotContain {
-				require.NotContains(t, got, notWant)
-			}
+				for _, want := range tt.wantContain {
+					require.Contains(t, got, want)
+				}
+				for _, notWant := range tt.wantNotContain {
+					require.NotContains(t, got, notWant)
+				}
+			})
 		})
 	}
 }
 
 func TestAttachUpdatesFutureChildEnvTrueColor(t *testing.T) {
-	sz := domain.Size{Cols: 80, Rows: 24}
-	p1, release1 := newBlockingPTY(t)
-	defer release1()
-	p2, release2 := newBlockingPTY(t)
-	defer release2()
+	synctest.Test(t, func(t *testing.T) {
+		sz := domain.Size{Cols: 80, Rows: 24}
+		p1, release1 := newBlockingPTY(t)
+		defer release1()
+		p2, release2 := newBlockingPTY(t)
+		defer release2()
 
-	var opens [][]string
-	f := portsmocks.NewMockPTYFactory(t)
-	normalSize := domain.Size{Cols: sz.Cols, Rows: sz.Rows - 2}
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Geometry) bool { return got.Size == normalSize })).RunAndReturn(
-		func(_ context.Context, _ string, _ []string, env []string, _ string, _ domain.Geometry) (ports.PTY, error) {
-			opens = append(opens, append([]string(nil), env...))
-			if len(opens) == 1 {
-				return p1, nil
-			}
-			return p2, nil
-		},
-	).Twice()
-	floating := newQuietPTY(t)
-	expectFloatingPrewarmOpen(f, normalSize, floating)
+		var opens [][]string
+		f := portsmocks.NewMockPTYFactory(t)
+		normalSize := domain.Size{Cols: sz.Cols, Rows: sz.Rows - 2}
+		f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Geometry) bool { return got.Size == normalSize })).RunAndReturn(
+			func(_ context.Context, _ string, _ []string, env []string, _ string, _ domain.Geometry) (ports.PTY, error) {
+				opens = append(opens, append([]string(nil), env...))
+				if len(opens) == 1 {
+					return p1, nil
+				}
+				return p2, nil
+			},
+		).Twice()
+		floating := newQuietPTY(t)
+		expectFloatingPrewarmOpen(f, normalSize, floating)
 
-	d := newTestDaemon(t, f, newStubClock(t))
-	d.baseEnv = []string{"KEEP=1", "COLORTERM=old"}
-	tr := newMockServerConnection(t)
-	tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
-	tr.EXPECT().Close().Return(nil).Maybe()
-	sess, ac, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "work", Size: sz}, tr)
-	require.NoError(t, err)
-	defer func() {
-		_ = d.killSession(sess, protocol.ReasonServerShutdown, false)
-		d.sessWg.Wait()
-	}()
+		d := newTestDaemon(t, f, newStubClock(t))
+		d.baseEnv = []string{"KEEP=1", "COLORTERM=old"}
+		tr := newMockServerConnection(t)
+		tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
+		tr.EXPECT().Close().Return(nil).Maybe()
+		sess, ac, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "work", Size: sz}, tr)
+		require.NoError(t, err)
+		defer func() {
+			_ = d.killSession(sess, protocol.ReasonServerShutdown, false)
+			d.sessWg.Wait()
+		}()
 
-	require.Contains(t, opens[0], "TERM=xterm-256color")
-	require.Contains(t, opens[0], "COLORTERM=truecolor")
-	require.Contains(t, opens[0], "TERM_PROGRAM=vev")
-	require.NoError(t, d.createTab(sess, ac.geometry.Size))
-	require.Contains(t, opens[1], "TERM=xterm-256color")
-	require.Contains(t, opens[1], "COLORTERM=truecolor")
-	require.Contains(t, opens[1], "TERM_PROGRAM=vev")
+		require.Contains(t, opens[0], "TERM=xterm-256color")
+		require.Contains(t, opens[0], "COLORTERM=truecolor")
+		require.Contains(t, opens[0], "TERM_PROGRAM=vev")
+		require.NoError(t, d.createTab(sess, ac.geometry.Size))
+		require.Contains(t, opens[1], "TERM=xterm-256color")
+		require.Contains(t, opens[1], "COLORTERM=truecolor")
+		require.Contains(t, opens[1], "TERM_PROGRAM=vev")
+	})
 }
 
 func TestLiveAttachUpdatesFutureChildEnvTrueColor(t *testing.T) {
-	sz := domain.Size{Cols: 80, Rows: 24}
-	p1, release1 := newBlockingPTY(t)
-	defer release1()
-	p2, release2 := newBlockingPTY(t)
-	defer release2()
+	synctest.Test(t, func(t *testing.T) {
+		sz := domain.Size{Cols: 80, Rows: 24}
+		p1, release1 := newBlockingPTY(t)
+		defer release1()
+		p2, release2 := newBlockingPTY(t)
+		defer release2()
 
-	var opens [][]string
-	f := portsmocks.NewMockPTYFactory(t)
-	normalSize := domain.Size{Cols: sz.Cols, Rows: sz.Rows - 2}
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Geometry) bool { return got.Size == normalSize })).RunAndReturn(
-		func(_ context.Context, _ string, _ []string, env []string, _ string, _ domain.Geometry) (ports.PTY, error) {
-			opens = append(opens, append([]string(nil), env...))
-			if len(opens) == 1 {
-				return p1, nil
+		var opens [][]string
+		f := portsmocks.NewMockPTYFactory(t)
+		normalSize := domain.Size{Cols: sz.Cols, Rows: sz.Rows - 2}
+		f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Geometry) bool { return got.Size == normalSize })).RunAndReturn(
+			func(_ context.Context, _ string, _ []string, env []string, _ string, _ domain.Geometry) (ports.PTY, error) {
+				opens = append(opens, append([]string(nil), env...))
+				if len(opens) == 1 {
+					return p1, nil
+				}
+				return p2, nil
+			},
+		).Twice()
+		floating := newQuietPTY(t)
+		expectFloatingPrewarmOpen(f, normalSize, floating)
+
+		d := newTestDaemon(t, f, newStubClock(t))
+		tr1 := newMockServerConnection(t)
+		tr1.EXPECT().Send(mock.Anything).Return(nil).Maybe()
+		tr1.EXPECT().Close().Return(nil).Maybe()
+		tr2 := newMockServerConnection(t)
+		tr2.EXPECT().Send(mock.Anything).Return(nil).Maybe()
+		tr2.EXPECT().Close().Return(nil).Maybe()
+		sess, _, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "work", Size: sz, Color: terminalcap.ColorCapabilities{Mode: terminalcap.ANSI256, Source: terminalcap.SourceDeclared}}, tr1)
+		require.NoError(t, err)
+		_, ac, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: sz}, tr2)
+		require.NoError(t, err)
+		defer func() {
+			// A toast armed on the stub clock parks a timer goroutine; retire
+			// it so the bubble can exit.
+			for _, attached := range sess.snapshotAttachments() {
+				attached.overlays.noticeMu.Lock()
+				attached.overlays.noticeTimer.stop()
+				attached.overlays.noticeMu.Unlock()
 			}
-			return p2, nil
-		},
-	).Twice()
-	floating := newQuietPTY(t)
-	expectFloatingPrewarmOpen(f, normalSize, floating)
+			_ = d.killSession(sess, protocol.ReasonServerShutdown, false)
+			d.sessWg.Wait()
+		}()
 
-	d := newTestDaemon(t, f, newStubClock(t))
-	tr1 := newMockServerConnection(t)
-	tr1.EXPECT().Send(mock.Anything).Return(nil).Maybe()
-	tr1.EXPECT().Close().Return(nil).Maybe()
-	tr2 := newMockServerConnection(t)
-	tr2.EXPECT().Send(mock.Anything).Return(nil).Maybe()
-	tr2.EXPECT().Close().Return(nil).Maybe()
-	sess, _, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "work", Size: sz, Color: terminalcap.ColorCapabilities{Mode: terminalcap.ANSI256, Source: terminalcap.SourceDeclared}}, tr1)
-	require.NoError(t, err)
-	_, ac, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: sz}, tr2)
-	require.NoError(t, err)
-	defer func() {
-		_ = d.killSession(sess, protocol.ReasonServerShutdown, false)
-		d.sessWg.Wait()
-	}()
-
-	require.Contains(t, opens[0], "TERM=xterm-256color")
-	require.Contains(t, opens[0], "COLORTERM=truecolor")
-	require.NoError(t, d.createTab(sess, ac.geometry.Size))
-	require.Contains(t, opens[1], "TERM=xterm-256color")
-	require.Contains(t, opens[1], "COLORTERM=truecolor")
-	require.Contains(t, opens[1], "TERM_PROGRAM=vev")
+		require.Contains(t, opens[0], "TERM=xterm-256color")
+		require.Contains(t, opens[0], "COLORTERM=truecolor")
+		require.NoError(t, d.createTab(sess, ac.geometry.Size))
+		require.Contains(t, opens[1], "TERM=xterm-256color")
+		require.Contains(t, opens[1], "COLORTERM=truecolor")
+		require.Contains(t, opens[1], "TERM_PROGRAM=vev")
+	})
 }
 
 func TestCreateSessionAndSwitchInheritsTerminalEnv(t *testing.T) {
-	sz := domain.Size{Cols: 80, Rows: 24}
-	p1, release1 := newBlockingPTY(t)
-	defer release1()
-	p2, release2 := newBlockingPTY(t)
-	defer release2()
-	var opens [][]string
-	f := portsmocks.NewMockPTYFactory(t)
-	normalSize := domain.Size{Cols: sz.Cols, Rows: sz.Rows - 2}
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Geometry) bool { return got.Size == normalSize })).RunAndReturn(
-		func(_ context.Context, _ string, _ []string, env []string, _ string, _ domain.Geometry) (ports.PTY, error) {
-			opens = append(opens, append([]string(nil), env...))
-			if len(opens) == 1 {
-				return p1, nil
-			}
-			return p2, nil
-		},
-	).Twice()
-	floating := newQuietPTY(t)
-	expectFloatingPrewarmOpen(f, normalSize, floating)
-	d := newTestDaemon(t, f, newStubClock(t))
-	tr := newMockServerConnection(t)
-	tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
-	tr.EXPECT().Close().Return(nil).Maybe()
-	sess, ac, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "work", Size: sz}, tr)
-	require.NoError(t, err)
-	// The source coordinator is deliberately made pending so the switch must
-	// invalidate it rather than letting its stale callback render for ac.
-	sourceCoordinator := sess.renderCoordinator()
-	require.NotNil(t, sourceCoordinator)
-	sourceCoordinator.invalidate(renderInvalidation{class: invalidateOutput})
-	ac.sendMu.Lock()
-	ac.output.next = 3
-	ac.output.acked = 1
-	ac.sendMu.Unlock()
+	synctest.Test(t, func(t *testing.T) {
+		sz := domain.Size{Cols: 80, Rows: 24}
+		p1, release1 := newBlockingPTY(t)
+		defer release1()
+		p2, release2 := newBlockingPTY(t)
+		defer release2()
+		var opens [][]string
+		f := portsmocks.NewMockPTYFactory(t)
+		normalSize := domain.Size{Cols: sz.Cols, Rows: sz.Rows - 2}
+		f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Geometry) bool { return got.Size == normalSize })).RunAndReturn(
+			func(_ context.Context, _ string, _ []string, env []string, _ string, _ domain.Geometry) (ports.PTY, error) {
+				opens = append(opens, append([]string(nil), env...))
+				if len(opens) == 1 {
+					return p1, nil
+				}
+				return p2, nil
+			},
+		).Twice()
+		floating := newQuietPTY(t)
+		expectFloatingPrewarmOpen(f, normalSize, floating)
+		d := newTestDaemon(t, f, newStubClock(t))
+		tr := newMockServerConnection(t)
+		tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
+		tr.EXPECT().Close().Return(nil).Maybe()
+		sess, ac, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "work", Size: sz}, tr)
+		require.NoError(t, err)
+		// The source coordinator is deliberately made pending so the switch must
+		// invalidate it rather than letting its stale callback render for ac.
+		sourceCoordinator := sess.renderCoordinator()
+		require.NotNil(t, sourceCoordinator)
+		sourceCoordinator.invalidate(renderInvalidation{class: invalidateOutput})
+		ac.sendMu.Lock()
+		ac.output.next = 3
+		ac.output.acked = 1
+		ac.sendMu.Unlock()
 
-	require.NoError(t, d.createSessionAndSwitch(sess, ac, "next"))
-	got := ac.currentSession()
-	require.NotNil(t, got)
-	sourceCoordinator.mu.Lock()
-	require.Empty(t, sourceCoordinator.attachments, "source callbacks must be stale after handoff")
-	require.Empty(t, sourceCoordinator.leases, "source leases must be retired after handoff")
-	sourceCoordinator.mu.Unlock()
-	destinationCoordinator := got.renderCoordinator()
-	require.NotNil(t, destinationCoordinator, "destination coordinator precedes first paint")
-	destinationCoordinator.mu.Lock()
-	require.Contains(t, destinationCoordinator.attachments, ac)
-	lease := destinationCoordinator.leases[ac]
-	require.NotNil(t, lease)
-	require.Same(t, ac, lease.attachment)
-	destinationCoordinator.mu.Unlock()
-	ac.sendMu.Lock()
-	require.Equal(t, uint64(1), ac.output.next-ac.output.acked, "only the destination first paint may follow the rebase")
-	ac.sendMu.Unlock()
-	got.mu.Lock()
-	got.mu.Unlock()
-	require.Len(t, opens, 2)
-	require.Contains(t, opens[1], "TERM=xterm-256color")
-	require.Contains(t, opens[1], "COLORTERM=truecolor")
-	require.Contains(t, opens[1], "TERM_PROGRAM=vev")
-	_ = d.killSession(got, protocol.ReasonSessionKilled, false)
-	release1()
-	release2()
-	d.sessWg.Wait()
+		require.NoError(t, d.createSessionAndSwitch(sess, ac, "next"))
+		got := ac.currentSession()
+		require.NotNil(t, got)
+		sourceCoordinator.mu.Lock()
+		require.Empty(t, sourceCoordinator.attachments, "source callbacks must be stale after handoff")
+		require.Empty(t, sourceCoordinator.leases, "source leases must be retired after handoff")
+		sourceCoordinator.mu.Unlock()
+		destinationCoordinator := got.renderCoordinator()
+		require.NotNil(t, destinationCoordinator, "destination coordinator precedes first paint")
+		destinationCoordinator.mu.Lock()
+		require.Contains(t, destinationCoordinator.attachments, ac)
+		lease := destinationCoordinator.leases[ac]
+		require.NotNil(t, lease)
+		require.Same(t, ac, lease.attachment)
+		destinationCoordinator.mu.Unlock()
+		ac.sendMu.Lock()
+		require.Equal(t, uint64(1), ac.output.next-ac.output.acked, "only the destination first paint may follow the rebase")
+		ac.sendMu.Unlock()
+		got.mu.Lock()
+		got.mu.Unlock()
+		require.Len(t, opens, 2)
+		require.Contains(t, opens[1], "TERM=xterm-256color")
+		require.Contains(t, opens[1], "COLORTERM=truecolor")
+		require.Contains(t, opens[1], "TERM_PROGRAM=vev")
+		_ = d.killSession(got, protocol.ReasonSessionKilled, false)
+		release1()
+		release2()
+		d.sessWg.Wait()
+	})
 }
 
 func TestAttachEnvironmentRefreshesOnlySessionBoundFuturePTYInputs(t *testing.T) {
-	sz := domain.Size{Cols: 80, Rows: 24}
-	p1, release1 := newBlockingPTY(t)
-	defer release1()
-	p2, release2 := newBlockingPTY(t)
-	defer release2()
+	synctest.Test(t, func(t *testing.T) {
+		sz := domain.Size{Cols: 80, Rows: 24}
+		p1, release1 := newBlockingPTY(t)
+		defer release1()
+		p2, release2 := newBlockingPTY(t)
+		defer release2()
 
-	var commands []string
-	var envs [][]string
-	f := portsmocks.NewMockPTYFactory(t)
-	normalSize := domain.Size{Cols: sz.Cols, Rows: sz.Rows - 2}
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Geometry) bool { return got.Size == normalSize })).RunAndReturn(
-		func(_ context.Context, command string, _ []string, env []string, _ string, _ domain.Geometry) (ports.PTY, error) {
-			commands = append(commands, command)
-			envs = append(envs, append([]string(nil), env...))
-			if len(envs) == 1 {
-				return p1, nil
-			}
-			return p2, nil
-		},
-	).Twice()
-	floating := newQuietPTY(t)
-	expectFloatingPrewarmOpen(f, normalSize, floating)
-	d := newTestDaemon(t, f, newStubClock(t))
-	tr1 := newMockServerConnection(t)
-	tr1.EXPECT().Send(mock.Anything).Return(nil).Maybe()
-	tr1.EXPECT().Close().Return(nil).Maybe()
-	tr2 := newMockServerConnection(t)
-	tr2.EXPECT().Send(mock.Anything).Return(nil).Maybe()
-	tr2.EXPECT().Close().Return(nil).Maybe()
+		var commands []string
+		var envs [][]string
+		f := portsmocks.NewMockPTYFactory(t)
+		normalSize := domain.Size{Cols: sz.Cols, Rows: sz.Rows - 2}
+		f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Geometry) bool { return got.Size == normalSize })).RunAndReturn(
+			func(_ context.Context, command string, _ []string, env []string, _ string, _ domain.Geometry) (ports.PTY, error) {
+				commands = append(commands, command)
+				envs = append(envs, append([]string(nil), env...))
+				if len(envs) == 1 {
+					return p1, nil
+				}
+				return p2, nil
+			},
+		).Twice()
+		floating := newQuietPTY(t)
+		expectFloatingPrewarmOpen(f, normalSize, floating)
+		d := newTestDaemon(t, f, newStubClock(t))
+		tr1 := newMockServerConnection(t)
+		tr1.EXPECT().Send(mock.Anything).Return(nil).Maybe()
+		tr1.EXPECT().Close().Return(nil).Maybe()
+		tr2 := newMockServerConnection(t)
+		tr2.EXPECT().Send(mock.Anything).Return(nil).Maybe()
+		tr2.EXPECT().Close().Return(nil).Maybe()
 
-	first := []string{"SECRET=first", "TERM=bad", "TERM_PROGRAM_extra=keep", "SHELL=/usr/bin/fish", "A=a=b", "WAYLAND_DISPLAY=wayland-1", "SSH_AUTH_SOCK=/run/first-agent"}
-	sess, _, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "work", Size: sz, Env: first}, tr1)
-	require.NoError(t, err)
-	second := []string{"SECRET=second", "TERM=bad", "TERM_PROGRAM_extra=keep", "SHELL=/bin/bash", "A=a=b", "DISPLAY=:0"}
-	_, ac, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: sz, Env: second}, tr2)
-	require.NoError(t, err)
-	defer func() {
-		_ = d.killSession(sess, protocol.ReasonServerShutdown, false)
-		d.sessWg.Wait()
-	}()
+		first := []string{"SECRET=first", "TERM=bad", "TERM_PROGRAM_extra=keep", "SHELL=/usr/bin/fish", "A=a=b", "WAYLAND_DISPLAY=wayland-1", "SSH_AUTH_SOCK=/run/first-agent"}
+		sess, _, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "work", Size: sz, Env: first}, tr1)
+		require.NoError(t, err)
+		second := []string{"SECRET=second", "TERM=bad", "TERM_PROGRAM_extra=keep", "SHELL=/bin/bash", "A=a=b", "DISPLAY=:0"}
+		_, ac, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: sz, Env: second}, tr2)
+		require.NoError(t, err)
+		defer func() {
+			_ = d.killSession(sess, protocol.ReasonServerShutdown, false)
+			d.sessWg.Wait()
+		}()
 
-	require.Equal(t, "/usr/bin/fish", commands[0])
-	require.Equal(t, []string{"SECRET=first", "TERM_PROGRAM_extra=keep", "SHELL=/usr/bin/fish", "A=a=b", "WAYLAND_DISPLAY=wayland-1", "SSH_AUTH_SOCK=/run/first-agent", "TERM=xterm-256color", "COLORTERM=truecolor", "TERM_PROGRAM=vev", "VEV=session=work,tab=" + sess.tabs[0].stableID + ",pane=" + sess.tabs[0].panes["pane-1"].stableID}, envs[0])
-	require.Equal(t, "fish", sess.tabs[0].focusedPaneTitle(false), "the initial tab title identifies the shell requested by its creator")
-	require.NoError(t, d.createTab(sess, ac.geometry.Size))
-	// Only session-bound variables follow the attaching client: the X11-only
-	// display group replaces the Wayland one, the absent agent socket is
-	// removed, and the creator's shell and ordinary variables stay.
-	require.Equal(t, "/usr/bin/fish", commands[1])
-	require.Equal(t, []string{"SECRET=first", "TERM_PROGRAM_extra=keep", "SHELL=/usr/bin/fish", "A=a=b", "DISPLAY=:0", "TERM=xterm-256color", "COLORTERM=truecolor", "TERM_PROGRAM=vev", "VEV=session=work,tab=" + sess.tabs[1].stableID + ",pane=" + sess.tabs[1].panes["pane-1"].stableID}, envs[1])
-	require.Equal(t, "fish", sess.tabs[1].focusedPaneTitle(false), "later tabs keep the session creator's shell")
+		require.Equal(t, "/usr/bin/fish", commands[0])
+		require.Equal(t, []string{"SECRET=first", "TERM_PROGRAM_extra=keep", "SHELL=/usr/bin/fish", "A=a=b", "WAYLAND_DISPLAY=wayland-1", "SSH_AUTH_SOCK=/run/first-agent", "TERM=xterm-256color", "COLORTERM=truecolor", "TERM_PROGRAM=vev", "VEV=session=work,tab=" + sess.tabs[0].stableID + ",pane=" + sess.tabs[0].panes["pane-1"].stableID}, envs[0])
+		require.Equal(t, "fish", sess.tabs[0].focusedPaneTitle(false), "the initial tab title identifies the shell requested by its creator")
+		require.NoError(t, d.createTab(sess, ac.geometry.Size))
+		// Only session-bound variables follow the attaching client: the X11-only
+		// display group replaces the Wayland one, the absent agent socket is
+		// removed, and the creator's shell and ordinary variables stay.
+		require.Equal(t, "/usr/bin/fish", commands[1])
+		require.Equal(t, []string{"SECRET=first", "TERM_PROGRAM_extra=keep", "SHELL=/usr/bin/fish", "A=a=b", "DISPLAY=:0", "TERM=xterm-256color", "COLORTERM=truecolor", "TERM_PROGRAM=vev", "VEV=session=work,tab=" + sess.tabs[1].stableID + ",pane=" + sess.tabs[1].panes["pane-1"].stableID}, envs[1])
+		require.Equal(t, "fish", sess.tabs[1].focusedPaneTitle(false), "later tabs keep the session creator's shell")
+	})
 }
 
 func TestChildEnvFromPreservesNonReservedEntriesVerbatimAndInOrder(t *testing.T) {
-	env := []string{"SECRET=a=b=c", "TERM_PROGRAM_extra=keep", "TERM", "TERM=old", "COLORTERM=old", "TERM_PROGRAM=old", "VEV=old", "EMPTY="}
-	got := childEnvFrom(env, "work", "tab", "pane")
-	require.Equal(t, []string{
-		"SECRET=a=b=c", "TERM_PROGRAM_extra=keep", "TERM", "EMPTY=",
-		"TERM=xterm-256color", "COLORTERM=truecolor", "TERM_PROGRAM=vev", "VEV=session=work,tab=tab,pane=pane",
-	}, got)
+	synctest.Test(t, func(t *testing.T) {
+		env := []string{"SECRET=a=b=c", "TERM_PROGRAM_extra=keep", "TERM", "TERM=old", "COLORTERM=old", "TERM_PROGRAM=old", "VEV=old", "EMPTY="}
+		got := childEnvFrom(env, "work", "tab", "pane")
+		require.Equal(t, []string{
+			"SECRET=a=b=c", "TERM_PROGRAM_extra=keep", "TERM", "EMPTY=",
+			"TERM=xterm-256color", "COLORTERM=truecolor", "TERM_PROGRAM=vev", "VEV=session=work,tab=tab,pane=pane",
+		}, got)
+	})
 }
 
 func TestShellFromEnvironmentFallsBackOnlyWhenAbsentOrEmpty(t *testing.T) {
@@ -1827,7 +1931,9 @@ func TestShellFromEnvironmentFallsBackOnlyWhenAbsentOrEmpty(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.want, shellFromEnvironment(tt.env))
+			synctest.Test(t, func(t *testing.T) {
+				require.Equal(t, tt.want, shellFromEnvironment(tt.env))
+			})
 		})
 	}
 }
@@ -1851,114 +1957,124 @@ func newLifecycleClock(t testing.TB, nows ...time.Time) *portsmocks.MockClock {
 }
 
 func TestNamedSessionLifecycleTimestampsAreMonotonicAcrossClockRegression(t *testing.T) {
-	ptys := make([]ports.PTY, 3)
-	var releases []func()
-	for i := range ptys {
-		p, release := newBlockingPTY(t)
-		ptys[i] = p
-		releases = append(releases, release)
-	}
-	defer releaseAll(releases)
-	clock := newLifecycleClock(t, time.Unix(0, 100), time.Unix(0, 100), time.Unix(0, 50))
-	d := newTestDaemon(t, newFactorySeq(t, ptys...), clock)
-	sz := domain.Size{Cols: 80, Rows: 24}
+	synctest.Test(t, func(t *testing.T) {
+		ptys := make([]ports.PTY, 3)
+		var releases []func()
+		for i := range ptys {
+			p, release := newBlockingPTY(t)
+			ptys[i] = p
+			releases = append(releases, release)
+		}
+		defer releaseAll(releases)
+		clock := newLifecycleClock(t, time.Unix(0, 100), time.Unix(0, 100), time.Unix(0, 50))
+		d := newTestDaemon(t, newFactorySeq(t, ptys...), clock)
+		sz := domain.Size{Cols: 80, Rows: 24}
 
-	var got []int64
-	for _, name := range []string{"one", "two", "three"} {
-		sess, err := createSessionForTest(d, name, false, "/tmp", sz, terminalEnv{}, d.baseEnv)
-		require.NoError(t, err)
-		got = append(got, sess.createdAt)
-	}
-	require.Equal(t, []int64{100, 101, 102}, got)
+		var got []int64
+		for _, name := range []string{"one", "two", "three"} {
+			sess, err := createSessionForTest(d, name, false, "/tmp", sz, terminalEnv{}, d.baseEnv)
+			require.NoError(t, err)
+			got = append(got, sess.createdAt)
+		}
+		require.Equal(t, []int64{100, 101, 102}, got)
+	})
 }
 
 func TestNamedSessionLifecycleExhaustionDoesNotMutateSessionState(t *testing.T) {
-	d := newTestDaemon(t, nil, newStubClock(t))
-	d.lastAllocatedCreatedAt = math.MaxInt64
-	d.nextID = 17
-	d.inactive["retained"] = inactiveSession{name: "retained", cwd: "/tmp", createdAt: 9}
+	synctest.Test(t, func(t *testing.T) {
+		d := newTestDaemon(t, nil, newStubClock(t))
+		d.lastAllocatedCreatedAt = math.MaxInt64
+		d.nextID = 17
+		d.inactive["retained"] = inactiveSession{name: "retained", cwd: "/tmp", createdAt: 9}
 
-	sess, err := createSessionForTest(d, "new", false, "/tmp", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, d.baseEnv)
+		sess, err := createSessionForTest(d, "new", false, "/tmp", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, d.baseEnv)
 
-	require.ErrorContains(t, err, "lifecycle identities exhausted")
-	require.Nil(t, sess)
-	require.Empty(t, d.sessions)
-	require.Equal(t, uint64(17), d.nextID)
-	require.Equal(t, int64(math.MaxInt64), d.lastAllocatedCreatedAt)
-	require.Equal(t, inactiveSession{name: "retained", cwd: "/tmp", createdAt: 9}, d.inactive["retained"])
+		require.ErrorContains(t, err, "lifecycle identities exhausted")
+		require.Nil(t, sess)
+		require.Empty(t, d.sessions)
+		require.Equal(t, uint64(17), d.nextID)
+		require.Equal(t, int64(math.MaxInt64), d.lastAllocatedCreatedAt)
+		require.Equal(t, inactiveSession{name: "retained", cwd: "/tmp", createdAt: 9}, d.inactive["retained"])
 
-	_, _, err = d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "routed", Size: domain.Size{Cols: 80, Rows: 24}}, nil)
-	require.ErrorContains(t, err, "lifecycle identities exhausted")
-	require.Empty(t, d.sessions)
-	require.Equal(t, uint64(17), d.nextID)
-	require.Equal(t, inactiveSession{name: "retained", cwd: "/tmp", createdAt: 9}, d.inactive["retained"])
+		_, _, err = d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "routed", Size: domain.Size{Cols: 80, Rows: 24}}, nil)
+		require.ErrorContains(t, err, "lifecycle identities exhausted")
+		require.Empty(t, d.sessions)
+		require.Equal(t, uint64(17), d.nextID)
+		require.Equal(t, inactiveSession{name: "retained", cwd: "/tmp", createdAt: 9}, d.inactive["retained"])
+	})
 }
 
 func TestCatalogueRecordsConstructExpectedSessionRegistry(t *testing.T) {
-	alphaRef := &domain.CheckpointRef{Generation: 1, ManifestDigest: [32]byte{1}}
-	workRef := &domain.CheckpointRef{Generation: 2, ManifestDigest: [32]byte{2}}
-	records := []domain.CatalogueRecord{
-		{Name: "alpha", IncarnationID: domain.IncarnationID{1}, Cwd: "/tmp/alpha", CreatedAt: 7, LastUsedSeq: 11, TabNames: []string{"shell"}, Committed: alphaRef},
-		{Name: "work", IncarnationID: domain.IncarnationID{2}, Cwd: "/tmp/work", CreatedAt: 9, LastUsedSeq: 13, TabNames: []string{"editor", "logs"}, Committed: workRef, DegradedReason: "uncertain legacy checkpoint"},
-	}
+	synctest.Test(t, func(t *testing.T) {
+		alphaRef := &domain.CheckpointRef{Generation: 1, ManifestDigest: [32]byte{1}}
+		workRef := &domain.CheckpointRef{Generation: 2, ManifestDigest: [32]byte{2}}
+		records := []domain.CatalogueRecord{
+			{Name: "alpha", IncarnationID: domain.IncarnationID{1}, Cwd: "/tmp/alpha", CreatedAt: 7, LastUsedSeq: 11, TabNames: []string{"shell"}, Committed: alphaRef},
+			{Name: "work", IncarnationID: domain.IncarnationID{2}, Cwd: "/tmp/work", CreatedAt: 9, LastUsedSeq: 13, TabNames: []string{"editor", "logs"}, Committed: workRef, DegradedReason: "uncertain legacy checkpoint"},
+		}
 
-	d := New(nil, newStubClock(t), slog.New(slog.NewTextHandler(io.Discard, nil)), WithCatalogue(persist.New(nil), records))
+		d := New(nil, newStubClock(t), slog.New(slog.NewTextHandler(io.Discard, nil)), WithCatalogue(persist.New(nil), records))
 
-	alpha := d.inactive["alpha"]
-	require.Equal(t, records[0], alpha.record)
-	require.Equal(t, protocol.SessionDown, alpha.state)
-	require.NotNil(t, alpha.restoreDone)
-	select {
-	case <-alpha.restoreDone:
-		t.Fatal("healthy catalogue record must begin in restoring state")
-	default:
-	}
-	work := d.inactive["work"]
-	require.Equal(t, records[1], work.record)
-	require.Equal(t, protocol.SessionBroken, work.state)
-	require.NotNil(t, work.restoreDone)
-	select {
-	case <-work.restoreDone:
-	default:
-		t.Fatal("degraded catalogue record must not wait for restoration")
-	}
-	require.Equal(t, int64(9), d.lastAllocatedCreatedAt)
-	require.Equal(t, uint64(13), d.mruSeq.Load())
+		alpha := d.inactive["alpha"]
+		require.Equal(t, records[0], alpha.record)
+		require.Equal(t, protocol.SessionDown, alpha.state)
+		require.NotNil(t, alpha.restoreDone)
+		select {
+		case <-alpha.restoreDone:
+			t.Fatal("healthy catalogue record must begin in restoring state")
+		default:
+		}
+		work := d.inactive["work"]
+		require.Equal(t, records[1], work.record)
+		require.Equal(t, protocol.SessionBroken, work.state)
+		require.NotNil(t, work.restoreDone)
+		select {
+		case <-work.restoreDone:
+		default:
+			t.Fatal("degraded catalogue record must not wait for restoration")
+		}
+		require.Equal(t, int64(9), d.lastAllocatedCreatedAt)
+		require.Equal(t, uint64(13), d.mruSeq.Load())
+	})
 }
 
 func TestNamedSessionLifecycleTimestampStartsAfterPersistedHighWaterMark(t *testing.T) {
-	store, _ := newMockStore(t)
-	seed := New(nil, newStubClock(t), slog.New(slog.NewTextHandler(io.Discard, nil)), WithStore(t, store))
-	require.NoError(t, testPersister(t, seed).Save(persist.Record{Name: "old", IncarnationID: domain.IncarnationID{1}, Cwd: "/tmp", CreatedAt: 900, UpdatedAt: 900}))
+	synctest.Test(t, func(t *testing.T) {
+		store, _ := newMockStore(t)
+		seed := New(nil, newStubClock(t), slog.New(slog.NewTextHandler(io.Discard, nil)), WithStore(t, store))
+		require.NoError(t, testPersister(t, seed).Save(persist.Record{Name: "old", IncarnationID: domain.IncarnationID{1}, Cwd: "/tmp", CreatedAt: 900, UpdatedAt: 900}))
 
-	p, release := newBlockingPTY(t)
-	defer release()
-	clock := newLifecycleClock(t, time.Unix(0, 100))
-	// Constructing with persistence must establish the lifecycle high-water mark.
-	d := New(newFactory(t, p), clock, slog.New(slog.NewTextHandler(io.Discard, nil)), WithStore(t, store))
-	d.serveCtx, d.serveCancel = context.WithCancel(context.Background())
-	t.Cleanup(d.serveCancel)
+		p, release := newBlockingPTY(t)
+		defer release()
+		clock := newLifecycleClock(t, time.Unix(0, 100))
+		// Constructing with persistence must establish the lifecycle high-water mark.
+		d := New(newFactory(t, p), clock, slog.New(slog.NewTextHandler(io.Discard, nil)), WithStore(t, store))
+		d.serveCtx, d.serveCancel = context.WithCancel(context.Background())
+		t.Cleanup(d.serveCancel)
 
-	sess, err := createSessionForTest(d, "new", false, "/tmp", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, d.baseEnv)
-	require.NoError(t, err)
-	require.Equal(t, int64(901), sess.createdAt)
+		sess, err := createSessionForTest(d, "new", false, "/tmp", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, d.baseEnv)
+		require.NoError(t, err)
+		require.Equal(t, int64(901), sess.createdAt)
+	})
 }
 
 func TestResumingStoppedSessionPreservesLifecycleIdentityInPersistence(t *testing.T) {
-	fromPTY, releaseFrom := newBlockingPTY(t)
-	targetPTY, releaseTarget := newBlockingPTY(t)
-	defer releaseFrom()
-	defer releaseTarget()
-	d, from, ac, _ := newManualSessionWithPTYs(t, fromPTY)
-	store, state := newMockStore(t)
-	WithStore(t, store)(d)
-	d.ptys = newFactory(t, targetPTY)
-	d.inactive["stopped"] = inactiveSession{name: "stopped", cwd: "/tmp", createdAt: 77, state: protocol.SessionDown}
+	synctest.Test(t, func(t *testing.T) {
+		fromPTY, releaseFrom := newBlockingPTY(t)
+		targetPTY, releaseTarget := newBlockingPTY(t)
+		defer releaseFrom()
+		defer releaseTarget()
+		d, from, ac, _ := newManualSessionWithPTYs(t, fromPTY)
+		store, state := newMockStore(t)
+		WithStore(t, store)(d)
+		d.ptys = newFactory(t, targetPTY)
+		d.inactive["stopped"] = inactiveSession{name: "stopped", cwd: "/tmp", createdAt: 77, state: protocol.SessionDown}
 
-	require.True(t, d.resumeStoppedAndSwitch(from, ac, picker.Target{Name: "stopped", Stopped: true}))
-	resumed := ac.currentSession()
-	require.Equal(t, int64(77), resumed.createdAt)
-	require.Equal(t, int64(77), state.record(t, "stopped").CreatedAt)
+		require.True(t, d.resumeStoppedAndSwitch(from, ac, picker.Target{Name: "stopped", Stopped: true}))
+		resumed := ac.currentSession()
+		require.Equal(t, int64(77), resumed.createdAt)
+		require.Equal(t, int64(77), state.record(t, "stopped").CreatedAt)
+	})
 }
 
 func TestLifecycleExpectedTargetChecksAreAtomicAcrossStateTransitions(t *testing.T) {
