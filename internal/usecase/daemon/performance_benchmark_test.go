@@ -960,38 +960,56 @@ type performanceMetrics struct {
 	frameGapEpochs           uint64
 }
 
-// performanceClock makes transition latency a reproducible counter rather
-// than a wall-clock observation. A nil timer channel deliberately executes
-// coordinator work synchronously.
-type performanceClock struct {
+// performanceClockState makes transition latency a reproducible counter rather
+// than a wall-clock observation: every reading advances one microsecond. It is
+// a plain state holder behind a generated MockClock.
+type performanceClockState struct {
 	mu  sync.Mutex
 	now time.Time
 }
 
-func (c *performanceClock) Now() time.Time {
+func (c *performanceClockState) tick() time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.now = c.now.Add(time.Microsecond)
 	return c.now
 }
-func (*performanceClock) NewTimer(time.Duration) ports.Timer { return performanceTimer{} }
 
+// performanceClock is the clock for the fixture.
+//
+// It stays hand-written, like countingOutputTransport: the allocation-budget
+// tests (TestLivePaintAllocationBudget, TestCopyEnterAllocationBudget) count
+// allocations per paint and the paint path reads Now(), so a generated testify
+// mock (which allocates on every Called) pushes them far past their budgets
+// (measured: 661 vs 216 for copy entry). A nil timer channel deliberately
+// executes coordinator work synchronously.
+//
+//testpolicy:double allocation-budget clock; a generated mock swamps the measured budget
+type performanceClock struct{ state *performanceClockState }
+
+func (c performanceClock) Now() time.Time { return c.state.tick() }
+func (performanceClock) NewTimer(time.Duration) ports.Timer {
+	return performanceTimer{}
+}
+
+//testpolicy:double allocation-budget timer; see performanceClock
 type performanceTimer struct{}
 
 func (performanceTimer) C() <-chan time.Time      { return nil }
 func (performanceTimer) Reset(time.Duration) bool { return true }
 func (performanceTimer) Stop() bool               { return true }
 
-// scriptedPerformancePTY records every requested terminal size and returns a
-// caller-provided error script. It has no reads or scheduling side effects.
-type scriptedPerformancePTY struct {
+// performancePTYState records every requested terminal size and returns a
+// caller-provided error script. It backs a MockPTY with no reads or scheduling
+// side effects.
+type performancePTYState struct {
 	mu    sync.Mutex
 	sizes []domain.Size
 	errs  []error
 	fails uint64
 }
 
-func (p *scriptedPerformancePTY) Resize(geometry domain.Geometry) error {
+func (p *performancePTYState) resize(geometry domain.Geometry) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.sizes = append(p.sizes, geometry.Size)
@@ -1002,22 +1020,31 @@ func (p *scriptedPerformancePTY) Resize(geometry domain.Geometry) error {
 	}
 	return nil
 }
-func (*scriptedPerformancePTY) Read([]byte) (int, error)     { return 0, io.EOF }
-func (*scriptedPerformancePTY) Write(b []byte) (int, error)  { return len(b), nil }
-func (*scriptedPerformancePTY) Close() error                 { return nil }
-func (*scriptedPerformancePTY) Pid() int                     { return 0 }
-func (*scriptedPerformancePTY) ForegroundPgid() (int, error) { return 0, nil }
-func (p *scriptedPerformancePTY) requested() []domain.Size {
+
+func newScriptedPerformancePTY(t testing.TB) (*portsmocks.MockPTY, *performancePTYState) {
+	t.Helper()
+	state := &performancePTYState{}
+	p := portsmocks.NewMockPTY(t)
+	p.EXPECT().Resize(mock.Anything).RunAndReturn(state.resize).Maybe()
+	p.EXPECT().Read(mock.Anything).Return(0, io.EOF).Maybe()
+	p.EXPECT().Write(mock.Anything).RunAndReturn(func(b []byte) (int, error) { return len(b), nil }).Maybe()
+	p.EXPECT().Close().Return(nil).Maybe()
+	p.EXPECT().Pid().Return(0).Maybe()
+	p.EXPECT().ForegroundPgid().Return(0, nil).Maybe()
+	return p, state
+}
+
+func (p *performancePTYState) requested() []domain.Size {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return append([]domain.Size(nil), p.sizes...)
 }
-func (p *scriptedPerformancePTY) metrics() (uint64, uint64) {
+func (p *performancePTYState) metrics() (uint64, uint64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.fails, uint64(len(p.sizes))
 }
-func (p *scriptedPerformancePTY) setErrors(errs []error) {
+func (p *performancePTYState) setErrors(errs []error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.errs = append([]error(nil), errs...)
@@ -1038,8 +1065,8 @@ type performanceFixture struct {
 	resizeSizes         [2]domain.Size
 	resizes             int
 	resizedSize         domain.Size
-	pty                 *scriptedPerformancePTY
-	clock               *performanceClock
+	pty                 *performancePTYState
+	clock               *performanceClockState
 	killSession         func(*session, uint8, bool) error
 	resizeRequests      uint64
 	resizeCommits       uint64
@@ -1071,12 +1098,12 @@ func newPerformanceFixtureWithCleanup(t testing.TB, config performanceConfig, re
 	if config.historyRows == 0 {
 		config.historyRows = 1
 	}
-	pty := &scriptedPerformancePTY{}
+	ptyMock, pty := newScriptedPerformancePTY(t)
 	ptys := make([]ports.PTY, config.tabs)
-	ptys[0] = pty
+	ptys[0] = ptyMock
 	d, sess, ac, _ := newManualSessionWithPTYsCleanup(t, registerCleanup, ptys...)
-	clock := &performanceClock{}
-	d.clock = clock
+	clock := &performanceClockState{}
+	d.clock = performanceClock{state: clock}
 	output := &countingOutputTransport{}
 	ac.tr = output
 	ac.geometry.Size = config.size
@@ -1276,7 +1303,7 @@ func (f *performanceFixture) resizeTo(size domain.Size) {
 	f.resizedSize = size
 	f.resizes++
 	before := f.sess.renderCoordinator().resizeSnapshot()
-	start := f.clock.Now()
+	start := f.clock.tick()
 	failuresBefore, callsBefore := f.pty.metrics()
 	f.d.resize(f.sess, f.ac, size)
 	after := f.sess.renderCoordinator().resizeSnapshot()
@@ -1285,7 +1312,7 @@ func (f *performanceFixture) resizeTo(size domain.Size) {
 	}
 	if after.committed > before.committed {
 		f.resizeCommits += after.committed - before.committed
-		f.resizeCommitNanos += uint64(f.clock.Now().Sub(start).Nanoseconds())
+		f.resizeCommitNanos += uint64(f.clock.tick().Sub(start).Nanoseconds())
 	}
 	failuresAfter, callsAfter := f.pty.metrics()
 	f.ptyFailures += failuresAfter - failuresBefore
@@ -1380,6 +1407,8 @@ type countingOutputMetrics struct{ frames, bytes, payloadBytes uint64 }
 // TestCopyEnterAllocationBudget) count allocations per paint, and a generated
 // testify mock allocates on every Called, which would swamp the budget. It adds
 // no behavior beyond counting Output frames.
+//
+//testpolicy:double allocation-budget counter; a generated mock would swamp the measured budget
 type countingOutputTransport struct {
 	mu sync.Mutex
 	countingOutputMetrics
