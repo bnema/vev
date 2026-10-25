@@ -112,6 +112,11 @@ packages:
           dir: internal/usecase/client
           filename: picker_presentation_host_mock_test.go
           pkgname: client
+      pickerHost:
+        config:
+          dir: internal/usecase/client
+          filename: picker_host_mock_test.go
+          pkgname: client
   github.com/bnema/vev/internal/usecase/command:
     interfaces:
       Context:
