@@ -208,9 +208,8 @@ func TestSubscribePublishesSnapshot(t *testing.T) {
 	t.Cleanup(sub.Close)
 
 	snapshot := e.publish(e.epoch, 7)
-	require.Eventually(t, func() bool {
-		return client.Snapshot().Revision == snapshot.Revision
-	}, 5*time.Second, 10*time.Millisecond, "committed publication must reach the client")
+	awaitSignal(t, sub.Changed(), "subscription was not woken by a committed publication")
+	require.Equal(t, snapshot.Revision, client.Snapshot().Revision, "committed publication must reach the client")
 
 	got := client.Snapshot()
 	require.Equal(t, e.epoch, got.Epoch)
@@ -218,12 +217,6 @@ func TestSubscribePublishesSnapshot(t *testing.T) {
 	require.Equal(t, snapshot.Daemons[0].Endpoint, got.Daemons[0].Endpoint)
 	require.Len(t, got.Daemons[0].Sessions, 2)
 	require.Equal(t, snapshot.Daemons[0].Sessions[0].Name, got.Daemons[0].Sessions[0].Name)
-
-	select {
-	case <-sub.Changed():
-	case <-time.After(5 * time.Second):
-		t.Fatal("subscription was not woken by a committed publication")
-	}
 }
 
 // TestSubscribeCarriesPassiveReader proves a client configured as a passive
@@ -246,7 +239,7 @@ func TestSubscribeCarriesPassiveReader(t *testing.T) {
 			require.NoError(t, err)
 			t.Cleanup(sub.Close)
 			core := e.authority.last()
-			require.Eventually(t, func() bool { return len(core.subscribeKinds()) == 1 }, 5*time.Second, 10*time.Millisecond)
+			require.Equal(t, tt.passive, awaitSignal(t, core.subscribed, "the core never saw the subscription"))
 			require.Equal(t, []bool{tt.passive}, core.subscribeKinds())
 		})
 	}
@@ -274,7 +267,8 @@ func TestSubscribeGenerationAdvancesAndReplaces(t *testing.T) {
 	}
 
 	e.publish(e.epoch, 3)
-	require.Eventually(t, func() bool { return client.Snapshot().Revision == 3 }, 5*time.Second, 10*time.Millisecond)
+	awaitSignal(t, second.Changed(), "the replacing subscription was not woken")
+	require.EqualValues(t, 3, client.Snapshot().Revision)
 }
 
 // subscribeResult is one Subscribe outcome.
@@ -533,16 +527,7 @@ func TestCloseStreamRetiresBothSides(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, client.CloseStream(client.ConnectionID(), 1))
 
-	require.Eventually(t, func() bool {
-		core.mu.Lock()
-		defer core.mu.Unlock()
-		for _, id := range core.closedIDs {
-			if id == 1 {
-				return true
-			}
-		}
-		return false
-	}, 5*time.Second, 10*time.Millisecond, "the broker core must retire the closed stream")
+	require.Equal(t, ports.BrokerStreamID(1), awaitSignal(t, core.closedStreams, "the broker core must retire the closed stream"))
 	require.NoError(t, stream.Close(), "closing an already retired stream is idempotent")
 }
 
@@ -810,7 +795,7 @@ func TestServerAbortsResultMissingRequiredAuthority(t *testing.T) {
 // releases its listener slot.
 func TestDisconnectCleanupReleasesEveryOwnedResource(t *testing.T) {
 	e := startEndpoint(t, Config{MaxClients: 2, HandshakeTimeout: time.Second})
-	client, _ := e.pair()
+	client, accepted := e.pair()
 	core := e.authority.last()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -822,20 +807,10 @@ func TestDisconnectCleanupReleasesEveryOwnedResource(t *testing.T) {
 
 	require.NoError(t, client.Close())
 
-	select {
-	case <-core.done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the admitted core service must be closed on disconnect")
-	}
-	select {
-	case <-conn.done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the bridged core connection must be closed on disconnect")
-	}
-
-	require.Eventually(t, func() bool {
-		return e.listener.(*listener).liveSessions() == 0
-	}, 5*time.Second, 10*time.Millisecond, "a retired session must leave the listener's live set")
+	awaitClosed(t, core.done, "the admitted core service must be closed on disconnect")
+	awaitClosed(t, conn.done, "the bridged core connection must be closed on disconnect")
+	awaitClosed(t, accepted.(*serverSession).Done(), "the session must retire on disconnect")
+	require.Zero(t, e.listener.(*listener).liveSessions(), "a retired session must leave the listener's live set")
 
 	// The listener slot is reusable: a fresh client is admitted.
 	fresh := e.dial()
@@ -857,10 +832,19 @@ func TestStalledSubscriberDoesNotBlockOtherClients(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(sub.Close)
 
+	// Publications coalesce, so wake on each change until the final revision
+	// lands; the single guard bounds the whole wait.
 	for revision := ports.BrokerRevision(1); revision <= 20; revision++ {
 		e.publish(e.epoch, revision)
 	}
-	require.Eventually(t, func() bool { return active.Snapshot().Revision == 20 }, 5*time.Second, 10*time.Millisecond)
+	guard := time.After(5 * time.Second)
+	for active.Snapshot().Revision != 20 {
+		select {
+		case <-sub.Changed():
+		case <-guard:
+			t.Fatal("the active client never received the final publication")
+		}
+	}
 
 	requireConnectionDelegates(t, active)
 }
@@ -917,8 +901,16 @@ func TestStalledClientStreamWaitsForCredit(t *testing.T) {
 		defer local.pipe.mu.Unlock()
 		return local.pipe.recvUsed + local.pipe.recvReturn
 	}
-	require.Eventually(t, func() bool { return held() > full }, 5*time.Second, time.Millisecond,
-		"the relay must fill one stream window")
+	// Each inbound chunk wakes the pipe after it is queued; no reader runs yet,
+	// so the test consumes those wakes to follow the fill without polling.
+	fillGuard := time.After(5 * time.Second)
+	for held() <= full {
+		select {
+		case <-local.pipe.wake:
+		case <-fillGuard:
+			t.Fatal("the relay must fill one stream window")
+		}
+	}
 	// Data beyond the credit would settle the stream with ErrStreamCredit.
 	select {
 	case <-stream.Done():
@@ -1009,7 +1001,9 @@ func TestRequestReconcileIsBoundedHint(t *testing.T) {
 	core := e.authority.last()
 
 	client.RequestReconcile("unknown@host:22")
-	time.Sleep(50 * time.Millisecond)
+	// Frames on one connection are handled in order, so a completed round trip
+	// proves a reconcile frame, had one been sent, was already handled.
+	requireConnectionDelegates(t, client)
 	core.mu.Lock()
 	require.Empty(t, core.reconcile)
 	core.mu.Unlock()
@@ -1018,14 +1012,14 @@ func TestRequestReconcileIsBoundedHint(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(sub.Close)
 	snapshot := e.publish(e.epoch, 4)
-	require.Eventually(t, func() bool { return client.Snapshot().Revision == 4 }, 5*time.Second, 10*time.Millisecond)
+	awaitSignal(t, sub.Changed(), "the publication never reached the client")
+	require.EqualValues(t, 4, client.Snapshot().Revision)
 
 	client.RequestReconcile(snapshot.Daemons[0].Endpoint)
-	require.Eventually(t, func() bool {
-		core.mu.Lock()
-		defer core.mu.Unlock()
-		return len(core.reconcile) == 1 && core.reconcile[0] == snapshot.Daemons[0].Endpoint
-	}, 5*time.Second, 10*time.Millisecond)
+	require.Equal(t, snapshot.Daemons[0].Endpoint, awaitSignal(t, core.reconciled, "the reconcile hint never reached the core"))
+	core.mu.Lock()
+	require.Len(t, core.reconcile, 1)
+	core.mu.Unlock()
 }
 
 // TestCoreErrorSurfacesAsTypedFailure proves a typed core failure reaches the
@@ -1080,9 +1074,8 @@ func TestSessionHandshakeFailureIsStreamLocal(t *testing.T) {
 	requireConnectionDelegates(t, client)
 
 	// The broker core sees the stream retired.
-	require.Eventually(t, func() bool {
-		return core.logicalConn(1) == nil
-	}, 5*time.Second, 10*time.Millisecond)
+	require.Equal(t, ports.BrokerStreamID(1), awaitSignal(t, core.closedStreams, "the broker core must see the stream retired"))
+	require.Nil(t, core.logicalConn(1))
 }
 
 // TestDomainFixturesAreValid guards the test fixtures against drifting from the

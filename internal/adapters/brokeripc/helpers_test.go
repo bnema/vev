@@ -482,6 +482,11 @@ type coreState struct {
 
 	// previews announces each preview subscription the core handed out, in order.
 	previews chan *previewState
+	// subscribed, reconciled and closedStreams announce each core subscription
+	// (true = passive), reconcile hint and retired stream identity in order.
+	subscribed    chan bool
+	reconciled    chan string
+	closedStreams chan ports.BrokerStreamID
 }
 
 // passiveCore is the admitted core mock plus the optional passive-reader
@@ -502,12 +507,15 @@ func (c passiveCore) SubscribePassive() (ports.BrokerSubscription, error) {
 func newCoreMock(t *testing.T, id ports.BrokerConnectionID, hub *snapshotHub, opts ...func(*portsmocks.MockBrokerCoreService, *coreState)) (ports.BrokerCoreService, *coreState) {
 	t.Helper()
 	c := &coreState{
-		t:        t,
-		id:       id,
-		hub:      hub,
-		streams:  make(map[ports.BrokerStreamID]*logicalState),
-		done:     make(chan struct{}),
-		previews: make(chan *previewState, 16),
+		t:             t,
+		id:            id,
+		hub:           hub,
+		streams:       make(map[ports.BrokerStreamID]*logicalState),
+		done:          make(chan struct{}),
+		previews:      make(chan *previewState, 16),
+		subscribed:    make(chan bool, 16),
+		reconciled:    make(chan string, 16),
+		closedStreams: make(chan ports.BrokerStreamID, 16),
 	}
 	m := portsmocks.NewMockBrokerCoreService(t)
 	for _, opt := range opts {
@@ -540,6 +548,7 @@ func newCoreMock(t *testing.T, id ports.BrokerConnectionID, hub *snapshotHub, op
 		c.mu.Lock()
 		c.reconcile = append(c.reconcile, endpoint)
 		c.mu.Unlock()
+		c.reconciled <- endpoint
 	}).Maybe()
 	m.EXPECT().Close().RunAndReturn(c.closeAll).Maybe()
 	return passiveCore{MockBrokerCoreService: m, state: c}, c
@@ -549,6 +558,7 @@ func (c *coreState) recordSubscribe(passive bool) ports.BrokerSubscription {
 	c.mu.Lock()
 	c.subscribes = append(c.subscribes, passive)
 	c.mu.Unlock()
+	c.subscribed <- passive
 	return c.hub.subscribe(c.t)
 }
 
@@ -584,6 +594,7 @@ func (c *coreState) closeStream(connection ports.BrokerConnectionID, stream port
 	}
 	c.closedIDs = append(c.closedIDs, stream)
 	c.mu.Unlock()
+	c.closedStreams <- stream
 	if !ok {
 		return ports.BrokerAdmissionStale
 	}
@@ -959,4 +970,28 @@ func (s *recordingState) transferCount(generation brokerwire.SubscriptionGenerat
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.ends[generation][revision]
+}
+
+// awaitSignal waits for one event on ch under a single bounded failure guard.
+func awaitSignal[T any](t *testing.T, ch <-chan T, why string) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(5 * time.Second):
+		t.Fatal(why)
+		var zero T
+		return zero
+	}
+}
+
+// awaitClosed waits for one channel to close under a single bounded failure
+// guard.
+func awaitClosed(t *testing.T, ch <-chan struct{}, why string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(5 * time.Second):
+		t.Fatal(why)
+	}
 }
