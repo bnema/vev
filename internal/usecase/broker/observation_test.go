@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"testing/synctest"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
@@ -74,25 +75,28 @@ func TestObservationRequestIsObservationOnly(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			request, err := tt.build(t)
-			require.NoError(t, err)
-			require.NoError(t, request.Validate())
-			require.Equal(t, ports.BrokerEpoch(7), request.Epoch)
-			require.Equal(t, ports.BrokerStreamObservation, request.Purpose)
-			require.Zero(t, request.Admission)
-			require.Empty(t, request.Name)
-			require.Empty(t, request.Env)
-			require.Equal(t, protocol.ExactSessionTarget{}, request.Target)
-			require.Equal(t, policy, request.Policy)
-			require.NotZero(t, request.Connection)
-			require.NotZero(t, request.Stream)
-			tt.check(t, request)
-			// Observation must never start the target: a spawn-capable request
-			// is refused rather than silently narrowed.
-			require.Equal(t, ports.BrokerDaemonExistingOnly, request.StartMode)
-			startable := request
-			startable.StartMode = ports.BrokerDaemonStartIfNeeded
-			require.Error(t, startable.Validate())
+			synctest.Test(t, func(t *testing.T) {
+				request, err := tt.build(t)
+				require.NoError(t, err)
+				require.NoError(t, request.Validate())
+				require.Equal(t, ports.BrokerEpoch(7), request.Epoch)
+				require.Equal(t, ports.BrokerStreamObservation, request.Purpose)
+				require.Zero(t, request.Admission)
+				require.Empty(t, request.Name)
+				require.Empty(t, request.Env)
+				require.Equal(t, protocol.ExactSessionTarget{}, request.Target)
+				require.Equal(t, policy, request.Policy)
+				require.NotZero(t, request.Connection)
+				require.NotZero(t, request.Stream)
+				tt.check(t, request)
+				// Observation must never start the target: a spawn-capable request
+				// is refused rather than silently narrowed.
+				require.Equal(t, ports.BrokerDaemonExistingOnly, request.StartMode)
+				startable := request
+				startable.StartMode = ports.BrokerDaemonStartIfNeeded
+				require.Error(t, startable.Validate())
+
+			})
 		})
 	}
 }
@@ -112,8 +116,11 @@ func TestRemoteProbeRejectsStaleRegistrationBeforeDial(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := tt.probe.Probe(context.Background(), registration)
-			require.ErrorContains(t, err, tt.wantErr)
+			synctest.Test(t, func(t *testing.T) {
+				_, err := tt.probe.Probe(context.Background(), registration)
+				require.ErrorContains(t, err, tt.wantErr)
+
+			})
 		})
 	}
 }
@@ -140,25 +147,34 @@ func TestNewLocalDaemonProbeRejectsIncompleteComposition(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := NewLocalDaemonProbe(tt.epoch, tt.address, policy, tt.connector, tt.codec, tt.loader)
-			require.ErrorContains(t, err, tt.wantErr)
+			synctest.Test(t, func(t *testing.T) {
+				_, err := NewLocalDaemonProbe(tt.epoch, tt.address, policy, tt.connector, tt.codec, tt.loader)
+				require.ErrorContains(t, err, tt.wantErr)
+
+			})
 		})
 	}
 }
 
 func TestLocalDaemonProbeWithoutIdentityDoesNotDial(t *testing.T) {
-	// No Connect expectation: any dial fails the mock.
-	probe, err := NewLocalDaemonProbe(7, "local-address", observationPolicy(), portsmocks.NewMockBrokerEndpointConnector(t), portsmocks.NewMockSessionCodec(t), func() (ports.BrokerDaemonIdentity, error) { return "", nil })
-	require.NoError(t, err)
-	observation, err := probe.ProbeLocal(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, domain.RemoteAvailabilityUnknown, observation.Availability)
-	require.Zero(t, observation.Identity)
+	synctest.Test(t, func(t *testing.T) {
+		// No Connect expectation: any dial fails the mock.
+		probe, err := NewLocalDaemonProbe(7, "local-address", observationPolicy(), portsmocks.NewMockBrokerEndpointConnector(t), portsmocks.NewMockSessionCodec(t), func() (ports.BrokerDaemonIdentity, error) { return "", nil })
+		require.NoError(t, err)
+		observation, err := probe.ProbeLocal(context.Background())
+		require.NoError(t, err)
+		require.Equal(t, domain.RemoteAvailabilityUnknown, observation.Availability)
+		require.Zero(t, observation.Identity)
+
+	})
 }
 
 func TestLocalDaemonProbeNilReceiverFailsClosed(t *testing.T) {
-	var probe *LocalDaemonProbe
-	observation, err := probe.ProbeLocal(context.Background())
-	require.Error(t, err)
-	require.Equal(t, domain.RemoteAvailabilityUnreachable, observation.Availability)
+	synctest.Test(t, func(t *testing.T) {
+		var probe *LocalDaemonProbe
+		observation, err := probe.ProbeLocal(context.Background())
+		require.Error(t, err)
+		require.Equal(t, domain.RemoteAvailabilityUnreachable, observation.Availability)
+
+	})
 }

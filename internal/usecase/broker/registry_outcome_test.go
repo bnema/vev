@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"testing/synctest"
 
 	"github.com/stretchr/testify/require"
 
@@ -29,10 +30,13 @@ func TestObservationOutcomeKeepsTypedDialFailure(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			kind, availability, failed := observationOutcome(probeResult{err: tt.err})
-			require.True(t, failed)
-			require.Equal(t, tt.kind, kind)
-			require.Equal(t, tt.want, availability)
+			synctest.Test(t, func(t *testing.T) {
+				kind, availability, failed := observationOutcome(probeResult{err: tt.err})
+				require.True(t, failed)
+				require.Equal(t, tt.kind, kind)
+				require.Equal(t, tt.want, availability)
+
+			})
 		})
 	}
 }

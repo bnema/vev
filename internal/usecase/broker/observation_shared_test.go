@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
@@ -40,79 +41,82 @@ func TestBrokerRemoteProbeBorrowsWarmTransport(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			record := ports.BrokerHostRecord{Registration: registration, Policy: policy}
-			if tt.bound {
-				record.Identity = identity
-			}
-			routes := portsmocks.NewMockBrokerRouteAuthority(t)
-			routes.EXPECT().ResolveDialTarget(mock.Anything, mock.Anything).Return(ports.BrokerDialTarget{
-				Fence: ports.BrokerEndpointFence{Registration: registration}, Policy: policy, Address: "opaque", StartMode: ports.BrokerDaemonExistingOnly,
-				ExpectedIdentity: ports.BrokerExpectedIdentity{Identity: record.Identity, Bound: tt.bound},
-			}, nil)
-			connector := portsmocks.NewMockBrokerEndpointConnector(t)
-			if tt.wantDials > 0 {
-				connector.EXPECT().Connect(mock.Anything, mock.Anything).Return(nil, dialErr).Times(tt.wantDials)
-			}
-			physical := portsmocks.NewMockBrokerPhysicalConnection(t)
-			codec := portsmocks.NewMockSessionCodec(t)
-			done := make(chan struct{})
-			if tt.retired {
-				close(done)
-			}
-			if tt.bound && tt.shared {
-				if tt.openErr != nil {
-					if !tt.retired {
-						physical.EXPECT().OpenStream(mock.Anything, mock.Anything).Return(nil, tt.openErr)
-						physical.EXPECT().Done().Return(done)
-					}
-				} else {
-					logical := portsmocks.NewMockBrokerEnvelopeStream(t)
-					typed := portsmocks.NewMockClientConnection(t)
-					codec.EXPECT().Client(logical).Return(typed)
-					var sent protocol.CommandRequest
-					typed.EXPECT().SendClient(mock.Anything).RunAndReturn(func(message protocol.ClientMessage) error {
-						sent = message.(protocol.CommandRequest)
-						return nil
-					})
-					typed.EXPECT().ReceiveServer().RunAndReturn(func() (protocol.ServerMessage, error) {
-						return protocol.CommandResult{RequestID: sent.RequestID, Outcome: protocol.CommandSucceeded, Output: observationCatalogue(t)}, nil
-					})
-					logical.EXPECT().Close().Return(nil)
-					physical.EXPECT().OpenStream(mock.Anything, mock.Anything).Return(logical, nil)
-					physical.EXPECT().Identity().Return(identity)
-					physical.EXPECT().Incarnation().Return(ports.BrokerDaemonIncarnation{1})
+			synctest.Test(t, func(t *testing.T) {
+				record := ports.BrokerHostRecord{Registration: registration, Policy: policy}
+				if tt.bound {
+					record.Identity = identity
 				}
-			}
-			probe := &RemoteProbe{
-				Epoch: 7, Routes: routes, Binder: portsmocks.NewMockBrokerIdentityBinder(t), Connector: connector,
-				Hosts: observationHosts(t, record), Codec: codec,
-			}
-			// Use the real pool for borrowing. Stateful pool retirement is
-			// covered with a fake physical in broker's worker tests.
-			pool, err := NewPool(7, routes, probe.Binder, connector, newManualClock(time.Unix(0, 0)), PoolLimits{Physical: 1, Clients: 1, Streams: 2, StreamsPerClient: 2, Warm: 1})
-			require.NoError(t, err)
-			t.Cleanup(func() { require.NoError(t, pool.Close()) })
-			if tt.shared && tt.bound && !tt.retired {
-				physical.EXPECT().Policy().Return(policy).Maybe()
-				physical.EXPECT().Identity().Return(identity).Maybe()
-				physical.EXPECT().Incarnation().Return(ports.BrokerDaemonIncarnation{1}).Maybe()
-				physical.EXPECT().Done().Return(done).Maybe()
-				physical.EXPECT().Close().Return(nil).Maybe()
-				require.True(t, pool.AdoptPhysical(physical, policy))
-			}
-			probe.SharePool(pool)
-
-			observation, err := probe.Probe(context.Background(), registration)
-			switch {
-			case tt.wantErr != nil:
-				require.ErrorIs(t, err, tt.wantErr)
-			case tt.openErr != nil:
-				require.ErrorIs(t, err, tt.openErr)
-			default:
+				routes := portsmocks.NewMockBrokerRouteAuthority(t)
+				routes.EXPECT().ResolveDialTarget(mock.Anything, mock.Anything).Return(ports.BrokerDialTarget{
+					Fence: ports.BrokerEndpointFence{Registration: registration}, Policy: policy, Address: "opaque", StartMode: ports.BrokerDaemonExistingOnly,
+					ExpectedIdentity: ports.BrokerExpectedIdentity{Identity: record.Identity, Bound: tt.bound},
+				}, nil)
+				connector := portsmocks.NewMockBrokerEndpointConnector(t)
+				if tt.wantDials > 0 {
+					connector.EXPECT().Connect(mock.Anything, mock.Anything).Return(nil, dialErr).Times(tt.wantDials)
+				}
+				physical := portsmocks.NewMockBrokerPhysicalConnection(t)
+				codec := portsmocks.NewMockSessionCodec(t)
+				done := make(chan struct{})
+				if tt.retired {
+					close(done)
+				}
+				if tt.bound && tt.shared {
+					if tt.openErr != nil {
+						if !tt.retired {
+							physical.EXPECT().OpenStream(mock.Anything, mock.Anything).Return(nil, tt.openErr)
+							physical.EXPECT().Done().Return(done)
+						}
+					} else {
+						logical := portsmocks.NewMockBrokerEnvelopeStream(t)
+						typed := portsmocks.NewMockClientConnection(t)
+						codec.EXPECT().Client(logical).Return(typed)
+						var sent protocol.CommandRequest
+						typed.EXPECT().SendClient(mock.Anything).RunAndReturn(func(message protocol.ClientMessage) error {
+							sent = message.(protocol.CommandRequest)
+							return nil
+						})
+						typed.EXPECT().ReceiveServer().RunAndReturn(func() (protocol.ServerMessage, error) {
+							return protocol.CommandResult{RequestID: sent.RequestID, Outcome: protocol.CommandSucceeded, Output: observationCatalogue(t)}, nil
+						})
+						logical.EXPECT().Close().Return(nil)
+						physical.EXPECT().OpenStream(mock.Anything, mock.Anything).Return(logical, nil)
+						physical.EXPECT().Identity().Return(identity)
+						physical.EXPECT().Incarnation().Return(ports.BrokerDaemonIncarnation{1})
+					}
+				}
+				probe := &RemoteProbe{
+					Epoch: 7, Routes: routes, Binder: portsmocks.NewMockBrokerIdentityBinder(t), Connector: connector,
+					Hosts: observationHosts(t, record), Codec: codec,
+				}
+				// Use the real pool for borrowing. Stateful pool retirement is
+				// covered with a fake physical in broker's worker tests.
+				pool, err := NewPool(7, routes, probe.Binder, connector, newManualClock(t, time.Unix(0, 0)).mock, PoolLimits{Physical: 1, Clients: 1, Streams: 2, StreamsPerClient: 2, Warm: 1})
 				require.NoError(t, err)
-				require.Equal(t, identity, observation.Identity)
-				require.True(t, observation.InventoryKnown)
-			}
+				t.Cleanup(func() { require.NoError(t, pool.Close()) })
+				if tt.shared && tt.bound && !tt.retired {
+					physical.EXPECT().Policy().Return(policy).Maybe()
+					physical.EXPECT().Identity().Return(identity).Maybe()
+					physical.EXPECT().Incarnation().Return(ports.BrokerDaemonIncarnation{1}).Maybe()
+					physical.EXPECT().Done().Return(done).Maybe()
+					physical.EXPECT().Close().Return(nil).Maybe()
+					require.True(t, pool.AdoptPhysical(physical, policy))
+				}
+				probe.SharePool(pool)
+
+				observation, err := probe.Probe(context.Background(), registration)
+				switch {
+				case tt.wantErr != nil:
+					require.ErrorIs(t, err, tt.wantErr)
+				case tt.openErr != nil:
+					require.ErrorIs(t, err, tt.openErr)
+				default:
+					require.NoError(t, err)
+					require.Equal(t, identity, observation.Identity)
+					require.True(t, observation.InventoryKnown)
+				}
+
+			})
 		})
 	}
 }
@@ -137,77 +141,80 @@ func TestBrokerRemoteProbeSilentBorrowedTransportNeverRedials(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			record := ports.BrokerHostRecord{Registration: registration, Policy: policy, Identity: identity}
-			routes := portsmocks.NewMockBrokerRouteAuthority(t)
-			routes.EXPECT().ResolveDialTarget(mock.Anything, mock.Anything).Return(ports.BrokerDialTarget{
-				Fence: ports.BrokerEndpointFence{Registration: registration}, Policy: policy, Address: "opaque", StartMode: ports.BrokerDaemonExistingOnly,
-				ExpectedIdentity: ports.BrokerExpectedIdentity{Identity: identity, Bound: true},
-			}, nil)
-			// No Connect expectation: any redial fails the mock.
-			connector := portsmocks.NewMockBrokerEndpointConnector(t)
-			physical := portsmocks.NewMockBrokerPhysicalConnection(t)
-			codec := portsmocks.NewMockSessionCodec(t)
-			healthy := make(chan struct{})
-			physical.EXPECT().Policy().Return(policy).Maybe()
-			physical.EXPECT().Identity().Return(identity).Maybe()
-			physical.EXPECT().Incarnation().Return(ports.BrokerDaemonIncarnation{1}).Maybe()
-			physical.EXPECT().Done().Return(healthy).Maybe()
-			physical.EXPECT().Close().Return(nil).Maybe()
+			synctest.Test(t, func(t *testing.T) {
+				record := ports.BrokerHostRecord{Registration: registration, Policy: policy, Identity: identity}
+				routes := portsmocks.NewMockBrokerRouteAuthority(t)
+				routes.EXPECT().ResolveDialTarget(mock.Anything, mock.Anything).Return(ports.BrokerDialTarget{
+					Fence: ports.BrokerEndpointFence{Registration: registration}, Policy: policy, Address: "opaque", StartMode: ports.BrokerDaemonExistingOnly,
+					ExpectedIdentity: ports.BrokerExpectedIdentity{Identity: identity, Bound: true},
+				}, nil)
+				// No Connect expectation: any redial fails the mock.
+				connector := portsmocks.NewMockBrokerEndpointConnector(t)
+				physical := portsmocks.NewMockBrokerPhysicalConnection(t)
+				codec := portsmocks.NewMockSessionCodec(t)
+				healthy := make(chan struct{})
+				physical.EXPECT().Policy().Return(policy).Maybe()
+				physical.EXPECT().Identity().Return(identity).Maybe()
+				physical.EXPECT().Incarnation().Return(ports.BrokerDaemonIncarnation{1}).Maybe()
+				physical.EXPECT().Done().Return(healthy).Maybe()
+				physical.EXPECT().Close().Return(nil).Maybe()
 
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			// waiting signals that the probe is parked on the silent daemon; the
-			// worker only signals, the test goroutine cancels and asserts.
-			waiting := make(chan struct{}, 1)
-			if tt.silentOpen {
-				physical.EXPECT().OpenStream(mock.Anything, mock.Anything).RunAndReturn(func(ctx context.Context, _ ports.BrokerOpenStreamRequest) (ports.BrokerEnvelopeStream, error) {
-					waiting <- struct{}{}
-					<-ctx.Done()
-					return nil, ctx.Err()
-				})
-			} else {
-				logical := portsmocks.NewMockBrokerEnvelopeStream(t)
-				typed := portsmocks.NewMockClientConnection(t)
-				codec.EXPECT().Client(logical).Return(typed)
-				closed := make(chan struct{})
-				var once sync.Once
-				typed.EXPECT().SendClient(mock.Anything).Return(nil)
-				typed.EXPECT().ReceiveServer().RunAndReturn(func() (protocol.ServerMessage, error) {
-					waiting <- struct{}{}
-					<-closed
-					return nil, errors.New("stream closed")
-				})
-				logical.EXPECT().Close().RunAndReturn(func() error { once.Do(func() { close(closed) }); return nil })
-				physical.EXPECT().OpenStream(mock.Anything, mock.Anything).Return(logical, nil)
-			}
-			probe := &RemoteProbe{
-				Epoch: 7, Routes: routes, Binder: portsmocks.NewMockBrokerIdentityBinder(t), Connector: connector,
-				Hosts: observationHosts(t, record), Codec: codec,
-			}
-			pool, err := NewPool(7, routes, probe.Binder, connector, newManualClock(time.Unix(0, 0)), PoolLimits{Physical: 1, Clients: 1, Streams: 2, StreamsPerClient: 2, Warm: 1})
-			require.NoError(t, err)
-			t.Cleanup(func() { require.NoError(t, pool.Close()) })
-			require.True(t, pool.AdoptPhysical(physical, policy))
-			probe.SharePool(pool)
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				// waiting signals that the probe is parked on the silent daemon; the
+				// worker only signals, the test goroutine cancels and asserts.
+				waiting := make(chan struct{}, 1)
+				if tt.silentOpen {
+					physical.EXPECT().OpenStream(mock.Anything, mock.Anything).RunAndReturn(func(ctx context.Context, _ ports.BrokerOpenStreamRequest) (ports.BrokerEnvelopeStream, error) {
+						waiting <- struct{}{}
+						<-ctx.Done()
+						return nil, ctx.Err()
+					})
+				} else {
+					logical := portsmocks.NewMockBrokerEnvelopeStream(t)
+					typed := portsmocks.NewMockClientConnection(t)
+					codec.EXPECT().Client(logical).Return(typed)
+					closed := make(chan struct{})
+					var once sync.Once
+					typed.EXPECT().SendClient(mock.Anything).Return(nil)
+					typed.EXPECT().ReceiveServer().RunAndReturn(func() (protocol.ServerMessage, error) {
+						waiting <- struct{}{}
+						<-closed
+						return nil, errors.New("stream closed")
+					})
+					logical.EXPECT().Close().RunAndReturn(func() error { once.Do(func() { close(closed) }); return nil })
+					physical.EXPECT().OpenStream(mock.Anything, mock.Anything).Return(logical, nil)
+				}
+				probe := &RemoteProbe{
+					Epoch: 7, Routes: routes, Binder: portsmocks.NewMockBrokerIdentityBinder(t), Connector: connector,
+					Hosts: observationHosts(t, record), Codec: codec,
+				}
+				pool, err := NewPool(7, routes, probe.Binder, connector, newManualClock(t, time.Unix(0, 0)).mock, PoolLimits{Physical: 1, Clients: 1, Streams: 2, StreamsPerClient: 2, Warm: 1})
+				require.NoError(t, err)
+				t.Cleanup(func() { require.NoError(t, pool.Close()) })
+				require.True(t, pool.AdoptPhysical(physical, policy))
+				probe.SharePool(pool)
 
-			type outcome struct{ err error }
-			done := make(chan outcome, 1)
-			go func() {
-				_, err := probe.Probe(ctx, registration)
-				done <- outcome{err: err}
-			}()
-			select {
-			case <-waiting:
-			case <-time.After(2 * time.Second):
-				t.Fatal("probe never reached the silent daemon")
-			}
-			cancel()
-			select {
-			case result := <-done:
-				require.ErrorIs(t, result.err, context.Canceled)
-			case <-time.After(2 * time.Second):
-				t.Fatal("probe outlived its attempt context")
-			}
+				type outcome struct{ err error }
+				done := make(chan outcome, 1)
+				go func() {
+					_, err := probe.Probe(ctx, registration)
+					done <- outcome{err: err}
+				}()
+				select {
+				case <-waiting:
+				case <-time.After(2 * time.Second):
+					t.Fatal("probe never reached the silent daemon")
+				}
+				cancel()
+				select {
+				case result := <-done:
+					require.ErrorIs(t, result.err, context.Canceled)
+				case <-time.After(2 * time.Second):
+					t.Fatal("probe outlived its attempt context")
+				}
+
+			})
 		})
 	}
 }
