@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -76,55 +77,58 @@ func (p *rawPeer) recvHeader(t *testing.T) uint32 {
 // service, and releases the listener's client slot, with no external session or
 // listener Close.
 func TestProtocolViolationWithParkedStreamWriterReleasesSession(t *testing.T) {
-	const epoch = ports.BrokerEpoch(0x55)
-	serverConn, peerConn := net.Pipe()
-	t.Cleanup(func() { _ = peerConn.Close() })
+	synctest.Test(t, func(t *testing.T) {
+		const epoch = ports.BrokerEpoch(0x55)
+		serverConn, peerConn := net.Pipe()
+		t.Cleanup(func() { _ = peerConn.Close() })
 
-	transport, ok := ipc.NewTransport(serverConn).(wire.BoundedTransport)
-	require.True(t, ok, "the IPC carriage must be a bounded transport")
-	coreMock, core := newTestCore(t, epoch)
-	released := make(chan struct{}, 1)
-	session, err := newServerSession(epoch, transport, brokerwire.DefaultCeilings(), coreMock, Config{}, func() { released <- struct{}{} }, time.Time{})
-	require.NoError(t, err)
+		transport, ok := ipc.NewTransport(serverConn).(wire.BoundedTransport)
+		require.True(t, ok, "the IPC carriage must be a bounded transport")
+		coreMock, core := newTestCore(t, epoch)
+		released := make(chan struct{}, 1)
+		session, err := newServerSession(epoch, transport, brokerwire.DefaultCeilings(), coreMock, Config{}, func() { released <- struct{}{} }, time.Time{})
+		require.NoError(t, err)
 
-	// The peer's Register already happened; the duplicate Register below is the
-	// violation.
-	require.NoError(t, session.conn.Register())
-	go session.run()
-	peer := &rawPeer{conn: peerConn, ceilings: brokerwire.DefaultCeilings()}
+		// The peer's Register already happened; the duplicate Register below is the
+		// violation.
+		require.NoError(t, session.conn.Register())
+		go session.run()
+		peer := &rawPeer{conn: peerConn, ceilings: brokerwire.DefaultCeilings()}
 
-	session.startStream(brokerwire.OpenStream{
-		Epoch: epoch, Connection: session.scope.Connection, Stream: 1,
-		Purpose: ports.BrokerStreamControl, Local: true, Policy: testPolicy(),
+		session.startStream(brokerwire.OpenStream{
+			Epoch: epoch, Connection: session.scope.Connection, Stream: 1,
+			Purpose: ports.BrokerStreamControl, Local: true, Policy: testPolicy(),
+		})
+		opened, isOpened := peer.recv(t).(brokerwire.StreamOpened)
+		require.True(t, isOpened, "the stream must be established before its writer can be parked")
+		require.Equal(t, ports.BrokerStreamID(1), opened.Stream)
+
+		// One daemon message reaches the stream's relay, and the peer consumes only
+		// the length prefix of the frame it produces: the broker's carriage write can
+		// no longer complete, so the stream writer is parked inside it.
+		conn := core.logicalConn(1)
+		require.NotNil(t, conn, "the broker core must have admitted the stream")
+		conn.toClient <- protocol.Pong{}
+		peer.recvHeader(t)
+
+		peer.send(t, brokerwire.Register{})
+
+		synctest.Wait()
+		select {
+		case <-session.done:
+		default:
+			t.Fatal("a protocol violation must settle a session with a parked stream writer")
+		}
+		select {
+		case <-released:
+		default:
+			t.Fatal("a settled session must release its client slot")
+		}
+		require.ErrorIs(t, session.terminalErr(), ErrProtocol)
+		select {
+		case <-core.done:
+		default:
+			t.Fatal("a settled session must close its admitted core service")
+		}
 	})
-	opened, isOpened := peer.recv(t).(brokerwire.StreamOpened)
-	require.True(t, isOpened, "the stream must be established before its writer can be parked")
-	require.Equal(t, ports.BrokerStreamID(1), opened.Stream)
-
-	// One daemon message reaches the stream's relay, and the peer consumes only
-	// the length prefix of the frame it produces: the broker's carriage write can
-	// no longer complete, so the stream writer is parked inside it.
-	conn := core.logicalConn(1)
-	require.NotNil(t, conn, "the broker core must have admitted the stream")
-	conn.toClient <- protocol.Pong{}
-	peer.recvHeader(t)
-
-	peer.send(t, brokerwire.Register{})
-
-	select {
-	case <-session.done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("a protocol violation must settle a session with a parked stream writer")
-	}
-	select {
-	case <-released:
-	case <-time.After(5 * time.Second):
-		t.Fatal("a settled session must release its client slot")
-	}
-	require.ErrorIs(t, session.terminalErr(), ErrProtocol)
-	select {
-	case <-core.done:
-	default:
-		t.Fatal("a settled session must close its admitted core service")
-	}
 }

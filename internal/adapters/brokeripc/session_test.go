@@ -796,7 +796,7 @@ func TestServerAbortsResultMissingRequiredAuthority(t *testing.T) {
 	// No result travels; the connection settles as a protocol violation.
 	err := raw.awaitReadError(t, 5*time.Second)
 	require.Error(t, err, "a success without its required authority must settle the connection")
-	awaitSessionDone(t, session.(*serverSession))
+	awaitSessionDoneReal(t, session.(*serverSession))
 	require.ErrorIs(t, session.(*serverSession).terminalErr(), ErrProtocol)
 	require.Error(t, session.Close(), "a protocol violation is not an orderly end")
 
