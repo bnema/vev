@@ -57,6 +57,7 @@ func TestStoreClaimAckRoundTrip(t *testing.T) {
 	require.Empty(t, again)
 }
 
+// real I/O: notice file on disk with file locks.
 func TestStoreClaimWaitsForAppendInCriticalSection(t *testing.T) {
 	t.Parallel()
 	dir := filepath.Join(t.TempDir(), "vev")
@@ -158,6 +159,7 @@ func TestStoreAckReleasesClaimAfterCleanupFailure(t *testing.T) {
 	}
 }
 
+// real I/O: notice file on disk with file locks.
 func TestStoreAckSerializesClaimReleaseWithSameStoreReclaim(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "vev")
 	store := New(dir)
