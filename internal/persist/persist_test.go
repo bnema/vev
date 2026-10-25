@@ -19,6 +19,7 @@ func validRecord(name string, id byte) domain.CatalogueRecord {
 	return domain.CatalogueRecord{Name: name, IncarnationID: domain.IncarnationID{id}}
 }
 
+// real I/O: opens and reads catalogue files in a temporary directory.
 func TestOpenOrCreate(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -55,6 +56,7 @@ func TestOpenOrCreate(t *testing.T) {
 	}
 }
 
+// real I/O: verifies durable catalogue files remain byte-for-byte unchanged.
 func TestOpenOrCreateRejectsNonCurrentDurableStateWithoutMutation(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -213,7 +215,9 @@ func TestCatalogueRecordsPropagatesMalformedRecord(t *testing.T) {
 	require.Empty(t, records)
 }
 
-type failClosedStore struct {
+// failClosedStoreState is closure-owned test data, not a Store implementation.
+type failClosedStoreState struct {
+	mock    *portsmocks.MockStore
 	data    map[string][]byte
 	durable map[string][]byte
 
@@ -230,73 +234,69 @@ type failClosedStore struct {
 	closeAborted bool
 }
 
-func newFailClosedStore(data map[string][]byte) *failClosedStore {
-	return &failClosedStore{
+func newFailClosedStore(t *testing.T, data map[string][]byte) *failClosedStoreState {
+	t.Helper()
+	s := &failClosedStoreState{
+		mock:           portsmocks.NewMockStore(t),
 		data:           copyStoreData(data),
 		durable:        copyStoreData(data),
 		failure:        errors.New("store write failed"),
 		restoreFailure: errors.New("store restore failed"),
 	}
-}
-
-func (s *failClosedStore) Get(key []byte) ([]byte, bool) {
-	value, ok := s.data[string(key)]
-	return append([]byte(nil), value...), ok
-}
-
-func (s *failClosedStore) Set(key, value []byte) error {
-	s.data[string(key)] = append([]byte(nil), value...)
-	if s.restoring && s.restoreSetFailures > 0 {
-		s.restoreSetFailures--
-		return s.restoreFailure
-	}
-	if s.setFailures > 0 {
-		s.setFailures--
-		return s.failure
-	}
-	return nil
-}
-
-func (s *failClosedStore) Delete(key []byte) error {
-	delete(s.data, string(key))
-	if s.restoring && s.restoreDeleteFailures > 0 {
-		s.restoreDeleteFailures--
-		return s.restoreFailure
-	}
-	if s.deleteFailures > 0 {
-		s.deleteFailures--
-		return s.failure
-	}
-	return nil
-}
-
-func (s *failClosedStore) Range(fn func([]byte, []byte) bool) {
-	for key, value := range s.data {
-		if !fn([]byte(key), append([]byte(nil), value...)) {
-			return
+	s.mock.EXPECT().Get(mock.Anything).RunAndReturn(func(key []byte) ([]byte, bool) {
+		value, ok := s.data[string(key)]
+		return append([]byte(nil), value...), ok
+	}).Maybe()
+	s.mock.EXPECT().Set(mock.Anything, mock.Anything).RunAndReturn(func(key, value []byte) error {
+		s.data[string(key)] = append([]byte(nil), value...)
+		if s.restoring && s.restoreSetFailures > 0 {
+			s.restoreSetFailures--
+			return s.restoreFailure
 		}
-	}
-}
-
-func (s *failClosedStore) Sync() error {
-	if s.syncFailures > 0 {
-		s.syncFailures--
-		s.restoring = true
-		return s.failure
-	}
-	s.durable = copyStoreData(s.data)
-	return nil
-}
-
-func (s *failClosedStore) Close() error {
-	s.closeFlushed = true
-	s.durable = copyStoreData(s.data)
-	return nil
-}
-
-func (s *failClosedStore) CloseWithoutSync() error {
-	s.closeAborted = true
-	return nil
+		if s.setFailures > 0 {
+			s.setFailures--
+			return s.failure
+		}
+		return nil
+	}).Maybe()
+	s.mock.EXPECT().Delete(mock.Anything).RunAndReturn(func(key []byte) error {
+		delete(s.data, string(key))
+		if s.restoring && s.restoreDeleteFailures > 0 {
+			s.restoreDeleteFailures--
+			return s.restoreFailure
+		}
+		if s.deleteFailures > 0 {
+			s.deleteFailures--
+			return s.failure
+		}
+		return nil
+	}).Maybe()
+	s.mock.EXPECT().Range(mock.Anything).Run(func(fn func([]byte, []byte) bool) {
+		for key, value := range s.data {
+			if !fn([]byte(key), append([]byte(nil), value...)) {
+				return
+			}
+		}
+	}).Maybe()
+	s.mock.EXPECT().Sync().RunAndReturn(func() error {
+		if s.syncFailures > 0 {
+			s.syncFailures--
+			s.restoring = true
+			return s.failure
+		}
+		s.durable = copyStoreData(s.data)
+		return nil
+	}).Maybe()
+	s.mock.EXPECT().Close().RunAndReturn(func() error {
+		s.closeFlushed = true
+		s.durable = copyStoreData(s.data)
+		return nil
+	}).Maybe()
+	s.mock.EXPECT().CloseWithoutSync().RunAndReturn(func() error {
+		s.closeAborted = true
+		return nil
+	}).Maybe()
+	return s
 }
 
 func copyStoreData(data map[string][]byte) map[string][]byte {
@@ -404,11 +404,11 @@ func TestRejectedIdentityWriteFencesCatalogue(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			store := newFailClosedStore(tt.initial)
+			store := newFailClosedStore(t, tt.initial)
 			store.setFailures = tt.setFailures
 			store.deleteFailures = tt.deleteFailures
 			store.syncFailures = tt.syncFailures
-			p := New(store)
+			p := New(store.mock)
 
 			err := tt.mutate(p)
 			require.ErrorIs(t, err, ErrCatalogueDurability)
@@ -434,11 +434,11 @@ func TestFailedSyncRetainsRepeatedRollbackFailuresAndAborts(t *testing.T) {
 	t.Parallel()
 	encoded, err := encodeRecordValue(validRecord("work", 1))
 	require.NoError(t, err)
-	store := newFailClosedStore(map[string][]byte{"work": encoded})
+	store := newFailClosedStore(t, map[string][]byte{"work": encoded})
 	store.syncFailures = 1
 	store.restoreSetFailures = 1
 	store.restoreDeleteFailures = 1
-	p := New(store)
+	p := New(store.mock)
 
 	err = p.Rename("work", validRecord("renamed", 1))
 	require.ErrorIs(t, err, ErrCatalogueDurability)
@@ -462,8 +462,8 @@ func TestRejectedIdentityWriteRestoresBufferedMetadata(t *testing.T) {
 	t.Parallel()
 	encoded, err := encodeRecordValue(validRecord("work", 1))
 	require.NoError(t, err)
-	store := newFailClosedStore(map[string][]byte{"work": encoded})
-	p := New(store)
+	store := newFailClosedStore(t, map[string][]byte{"work": encoded})
+	p := New(store.mock)
 
 	cwd := "/buffered"
 	require.NoError(t, p.UpdateMetadata(domain.CatalogueMetadataUpdate{

@@ -177,14 +177,11 @@ func (s *brokerSubprocessSandbox) terminate(role string, signal syscall.Signal) 
 
 // waitForSocketGone waits until the broker endpoint no longer exists.
 func (s *brokerSubprocessSandbox) waitForSocketGone(timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if _, err := os.Lstat(s.socketPath()); errors.Is(err, os.ErrNotExist) {
-			return true
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	return false
+	// A socket inode disappearing publishes no event, so this polls.
+	return pollUntil(timeout, func() bool {
+		_, err := os.Lstat(s.socketPath())
+		return errors.Is(err, os.ErrNotExist)
+	})
 }
 
 // cleanup terminates every recorded broker and launcher so no test leaks an
@@ -203,6 +200,7 @@ func (s *brokerSubprocessSandbox) cleanup() {
 // TestBrokerStatusSubprocessElectsExactlyOneBroker races several real status
 // processes against one socket: exactly one broker process, one lifetime owner,
 // and one epoch must result.
+// real I/O: real subprocesses.
 func TestBrokerStatusSubprocessElectsExactlyOneBroker(t *testing.T) {
 	sandbox := newBrokerSubprocessSandbox(t, "5s")
 	const racers = 4
@@ -235,6 +233,7 @@ func TestBrokerStatusSubprocessElectsExactlyOneBroker(t *testing.T) {
 // TestBrokerStatusSubprocessIdleExitRestartsWithNewEpoch lets the broker idle
 // out, then restarts it on demand and proves the new process samples a fresh
 // epoch.
+// real I/O: real subprocesses.
 func TestBrokerStatusSubprocessIdleExitRestartsWithNewEpoch(t *testing.T) {
 	sandbox := newBrokerSubprocessSandbox(t, "2s")
 
@@ -259,6 +258,7 @@ func TestBrokerStatusSubprocessIdleExitRestartsWithNewEpoch(t *testing.T) {
 
 // TestBrokerStatusSubprocessRecoversStaleSocket proves a stale socket left by a
 // dead owner is recoverable absence, not an incompatible endpoint.
+// real I/O: real subprocesses.
 func TestBrokerStatusSubprocessRecoversStaleSocket(t *testing.T) {
 	sandbox := newBrokerSubprocessSandbox(t, "3s")
 	require.NoError(t, os.MkdirAll(sandbox.layout.Runtime, 0o700))
@@ -273,6 +273,7 @@ func TestBrokerStatusSubprocessRecoversStaleSocket(t *testing.T) {
 // TestBrokerStatusSubprocessWaitsForLiveSpawnerThenRecovers holds the
 // descriptor-backed election lock like a spawner that died mid-startup: the
 // waiter must not spawn, and must take over once the lock is released.
+// real I/O: real subprocesses, real flock lifecycle locks.
 func TestBrokerStatusSubprocessWaitsForLiveSpawnerThenRecovers(t *testing.T) {
 	sandbox := newBrokerSubprocessSandbox(t, "3s")
 
@@ -295,6 +296,7 @@ func TestBrokerStatusSubprocessWaitsForLiveSpawnerThenRecovers(t *testing.T) {
 // TestBrokerStatusSubprocessSilentEndpointFailsWithoutSpawning proves a live
 // endpoint that never answers the broker handshake is diagnosed as
 // incompatible under the probe budget, and never respawned over.
+// real I/O: real subprocesses.
 func TestBrokerStatusSubprocessSilentEndpointFailsWithoutSpawning(t *testing.T) {
 	sandbox := newBrokerSubprocessSandbox(t, "3s")
 	require.NoError(t, os.MkdirAll(sandbox.layout.Runtime, 0o700))
@@ -350,6 +352,7 @@ func TestBrokerLauncherSpawnWaitIsBoundedByContext(t *testing.T) {
 // process is spawned, and that a missing configuration fails the launcher.
 // A production launcher accepts no idle override; malformed broker.json is
 // diagnosed by the detached serve before it can claim the lifetime lock.
+// real I/O: real subprocesses.
 func TestBrokerStatusSubprocessLauncherDiagnosesConflicts(t *testing.T) {
 	t.Run("unsupported idle override", func(t *testing.T) {
 		sandbox := newBrokerSubprocessSandbox(t, "90s")
@@ -370,6 +373,7 @@ func TestBrokerStatusSubprocessLauncherDiagnosesConflicts(t *testing.T) {
 
 // TestBrokerStatusSubprocessNoOrphanProcess proves the launcher exits on its
 // own, one broker remains, and terminating it leaves no recorded process live.
+// real I/O: real subprocesses, real flock lifecycle locks.
 func TestBrokerStatusSubprocessNoOrphanProcess(t *testing.T) {
 	sandbox := newBrokerSubprocessSandbox(t, "5s")
 

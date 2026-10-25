@@ -12,6 +12,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
+	wiremocks "github.com/bnema/vev/internal/protocol/wire/mocks"
 	"github.com/stretchr/testify/require"
 )
 
@@ -46,7 +47,7 @@ func TestServerConnectionDecodesEveryClientMessage(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			raw := &scriptedTransport{recv: mustServerPreambleQueue(t, mustEncodeClient(t, tt.want))}
+			raw, _ := newScriptedTransport(t, withRecv(mustServerPreambleQueue(t, mustEncodeClient(t, tt.want))...))
 			got, err := NewServerConnection(raw).ReceiveClient()
 			require.NoError(t, err)
 			require.Equal(t, tt.want, got)
@@ -105,10 +106,10 @@ func TestServerConnectionEncodesEveryServerMessage(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			raw := &scriptedTransport{}
+			raw, rawState := newScriptedTransport(t)
 			require.NoError(t, NewServerConnection(raw).SendServer(tt.message))
-			require.Equal(t, 1, raw.sentLen())
-			got, err := DecodeServerEnvelope(raw.sentPayload(0))
+			require.Equal(t, 1, rawState.sentLen())
+			got, err := DecodeServerEnvelope(rawState.sentPayload(0))
 			require.NoError(t, err)
 			switch message := tt.message.(type) {
 			case *protocol.UIReceipt:
@@ -135,7 +136,7 @@ func TestServerConnectionPreservesPayloadAgnosticClientControls(t *testing.T) {
 		{name: "ping", message: protocol.Ping{}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			raw := &scriptedTransport{recv: mustServerPreambleQueue(t, mustEncodeClient(t, tt.message))}
+			raw, _ := newScriptedTransport(t, withRecv(mustServerPreambleQueue(t, mustEncodeClient(t, tt.message))...))
 			message, err := NewServerConnection(raw).ReceiveClient()
 			require.NoError(t, err)
 			require.Equal(t, tt.message, message)
@@ -177,7 +178,7 @@ func TestServerConnectionClassifiesDecodeFailures(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			raw := &scriptedTransport{recv: mustServerPreambleQueue(t, tt.payload)}
+			raw, _ := newScriptedTransport(t, withRecv(mustServerPreambleQueue(t, tt.payload)...))
 			_, err := NewServerConnection(raw).ReceiveClient()
 			var failure *protocol.DecodeFailure
 			require.ErrorAs(t, err, &failure)
@@ -192,7 +193,7 @@ func TestServerConnectionClassifiesDecodeFailures(t *testing.T) {
 func TestServerConnectionPreservesSendModesCapabilitiesAndErrors(t *testing.T) {
 	sendErr := errors.New("send failed")
 	events := make(chan ports.LinkEvent, 1)
-	raw := &capableTransport{scriptedTransport: scriptedTransport{sendErr: sendErr}, events: events}
+	raw, rawState := newCapableTransport(t, withSendErr(sendErr), withLinkEvents(events))
 	connection := NewServerConnection(raw)
 
 	caps := connection.Capabilities()
@@ -206,21 +207,21 @@ func TestServerConnectionPreservesSendModesCapabilitiesAndErrors(t *testing.T) {
 
 	message := protocol.Pong{}
 	require.ErrorIs(t, connection.SendServer(message), sendErr)
-	require.Equal(t, 1, raw.sentLen())
-	got, err := DecodeServerEnvelope(raw.sentPayload(0))
+	require.Equal(t, 1, rawState.sentLen())
+	got, err := DecodeServerEnvelope(rawState.sentPayload(0))
 	require.NoError(t, err)
 	require.Equal(t, message, got)
 	require.ErrorIs(t, connection.SendServerAsync(message), sendErr)
-	require.Equal(t, 1, len(raw.async))
+	require.Equal(t, 1, rawState.asyncLen())
 	require.ErrorIs(t, connection.SendServerSynchronous(message), sendErr)
-	require.Equal(t, 1, len(raw.synchronous))
+	require.Equal(t, 1, rawState.synchronousLen())
 
 	output := protocol.Output{Epoch: 1, New: 1, Full: true, Size: domain.Size{Cols: 80, Rows: 24}, Context: testUIOutputContext()}
 	require.ErrorIs(t, connection.SendOutput(output), sendErr)
 	require.ErrorIs(t, connection.SendOutputAsync(output), sendErr)
 	require.ErrorIs(t, connection.SendOutputSynchronous(output), sendErr)
 
-	plain := NewServerConnection(&scriptedTransport{})
+	plain := NewServerConnection(newBareTransport(t))
 	require.ErrorIs(t, plain.SendServerAsync(message), ErrUnsupportedSend)
 	require.ErrorIs(t, plain.SendServerSynchronous(message), ErrUnsupportedSend)
 	require.ErrorIs(t, plain.SendOutputAsync(output), ErrUnsupportedSend)
@@ -237,7 +238,7 @@ func TestServerConnectionForwardsReceiveAndCloseErrors(t *testing.T) {
 	// itself fails on the joined error; the failure surfaces as a
 	// typed decode failure chaining io.EOF, and the failed attempt
 	// closes the transport before the explicit Close.
-	raw := &scriptedTransport{recv: mustServerPreambleQueue(t), recvErr: recvErr, closeErr: closeErr}
+	raw, rawState := newScriptedTransport(t, withRecv(mustServerPreambleQueue(t)...), withRecvErr(recvErr), withCloseErr(closeErr))
 	connection := NewServerConnection(raw)
 	_, err := connection.ReceiveClient()
 	require.ErrorIs(t, err, io.EOF)
@@ -245,13 +246,12 @@ func TestServerConnectionForwardsReceiveAndCloseErrors(t *testing.T) {
 	require.ErrorAs(t, err, &failure)
 	require.Equal(t, protocol.DecodeMalformed, failure.Category)
 	require.ErrorIs(t, connection.Close(), closeErr)
-	require.Equal(t, 2, raw.closeCalls())
+	require.Equal(t, 2, rawState.closeCalls())
 }
 
 func TestServerListenerWrapsEachAcceptedIncarnation(t *testing.T) {
-	raw := &scriptedTransport{recv: mustServerPreambleQueue(t, mustEncodeClient(t, protocol.Ping{}))}
-	listener := &scriptedListener{transport: raw}
-	wrapped := NewServerListener(listener)
+	raw, _ := newScriptedTransport(t, withRecv(mustServerPreambleQueue(t, mustEncodeClient(t, protocol.Ping{}))...))
+	wrapped := NewServerListener(newScriptedListener(t, raw))
 	first, err := wrapped.Accept()
 	require.NoError(t, err)
 	message, err := first.ReceiveClient()
@@ -261,8 +261,13 @@ func TestServerListenerWrapsEachAcceptedIncarnation(t *testing.T) {
 	require.NoError(t, wrapped.Close())
 }
 
-type scriptedListener struct{ transport wire.Transport }
-
-func (l *scriptedListener) Accept() (wire.Transport, error) { return l.transport, nil }
-func (*scriptedListener) Close() error                      { return nil }
-func (*scriptedListener) Addr() string                      { return "test" }
+// newScriptedListener returns a wire.Listener mock that accepts the given
+// transport every time and reports the address "test".
+func newScriptedListener(t *testing.T, transport wire.Transport) *wiremocks.MockListener {
+	t.Helper()
+	listener := wiremocks.NewMockListener(t)
+	listener.EXPECT().Accept().Return(transport, nil).Maybe()
+	listener.EXPECT().Close().Return(nil).Maybe()
+	listener.EXPECT().Addr().Return("test").Maybe()
+	return listener
+}

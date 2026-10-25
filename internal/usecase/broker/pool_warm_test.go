@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/bnema/vev/internal/ports"
@@ -27,7 +28,7 @@ type warmHarness struct {
 
 func newWarmHarness(t *testing.T, warm int, idle time.Duration) *warmHarness {
 	t.Helper()
-	h := &warmHarness{clock: newManualClock(time.Unix(0, 0)), target: "alpha", dials: make(map[ports.BrokerDaemonIdentity][]*fakePhysical)}
+	h := &warmHarness{clock: newManualClock(t, time.Unix(0, 0)), target: "alpha", dials: make(map[ports.BrokerDaemonIdentity][]*fakePhysical)}
 	routes := portsmocks.NewMockBrokerRouteAuthority(t)
 	routes.EXPECT().ResolveDialTarget(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, r ports.BrokerOpenStreamRequest) (ports.BrokerDialTarget, error) {
 		h.mu.Lock()
@@ -44,9 +45,9 @@ func newWarmHarness(t *testing.T, warm int, idle time.Duration) *warmHarness {
 		h.mu.Lock()
 		h.dials[e.ExpectedIdentity.Identity] = append(h.dials[e.ExpectedIdentity.Identity], f)
 		h.mu.Unlock()
-		return f, nil
+		return mockPhysical(t, f), nil
 	}).Maybe()
-	pool, err := NewPool(1, routes, binder, connector, h.clock, PoolLimits{Physical: 4, Clients: 4, Streams: 16, StreamsPerClient: 16, Warm: warm, Idle: idle})
+	pool, err := NewPool(1, routes, binder, connector, h.clock.mock, PoolLimits{Physical: 4, Clients: 4, Streams: 16, StreamsPerClient: 16, Warm: warm, Idle: idle})
 	require.NoError(t, err)
 	h.pool = pool
 	t.Cleanup(func() { require.NoError(t, pool.Close()) })
@@ -89,7 +90,7 @@ func closed(f *fakePhysical) bool {
 // a bounded fake-clock move, never a sleep.
 func (h *warmHarness) reap(t *testing.T, f *fakePhysical, grace time.Duration) {
 	t.Helper()
-	require.Eventually(t, func() bool { h.clock.Advance(grace); return closed(f) }, 3*time.Second, time.Millisecond)
+	requireQuiescent(t, func() bool { h.clock.Advance(grace); return closed(f) }, 3*time.Second, time.Millisecond)
 }
 
 func TestPoolWarmReuse(t *testing.T) {
@@ -120,8 +121,8 @@ func TestPoolWarmReuse(t *testing.T) {
 			run: func(t *testing.T, h *warmHarness) {
 				h.visit(t, "alpha")
 				h.reap(t, h.physicals("alpha")[0], grace)
-				require.Eventually(t, func() bool { _, ok := h.pool.SharedPhysical("alpha", poolPolicy()); return !ok }, 3*time.Second, time.Millisecond)
-				require.Eventually(t, func() bool { h.pool.mu.Lock(); defer h.pool.mu.Unlock(); return len(h.pool.entries) == 0 }, 3*time.Second, time.Millisecond)
+				requireQuiescent(t, func() bool { _, ok := h.pool.SharedPhysical("alpha", poolPolicy()); return !ok }, 3*time.Second, time.Millisecond)
+				requireQuiescent(t, func() bool { h.pool.mu.Lock(); defer h.pool.mu.Unlock(); return len(h.pool.entries) == 0 }, 3*time.Second, time.Millisecond)
 				h.visit(t, "alpha")
 			},
 			want: map[ports.BrokerDaemonIdentity]int{"alpha": 2},
@@ -177,7 +178,7 @@ func TestPoolWarmReuse(t *testing.T) {
 			run: func(t *testing.T, h *warmHarness) {
 				h.visit(t, "alpha")
 				await(t, h.physicals("alpha")[0].done)
-				require.Eventually(t, func() bool { h.pool.mu.Lock(); defer h.pool.mu.Unlock(); return len(h.pool.entries) == 0 }, 3*time.Second, time.Millisecond)
+				requireQuiescent(t, func() bool { h.pool.mu.Lock(); defer h.pool.mu.Unlock(); return len(h.pool.entries) == 0 }, 3*time.Second, time.Millisecond)
 				h.visit(t, "alpha")
 			},
 			want: map[ports.BrokerDaemonIdentity]int{"alpha": 2},
@@ -185,11 +186,14 @@ func TestPoolWarmReuse(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := newWarmHarness(t, tt.warm, tt.idle)
-			tt.run(t, h)
-			for identity, want := range tt.want {
-				require.Len(t, h.physicals(identity), want, "dials for %s", identity)
-			}
+			synctest.Test(t, func(t *testing.T) {
+				h := newWarmHarness(t, tt.warm, tt.idle)
+				tt.run(t, h)
+				for identity, want := range tt.want {
+					require.Len(t, h.physicals(identity), want, "dials for %s", identity)
+				}
+
+			})
 		})
 	}
 }
@@ -206,84 +210,93 @@ func TestPoolAdoptProbePhysical(t *testing.T) {
 		{name: "warm disabled refuses probe", warm: 0},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			h := newWarmHarness(t, tt.warm, tt.idle)
-			physical := &fakePhysical{endpoint: ports.BrokerDialTarget{Policy: poolPolicy(), ExpectedIdentity: ports.BrokerExpectedIdentity{Identity: "alpha", Bound: true}}, done: make(chan struct{})}
-			require.Equal(t, tt.want, h.pool.AdoptPhysical(physical, poolPolicy()))
-			if !tt.want {
-				require.NoError(t, physical.Close())
-				return
-			}
-			shared, ok := h.pool.SharedPhysical("alpha", poolPolicy())
-			require.True(t, ok)
-			require.Same(t, physical, shared)
-			h.visit(t, "alpha")
-			require.Empty(t, h.physicals("alpha"), "attach must not redial after a first probe")
-			require.False(t, h.pool.AdoptPhysical(&fakePhysical{endpoint: physical.endpoint, done: make(chan struct{})}, poolPolicy()), "duplicate probe cannot replace the attachment")
-			if tt.idle > 0 {
-				h.reap(t, physical, tt.idle)
-			} else {
-				require.NoError(t, h.pool.Close())
-			}
-			require.True(t, closed(physical))
+			synctest.Test(t, func(t *testing.T) {
+				h := newWarmHarness(t, tt.warm, tt.idle)
+				physical := &fakePhysical{endpoint: ports.BrokerDialTarget{Policy: poolPolicy(), ExpectedIdentity: ports.BrokerExpectedIdentity{Identity: "alpha", Bound: true}}, done: make(chan struct{})}
+				require.Equal(t, tt.want, h.pool.AdoptPhysical(mockPhysical(t, physical), poolPolicy()))
+				if !tt.want {
+					require.NoError(t, physical.markClosed())
+					return
+				}
+				shared, ok := h.pool.SharedPhysical("alpha", poolPolicy())
+				require.True(t, ok)
+				require.Same(t, mockPhysical(t, physical), shared)
+				h.visit(t, "alpha")
+				require.Empty(t, h.physicals("alpha"), "attach must not redial after a first probe")
+				require.False(t, h.pool.AdoptPhysical(mockPhysical(t, &fakePhysical{endpoint: physical.endpoint, done: make(chan struct{})}), poolPolicy()), "duplicate probe cannot replace the attachment")
+				if tt.idle > 0 {
+					h.reap(t, physical, tt.idle)
+				} else {
+					require.NoError(t, h.pool.Close())
+				}
+				require.True(t, closed(physical))
+
+			})
 		})
 	}
 }
 
 func TestPoolCloseRetiresWarmTransports(t *testing.T) {
-	h := newWarmHarness(t, 2, 0)
-	h.visit(t, "alpha")
-	h.visit(t, "beta")
-	require.NoError(t, h.pool.Close())
-	for _, identity := range []ports.BrokerDaemonIdentity{"alpha", "beta"} {
-		require.True(t, closed(h.physicals(identity)[0]), identity)
-	}
-	_, ok := h.pool.SharedPhysical("alpha", poolPolicy())
-	require.False(t, ok)
+	synctest.Test(t, func(t *testing.T) {
+		h := newWarmHarness(t, 2, 0)
+		h.visit(t, "alpha")
+		h.visit(t, "beta")
+		require.NoError(t, h.pool.Close())
+		for _, identity := range []ports.BrokerDaemonIdentity{"alpha", "beta"} {
+			require.True(t, closed(h.physicals(identity)[0]), identity)
+		}
+		_, ok := h.pool.SharedPhysical("alpha", poolPolicy())
+		require.False(t, ok)
+
+	})
 }
 
 func TestPoolLocalOpenDoesNotWaitForProbeAdoption(t *testing.T) {
-	h := newWarmHarness(t, 2, time.Minute)
-	h.visit(t, "local-daemon")
+	synctest.Test(t, func(t *testing.T) {
+		h := newWarmHarness(t, 2, time.Minute)
+		h.visit(t, "local-daemon")
 
-	probe := &fakePhysical{
-		endpoint: ports.BrokerDialTarget{Policy: poolPolicy()},
-		identity: "remote-daemon",
-		done:     make(chan struct{}),
-	}
-	start := make(chan struct{})
-	adopted := make(chan bool, 1)
-	opened := make(chan error, 1)
-	go func() {
-		<-start
-		adopted <- h.pool.AdoptPhysical(probe, poolPolicy())
-	}()
-	go func() {
-		<-start
-		h.mu.Lock()
-		h.target = "local-daemon"
-		h.stream++
-		stream := h.stream
-		h.mu.Unlock()
-		logical, err := h.pool.OpenStream(context.Background(), poolRequest(h.client, stream))
-		if err == nil {
-			err = logical.Close()
+		probe := &fakePhysical{
+			endpoint: ports.BrokerDialTarget{Policy: poolPolicy()},
+			identity: "remote-daemon",
+			done:     make(chan struct{}),
 		}
-		opened <- err
-	}()
-	close(start)
+		start := make(chan struct{})
+		adopted := make(chan bool, 1)
+		opened := make(chan error, 1)
+		go func() {
+			<-start
+			adopted <- h.pool.AdoptPhysical(mockPhysical(t, probe), poolPolicy())
+		}()
+		go func() {
+			<-start
+			h.mu.Lock()
+			h.target = "local-daemon"
+			h.stream++
+			stream := h.stream
+			h.mu.Unlock()
+			logical, err := h.pool.OpenStream(context.Background(), poolRequest(h.client, stream))
+			if err == nil {
+				err = logical.Close()
+			}
+			opened <- err
+		}()
+		close(start)
 
-	select {
-	case err := <-opened:
-		require.NoError(t, err, "local OpenStream must progress while another goroutine adopts a remote probe transport")
-	case <-time.After(3 * time.Second):
-		t.Fatal("local OpenStream blocked while probe adoption was in progress")
-	}
-	select {
-	case ok := <-adopted:
-		require.True(t, ok, "the authenticated remote physical should be adopted")
-	case <-time.After(3 * time.Second):
-		t.Fatal("probe transport adoption did not complete")
-	}
+		select {
+		case err := <-opened:
+			require.NoError(t, err, "local OpenStream must progress while another goroutine adopts a remote probe transport")
+		case <-time.After(3 * time.Second):
+			t.Fatal("local OpenStream blocked while probe adoption was in progress")
+		}
+		select {
+		case ok := <-adopted:
+			require.True(t, ok, "the authenticated remote physical should be adopted")
+		case <-time.After(3 * time.Second):
+			t.Fatal("probe transport adoption did not complete")
+		}
+
+	})
 }
 
 func TestPoolSharedPhysical(t *testing.T) {
@@ -299,18 +312,21 @@ func TestPoolSharedPhysical(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := newWarmHarness(t, 1, 0)
-			h.visit(t, "alpha")
-			physical, ok := h.pool.SharedPhysical(tt.identity, tt.policy())
-			require.Equal(t, tt.want, ok)
-			if tt.want {
-				require.Same(t, h.physicals("alpha")[0], physical)
-				// Borrowing neither dials nor refreshes warm order: beta still
-				// evicts alpha.
-				h.visit(t, "beta")
-				await(t, h.physicals("alpha")[0].done)
-				require.Len(t, h.physicals("alpha"), 1)
-			}
+			synctest.Test(t, func(t *testing.T) {
+				h := newWarmHarness(t, 1, 0)
+				h.visit(t, "alpha")
+				physical, ok := h.pool.SharedPhysical(tt.identity, tt.policy())
+				require.Equal(t, tt.want, ok)
+				if tt.want {
+					require.Same(t, mockPhysical(t, h.physicals("alpha")[0]), physical)
+					// Borrowing neither dials nor refreshes warm order: beta still
+					// evicts alpha.
+					h.visit(t, "beta")
+					await(t, h.physicals("alpha")[0].done)
+					require.Len(t, h.physicals("alpha"), 1)
+				}
+
+			})
 		})
 	}
 }
@@ -329,13 +345,16 @@ func TestNewPoolWarmLimits(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			pool, err := NewPool(1, portsmocks.NewMockBrokerRouteAuthority(t), portsmocks.NewMockBrokerIdentityBinder(t), portsmocks.NewMockBrokerEndpointConnector(t), newManualClock(time.Unix(0, 0)), PoolLimits{Physical: 1, Clients: 1, Streams: 1, StreamsPerClient: 1, Warm: tt.warm, Idle: tt.idle})
-			if tt.wantErr {
-				require.ErrorIs(t, err, ports.BrokerAdmissionInvalid)
-				return
-			}
-			require.NoError(t, err)
-			require.NoError(t, pool.Close())
+			synctest.Test(t, func(t *testing.T) {
+				pool, err := NewPool(1, portsmocks.NewMockBrokerRouteAuthority(t), portsmocks.NewMockBrokerIdentityBinder(t), portsmocks.NewMockBrokerEndpointConnector(t), newManualClock(t, time.Unix(0, 0)).mock, PoolLimits{Physical: 1, Clients: 1, Streams: 1, StreamsPerClient: 1, Warm: tt.warm, Idle: tt.idle})
+				if tt.wantErr {
+					require.ErrorIs(t, err, ports.BrokerAdmissionInvalid)
+					return
+				}
+				require.NoError(t, err)
+				require.NoError(t, pool.Close())
+
+			})
 		})
 	}
 }

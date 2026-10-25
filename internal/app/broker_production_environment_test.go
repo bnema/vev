@@ -17,6 +17,7 @@ import (
 // Exercise both real detached re-execs, which change cwd to the user's home.
 // A long development root must preserve its configuration/state identity while
 // all roles independently resolve the same portable, isolated runtime path.
+// real I/O: real subprocesses.
 func TestProductionBrokerDevelopmentEnvironmentReexec(t *testing.T) {
 	for _, explicit := range []bool{false, true} {
 		name := "implicit"

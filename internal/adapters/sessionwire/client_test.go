@@ -45,9 +45,9 @@ func TestClientConnectionEncodesEveryClientMessage(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			raw := &scriptedTransport{recv: []wire.Envelope{mustPreambleResponse(t)}}
+			raw, rawState := newScriptedTransport(t, withRecv([]wire.Envelope{mustPreambleResponse(t)}...))
 			require.NoError(t, NewClientConnection(raw).SendClient(tt.message))
-			got, err := DecodeClientEnvelope(mustSingleAppPayload(t, raw))
+			got, err := DecodeClientEnvelope(mustSingleAppPayload(t, rawState))
 			require.NoError(t, err)
 			switch message := tt.message.(type) {
 			case *protocol.SessionCreationFailure:
@@ -87,7 +87,7 @@ func TestClientConnectionDecodesEveryServerMessage(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			raw := &scriptedTransport{recv: mustClientPreambleQueue(t, mustEncodeServer(t, tt.message))}
+			raw, _ := newScriptedTransport(t, withRecv(mustClientPreambleQueue(t, mustEncodeServer(t, tt.message))...))
 			got, err := NewClientConnection(raw).ReceiveServer()
 			require.NoError(t, err)
 			require.Equal(t, tt.message, got)
@@ -100,7 +100,7 @@ func TestClientConnectionClassifiesFailuresAndPreservesCapabilities(t *testing.T
 		// A client envelope on the server-to-client path is rejected
 		// before any mutation: its fields are unknown to the server
 		// envelope, so decoding reports the wrong-direction category.
-		raw := &scriptedTransport{recv: mustClientPreambleQueue(t, mustEncodeClient(t, protocol.Input{InputSeq: 1, Data: []byte("x")}))}
+		raw, _ := newScriptedTransport(t, withRecv(mustClientPreambleQueue(t, mustEncodeClient(t, protocol.Input{InputSeq: 1, Data: []byte("x")}))...))
 		_, err := NewClientConnection(raw).ReceiveServer()
 		var failure *protocol.DecodeFailure
 		require.ErrorAs(t, err, &failure)
@@ -109,7 +109,7 @@ func TestClientConnectionClassifiesFailuresAndPreservesCapabilities(t *testing.T
 
 	t.Run("truncated payload", func(t *testing.T) {
 		valid := mustEncodeServer(t, protocol.ErrorMsg{Code: protocol.ErrInternal, Text: "error"})
-		raw := &scriptedTransport{recv: mustClientPreambleQueue(t, valid[:1])}
+		raw, _ := newScriptedTransport(t, withRecv(mustClientPreambleQueue(t, valid[:1])...))
 		_, err := NewClientConnection(raw).ReceiveServer()
 		var failure *protocol.DecodeFailure
 		require.ErrorAs(t, err, &failure)
@@ -121,7 +121,7 @@ func TestClientConnectionClassifiesFailuresAndPreservesCapabilities(t *testing.T
 		// A second top-level variant occurrence is trailing data, not
 		// a longer message: the scanner rejects duplicate variants.
 		duplicate := mustEncodeServer(t, protocol.Pong{})
-		raw := &scriptedTransport{recv: mustClientPreambleQueue(t, append(append([]byte(nil), valid...), duplicate...))}
+		raw, _ := newScriptedTransport(t, withRecv(mustClientPreambleQueue(t, append(append([]byte(nil), valid...), duplicate...))...))
 		_, err := NewClientConnection(raw).ReceiveServer()
 		var failure *protocol.DecodeFailure
 		require.ErrorAs(t, err, &failure)
@@ -131,7 +131,7 @@ func TestClientConnectionClassifiesFailuresAndPreservesCapabilities(t *testing.T
 
 	t.Run("capabilities", func(t *testing.T) {
 		events := make(chan ports.LinkEvent, 1)
-		raw := &capableTransport{events: events}
+		raw, _ := newCapableTransport(t, withLinkEvents(events))
 		connection := NewClientConnection(raw)
 		require.Equal(t, uint8(1), connection.Capabilities().PreferredOutputWindow)
 		require.True(t, connection.Capabilities().LinkState)

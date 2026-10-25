@@ -9,11 +9,10 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -25,6 +24,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/lifecycle"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 )
 
@@ -32,8 +32,7 @@ const (
 	brokerTestEndpoint    = "offline@daemon:2222"
 	brokerTestIdentity    = "offline-daemon"
 	brokerTestWait        = 5 * time.Second
-	brokerTestPollTick    = 5 * time.Millisecond
-	brokerTestIdleAdvance = time.Minute
+	brokerTestIdleAdvance = brokerconfig.MaxIdleGrace
 )
 
 // brokerTestPolicy is the exact policy provisioned and offered by the fixture.
@@ -138,13 +137,16 @@ func awaitSandboxCancel(t *testing.T, cancel context.CancelFunc, done <-chan err
 	}
 }
 
-// fatalListener is a ports.BrokerListener whose Accept always reports one
+// newFatalListener is a ports.BrokerListener whose Accept always reports one
 // fixed terminal error, so a test can drive the accept drain without a carriage.
-type fatalListener struct{ err error }
-
-func (l fatalListener) Accept() (ports.BrokerCoreService, error) { return nil, l.err }
-func (l fatalListener) Close() error                             { return nil }
-func (l fatalListener) Addr() string                             { return "fatal" }
+func newFatalListener(t *testing.T, err error) *portsmocks.MockBrokerListener {
+	t.Helper()
+	listener := portsmocks.NewMockBrokerListener(t)
+	listener.EXPECT().Accept().Return(nil, err).Maybe()
+	listener.EXPECT().Close().Return(nil).Maybe()
+	listener.EXPECT().Addr().Return("fatal").Maybe()
+	return listener
+}
 
 // TestDrainBrokerAcceptClassifiesTerminalFailure proves the drain treats a
 // listener close as an orderly end with no log and no failure signal, while any
@@ -162,36 +164,39 @@ func TestDrainBrokerAcceptClassifiesTerminalFailure(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var buffer bytes.Buffer
-			log := slog.New(slog.NewTextHandler(&buffer, nil))
-			started := make(chan struct{})
-			drained := make(chan struct{})
-			failed := make(chan struct{})
-			go drainBrokerAccept(fatalListener{err: tt.err}, log, started, drained, failed)
+			synctest.Test(t, func(t *testing.T) {
+				var buffer bytes.Buffer
+				log := slog.New(slog.NewTextHandler(&buffer, nil))
+				started := make(chan struct{})
+				drained := make(chan struct{})
+				failed := make(chan struct{})
+				go drainBrokerAccept(newFatalListener(t, tt.err), log, started, drained, failed)
 
-			select {
-			case <-started:
-			case <-time.After(brokerTestWait):
-				t.Fatal("the drain never started")
-			}
-			select {
-			case <-drained:
-			case <-time.After(brokerTestWait):
-				t.Fatal("the drain did not stop on a terminal accept failure")
-			}
+				synctest.Wait()
+				select {
+				case <-started:
+				default:
+					t.Fatal("the drain never started")
+				}
+				select {
+				case <-drained:
+				default:
+					t.Fatal("the drain did not stop on a terminal accept failure")
+				}
 
-			select {
-			case <-failed:
-				require.True(t, tt.wantFailed, "an orderly listener close must not signal failure")
-			default:
-				require.False(t, tt.wantFailed, "an unexpected terminal failure must signal shutdown")
-			}
+				select {
+				case <-failed:
+					require.True(t, tt.wantFailed, "an orderly listener close must not signal failure")
+				default:
+					require.False(t, tt.wantFailed, "an unexpected terminal failure must signal shutdown")
+				}
 
-			if tt.wantLogged {
-				require.Contains(t, buffer.String(), "broker_offline_accept_failed")
-				return
-			}
-			require.Empty(t, strings.TrimSpace(buffer.String()), "an orderly listener close must not be logged")
+				if tt.wantLogged {
+					require.Contains(t, buffer.String(), "broker_offline_accept_failed")
+					return
+				}
+				require.Empty(t, strings.TrimSpace(buffer.String()), "an orderly listener close must not be logged")
+			})
 		})
 	}
 }
@@ -199,20 +204,21 @@ func TestDrainBrokerAcceptClassifiesTerminalFailure(t *testing.T) {
 func TestProductionBrokerServeRejectsUnsafeRoot(t *testing.T) {
 	layout := emptyProductionBrokerLayout(t, "")
 	require.NoError(t, os.MkdirAll(layout.Root, 0o755))
-	deps, _ := testBrokerServeDeps(newSandboxClock())
+	deps, _ := testBrokerServeDeps(idleSandboxClock(t))
 	err := runBrokerServe(context.Background(), brokerServeOptions{}, deps)
 	require.ErrorContains(t, err, "0755")
 	require.NoFileExists(t, filepath.Join(layout.Runtime, "lifecycle.lock"))
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestBrokerServeRoundTrip(t *testing.T) {
 	emptyProductionBrokerLayout(t, "")
 	policy := brokerTestPolicy()
 	fixture := newBrokerMuxFixture(t, policy)
 	writeProductionBrokerDocument(t, sandboxRegistrationDocument(fixture.route))
 
-	clk := newSandboxClock()
-	deps, ready := testBrokerServeDeps(clk)
+	clock, _ := newSandboxClockMock(t)
+	deps, ready := testBrokerServeDeps(clock)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := runSandbox(ctx, brokerServeOptions{}, deps)
@@ -298,7 +304,7 @@ func requireSocketRemoved(t *testing.T, socketPath string) {
 
 // waitForSandboxShutdown advances the manual clock until the sandbox has shut
 // down, so a real idle grace is never awaited.
-func waitForSandboxShutdown(t *testing.T, clk *sandboxClock, done <-chan error) {
+func waitForSandboxShutdown(t *testing.T, clk *sandboxClockState, done <-chan error) {
 	t.Helper()
 	deadline := time.After(brokerTestWait)
 	for {
@@ -306,7 +312,8 @@ func waitForSandboxShutdown(t *testing.T, clk *sandboxClock, done <-chan error) 
 		case err := <-done:
 			require.NoError(t, err)
 			return
-		case <-time.After(brokerTestPollTick):
+		case <-clk.armed:
+			// A timer was armed: the idle grace is now pending, so step past it.
 			clk.Advance(brokerTestIdleAdvance)
 		case <-deadline:
 			t.Fatal("idle sandbox did not shut down")
@@ -314,11 +321,12 @@ func waitForSandboxShutdown(t *testing.T, clk *sandboxClock, done <-chan error) 
 	}
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestBrokerServeIdleShutdownOnEmptyConfig(t *testing.T) {
 	layout := emptyProductionBrokerLayout(t, "")
-	clk := newSandboxClock()
+	clock, clk := newSandboxClockMock(t)
 
-	deps, ready := testBrokerServeDeps(clk)
+	deps, ready := testBrokerServeDeps(clock)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := runSandbox(ctx, brokerServeOptions{}, deps)
@@ -339,11 +347,12 @@ func requireOwnerLockReleased(t *testing.T, runtimeDir string) {
 	require.NoError(t, owner.Release())
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestBrokerServeCancelCleanup(t *testing.T) {
 	layout := emptyProductionBrokerLayout(t, "")
-	clk := newSandboxClock()
+	clock, _ := newSandboxClockMock(t)
 
-	deps, ready := testBrokerServeDeps(clk)
+	deps, ready := testBrokerServeDeps(clock)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := runSandbox(ctx, brokerServeOptions{}, deps)
@@ -358,31 +367,32 @@ func TestBrokerServeCancelCleanup(t *testing.T) {
 
 }
 
-// wedgedListener is a ports.BrokerListener whose Accept always reports one
+// newWedgedListener is a ports.BrokerListener whose Accept always reports one
 // unexpected terminal failure and whose Close records that the sandbox tore it
 // down, so a test can prove an accept failure does not leave a bound broker.
-type wedgedListener struct {
-	err    error
-	addr   string
-	closed atomic.Bool
+func newWedgedListener(t *testing.T, err error, addr string) (*portsmocks.MockBrokerListener, *atomic.Bool) {
+	t.Helper()
+	closed := &atomic.Bool{}
+	listener := portsmocks.NewMockBrokerListener(t)
+	listener.EXPECT().Accept().Return(nil, err).Maybe()
+	listener.EXPECT().Close().RunAndReturn(func() error {
+		closed.Store(true)
+		return nil
+	}).Maybe()
+	listener.EXPECT().Addr().Return(addr).Maybe()
+	return listener, closed
 }
-
-func (l *wedgedListener) Accept() (ports.BrokerCoreService, error) { return nil, l.err }
-func (l *wedgedListener) Close() error {
-	l.closed.Store(true)
-	return nil
-}
-func (l *wedgedListener) Addr() string { return l.addr }
 
 // TestBrokerServeShutsDownOnUnexpectedAcceptFailure proves an unexpected
 // terminal accept failure commits shutdown and drains the listener, instead of
 // leaving a bound broker whose socket can no longer admit work.
+// real I/O: real unix-socket broker/daemon stack.
 func TestBrokerServeShutsDownOnUnexpectedAcceptFailure(t *testing.T) {
 	layout := emptyProductionBrokerLayout(t, "")
-	clk := newSandboxClock()
+	clock, _ := newSandboxClockMock(t)
 
-	listener := &wedgedListener{err: errors.New("carriage accept failed"), addr: "wedged"}
-	deps, ready := testBrokerServeDeps(clk)
+	listener, listenerClosed := newWedgedListener(t, errors.New("carriage accept failed"), "wedged")
+	deps, ready := testBrokerServeDeps(clock)
 	deps.listen = func(string, ports.BrokerEpoch, ports.BrokerAuthority, brokeripc.Config) (ports.BrokerListener, error) {
 		return listener, nil
 	}
@@ -397,23 +407,24 @@ func TestBrokerServeShutsDownOnUnexpectedAcceptFailure(t *testing.T) {
 	case <-time.After(brokerTestWait):
 		t.Fatal("the broker wedged on an unexpected accept failure")
 	}
-	require.True(t, listener.closed.Load(), "shutdown must close the wedged listener")
+	require.True(t, listenerClosed.Load(), "shutdown must close the wedged listener")
 	requireOwnerLockReleased(t, layout.Runtime)
 
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestBrokerServeRefusesDuplicateOwnership(t *testing.T) {
 	emptyProductionBrokerLayout(t, "")
-	clk := newSandboxClock()
+	clock, _ := newSandboxClockMock(t)
 
-	deps, ready := testBrokerServeDeps(clk)
+	deps, ready := testBrokerServeDeps(clock)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := runSandbox(ctx, brokerServeOptions{}, deps)
 	socketPath := awaitSandboxReady(t, ready, done)
 
 	// A second foreground owner fails fast on the lifetime lock.
-	secondDeps, _ := testBrokerServeDeps(newSandboxClock())
+	secondDeps, _ := testBrokerServeDeps(idleSandboxClock(t))
 	err := runBrokerServe(context.Background(), brokerServeOptions{}, secondDeps)
 	require.ErrorIs(t, err, lifecycle.ErrBusy)
 
@@ -510,117 +521,18 @@ func newBrokerMuxFixtureAt(t *testing.T, policy ports.BrokerPolicy, route string
 	return fixture
 }
 
-// sandboxClock is a deterministic ports.Clock/ports.Timer pair: time only moves
-// when Advance is called, so idle shutdown is exercised without wall time.
-type sandboxClock struct {
-	mu     sync.Mutex
-	now    time.Time
-	order  uint64
-	timers map[*sandboxTimer]struct{}
-}
-
-func newSandboxClock() *sandboxClock {
-	return &sandboxClock{now: time.Unix(0, 0), timers: make(map[*sandboxTimer]struct{})}
-}
-
-func (c *sandboxClock) Now() time.Time {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.now
-}
-
-func (c *sandboxClock) NewTimer(d time.Duration) ports.Timer {
-	timer := &sandboxTimer{clock: c, ch: make(chan time.Time, 1)}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	timer.arm(d)
-	return timer
-}
-
-// Advance moves time forward and fires every timer that came due.
-func (c *sandboxClock) Advance(d time.Duration) {
-	if d < 0 {
-		panic("sandboxClock.Advance requires a non-negative duration")
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.now = c.now.Add(d)
-	due := make([]*sandboxTimer, 0, len(c.timers))
-	for timer := range c.timers {
-		if !timer.when.After(c.now) {
-			due = append(due, timer)
-		}
-	}
-	sort.Slice(due, func(i, j int) bool {
-		if due[i].when.Equal(due[j].when) {
-			return due[i].order < due[j].order
-		}
-		return due[i].when.Before(due[j].when)
-	})
-	for _, timer := range due {
-		timer.active = false
-		delete(c.timers, timer)
-		select {
-		case timer.ch <- c.now:
-		default:
-		}
-	}
-}
-
-type sandboxTimer struct {
-	clock  *sandboxClock
-	ch     chan time.Time
-	when   time.Time
-	order  uint64
-	active bool
-}
-
-func (t *sandboxTimer) C() <-chan time.Time { return t.ch }
-
-func (t *sandboxTimer) Stop() bool {
-	t.clock.mu.Lock()
-	defer t.clock.mu.Unlock()
-	if !t.active {
-		return false
-	}
-	t.active = false
-	delete(t.clock.timers, t)
-	return true
-}
-
-func (t *sandboxTimer) Reset(d time.Duration) bool {
-	t.clock.mu.Lock()
-	defer t.clock.mu.Unlock()
-	wasActive := t.active
-	if t.active {
-		t.active = false
-		delete(t.clock.timers, t)
-	}
-	select {
-	case <-t.ch:
-	default:
-	}
-	t.arm(d)
-	return wasActive
-}
-
-func (t *sandboxTimer) arm(d time.Duration) {
-	t.order = t.clock.order
-	t.clock.order++
-	t.when = t.clock.now.Add(d)
-	t.active = true
-	t.clock.timers[t] = struct{}{}
-}
-
 func TestSandboxClockFiresOnAdvance(t *testing.T) {
-	clk := newSandboxClock()
-	timer := clk.NewTimer(time.Minute)
-	require.True(t, timer.Stop())
-	timer = clk.NewTimer(time.Minute)
-	clk.Advance(time.Minute)
-	select {
-	case <-timer.C():
-	case <-time.After(brokerTestWait):
-		t.Fatal("manual timer did not fire")
-	}
+	synctest.Test(t, func(t *testing.T) {
+		clk, state := newSandboxClockMock(t)
+		timer := clk.NewTimer(time.Minute)
+		require.True(t, timer.Stop())
+		timer = clk.NewTimer(time.Minute)
+		state.Advance(time.Minute)
+		synctest.Wait()
+		select {
+		case <-timer.C():
+		default:
+			t.Fatal("manual timer did not fire")
+		}
+	})
 }

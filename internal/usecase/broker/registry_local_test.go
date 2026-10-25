@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -12,11 +13,13 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/stretchr/testify/mock"
 )
 
 // scriptedLocalProbe scripts one local observation per received call: the test
 // owns the completion, so the local probe never depends on wall time.
 type scriptedLocalProbe struct {
+	mock     *MockLocalProbe
 	calls    chan localProbeCall
 	canceled chan struct{}
 }
@@ -30,11 +33,31 @@ type localProbeAnswer struct {
 	err      error
 }
 
-func newScriptedLocalProbe(capacity int) *scriptedLocalProbe {
-	return &scriptedLocalProbe{calls: make(chan localProbeCall, capacity), canceled: make(chan struct{}, 1)}
+func newScriptedLocalProbe(t testing.TB, capacity int) *scriptedLocalProbe {
+	t.Helper()
+	state := &scriptedLocalProbe{calls: make(chan localProbeCall, capacity), canceled: make(chan struct{}, 1)}
+	state.mock = buildLocalProbeMock(t, state)
+	return state
 }
 
-func (p *scriptedLocalProbe) ProbeLocal(ctx context.Context) (ports.BrokerDaemonObservation, error) {
+// newLocalProbeMock builds a MockLocalProbe: options register overrides first,
+// then the optional scripted default is registered.
+func newLocalProbeMock(t testing.TB, opts ...func(*MockLocalProbe, *scriptedLocalProbe)) *MockLocalProbe {
+	t.Helper()
+	return buildLocalProbeMock(t, &scriptedLocalProbe{calls: make(chan localProbeCall, 1), canceled: make(chan struct{}, 1)}, opts...)
+}
+
+func buildLocalProbeMock(t testing.TB, state *scriptedLocalProbe, opts ...func(*MockLocalProbe, *scriptedLocalProbe)) *MockLocalProbe {
+	t.Helper()
+	m := NewMockLocalProbe(t)
+	for _, opt := range opts {
+		opt(m, state)
+	}
+	m.EXPECT().ProbeLocal(mock.Anything).RunAndReturn(state.probeLocal).Maybe()
+	return m
+}
+
+func (p *scriptedLocalProbe) probeLocal(ctx context.Context) (ports.BrokerDaemonObservation, error) {
 	call := localProbeCall{result: make(chan localProbeAnswer, 1)}
 	select {
 	case p.calls <- call:
@@ -74,23 +97,25 @@ func receiveLocalCall(t *testing.T, probe *scriptedLocalProbe) localProbeCall {
 // without sleeping on the behavior under test.
 func requireNoLocalProbeWithin(t *testing.T, probe *scriptedLocalProbe, window time.Duration) {
 	t.Helper()
-	timer := time.NewTimer(window)
-	defer timer.Stop()
+	// Fake time: inside the synctest bubble, Sleep only advances the bubble clock.
+	time.Sleep(window)
+	synctest.Wait()
 	select {
 	case <-probe.calls:
 		t.Fatal("unexpected local probe attempt")
-	case <-timer.C:
+	default:
 	}
 }
 
 // newLocalTestRegistry builds a registry that observes the broker's own machine
 // daemon through localProbe, beside an optional remote probe.
-func newLocalTestRegistry(t *testing.T, store ports.BrokerHostStore, remoteProbe ports.BrokerHostProbe, localProbe LocalProbe, clock *manualClock) *Registry {
+func newLocalTestRegistry(t *testing.T, store any, remoteProbe any, localProbe LocalProbe, clock *manualClock) *Registry {
 	t.Helper()
-	registry, err := NewRegistryWithConfig(1, store, remoteProbe, clock, nil, RegistryConfig{
+	registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, store), mockProbe(t, remoteProbe), clock.mock, nil, RegistryConfig{
 		Local: &LocalObservation{DisplayOrigin: "local", Policy: poolPolicy(), Probe: localProbe},
 	})
 	require.NoError(t, err)
+	t.Cleanup(func() { registry.store.close() })
 	registry.jitter = identityJitter
 	return registry
 }
@@ -110,89 +135,17 @@ func waitLocal(t *testing.T, r *Registry, predicate func(ports.BrokerDaemonObser
 // authority plus the observed identity/incarnation/version, and is never
 // durable: the store persists the remote observations only.
 func TestRegistryPublishesObservedLocalDaemonFirst(t *testing.T) {
-	clock := newManualClock(time.Unix(100, 0))
-	store := newTestStore()
-	local := newScriptedLocalProbe(1)
-	registry := newLocalTestRegistry(t, store, newTestProbe(1), local, clock)
-	reg := registration(t, "user@host:22", 1)
-	require.NoError(t, registry.setHosts(hostRecords(reg)))
-	startRegistry(t, registry)
-
-	call := receiveLocalCall(t, local)
-	call.result <- localProbeAnswer{snapshot: ports.BrokerDaemonObservation{
-		Identity:        "local-daemon",
-		Incarnation:     ports.BrokerDaemonIncarnation{9},
-		ProtocolVersion: protocol.Version,
-		Availability:    domain.RemoteAvailabilityReachable,
-	}}
-
-	host := waitLocal(t, registry, func(o ports.BrokerDaemonObservation) bool {
-		return !o.Checking && o.Availability == domain.RemoteAvailabilityReachable
-	})
-	require.True(t, host.Local)
-	require.Zero(t, host.Endpoint)
-	require.Equal(t, domain.RemoteRegistration{}, host.Registration)
-	require.Equal(t, "local", host.DisplayOrigin)
-	require.Equal(t, poolPolicy(), host.Policy)
-	require.Zero(t, host.Rank)
-	require.Equal(t, ports.BrokerDaemonIdentity("local-daemon"), host.Identity)
-	require.Equal(t, ports.BrokerDaemonIncarnation{9}, host.Incarnation)
-	require.Equal(t, protocol.Version, host.ProtocolVersion)
-
-	snapshot := registry.Snapshot()
-	require.True(t, snapshot.Daemons[0].Local)
-	require.Equal(t, reg.Endpoint, snapshot.Daemons[1].Endpoint)
-
-	// Never durable: the store receives remote observations only, and the local
-	// entry is dropped before persistence.
-	stored := waitStored(t, store, func(snapshot ports.BrokerSnapshot) bool {
-		return len(snapshot.Daemons) == 1 && !snapshot.Daemons[0].Local
-	})
-	require.Equal(t, reg.Endpoint, stored.Daemons[0].Endpoint)
-}
-
-// TestRegistryLocalObservationNeverInventsState proves an unreachable local
-// daemon is published with the explicit unknown availability and zero observed
-// identity, and a hostile probe result cannot supply local authority,
-// endpoint, registration, policy, or display origin.
-func TestRegistryLocalObservationNeverInventsState(t *testing.T) {
-	t.Run("failure keeps zero identity and typed availability", func(t *testing.T) {
-		clock := newManualClock(time.Unix(100, 0))
-		local := newScriptedLocalProbe(1)
-		registry := newLocalTestRegistry(t, newTestStore(), newTestProbe(1), local, clock)
+	synctest.Test(t, func(t *testing.T) {
+		clock := newManualClock(t, time.Unix(100, 0))
+		store := newTestStore()
+		local := newScriptedLocalProbe(t, 1)
+		registry := newLocalTestRegistry(t, store, newTestProbe(1), local.mock, clock)
+		reg := registration(t, "user@host:22", 1)
+		require.NoError(t, registry.setHosts(hostRecords(reg)))
 		startRegistry(t, registry)
 
-		call := receiveLocalCall(t, local)
-		call.result <- localProbeAnswer{err: errors.New("local carriage refused")}
-
-		host := waitLocal(t, registry, func(o ports.BrokerDaemonObservation) bool {
-			return !o.Checking && o.Availability == domain.RemoteAvailabilityUnreachable
-		})
-		require.True(t, host.Local)
-		require.Zero(t, host.Endpoint)
-		require.Equal(t, ports.BrokerDaemonIdentity(""), host.Identity)
-		require.True(t, host.Incarnation.IsZero())
-		require.Zero(t, host.ProtocolVersion)
-		require.Equal(t, domain.RemoteFailureTransport, host.LastFailure.Kind)
-		require.Equal(t, 1, len(registry.Snapshot().Daemons))
-	})
-
-	t.Run("hostile probe cannot supply local authority", func(t *testing.T) {
-		clock := newManualClock(time.Unix(100, 0))
-		local := newScriptedLocalProbe(1)
-		registry := newLocalTestRegistry(t, newTestStore(), newTestProbe(1), local, clock)
-		startRegistry(t, registry)
-
-		hostilePolicy := poolPolicy()
-		hostilePolicy.Trust = "attacker"
 		call := receiveLocalCall(t, local)
 		call.result <- localProbeAnswer{snapshot: ports.BrokerDaemonObservation{
-			Local:           false,
-			Endpoint:        "attacker@evil",
-			DisplayOrigin:   "evil",
-			Rank:            42,
-			Registration:    registration(t, "attacker@evil", 9),
-			Policy:          hostilePolicy,
 			Identity:        "local-daemon",
 			Incarnation:     ports.BrokerDaemonIncarnation{9},
 			ProtocolVersion: protocol.Version,
@@ -207,8 +160,89 @@ func TestRegistryLocalObservationNeverInventsState(t *testing.T) {
 		require.Equal(t, domain.RemoteRegistration{}, host.Registration)
 		require.Equal(t, "local", host.DisplayOrigin)
 		require.Equal(t, poolPolicy(), host.Policy)
-		require.NotEqual(t, hostilePolicy, host.Policy)
 		require.Zero(t, host.Rank)
+		require.Equal(t, ports.BrokerDaemonIdentity("local-daemon"), host.Identity)
+		require.Equal(t, ports.BrokerDaemonIncarnation{9}, host.Incarnation)
+		require.Equal(t, protocol.Version, host.ProtocolVersion)
+
+		snapshot := registry.Snapshot()
+		require.True(t, snapshot.Daemons[0].Local)
+		require.Equal(t, reg.Endpoint, snapshot.Daemons[1].Endpoint)
+
+		// Never durable: the store receives remote observations only, and the local
+		// entry is dropped before persistence.
+		stored := waitStored(t, store, func(snapshot ports.BrokerSnapshot) bool {
+			return len(snapshot.Daemons) == 1 && !snapshot.Daemons[0].Local
+		})
+		require.Equal(t, reg.Endpoint, stored.Daemons[0].Endpoint)
+
+	})
+}
+
+// TestRegistryLocalObservationNeverInventsState proves an unreachable local
+// daemon is published with the explicit unknown availability and zero observed
+// identity, and a hostile probe result cannot supply local authority,
+// endpoint, registration, policy, or display origin.
+func TestRegistryLocalObservationNeverInventsState(t *testing.T) {
+	t.Run("failure keeps zero identity and typed availability", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			clock := newManualClock(t, time.Unix(100, 0))
+			local := newScriptedLocalProbe(t, 1)
+			registry := newLocalTestRegistry(t, newTestStore(), newTestProbe(1), local.mock, clock)
+			startRegistry(t, registry)
+
+			call := receiveLocalCall(t, local)
+			call.result <- localProbeAnswer{err: errors.New("local carriage refused")}
+
+			host := waitLocal(t, registry, func(o ports.BrokerDaemonObservation) bool {
+				return !o.Checking && o.Availability == domain.RemoteAvailabilityUnreachable
+			})
+			require.True(t, host.Local)
+			require.Zero(t, host.Endpoint)
+			require.Equal(t, ports.BrokerDaemonIdentity(""), host.Identity)
+			require.True(t, host.Incarnation.IsZero())
+			require.Zero(t, host.ProtocolVersion)
+			require.Equal(t, domain.RemoteFailureTransport, host.LastFailure.Kind)
+			require.Equal(t, 1, len(registry.Snapshot().Daemons))
+
+		})
+	})
+
+	t.Run("hostile probe cannot supply local authority", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			clock := newManualClock(t, time.Unix(100, 0))
+			local := newScriptedLocalProbe(t, 1)
+			registry := newLocalTestRegistry(t, newTestStore(), newTestProbe(1), local.mock, clock)
+			startRegistry(t, registry)
+
+			hostilePolicy := poolPolicy()
+			hostilePolicy.Trust = "attacker"
+			call := receiveLocalCall(t, local)
+			call.result <- localProbeAnswer{snapshot: ports.BrokerDaemonObservation{
+				Local:           false,
+				Endpoint:        "attacker@evil",
+				DisplayOrigin:   "evil",
+				Rank:            42,
+				Registration:    registration(t, "attacker@evil", 9),
+				Policy:          hostilePolicy,
+				Identity:        "local-daemon",
+				Incarnation:     ports.BrokerDaemonIncarnation{9},
+				ProtocolVersion: protocol.Version,
+				Availability:    domain.RemoteAvailabilityReachable,
+			}}
+
+			host := waitLocal(t, registry, func(o ports.BrokerDaemonObservation) bool {
+				return !o.Checking && o.Availability == domain.RemoteAvailabilityReachable
+			})
+			require.True(t, host.Local)
+			require.Zero(t, host.Endpoint)
+			require.Equal(t, domain.RemoteRegistration{}, host.Registration)
+			require.Equal(t, "local", host.DisplayOrigin)
+			require.Equal(t, poolPolicy(), host.Policy)
+			require.NotEqual(t, hostilePolicy, host.Policy)
+			require.Zero(t, host.Rank)
+
+		})
 	})
 }
 
@@ -263,27 +297,30 @@ func TestRegistryLocalPendingReprobeHonorsExplicitReconcileOnly(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			clock := newManualClock(time.Unix(100, 0))
-			local := newScriptedLocalProbe(2)
-			registry := newLocalTestRegistry(t, newTestStore(), nil, local, clock)
-			startRegistry(t, registry)
+			synctest.Test(t, func(t *testing.T) {
+				clock := newManualClock(t, time.Unix(100, 0))
+				local := newScriptedLocalProbe(t, 2)
+				registry := newLocalTestRegistry(t, newTestStore(), nil, local.mock, clock)
+				startRegistry(t, registry)
 
-			call := receiveLocalCall(t, local)
-			call.result <- tt.first
-			waitLocal(t, registry, func(o ports.BrokerDaemonObservation) bool { return !o.Checking })
+				call := receiveLocalCall(t, local)
+				call.result <- tt.first
+				waitLocal(t, registry, func(o ports.BrokerDaemonObservation) bool { return !o.Checking })
 
-			if tt.requestReconcile {
-				registry.RequestProbe("")
-			}
+				if tt.requestReconcile {
+					registry.RequestProbe("")
+				}
 
-			// No clock advance at all: NextDue (freshFor after success, the retry
-			// delay after unknown) is still in the future either way, so only the
-			// pending flag - never the schedule - can explain a dispatch here.
-			if tt.wantReprobe {
-				receiveLocalCall(t, local)
-			} else {
-				requireNoLocalProbeWithin(t, local, probeGrace)
-			}
+				// No clock advance at all: NextDue (freshFor after success, the retry
+				// delay after unknown) is still in the future either way, so only the
+				// pending flag - never the schedule - can explain a dispatch here.
+				if tt.wantReprobe {
+					receiveLocalCall(t, local)
+				} else {
+					requireNoLocalProbeWithin(t, local, probeGrace)
+				}
+
+			})
 		})
 	}
 }
@@ -293,31 +330,34 @@ func TestRegistryLocalPendingReprobeHonorsExplicitReconcileOnly(t *testing.T) {
 // observation the wire refuses: a partial identity (identity without a version)
 // is rejected without inventing the missing half.
 func TestRegistryLocalObservationValidatesProbeResults(t *testing.T) {
-	clock := newManualClock(time.Unix(100, 0))
-	local := newScriptedLocalProbe(1)
-	registry := newLocalTestRegistry(t, newTestStore(), newTestProbe(1), local, clock)
-	startRegistry(t, registry)
+	synctest.Test(t, func(t *testing.T) {
+		clock := newManualClock(t, time.Unix(100, 0))
+		local := newScriptedLocalProbe(t, 1)
+		registry := newLocalTestRegistry(t, newTestStore(), newTestProbe(1), local.mock, clock)
+		startRegistry(t, registry)
 
-	call := receiveLocalCall(t, local)
-	call.result <- localProbeAnswer{snapshot: ports.BrokerDaemonObservation{
-		Identity:     "local-daemon", // no protocol version: partial identity
-		Incarnation:  ports.BrokerDaemonIncarnation{9},
-		Availability: domain.RemoteAvailabilityReachable,
-	}}
+		call := receiveLocalCall(t, local)
+		call.result <- localProbeAnswer{snapshot: ports.BrokerDaemonObservation{
+			Identity:     "local-daemon", // no protocol version: partial identity
+			Incarnation:  ports.BrokerDaemonIncarnation{9},
+			Availability: domain.RemoteAvailabilityReachable,
+		}}
 
-	host := waitLocal(t, registry, func(o ports.BrokerDaemonObservation) bool {
-		return !o.Checking && o.Availability == domain.RemoteAvailabilityInvalidResponse
+		host := waitLocal(t, registry, func(o ports.BrokerDaemonObservation) bool {
+			return !o.Checking && o.Availability == domain.RemoteAvailabilityInvalidResponse
+		})
+		require.True(t, host.Local)
+		require.Equal(t, domain.RemoteFailureInvalidResponse, host.LastFailure.Kind)
+
 	})
-	require.True(t, host.Local)
-	require.Equal(t, domain.RemoteFailureInvalidResponse, host.LastFailure.Kind)
 }
 
 // TestRegistryLocalObservationConstruction pins the composition refusals: a
 // read-only registry owns no local producer, a local producer requires a probe,
 // and its policy and display origin are validated before anything is published.
 func TestRegistryLocalObservationConstruction(t *testing.T) {
-	clock := newManualClock(time.Unix(100, 0))
-	valid := &LocalObservation{DisplayOrigin: "local", Policy: poolPolicy(), Probe: newScriptedLocalProbe(1)}
+	clock := newManualClock(t, time.Unix(100, 0))
+	valid := &LocalObservation{DisplayOrigin: "local", Policy: poolPolicy(), Probe: newScriptedLocalProbe(t, 1).mock}
 
 	invalidPolicy := poolPolicy()
 	invalidPolicy.ProtocolVersion = 0
@@ -325,7 +365,7 @@ func TestRegistryLocalObservationConstruction(t *testing.T) {
 	tests := []struct {
 		name        string
 		cfg         RegistryConfig
-		remoteProbe ports.BrokerHostProbe
+		remoteProbe any
 	}{
 		{
 			name:        "observation-disabled registry cannot observe locally",
@@ -339,17 +379,17 @@ func TestRegistryLocalObservationConstruction(t *testing.T) {
 		},
 		{
 			name:        "local authority policy is validated",
-			cfg:         RegistryConfig{Local: &LocalObservation{DisplayOrigin: "local", Policy: invalidPolicy, Probe: newScriptedLocalProbe(1)}},
+			cfg:         RegistryConfig{Local: &LocalObservation{DisplayOrigin: "local", Policy: invalidPolicy, Probe: newScriptedLocalProbe(t, 1).mock}},
 			remoteProbe: newTestProbe(1),
 		},
 		{
 			name:        "local display origin is required",
-			cfg:         RegistryConfig{Local: &LocalObservation{DisplayOrigin: "", Policy: poolPolicy(), Probe: newScriptedLocalProbe(1)}},
+			cfg:         RegistryConfig{Local: &LocalObservation{DisplayOrigin: "", Policy: poolPolicy(), Probe: newScriptedLocalProbe(t, 1).mock}},
 			remoteProbe: newTestProbe(1),
 		},
 		{
 			name:        "local display origin must be normalized",
-			cfg:         RegistryConfig{Local: &LocalObservation{DisplayOrigin: "ev\u202eil", Policy: poolPolicy(), Probe: newScriptedLocalProbe(1)}},
+			cfg:         RegistryConfig{Local: &LocalObservation{DisplayOrigin: "ev\u202eil", Policy: poolPolicy(), Probe: newScriptedLocalProbe(t, 1).mock}},
 			remoteProbe: newTestProbe(1),
 		},
 		{
@@ -360,8 +400,11 @@ func TestRegistryLocalObservationConstruction(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := NewRegistryWithConfig(1, newTestStore(), tt.remoteProbe, clock, nil, tt.cfg)
-			require.Error(t, err)
+			synctest.Test(t, func(t *testing.T) {
+				_, err := NewRegistryWithConfig(1, hostStoreFixture(t, newTestStore()), mockProbe(t, tt.remoteProbe), clock.mock, nil, tt.cfg)
+				require.Error(t, err)
+
+			})
 		})
 	}
 }
@@ -370,31 +413,34 @@ func TestRegistryLocalObservationConstruction(t *testing.T) {
 // only the broker's own machine daemon needs no remote probe, and that such a
 // registry refuses remote membership rather than silently never probing it.
 func TestRegistryLocalOnlyRequiresNoRemoteProbe(t *testing.T) {
-	clock := newManualClock(time.Unix(100, 0))
-	local := newScriptedLocalProbe(1)
-	registry, err := NewRegistryWithConfig(1, newTestStore(), nil, clock, nil, RegistryConfig{
-		Local: &LocalObservation{DisplayOrigin: "local", Policy: poolPolicy(), Probe: local},
-	})
-	require.NoError(t, err)
-	registry.jitter = identityJitter
+	synctest.Test(t, func(t *testing.T) {
+		clock := newManualClock(t, time.Unix(100, 0))
+		local := newScriptedLocalProbe(t, 1)
+		registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, newTestStore()), mockProbe(t, nil), clock.mock, nil, RegistryConfig{
+			Local: &LocalObservation{DisplayOrigin: "local", Policy: poolPolicy(), Probe: local.mock},
+		})
+		require.NoError(t, err)
+		registry.jitter = identityJitter
 
-	reg := registration(t, "user@host:22", 1)
-	require.Error(t, registry.setHosts(hostRecords(reg)))
-	require.Error(t, registry.ReplaceHosts(hostRecords(reg)))
+		reg := registration(t, "user@host:22", 1)
+		require.Error(t, registry.setHosts(hostRecords(reg)))
+		require.Error(t, registry.ReplaceHosts(hostRecords(reg)))
 
-	startRegistry(t, registry)
-	call := receiveLocalCall(t, local)
-	call.result <- localProbeAnswer{snapshot: ports.BrokerDaemonObservation{
-		Identity:        "local-daemon",
-		Incarnation:     ports.BrokerDaemonIncarnation{9},
-		ProtocolVersion: protocol.Version,
-		Availability:    domain.RemoteAvailabilityReachable,
-	}}
-	host := waitLocal(t, registry, func(o ports.BrokerDaemonObservation) bool {
-		return !o.Checking && o.Availability == domain.RemoteAvailabilityReachable
+		startRegistry(t, registry)
+		call := receiveLocalCall(t, local)
+		call.result <- localProbeAnswer{snapshot: ports.BrokerDaemonObservation{
+			Identity:        "local-daemon",
+			Incarnation:     ports.BrokerDaemonIncarnation{9},
+			ProtocolVersion: protocol.Version,
+			Availability:    domain.RemoteAvailabilityReachable,
+		}}
+		host := waitLocal(t, registry, func(o ports.BrokerDaemonObservation) bool {
+			return !o.Checking && o.Availability == domain.RemoteAvailabilityReachable
+		})
+		require.True(t, host.Local)
+		require.Len(t, registry.Snapshot().Daemons, 1)
+
 	})
-	require.True(t, host.Local)
-	require.Len(t, registry.Snapshot().Daemons, 1)
 }
 
 // localEntryCount counts the published local entries. A valid snapshot carries
@@ -472,17 +518,21 @@ func TestRegistryLocalEntryStaysFirstAcrossMembershipChanges(t *testing.T) {
 			remotes: nil,
 		},
 	}
-	registry := newLocalTestRegistry(t, newTestStore(), newTestProbe(1), newScriptedLocalProbe(1), newManualClock(time.Unix(100, 0)))
-	for _, tt := range steps {
-		t.Run(tt.name, func(t *testing.T) {
-			tt.apply(t, registry)
-			snapshot := registry.Snapshot()
-			require.NotEmpty(t, snapshot.Daemons)
-			require.True(t, snapshot.Daemons[0].Local, "the local entry is always at index zero")
-			require.Equal(t, 1, localEntryCount(snapshot), "exactly one local entry is published")
-			require.Equal(t, tt.remotes, remoteEndpoints(snapshot), "remotes keep registration order behind the local entry")
-		})
-	}
+	synctest.Test(t, func(t *testing.T) {
+		registry := newLocalTestRegistry(t, newTestStore(), newTestProbe(1), newScriptedLocalProbe(t, 1).mock, newManualClock(t, time.Unix(100, 0)))
+		for _, tt := range steps {
+			func() {
+				t.Log(tt.name)
+				tt.apply(t, registry)
+				snapshot := registry.Snapshot()
+				require.NotEmpty(t, snapshot.Daemons)
+				require.True(t, snapshot.Daemons[0].Local, "the local entry is always at index zero")
+				require.Equal(t, 1, localEntryCount(snapshot), "exactly one local entry is published")
+				require.Equal(t, tt.remotes, remoteEndpoints(snapshot), "remotes keep registration order behind the local entry")
+
+			}()
+		}
+	})
 }
 
 // TestRegistryLocalOnlyRefusesRestoredRemoteMembership proves a local-only
@@ -491,30 +541,37 @@ func TestRegistryLocalEntryStaysFirstAcrossMembershipChanges(t *testing.T) {
 // a remote host it could never probe. The setHosts/ReplaceHosts refusals are
 // covered beside this test.
 func TestRegistryLocalOnlyRefusesRestoredRemoteMembership(t *testing.T) {
-	clock := newManualClock(time.Unix(100, 0))
+	clock := newManualClock(t, time.Unix(100, 0))
 	local := func() *LocalObservation {
-		return &LocalObservation{DisplayOrigin: "local", Policy: poolPolicy(), Probe: newScriptedLocalProbe(1)}
+		return &LocalObservation{DisplayOrigin: "local", Policy: poolPolicy(), Probe: newScriptedLocalProbe(t, 1).mock}
 	}
 	reg := registration(t, "user@host:22", 1)
 
 	t.Run("construction refuses a store with restored remote membership", func(t *testing.T) {
-		store := newTestStore()
-		store.hosts = ports.BrokerHosts{Revision: 1, Hosts: hostRecords(reg)}
-		_, err := NewRegistryWithConfig(1, store, nil, clock, nil, RegistryConfig{Local: local()})
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "remote hosts require a host probe")
+		synctest.Test(t, func(t *testing.T) {
+			store := newTestStore()
+			store.hosts = ports.BrokerHosts{Revision: 1, Hosts: hostRecords(reg)}
+			_, err := NewRegistryWithConfig(1, hostStoreFixture(t, store), mockProbe(t, nil), clock.mock, nil, RegistryConfig{Local: local()})
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "remote hosts require a host probe")
+
+		})
 	})
 
 	t.Run("projectMembership refuses restored remote membership directly", func(t *testing.T) {
-		registry, err := NewRegistryWithConfig(1, newTestStore(), nil, clock, nil, RegistryConfig{Local: local()})
-		require.NoError(t, err)
-		// Empty restored membership is accepted: the local-only registry owns no
-		// remote host and needs no remote probe.
-		require.NoError(t, registry.projectMembership(ports.BrokerHosts{Revision: 1}))
-		err = registry.projectMembership(ports.BrokerHosts{Revision: 1, Hosts: hostRecords(reg)})
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "remote hosts require a host probe")
-		require.Empty(t, remoteEndpoints(registry.Snapshot()), "the refused membership is never published")
+		synctest.Test(t, func(t *testing.T) {
+			registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, newTestStore()), mockProbe(t, nil), clock.mock, nil, RegistryConfig{Local: local()})
+			require.NoError(t, err)
+			t.Cleanup(func() { registry.store.close() })
+			// Empty restored membership is accepted: the local-only registry owns no
+			// remote host and needs no remote probe.
+			require.NoError(t, registry.projectMembership(ports.BrokerHosts{Revision: 1}))
+			err = registry.projectMembership(ports.BrokerHosts{Revision: 1, Hosts: hostRecords(reg)})
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "remote hosts require a host probe")
+			require.Empty(t, remoteEndpoints(registry.Snapshot()), "the refused membership is never published")
+
+		})
 	})
 }
 
@@ -525,28 +582,31 @@ func TestRegistryLocalOnlyRefusesRestoredRemoteMembership(t *testing.T) {
 // lives here because pool_test.go is outside this change's write scope; the
 // fake connector/resolver harness it reuses is defined there.
 func TestPoolLocalStreamsShareOnePhysicalEntry(t *testing.T) {
-	var connects atomic.Int32
-	var physical *fakePhysical
-	pool, _ := setupPool(t, func(_ context.Context, endpoint ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
-		connects.Add(1)
-		physical = &fakePhysical{endpoint: endpoint, done: make(chan struct{})}
-		return physical, nil
+	synctest.Test(t, func(t *testing.T) {
+		var connects atomic.Int32
+		var physical *fakePhysical
+		pool, _ := setupPool(t, func(_ context.Context, endpoint ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
+			connects.Add(1)
+			physical = &fakePhysical{endpoint: endpoint, done: make(chan struct{})}
+			return mockPhysical(t, physical), nil
+		})
+		id, err := pool.RegisterClient()
+		require.NoError(t, err)
+		first, err := pool.OpenStream(context.Background(), poolRequest(id, 1))
+		require.NoError(t, err)
+		second, err := pool.OpenStream(context.Background(), poolRequest(id, 2))
+		require.NoError(t, err)
+		require.EqualValues(t, 1, connects.Load(), "both local streams share one physical carriage")
+		require.NoError(t, first.Close())
+		select {
+		case <-second.Done():
+			t.Fatal("closing one local stream closed its sibling")
+		default:
+		}
+		require.NoError(t, second.Close())
+		require.NoError(t, physical.markClosed())
+
 	})
-	id, err := pool.RegisterClient()
-	require.NoError(t, err)
-	first, err := pool.OpenStream(context.Background(), poolRequest(id, 1))
-	require.NoError(t, err)
-	second, err := pool.OpenStream(context.Background(), poolRequest(id, 2))
-	require.NoError(t, err)
-	require.EqualValues(t, 1, connects.Load(), "both local streams share one physical carriage")
-	require.NoError(t, first.Close())
-	select {
-	case <-second.Done():
-		t.Fatal("closing one local stream closed its sibling")
-	default:
-	}
-	require.NoError(t, second.Close())
-	require.NoError(t, physical.Close())
 }
 
 // TestRegistryMutableAddHostLocalOnlyNoRemoteProbe proves a mutable registry that
@@ -558,41 +618,44 @@ func TestPoolLocalStreamsShareOnePhysicalEntry(t *testing.T) {
 // case because the immutable default refuses before the membership mode is even
 // consulted.
 func TestRegistryMutableAddHostLocalOnlyNoRemoteProbe(t *testing.T) {
-	clock := newManualClock(time.Unix(100, 0))
-	store := newMembershipStore()
-	local := newScriptedLocalProbe(1)
-	registry, err := NewRegistryWithConfig(1, store, nil, clock, nil, RegistryConfig{
-		MembershipMode:       MembershipMutable,
-		IncarnationGenerator: (&incarnationSequencer{}).generate,
-		Local:                &LocalObservation{DisplayOrigin: "local", Policy: poolPolicy(), Probe: local},
-	})
-	require.NoError(t, err)
-	registry.jitter = identityJitter
+	synctest.Test(t, func(t *testing.T) {
+		clock := newManualClock(t, time.Unix(100, 0))
+		store := newMembershipStore()
+		local := newScriptedLocalProbe(t, 1)
+		registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, store), mockProbe(t, nil), clock.mock, nil, RegistryConfig{
+			MembershipMode:       MembershipMutable,
+			IncarnationGenerator: (&incarnationSequencer{}).generate,
+			Local:                &LocalObservation{DisplayOrigin: "local", Policy: poolPolicy(), Probe: local.mock},
+		})
+		require.NoError(t, err)
+		registry.jitter = identityJitter
 
-	authority := registry.authority
-	before := registry.Snapshot()
-	require.NotPanics(t, func() {
-		_, err = registry.AddHost(context.Background(), "user@host:22", poolPolicy())
-	}, "an absent remote probe must be refused, never dereferenced")
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "remote hosts require a host probe")
-	require.Equal(t, 0, store.casCalls(), "the refusal happens before the store CAS")
-	require.Equal(t, authority, registry.authority, "a refused add never moves authority")
-	require.Equal(t, before, registry.Snapshot(), "a refused add never publishes")
+		authority := registry.authority
+		before := registry.Snapshot()
+		require.NotPanics(t, func() {
+			_, err = registry.AddHost(context.Background(), "user@host:22", poolPolicy())
+		}, "an absent remote probe must be refused, never dereferenced")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "remote hosts require a host probe")
+		require.Equal(t, 0, store.casCalls(), "the refusal happens before the store CAS")
+		require.Equal(t, authority, registry.authority, "a refused add never moves authority")
+		require.Equal(t, before, registry.Snapshot(), "a refused add never publishes")
 
-	// The local entry stays observable: the refusal never leaves the registry
-	// unable to publish what it still owns.
-	startRegistry(t, registry)
-	call := receiveLocalCall(t, local)
-	call.result <- localProbeAnswer{snapshot: ports.BrokerDaemonObservation{
-		Identity:        "local-daemon",
-		Incarnation:     ports.BrokerDaemonIncarnation{9},
-		ProtocolVersion: protocol.Version,
-		Availability:    domain.RemoteAvailabilityReachable,
-	}}
-	host := waitLocal(t, registry, func(o ports.BrokerDaemonObservation) bool {
-		return !o.Checking && o.Availability == domain.RemoteAvailabilityReachable
+		// The local entry stays observable: the refusal never leaves the registry
+		// unable to publish what it still owns.
+		startRegistry(t, registry)
+		call := receiveLocalCall(t, local)
+		call.result <- localProbeAnswer{snapshot: ports.BrokerDaemonObservation{
+			Identity:        "local-daemon",
+			Incarnation:     ports.BrokerDaemonIncarnation{9},
+			ProtocolVersion: protocol.Version,
+			Availability:    domain.RemoteAvailabilityReachable,
+		}}
+		host := waitLocal(t, registry, func(o ports.BrokerDaemonObservation) bool {
+			return !o.Checking && o.Availability == domain.RemoteAvailabilityReachable
+		})
+		require.True(t, host.Local)
+		require.Len(t, registry.Snapshot().Daemons, 1)
+
 	})
-	require.True(t, host.Local)
-	require.Len(t, registry.Snapshot().Daemons, 1)
 }

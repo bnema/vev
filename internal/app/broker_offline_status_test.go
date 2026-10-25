@@ -56,12 +56,21 @@ func productionStatusRequest(layout brokerconfig.Layout, timeout time.Duration) 
 	}
 }
 
-// fakeStatusLock records releases for one held election.
-type fakeStatusLock struct{ releases atomic.Int32 }
+// statusLock records releases for one held election. lock is the generated
+// mock handed to the code under test; releases counts its Release calls.
+type statusLock struct {
+	lock     *mocklifecycleOwnership
+	releases atomic.Int32
+}
 
-func (l *fakeStatusLock) Release() error {
-	l.releases.Add(1)
-	return nil
+func newStatusLock(t testing.TB) *statusLock {
+	t.Helper()
+	l := &statusLock{}
+	l.lock = newOwnershipMock(t, func() error {
+		l.releases.Add(1)
+		return nil
+	})
+	return l
 }
 
 // readyReport is the report returned when a scripted probe succeeds.
@@ -86,9 +95,9 @@ func testStatusDeps(t *testing.T) (brokerStatusDeps, *statusRecorder) {
 		},
 		acquireElection: func(string) (brokerStatusLock, error) {
 			rec.elections.Add(1)
-			lock := &fakeStatusLock{}
+			lock := newStatusLock(t)
 			rec.locks = append(rec.locks, lock)
-			return lock, nil
+			return lock.lock, nil
 		},
 		lifetimeOwner: func(string) (bool, error) { return false, nil },
 		spawn: func(context.Context, string, time.Duration, bool) error {
@@ -108,7 +117,7 @@ type statusRecorder struct {
 	probes    atomic.Int32
 	spawns    atomic.Int32
 	elections atomic.Int32
-	locks     []*fakeStatusLock
+	locks     []*statusLock
 }
 
 // setProbe installs one scripted probe that sees its 1-based attempt number.
@@ -157,7 +166,7 @@ func TestBrokerServeRefusesConflictingIdleGrace(t *testing.T) {
 	layout := emptyProductionBrokerLayout(t, "90s")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	deps, _ := testBrokerServeDeps(newSandboxClock())
+	deps, _ := testBrokerServeDeps(idleSandboxClock(t))
 	err := runBrokerServe(ctx, brokerServeOptions{idleGrace: time.Minute}, deps)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "conflicts with the provisioned idle grace")
@@ -252,9 +261,9 @@ func TestBrokerStatusEnsureRecoversAfterSpawnerDeath(t *testing.T) {
 			// The previous elected spawner is still alive (or mid-startup).
 			return nil, lifecycle.ErrBusy
 		}
-		lock := &fakeStatusLock{}
+		lock := newStatusLock(t)
 		rec.locks = append(rec.locks, lock)
-		return lock, nil
+		return lock.lock, nil
 	}
 	report, err := ensureBrokerReady(context.Background(), productionStatusRequest(layout, time.Second), deps)
 	require.NoError(t, err)
@@ -297,7 +306,7 @@ func TestBrokerStatusEnsureSpawnFailureIsReported(t *testing.T) {
 func TestBrokerEnsureProductionConfigFailure(t *testing.T) {
 	layout := emptyProductionBrokerLayout(t, "")
 	require.NoError(t, os.WriteFile(productionBrokerConfigPath(), []byte("not json"), 0o600))
-	deps, _ := testBrokerServeDeps(newSandboxClock())
+	deps, _ := testBrokerServeDeps(idleSandboxClock(t))
 	err := runBrokerServe(context.Background(), brokerServeOptions{}, deps)
 	require.Error(t, err)
 	require.NoFileExists(t, filepath.Join(layout.Runtime, "lifecycle.lock"))
@@ -344,6 +353,7 @@ func TestBrokerStatusEnsureHonorsCancellation(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestProbeBrokerStatusClassifiesAbsenceAndIncompatibility(t *testing.T) {
 	layout := emptyProductionBrokerLayout(t, "")
 	socketPath := brokeripc.SocketPath(layout.Runtime)
@@ -384,6 +394,7 @@ func TestProbeBrokerStatusClassifiesAbsenceAndIncompatibility(t *testing.T) {
 	})
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestProbeBrokerStatusSilentRegistrationIsBounded(t *testing.T) {
 	layout := emptyProductionBrokerLayout(t, "")
 	socketPath := brokeripc.SocketPath(layout.Runtime)

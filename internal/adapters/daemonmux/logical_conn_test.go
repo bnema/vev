@@ -8,8 +8,12 @@ import (
 	"runtime"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/adapters/sessionwire"
@@ -26,48 +30,36 @@ var errMemCarrierClosed = errors.New("memCarrier: closed")
 // memCarrier is one end of a paired, in-memory FramedCarrier link. Two
 // endpoints share a closed channel and exchange complete envelopes over two
 // buffered channels, so one pump's reader is the other pump's writer.
-type memCarrier struct {
-	out  chan []byte
-	in   chan []byte
-	done chan struct{}
-	once *sync.Once
-}
-
-func newMemCarrierPair(buffer int) (*memCarrier, *memCarrier) {
-	aToB := make(chan []byte, buffer)
-	bToA := make(chan []byte, buffer)
+func newMemCarrierPair(t *testing.T, buffer int) (*MockFramedCarrier, *MockFramedCarrier) {
+	aToB, bToA := make(chan []byte, buffer), make(chan []byte, buffer)
 	done := make(chan struct{})
-	once := &sync.Once{}
-	a := &memCarrier{out: aToB, in: bToA, done: done, once: once}
-	b := &memCarrier{out: bToA, in: aToB, done: done, once: once}
-	return a, b
-}
-
-func (m *memCarrier) Send(ctx context.Context, payload []byte) error {
-	select {
-	case m.out <- append([]byte(nil), payload...):
-		return nil
-	case <-m.done:
-		return errMemCarrierClosed
-	case <-ctx.Done():
-		return ctx.Err()
+	var once sync.Once
+	endpoint := func(out, in chan []byte) *MockFramedCarrier {
+		c := NewMockFramedCarrier(t)
+		c.EXPECT().Send(mock.Anything, mock.Anything).RunAndReturn(func(ctx context.Context, payload []byte) error {
+			select {
+			case out <- append([]byte(nil), payload...):
+				return nil
+			case <-done:
+				return errMemCarrierClosed
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}).Maybe()
+		c.EXPECT().Receive(mock.Anything).RunAndReturn(func(ctx context.Context) ([]byte, error) {
+			select {
+			case payload := <-in:
+				return payload, nil
+			case <-done:
+				return nil, errMemCarrierClosed
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}).Maybe()
+		c.EXPECT().Close().RunAndReturn(func() error { once.Do(func() { close(done) }); return nil }).Maybe()
+		return c
 	}
-}
-
-func (m *memCarrier) Receive(ctx context.Context) ([]byte, error) {
-	select {
-	case payload := <-m.in:
-		return payload, nil
-	case <-m.done:
-		return nil, errMemCarrierClosed
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-}
-
-func (m *memCarrier) Close() error {
-	m.once.Do(func() { close(m.done) })
-	return nil
+	return endpoint(aToB, bToA), endpoint(bToA, aToB)
 }
 
 // newPairedPumps builds a broker-side pump (decodes server frames, emits client
@@ -88,11 +80,19 @@ func newPairedPumps(t *testing.T, ceilings MuxCeilings) (*Pump, *Pump) {
 // closed at test end.
 func newPairedPumpsUnstarted(t *testing.T, ceilings MuxCeilings) (*Pump, *Pump, func()) {
 	t.Helper()
-	brokerCarrier, daemonCarrier := newMemCarrierPair(4096)
+	brokerCarrier, daemonCarrier := newMemCarrierPair(t, 4096)
 	broker, err := NewPump(brokerCarrier, DirectionServer, ceilings)
 	require.NoError(t, err)
 	daemon, err := NewPump(daemonCarrier, DirectionClient, ceilings)
 	require.NoError(t, err)
+	signals := &admissionSignals{ready: make(map[PhysicalStreamID]chan struct{})}
+	pairedAdmissions.Store(daemon, signals)
+	t.Cleanup(func() { pairedAdmissions.Delete(daemon) })
+	require.NoError(t, daemon.OnAdmitted(func(open Open) {
+		signals.mu.Lock()
+		defer signals.mu.Unlock()
+		close(signals.channel(open.Ref.Physical))
+	}))
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() {
 		cancel()
@@ -140,14 +140,40 @@ func controlRequest(stream int) ports.BrokerOpenStreamRequest {
 
 // awaitStream waits until a stream identity has been admitted on the daemon
 // side.
-func awaitStream(pump *Pump, id PhysicalStreamID, deadline time.Time) (StreamStatus, error) {
-	for time.Now().Before(deadline) {
-		if status, ok := pump.Engine().Status(id); ok && status.State != StreamTerminal {
-			return status, nil
-		}
-		time.Sleep(time.Millisecond)
+type admissionSignals struct {
+	mu    sync.Mutex
+	ready map[PhysicalStreamID]chan struct{}
+}
+
+var pairedAdmissions sync.Map
+
+func (s *admissionSignals) channel(id PhysicalStreamID) chan struct{} {
+	ch := s.ready[id]
+	if ch == nil {
+		ch = make(chan struct{})
+		s.ready[id] = ch
 	}
-	return StreamStatus{}, fmt.Errorf("daemonmux test: stream %d was not admitted", id)
+	return ch
+}
+func awaitStream(pump *Pump, id PhysicalStreamID, deadline time.Time) (StreamStatus, error) {
+	value, ok := pairedAdmissions.Load(pump)
+	if !ok {
+		return StreamStatus{}, fmt.Errorf("missing paired admission observer")
+	}
+	signals := value.(*admissionSignals)
+	signals.mu.Lock()
+	ch := signals.channel(id)
+	signals.mu.Unlock()
+	select {
+	case <-ch:
+	case <-time.After(time.Until(deadline)):
+		return StreamStatus{}, fmt.Errorf("stream %d was not admitted", id)
+	}
+	status, ok := pump.Engine().Status(id)
+	if !ok || status.State == StreamTerminal {
+		return StreamStatus{}, fmt.Errorf("stream %d was not admitted", id)
+	}
+	return status, nil
 }
 
 // sessionPeer is a test-only daemon-side typed session: it frames the same mux
@@ -200,14 +226,18 @@ type daemonAcceptor struct {
 	pump  *Pump
 	flood int
 
-	mu    sync.Mutex
-	count int
-	peers map[PhysicalStreamID]*sessionPeer
-	errCh chan error
+	mu      sync.Mutex
+	count   int
+	peers   map[PhysicalStreamID]*sessionPeer
+	errCh   chan error
+	changed chan struct{}
 }
 
-func newDaemonAcceptor(pump *Pump, flood int) *daemonAcceptor {
-	return &daemonAcceptor{pump: pump, flood: flood, peers: map[PhysicalStreamID]*sessionPeer{}, errCh: make(chan error, 256)}
+func newDaemonAcceptor(t *testing.T, pump *Pump, flood int) *daemonAcceptor {
+	t.Helper()
+	a := &daemonAcceptor{pump: pump, flood: flood, peers: map[PhysicalStreamID]*sessionPeer{}, errCh: make(chan error, 256), changed: make(chan struct{})}
+	t.Cleanup(a.closePeers)
+	return a
 }
 
 func (a *daemonAcceptor) start(id PhysicalStreamID, deadline time.Time) {
@@ -282,6 +312,8 @@ func (a *daemonAcceptor) add(id PhysicalStreamID, peer *sessionPeer) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.count++
+	close(a.changed)
+	a.changed = make(chan struct{})
 	if peer != nil {
 		a.peers[id] = peer
 	}
@@ -295,29 +327,27 @@ func (a *daemonAcceptor) fail(err error) {
 }
 
 func (a *daemonAcceptor) wait(count int, deadline time.Time) error {
-	for time.Now().Before(deadline) {
+	guard := time.After(time.Until(deadline))
+	for {
+		a.mu.Lock()
+		n, ch := a.count, a.changed
+		a.mu.Unlock()
 		select {
 		case err := <-a.errCh:
 			return err
 		default:
 		}
-		a.mu.Lock()
-		accepted := a.count
-		a.mu.Unlock()
-		if accepted >= count {
+		if n >= count {
 			return nil
 		}
-		time.Sleep(time.Millisecond)
+		select {
+		case err := <-a.errCh:
+			return err
+		case <-ch:
+		case <-guard:
+			return fmt.Errorf("accepted %d of %d streams", n, count)
+		}
 	}
-	a.mu.Lock()
-	accepted := a.count
-	a.mu.Unlock()
-	select {
-	case err := <-a.errCh:
-		return err
-	default:
-	}
-	return fmt.Errorf("daemonmux test: accepted %d of %d streams", accepted, count)
 }
 
 func (a *daemonAcceptor) closePeers() {
@@ -328,13 +358,14 @@ func (a *daemonAcceptor) closePeers() {
 	}
 }
 
-func openWithDeadline(t *testing.T, connector *LogicalConnector, stream int) typedLogical {
+func openWithDeadline(t *testing.T, connector *LogicalConnector, stream int) *portsmocks.MockBrokerLogicalConnection {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	connection, err := connector.Open(ctx, controlRequest(stream))
 	require.NoError(t, err)
-	return newTypedLogical(connection)
+	t.Cleanup(func() { _ = connection.Close() })
+	return newTypedLogical(t, connection)
 }
 
 // watchRegistered reports whether the pump still holds an inbound watch entry
@@ -369,73 +400,77 @@ func TestNewLogicalConnectorValidation(t *testing.T) {
 // TestMuxStreamPipeChunkAndOrder proves the byte stream chunks outbound writes
 // at the negotiated ceiling in order and drains inbound chunks in order.
 func TestMuxStreamPipeChunkAndOrder(t *testing.T) {
-	pump, carrier := newTestPump(t, DirectionClient)
-	pump.Start(context.Background())
-	require.NoError(t, pump.Engine().Open(openFor(1)))
-	require.NoError(t, pump.Engine().Opened(Opened{Ref: testRef(1)}))
+	inBubble(t, func(t *testing.T) {
+		pump, carrier := newTestPump(t, DirectionClient)
+		pump.Start(context.Background())
+		require.NoError(t, pump.Engine().Open(openFor(1)))
+		require.NoError(t, pump.Engine().Opened(Opened{Ref: testRef(1)}))
 
-	pipe := newMuxStreamPipe(pump, 1, 4, mustStatus(t, pump.Engine(), 1).Done)
-	written, err := pipe.Write([]byte("0123456789"))
-	require.NoError(t, err)
-	require.Equal(t, 10, written)
-
-	var chunks [][]byte
-	for i := 0; i < 3; i++ {
-		message, err := DecodeServer(carrier.nextSent(t), testEnvelopeCeiling, testChunkCeiling)
+		pipe := newMuxStreamPipe(pump, 1, 4, mustStatus(t, pump.Engine(), 1).Done)
+		written, err := pipe.Write([]byte("0123456789"))
 		require.NoError(t, err)
-		data, ok := message.(Data)
-		require.True(t, ok)
-		require.LessOrEqual(t, uint64(len(data.Data)), uint64(4))
-		chunks = append(chunks, data.Data)
-	}
-	require.Equal(t, [][]byte{[]byte("0123"), []byte("4567"), []byte("89")}, chunks)
+		require.Equal(t, 10, written)
 
-	deliverClientFrame(t, carrier, Data{Physical: 1, Data: []byte("abc")})
-	deliverClientFrame(t, carrier, Data{Physical: 1, Data: []byte("de")})
-	buffer := make([]byte, 3)
-	_, err = io.ReadFull(pipe, buffer)
-	require.NoError(t, err)
-	require.Equal(t, []byte("abc"), buffer)
-	buffer = make([]byte, 2)
-	_, err = io.ReadFull(pipe, buffer)
-	require.NoError(t, err)
-	require.Equal(t, []byte("de"), buffer)
+		var chunks [][]byte
+		for i := 0; i < 3; i++ {
+			message, err := DecodeServer(carrier.nextSent(t), testEnvelopeCeiling, testChunkCeiling)
+			require.NoError(t, err)
+			data, ok := message.(Data)
+			require.True(t, ok)
+			require.LessOrEqual(t, uint64(len(data.Data)), uint64(4))
+			chunks = append(chunks, data.Data)
+		}
+		require.Equal(t, [][]byte{[]byte("0123"), []byte("4567"), []byte("89")}, chunks)
+
+		deliverClientFrame(t, carrier, Data{Physical: 1, Data: []byte("abc")})
+		deliverClientFrame(t, carrier, Data{Physical: 1, Data: []byte("de")})
+		buffer := make([]byte, 3)
+		_, err = io.ReadFull(pipe, buffer)
+		require.NoError(t, err)
+		require.Equal(t, []byte("abc"), buffer)
+		buffer = make([]byte, 2)
+		_, err = io.ReadFull(pipe, buffer)
+		require.NoError(t, err)
+		require.Equal(t, []byte("de"), buffer)
+	})
 }
 
 // TestLogicalTwoConnections opens two typed logical connections over one
 // physical pair, exchanges a typed round trip on each, and closes them
 // independently.
 func TestLogicalTwoConnections(t *testing.T) {
-	const count = 2
-	brokerPump, daemonPump := newPairedPumps(t, DefaultMuxCeilings())
-	connector := mustConnector(t, brokerPump)
-	deadline := time.Now().Add(30 * time.Second)
+	inBubble(t, func(t *testing.T) {
+		const count = 2
+		brokerPump, daemonPump := newPairedPumps(t, DefaultMuxCeilings())
+		connector := mustConnector(t, brokerPump)
+		deadline := time.Now().Add(30 * time.Second)
 
-	acceptor := newDaemonAcceptor(daemonPump, 1)
-	for i := 1; i <= count; i++ {
-		acceptor.start(PhysicalStreamID(i), deadline)
-	}
+		acceptor := newDaemonAcceptor(t, daemonPump, 1)
+		for i := 1; i <= count; i++ {
+			acceptor.start(PhysicalStreamID(i), deadline)
+		}
 
-	connections := make([]typedLogical, 0, count)
-	for i := 1; i <= count; i++ {
-		connection := openWithDeadline(t, connector, i)
-		require.NoError(t, connection.SendClient(protocol.Ping{}), "connection %d", i)
-		message, err := connection.ReceiveServer()
-		require.NoError(t, err, "connection %d", i)
-		require.Equal(t, protocol.Pong{}, message, "connection %d", i)
-		connections = append(connections, connection)
-	}
-	require.NoError(t, acceptor.wait(count, deadline))
+		connections := make([]*portsmocks.MockBrokerLogicalConnection, 0, count)
+		for i := 1; i <= count; i++ {
+			connection := openWithDeadline(t, connector, i)
+			require.NoError(t, connection.SendClient(protocol.Ping{}), "connection %d", i)
+			message, err := connection.ReceiveServer()
+			require.NoError(t, err, "connection %d", i)
+			require.Equal(t, protocol.Pong{}, message, "connection %d", i)
+			connections = append(connections, connection)
+		}
+		require.NoError(t, acceptor.wait(count, deadline))
 
-	for i, connection := range connections {
-		require.False(t, channelClosed(connection.Done()), "connection %d", i)
-		require.NoError(t, connection.Close(), "connection %d", i)
-		require.True(t, channelClosed(connection.Done()), "connection %d", i)
-		require.NoError(t, connection.Err(), "connection %d", i)
-	}
-	acceptor.closePeers()
-	require.False(t, channelClosed(brokerPump.Done()))
-	require.False(t, channelClosed(daemonPump.Done()))
+		for i, connection := range connections {
+			require.False(t, channelClosed(connection.Done()), "connection %d", i)
+			require.NoError(t, connection.Close(), "connection %d", i)
+			require.True(t, channelClosed(connection.Done()), "connection %d", i)
+			require.NoError(t, connection.Err(), "connection %d", i)
+		}
+		acceptor.closePeers()
+		require.False(t, channelClosed(brokerPump.Done()))
+		require.False(t, channelClosed(daemonPump.Done()))
+	})
 }
 
 // TestLogicalHundredConnectionsConcurrentAdmission opens 100 typed logical
@@ -445,126 +480,128 @@ func TestLogicalTwoConnections(t *testing.T) {
 // ceiling, proves the 129th stream is refused with the typed admission limit,
 // and proves a retry after a Close succeeds with a fresh monotonic identity.
 func TestLogicalHundredConnectionsConcurrentAdmission(t *testing.T) {
-	brokerPump, daemonPump := newPairedPumps(t, DefaultMuxCeilings())
-	connector := mustConnector(t, brokerPump)
-	deadline := time.Now().Add(60 * time.Second)
+	inBubble(t, func(t *testing.T) {
+		brokerPump, daemonPump := newPairedPumps(t, DefaultMuxCeilings())
+		connector := mustConnector(t, brokerPump)
+		deadline := time.Now().Add(60 * time.Second)
 
-	const count = 100
-	const ceiling = int(MaxMuxStreams)
-	require.Equal(t, 128, ceiling, "the default physical connection admits 128 streams")
+		const count = 100
+		const ceiling = int(MaxMuxStreams)
+		require.Equal(t, 128, ceiling, "the default physical connection admits 128 streams")
 
-	acceptor := newDaemonAcceptor(daemonPump, 1)
-	// Every physical identity the connector can allocate, plus the retry after
-	// the refused 129th attempt (which still consumes its monotonic identity).
-	for i := 1; i <= ceiling; i++ {
-		acceptor.start(PhysicalStreamID(i), deadline)
-	}
-	acceptor.start(PhysicalStreamID(ceiling+2), deadline)
-
-	openConcurrently := func(requests []ports.BrokerOpenStreamRequest) ([]*LogicalConnection, []error) {
-		connections := make([]*LogicalConnection, len(requests))
-		errs := make([]error, len(requests))
-		var wg sync.WaitGroup
-		for i, request := range requests {
-			wg.Add(1)
-			go func(index int, request ports.BrokerOpenStreamRequest) {
-				defer wg.Done()
-				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				defer cancel()
-				connections[index], errs[index] = connector.Open(ctx, request)
-			}(i, request)
+		acceptor := newDaemonAcceptor(t, daemonPump, 1)
+		// Every physical identity the connector can allocate, plus the retry after
+		// the refused 129th attempt (which still consumes its monotonic identity).
+		for i := 1; i <= ceiling; i++ {
+			acceptor.start(PhysicalStreamID(i), deadline)
 		}
-		wg.Wait()
-		return connections, errs
-	}
+		acceptor.start(PhysicalStreamID(ceiling+2), deadline)
 
-	requests := make([]ports.BrokerOpenStreamRequest, count)
-	for i := range requests {
-		requests[i] = controlRequest(i + 1)
-	}
-	connections, errs := openConcurrently(requests)
-	for i, err := range errs {
-		require.NoError(t, err, "connection %d", i)
-		require.NotNil(t, connections[i], "connection %d", i)
-	}
-	require.Equal(t, count, brokerPump.Engine().Live(), "all connections are open before any traffic")
-	require.NoError(t, acceptor.wait(count, deadline))
-
-	// Interleave a typed round trip across every stream, then drain it.
-	trafficErrs := make([]error, count)
-	var traffic sync.WaitGroup
-	for i := range connections {
-		traffic.Add(1)
-		go func(index int) {
-			defer traffic.Done()
-			typed := asTyped(connections[index])
-			if err := typed.SendClient(protocol.Ping{}); err != nil {
-				trafficErrs[index] = err
-				return
+		openConcurrently := func(requests []ports.BrokerOpenStreamRequest) ([]*LogicalConnection, []error) {
+			connections := make([]*LogicalConnection, len(requests))
+			errs := make([]error, len(requests))
+			var wg sync.WaitGroup
+			for i, request := range requests {
+				wg.Add(1)
+				go func(index int, request ports.BrokerOpenStreamRequest) {
+					defer wg.Done()
+					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+					defer cancel()
+					connections[index], errs[index] = connector.Open(ctx, request)
+				}(i, request)
 			}
-			message, err := typed.ReceiveServer()
-			if err != nil {
-				trafficErrs[index] = err
-				return
-			}
-			if message != (protocol.Pong{}) {
-				trafficErrs[index] = fmt.Errorf("connection %d: received %v", index, message)
-			}
-		}(i)
-	}
-	traffic.Wait()
-	for i, err := range trafficErrs {
-		require.NoError(t, err, "connection %d", i)
-	}
-	require.Equal(t, count, brokerPump.Engine().Live(), "traffic never settles a live stream")
+			wg.Wait()
+			return connections, errs
+		}
 
-	// Fill the physical connection to its concurrent-stream ceiling.
-	fill := make([]ports.BrokerOpenStreamRequest, ceiling-count)
-	for i := range fill {
-		fill[i] = controlRequest(count + i + 1)
-	}
-	extra, fillErrs := openConcurrently(fill)
-	for i, err := range fillErrs {
-		require.NoError(t, err, "extra connection %d", i)
-	}
-	require.Equal(t, ceiling, brokerPump.Engine().Live())
-	require.NoError(t, acceptor.wait(ceiling, deadline))
+		requests := make([]ports.BrokerOpenStreamRequest, count)
+		for i := range requests {
+			requests[i] = controlRequest(i + 1)
+		}
+		connections, errs := openConcurrently(requests)
+		for i, err := range errs {
+			require.NoError(t, err, "connection %d", i)
+			require.NotNil(t, connections[i], "connection %d", i)
+		}
+		require.Equal(t, count, brokerPump.Engine().Live(), "all connections are open before any traffic")
+		require.NoError(t, acceptor.wait(count, deadline))
 
-	// The 129th stream is refused by the admission ceiling before it reaches
-	// the daemon.
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	refused, err := connector.Open(ctx, controlRequest(1000))
-	require.ErrorIs(t, err, ports.BrokerAdmissionLimit)
-	require.Nil(t, refused)
-	require.Equal(t, ceiling, brokerPump.Engine().Live(), "a refused admission frees nothing")
+		// Interleave a typed round trip across every stream, then drain it.
+		trafficErrs := make([]error, count)
+		var traffic sync.WaitGroup
+		for i := range connections {
+			traffic.Add(1)
+			go func(index int) {
+				defer traffic.Done()
+				typed := asTyped(t, connections[index])
+				if err := typed.SendClient(protocol.Ping{}); err != nil {
+					trafficErrs[index] = err
+					return
+				}
+				message, err := typed.ReceiveServer()
+				if err != nil {
+					trafficErrs[index] = err
+					return
+				}
+				if message != (protocol.Pong{}) {
+					trafficErrs[index] = fmt.Errorf("connection %d: received %v", index, message)
+				}
+			}(i)
+		}
+		traffic.Wait()
+		for i, err := range trafficErrs {
+			require.NoError(t, err, "connection %d", i)
+		}
+		require.Equal(t, count, brokerPump.Engine().Live(), "traffic never settles a live stream")
 
-	// A Close frees one slot; the retry uses a fresh monotonic identity.
-	require.NoError(t, connections[0].Close())
-	require.True(t, channelClosed(connections[0].Done()))
-	require.Equal(t, ceiling-1, brokerPump.Engine().Live())
-	retry := openWithDeadline(t, connector, 1001)
-	require.NoError(t, retry.SendClient(protocol.Ping{}))
-	message, err := retry.ReceiveServer()
-	require.NoError(t, err)
-	require.Equal(t, protocol.Pong{}, message)
-	require.Equal(t, ceiling, brokerPump.Engine().Live())
-	require.NoError(t, acceptor.wait(ceiling+1, deadline))
+		// Fill the physical connection to its concurrent-stream ceiling.
+		fill := make([]ports.BrokerOpenStreamRequest, ceiling-count)
+		for i := range fill {
+			fill[i] = controlRequest(count + i + 1)
+		}
+		extra, fillErrs := openConcurrently(fill)
+		for i, err := range fillErrs {
+			require.NoError(t, err, "extra connection %d", i)
+		}
+		require.Equal(t, ceiling, brokerPump.Engine().Live())
+		require.NoError(t, acceptor.wait(ceiling, deadline))
 
-	for i := 1; i < len(connections); i++ {
-		require.False(t, channelClosed(connections[i].Done()), "connection %d", i)
-		require.NoError(t, connections[i].Close(), "connection %d", i)
-		require.True(t, channelClosed(connections[i].Done()), "connection %d", i)
-		require.NoError(t, connections[i].Err(), "connection %d", i)
-	}
-	for i := range extra {
-		require.NoError(t, extra[i].Close(), "extra connection %d", i)
-	}
-	require.NoError(t, retry.Close())
-	require.Zero(t, brokerPump.Engine().Live(), "every stream is retired")
-	acceptor.closePeers()
-	require.False(t, channelClosed(brokerPump.Done()))
-	require.False(t, channelClosed(daemonPump.Done()))
+		// The 129th stream is refused by the admission ceiling before it reaches
+		// the daemon.
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		refused, err := connector.Open(ctx, controlRequest(1000))
+		require.ErrorIs(t, err, ports.BrokerAdmissionLimit)
+		require.Nil(t, refused)
+		require.Equal(t, ceiling, brokerPump.Engine().Live(), "a refused admission frees nothing")
+
+		// A Close frees one slot; the retry uses a fresh monotonic identity.
+		require.NoError(t, connections[0].Close())
+		require.True(t, channelClosed(connections[0].Done()))
+		require.Equal(t, ceiling-1, brokerPump.Engine().Live())
+		retry := openWithDeadline(t, connector, 1001)
+		require.NoError(t, retry.SendClient(protocol.Ping{}))
+		message, err := retry.ReceiveServer()
+		require.NoError(t, err)
+		require.Equal(t, protocol.Pong{}, message)
+		require.Equal(t, ceiling, brokerPump.Engine().Live())
+		require.NoError(t, acceptor.wait(ceiling+1, deadline))
+
+		for i := 1; i < len(connections); i++ {
+			require.False(t, channelClosed(connections[i].Done()), "connection %d", i)
+			require.NoError(t, connections[i].Close(), "connection %d", i)
+			require.True(t, channelClosed(connections[i].Done()), "connection %d", i)
+			require.NoError(t, connections[i].Err(), "connection %d", i)
+		}
+		for i := range extra {
+			require.NoError(t, extra[i].Close(), "extra connection %d", i)
+		}
+		require.NoError(t, retry.Close())
+		require.Zero(t, brokerPump.Engine().Live(), "every stream is retired")
+		acceptor.closePeers()
+		require.False(t, channelClosed(brokerPump.Done()))
+		require.False(t, channelClosed(daemonPump.Done()))
+	})
 }
 
 // TestLogicalBlockedReaderSiblingProgresses is the regression for a slow
@@ -574,196 +611,206 @@ func TestLogicalHundredConnectionsConcurrentAdmission(t *testing.T) {
 // sibling keeps exchanging typed messages, and once the consumer reads again
 // every flooded frame arrives in order on the still-open stream.
 func TestLogicalBlockedReaderSiblingProgresses(t *testing.T) {
-	brokerPump, daemonPump := newPairedPumps(t, DefaultMuxCeilings())
-	connector := mustConnector(t, brokerPump)
-	deadline := time.Now().Add(15 * time.Second)
+	inBubble(t, func(t *testing.T) {
+		brokerPump, daemonPump := newPairedPumps(t, DefaultMuxCeilings())
+		connector := mustConnector(t, brokerPump)
+		deadline := time.Now().Add(15 * time.Second)
 
-	// Each Pong is one tiny frame, so the flood is far more frames than the
-	// eight queued frames that used to reset the stream, and more credit than
-	// one window.
-	const flood = 20000
-	blockedAcceptor := newDaemonAcceptor(daemonPump, flood)
-	blockedAcceptor.start(1, deadline)
-	siblingAcceptor := newDaemonAcceptor(daemonPump, 1)
-	siblingAcceptor.start(2, deadline)
+		// Each Pong is one tiny frame, so the flood is far more frames than the
+		// eight queued frames that used to reset the stream, and more credit than
+		// one window.
+		const flood = 20000
+		blockedAcceptor := newDaemonAcceptor(t, daemonPump, flood)
+		blockedAcceptor.start(1, deadline)
+		siblingAcceptor := newDaemonAcceptor(t, daemonPump, 1)
+		siblingAcceptor.start(2, deadline)
 
-	blocked := openWithDeadline(t, connector, 1)
-	sibling := openWithDeadline(t, connector, 2)
-	require.NoError(t, blockedAcceptor.wait(1, deadline))
-	require.NoError(t, siblingAcceptor.wait(1, deadline))
+		blocked := openWithDeadline(t, connector, 1)
+		sibling := openWithDeadline(t, connector, 2)
+		require.NoError(t, blockedAcceptor.wait(1, deadline))
+		require.NoError(t, siblingAcceptor.wait(1, deadline))
 
-	require.NoError(t, sibling.SendClient(protocol.Ping{}))
-	message, err := sibling.ReceiveServer()
-	require.NoError(t, err)
-	require.Equal(t, protocol.Pong{}, message)
-
-	// Trigger the flood, then do not read: the daemon fills the window and
-	// its writer waits for credit.
-	require.NoError(t, blocked.SendClient(protocol.Ping{}))
-	require.Eventually(t, func() bool {
-		status, ok := daemonPump.Engine().Status(1)
-		return ok && status.SendCredit < chunkCredit(int(MaxMuxChunkBytes))
-	}, 5*time.Second, time.Millisecond, "the daemon never exhausted its credit")
-	require.False(t, channelClosed(blocked.Done()), "a slow consumer must not reset its stream")
-
-	// The sibling still progresses and the physical connection is untouched.
-	require.NoError(t, sibling.SendClient(protocol.Ping{}))
-	message, err = sibling.ReceiveServer()
-	require.NoError(t, err)
-	require.Equal(t, protocol.Pong{}, message)
-	require.False(t, channelClosed(brokerPump.Done()))
-	require.Equal(t, StreamOpen, mustStatus(t, brokerPump.Engine(), 2).State)
-
-	// The consumer catches up: every flooded frame arrives on the same stream.
-	for i := 0; i < flood; i++ {
-		message, err := blocked.ReceiveServer()
-		require.NoError(t, err, "frame %d", i)
+		require.NoError(t, sibling.SendClient(protocol.Ping{}))
+		message, err := sibling.ReceiveServer()
+		require.NoError(t, err)
 		require.Equal(t, protocol.Pong{}, message)
-	}
-	require.False(t, channelClosed(blocked.Done()))
-	require.Equal(t, StreamOpen, mustStatus(t, brokerPump.Engine(), 1).State)
+
+		// Trigger the flood, then do not read: the daemon fills the window and
+		// its writer waits for credit.
+		require.NoError(t, blocked.SendClient(protocol.Ping{}))
+		requireSettled(t, func() bool {
+			status, ok := daemonPump.Engine().Status(1)
+			return ok && status.SendCredit < chunkCredit(int(MaxMuxChunkBytes))
+		}, "the daemon never exhausted its credit")
+		require.False(t, channelClosed(blocked.Done()), "a slow consumer must not reset its stream")
+
+		// The sibling still progresses and the physical connection is untouched.
+		require.NoError(t, sibling.SendClient(protocol.Ping{}))
+		message, err = sibling.ReceiveServer()
+		require.NoError(t, err)
+		require.Equal(t, protocol.Pong{}, message)
+		require.False(t, channelClosed(brokerPump.Done()))
+		require.Equal(t, StreamOpen, mustStatus(t, brokerPump.Engine(), 2).State)
+
+		// The consumer catches up: every flooded frame arrives on the same stream.
+		for i := 0; i < flood; i++ {
+			message, err := blocked.ReceiveServer()
+			require.NoError(t, err, "frame %d", i)
+			require.Equal(t, protocol.Pong{}, message)
+		}
+		require.False(t, channelClosed(blocked.Done()))
+		require.Equal(t, StreamOpen, mustStatus(t, brokerPump.Engine(), 1).State)
+	})
 }
 
 // TestLogicalMalformedInnerFrameResetsOnlyStream proves a malformed inner
 // session frame resets exactly its own stream and leaves the physical
 // connection and a sibling untouched.
 func TestLogicalMalformedInnerFrameResetsOnlyStream(t *testing.T) {
-	brokerPump, daemonPump := newPairedPumps(t, DefaultMuxCeilings())
-	connector := mustConnector(t, brokerPump)
-	deadline := time.Now().Add(15 * time.Second)
+	inBubble(t, func(t *testing.T) {
+		brokerPump, daemonPump := newPairedPumps(t, DefaultMuxCeilings())
+		connector := mustConnector(t, brokerPump)
+		deadline := time.Now().Add(15 * time.Second)
 
-	bareAcceptor := newDaemonAcceptor(daemonPump, 1)
-	bareAcceptor.startBare(1, deadline)
-	siblingAcceptor := newDaemonAcceptor(daemonPump, 1)
-	siblingAcceptor.start(2, deadline)
+		bareAcceptor := newDaemonAcceptor(t, daemonPump, 1)
+		bareAcceptor.startBare(1, deadline)
+		siblingAcceptor := newDaemonAcceptor(t, daemonPump, 1)
+		siblingAcceptor.start(2, deadline)
 
-	malformed := openWithDeadline(t, connector, 1)
-	sibling := openWithDeadline(t, connector, 2)
-	require.NoError(t, bareAcceptor.wait(1, deadline))
-	require.NoError(t, siblingAcceptor.wait(1, deadline))
+		malformed := openWithDeadline(t, connector, 1)
+		sibling := openWithDeadline(t, connector, 2)
+		require.NoError(t, bareAcceptor.wait(1, deadline))
+		require.NoError(t, siblingAcceptor.wait(1, deadline))
 
-	require.NoError(t, sibling.SendClient(protocol.Ping{}))
-	message, err := sibling.ReceiveServer()
-	require.NoError(t, err)
-	require.Equal(t, protocol.Pong{}, message)
+		require.NoError(t, sibling.SendClient(protocol.Ping{}))
+		message, err := sibling.ReceiveServer()
+		require.NoError(t, err)
+		require.Equal(t, protocol.Pong{}, message)
 
-	// A zero-length inner frame is malformed: the client's first read fails and
-	// must reset only this stream.
-	require.NoError(t, daemonPump.SendData(1, []byte{0, 0, 0, 0}, nil))
-	_, err = malformed.ReceiveServer()
-	require.Error(t, err)
-	require.True(t, channelClosed(malformed.Done()))
+		// A zero-length inner frame is malformed: the client's first read fails and
+		// must reset only this stream.
+		require.NoError(t, daemonPump.SendData(1, []byte{0, 0, 0, 0}, nil))
+		_, err = malformed.ReceiveServer()
+		require.Error(t, err)
+		require.True(t, channelClosed(malformed.Done()))
 
-	var loss ports.BrokerStreamLost
-	require.ErrorAs(t, malformed.Err(), &loss)
-	require.Equal(t, ports.BrokerStreamID(1), loss.Stream)
-	require.Equal(t, ports.BrokerConnectionID{1}, loss.Connection)
-	require.Equal(t, ports.BrokerEpoch(1), loss.Epoch)
-	require.Equal(t, domain.RemoteFailureInvalidResponse, loss.Cause)
+		var loss ports.BrokerStreamLost
+		require.ErrorAs(t, malformed.Err(), &loss)
+		require.Equal(t, ports.BrokerStreamID(1), loss.Stream)
+		require.Equal(t, ports.BrokerConnectionID{1}, loss.Connection)
+		require.Equal(t, ports.BrokerEpoch(1), loss.Epoch)
+		require.Equal(t, domain.RemoteFailureInvalidResponse, loss.Cause)
 
-	// The daemon observed exactly a stream-local reset.
-	require.Eventually(t, func() bool {
-		status, ok := daemonPump.Engine().Status(1)
-		return ok && status.State == StreamTerminal
-	}, 5*time.Second, time.Millisecond)
-	reset := mustStatus(t, daemonPump.Engine(), 1)
-	require.Equal(t, domain.RemoteFailureInvalidResponse, reset.FailureKind)
+		// The daemon observed exactly a stream-local reset.
+		requireSettled(t, func() bool {
+			status, ok := daemonPump.Engine().Status(1)
+			return ok && status.State == StreamTerminal
+		})
+		reset := mustStatus(t, daemonPump.Engine(), 1)
+		require.Equal(t, domain.RemoteFailureInvalidResponse, reset.FailureKind)
 
-	// The sibling still progresses and the physical pumps stay open.
-	require.NoError(t, sibling.SendClient(protocol.Ping{}))
-	message, err = sibling.ReceiveServer()
-	require.NoError(t, err)
-	require.Equal(t, protocol.Pong{}, message)
-	require.False(t, channelClosed(brokerPump.Done()))
-	require.False(t, channelClosed(daemonPump.Done()))
+		// The sibling still progresses and the physical pumps stay open.
+		require.NoError(t, sibling.SendClient(protocol.Ping{}))
+		message, err = sibling.ReceiveServer()
+		require.NoError(t, err)
+		require.Equal(t, protocol.Pong{}, message)
+		require.False(t, channelClosed(brokerPump.Done()))
+		require.False(t, channelClosed(daemonPump.Done()))
+	})
 }
 
 // TestLogicalOpenCancellationReleasesReservation proves a cancelled open
 // releases its local reservation and a later open still succeeds.
 func TestLogicalOpenCancellationReleasesReservation(t *testing.T) {
-	brokerPump, daemonPump := newPairedPumps(t, DefaultMuxCeilings())
-	connector := mustConnector(t, brokerPump)
-	deadline := time.Now().Add(15 * time.Second)
+	inBubble(t, func(t *testing.T) {
+		brokerPump, daemonPump := newPairedPumps(t, DefaultMuxCeilings())
+		connector := mustConnector(t, brokerPump)
+		deadline := time.Now().Add(15 * time.Second)
 
-	// No daemon acceptor: the open waits for an Opened that never arrives.
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	connection, err := connector.Open(ctx, controlRequest(1))
-	require.ErrorIs(t, err, context.DeadlineExceeded)
-	require.Nil(t, connection)
+		// No daemon acceptor: the open waits for an Opened that never arrives.
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		connection, err := connector.Open(ctx, controlRequest(1))
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		require.Nil(t, connection)
 
-	require.Eventually(t, func() bool {
-		status, ok := brokerPump.Engine().Status(1)
-		return ok && status.State == StreamTerminal
-	}, 5*time.Second, time.Millisecond)
-	require.False(t, watchRegistered(brokerPump, 1), "cancelled open leaked a watch entry")
+		requireSettled(t, func() bool {
+			status, ok := brokerPump.Engine().Status(1)
+			return ok && status.State == StreamTerminal
+		})
+		require.False(t, watchRegistered(brokerPump, 1), "cancelled open leaked a watch entry")
 
-	// A sibling stream on the same physical connection still opens and works.
-	acceptor := newDaemonAcceptor(daemonPump, 1)
-	acceptor.start(2, deadline)
-	sibling := openWithDeadline(t, connector, 2)
-	require.NoError(t, acceptor.wait(1, deadline))
-	require.NoError(t, sibling.SendClient(protocol.Ping{}))
-	message, err := sibling.ReceiveServer()
-	require.NoError(t, err)
-	require.Equal(t, protocol.Pong{}, message)
-	require.False(t, channelClosed(brokerPump.Done()))
+		// A sibling stream on the same physical connection still opens and works.
+		acceptor := newDaemonAcceptor(t, daemonPump, 1)
+		acceptor.start(2, deadline)
+		sibling := openWithDeadline(t, connector, 2)
+		require.NoError(t, acceptor.wait(1, deadline))
+		require.NoError(t, sibling.SendClient(protocol.Ping{}))
+		message, err := sibling.ReceiveServer()
+		require.NoError(t, err)
+		require.Equal(t, protocol.Pong{}, message)
+		require.False(t, channelClosed(brokerPump.Done()))
+	})
 }
 
 // TestLogicalOpenRefused proves a daemon refusal fails the open with the typed
 // refusal and leaves the physical connection open.
 func TestLogicalOpenRefused(t *testing.T) {
-	brokerPump, daemonPump := newPairedPumps(t, DefaultMuxCeilings())
-	connector := mustConnector(t, brokerPump)
-	deadline := time.Now().Add(15 * time.Second)
+	inBubble(t, func(t *testing.T) {
+		brokerPump, daemonPump := newPairedPumps(t, DefaultMuxCeilings())
+		connector := mustConnector(t, brokerPump)
+		deadline := time.Now().Add(15 * time.Second)
 
-	acceptor := newDaemonAcceptor(daemonPump, 1)
-	acceptor.startRefused(1, deadline)
+		acceptor := newDaemonAcceptor(t, daemonPump, 1)
+		acceptor.startRefused(1, deadline)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	connection, err := connector.Open(ctx, controlRequest(1))
-	require.Error(t, err)
-	require.Nil(t, connection)
-	require.NoError(t, acceptor.wait(1, deadline))
-	require.False(t, channelClosed(brokerPump.Done()))
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		connection, err := connector.Open(ctx, controlRequest(1))
+		require.Error(t, err)
+		require.Nil(t, connection)
+		require.NoError(t, acceptor.wait(1, deadline))
+		require.False(t, channelClosed(brokerPump.Done()))
+	})
 }
 
 // TestLogicalCloseIsolation proves closing one logical connection settles only
 // itself and leaves a sibling and the physical connection untouched.
 func TestLogicalCloseIsolation(t *testing.T) {
-	brokerPump, daemonPump := newPairedPumps(t, DefaultMuxCeilings())
-	connector := mustConnector(t, brokerPump)
-	deadline := time.Now().Add(15 * time.Second)
+	inBubble(t, func(t *testing.T) {
+		brokerPump, daemonPump := newPairedPumps(t, DefaultMuxCeilings())
+		connector := mustConnector(t, brokerPump)
+		deadline := time.Now().Add(15 * time.Second)
 
-	firstAcceptor := newDaemonAcceptor(daemonPump, 1)
-	firstAcceptor.start(1, deadline)
-	secondAcceptor := newDaemonAcceptor(daemonPump, 1)
-	secondAcceptor.start(2, deadline)
+		firstAcceptor := newDaemonAcceptor(t, daemonPump, 1)
+		firstAcceptor.start(1, deadline)
+		secondAcceptor := newDaemonAcceptor(t, daemonPump, 1)
+		secondAcceptor.start(2, deadline)
 
-	first := openWithDeadline(t, connector, 1)
-	second := openWithDeadline(t, connector, 2)
-	require.NoError(t, firstAcceptor.wait(1, deadline))
-	require.NoError(t, secondAcceptor.wait(1, deadline))
+		first := openWithDeadline(t, connector, 1)
+		second := openWithDeadline(t, connector, 2)
+		require.NoError(t, firstAcceptor.wait(1, deadline))
+		require.NoError(t, secondAcceptor.wait(1, deadline))
 
-	require.NoError(t, first.Close())
-	require.True(t, channelClosed(first.Done()))
-	require.NoError(t, first.Err())
-	require.Equal(t, domain.RemoteFailureNone, first.FailureKind())
-	require.False(t, watchRegistered(brokerPump, 1), "closed logical connection leaked a watch entry")
+		require.NoError(t, first.Close())
+		require.True(t, channelClosed(first.Done()))
+		require.NoError(t, first.Err())
+		require.Equal(t, domain.RemoteFailureNone, mustStatus(t, brokerPump.Engine(), 1).FailureKind)
+		require.False(t, watchRegistered(brokerPump, 1), "closed logical connection leaked a watch entry")
 
-	// The daemon observed the orderly Close for stream 1.
-	require.Eventually(t, func() bool {
-		status, ok := daemonPump.Engine().Status(1)
-		return ok && status.State == StreamTerminal && status.Err == nil
-	}, 5*time.Second, time.Millisecond)
+		// The daemon observed the orderly Close for stream 1.
+		requireSettled(t, func() bool {
+			status, ok := daemonPump.Engine().Status(1)
+			return ok && status.State == StreamTerminal && status.Err == nil
+		})
 
-	require.NoError(t, second.SendClient(protocol.Ping{}))
-	message, err := second.ReceiveServer()
-	require.NoError(t, err)
-	require.Equal(t, protocol.Pong{}, message)
-	require.False(t, channelClosed(brokerPump.Done()))
-	require.False(t, channelClosed(daemonPump.Done()))
+		require.NoError(t, second.SendClient(protocol.Ping{}))
+		message, err := second.ReceiveServer()
+		require.NoError(t, err)
+		require.Equal(t, protocol.Pong{}, message)
+		require.False(t, channelClosed(brokerPump.Done()))
+		require.False(t, channelClosed(daemonPump.Done()))
+	})
 }
 
 // TestLogicalCloseDiscardsQueuedInboundReleasesAccounting proves a local Close
@@ -775,162 +822,168 @@ func TestLogicalCloseIsolation(t *testing.T) {
 // leaked slot would refuse the third admission, and the peer still observes
 // exactly one orderly mux Close for each cycle.
 func TestLogicalCloseDiscardsQueuedInboundReleasesAccounting(t *testing.T) {
-	ceilings := DefaultMuxCeilings()
-	ceilings.MaxStreams = 2
-	pump, carrier := newTestPumpWithCeilings(t, DirectionServer, ceilings)
-	pump.Start(context.Background())
+	inBubble(t, func(t *testing.T) {
+		ceilings := DefaultMuxCeilings()
+		ceilings.MaxStreams = 2
+		pump, carrier := newTestPumpWithCeilings(t, DirectionServer, ceilings)
+		pump.Start(context.Background())
 
-	chunk := []byte("queued")
-	const cycles = 3
-	for i := 1; i <= cycles; i++ {
-		id := PhysicalStreamID(i)
-		require.NoError(t, pump.Engine().Open(openFor(id)), "cycle %d admission", i)
-		require.NoError(t, pump.Engine().Opened(Opened{Ref: testRef(id)}))
-		status := mustStatus(t, pump.Engine(), id)
-		connection := newLogicalConnection(pump, status.Ref, status.Done, pump.cause(id))
+		chunk := []byte("queued")
+		const cycles = 3
+		for i := 1; i <= cycles; i++ {
+			id := PhysicalStreamID(i)
+			require.NoError(t, pump.Engine().Open(openFor(id)), "cycle %d admission", i)
+			require.NoError(t, pump.Engine().Opened(Opened{Ref: testRef(id)}))
+			status := mustStatus(t, pump.Engine(), id)
+			connection := newLogicalConnection(pump, status.Ref, status.Done, pump.cause(id))
 
-		// The peer pipelined one chunk that this side never reads, so the stream
-		// holds accepted inbound data when the local Close arrives.
-		deliverServerFrame(t, carrier, Data{Physical: id, Data: chunk})
-		requireEngineEventually(t, pump, func(e *StreamEngine) bool { return e.AggregateBytes() > 0 },
-			"cycle %d: the accepted chunk was never queued", i)
+			// The peer pipelined one chunk that this side never reads, so the stream
+			// holds accepted inbound data when the local Close arrives.
+			deliverServerFrame(t, carrier, Data{Physical: id, Data: chunk})
+			requireEngineSettled(t, pump, func(e *StreamEngine) bool { return e.AggregateBytes() > 0 },
+				"cycle %d: the accepted chunk was never queued", i)
 
-		require.NoError(t, connection.Close())
-		require.NoError(t, connection.Close(), "Close is idempotent")
-		require.True(t, channelClosed(connection.Done()))
-		require.NoError(t, connection.Err())
+			require.NoError(t, connection.Close())
+			require.NoError(t, connection.Close(), "Close is idempotent")
+			require.True(t, channelClosed(connection.Done()))
+			require.NoError(t, connection.Err())
 
-		closed := mustStatus(t, pump.Engine(), id)
-		require.Equal(t, StreamTerminal, closed.State, "cycle %d: the closed stream must be terminal", i)
-		require.Zero(t, closed.QueuedChunks, "cycle %d", i)
-		require.Zero(t, pump.Engine().Live(), "cycle %d: a closing stream leaked its admission slot", i)
-		require.Zero(t, pump.Engine().AggregateBytes(), "cycle %d: a closing stream leaked its queued bytes", i)
-		require.False(t, watchRegistered(pump, id), "cycle %d: the closed connection leaked a watch entry", i)
+			closed := mustStatus(t, pump.Engine(), id)
+			require.Equal(t, StreamTerminal, closed.State, "cycle %d: the closed stream must be terminal", i)
+			require.Zero(t, closed.QueuedChunks, "cycle %d", i)
+			require.Zero(t, pump.Engine().Live(), "cycle %d: a closing stream leaked its admission slot", i)
+			require.Zero(t, pump.Engine().AggregateBytes(), "cycle %d: a closing stream leaked its queued bytes", i)
+			require.False(t, watchRegistered(pump, id), "cycle %d: the closed connection leaked a watch entry", i)
 
-		// Exactly one orderly mux Close reached the peer; the drain is local and
-		// never replaces it with a Reset.
-		message, err := DecodeClient(carrier.nextSent(t), testEnvelopeCeiling, testChunkCeiling)
-		require.NoError(t, err)
-		closedFrame, ok := message.(Close)
-		require.True(t, ok, "cycle %d: the peer frame is not a Close", i)
-		require.Equal(t, Close{Physical: id}, closedFrame)
-		carrier.requireNoSent(t, 20*time.Millisecond)
-	}
-	require.False(t, pump.Engine().Closed())
-	require.False(t, channelClosed(pump.Done()))
+			// Exactly one orderly mux Close reached the peer; the drain is local and
+			// never replaces it with a Reset.
+			message, err := DecodeClient(carrier.nextSent(t), testEnvelopeCeiling, testChunkCeiling)
+			require.NoError(t, err)
+			closedFrame, ok := message.(Close)
+			require.True(t, ok, "cycle %d: the peer frame is not a Close", i)
+			require.Equal(t, Close{Physical: id}, closedFrame)
+			carrier.requireNoSentSettled(t)
+		}
+		require.False(t, pump.Engine().Closed())
+		require.False(t, channelClosed(pump.Done()))
+	})
 }
 
 // TestLogicalPhysicalLossFanout proves a physical loss publishes one stable
 // ports.BrokerStreamLost per affected logical stream with its exact scope.
 func TestLogicalPhysicalLossFanout(t *testing.T) {
-	brokerPump, daemonPump := newPairedPumps(t, DefaultMuxCeilings())
-	connector := mustConnector(t, brokerPump)
-	deadline := time.Now().Add(15 * time.Second)
+	inBubble(t, func(t *testing.T) {
+		brokerPump, daemonPump := newPairedPumps(t, DefaultMuxCeilings())
+		connector := mustConnector(t, brokerPump)
+		deadline := time.Now().Add(15 * time.Second)
 
-	const count = 3
-	acceptor := newDaemonAcceptor(daemonPump, 1)
-	for i := 1; i <= count; i++ {
-		acceptor.start(PhysicalStreamID(i), deadline)
-	}
-	connections := make([]typedLogical, 0, count)
-	for i := 1; i <= count; i++ {
-		connection := openWithDeadline(t, connector, i)
-		require.NoError(t, connection.SendClient(protocol.Ping{}))
-		message, err := connection.ReceiveServer()
-		require.NoError(t, err)
-		require.Equal(t, protocol.Pong{}, message)
-		connections = append(connections, connection)
-	}
-	require.NoError(t, acceptor.wait(count, deadline))
+		const count = 3
+		acceptor := newDaemonAcceptor(t, daemonPump, 1)
+		for i := 1; i <= count; i++ {
+			acceptor.start(PhysicalStreamID(i), deadline)
+		}
+		connections := make([]*portsmocks.MockBrokerLogicalConnection, 0, count)
+		for i := 1; i <= count; i++ {
+			connection := openWithDeadline(t, connector, i)
+			require.NoError(t, connection.SendClient(protocol.Ping{}))
+			message, err := connection.ReceiveServer()
+			require.NoError(t, err)
+			require.Equal(t, protocol.Pong{}, message)
+			connections = append(connections, connection)
+		}
+		require.NoError(t, acceptor.wait(count, deadline))
 
-	// Failing the daemon-side carrier is a physical loss on the broker pump.
-	require.NoError(t, daemonPump.Close())
-	require.Eventually(t, func() bool { return channelClosed(brokerPump.Done()) }, 5*time.Second, time.Millisecond)
+		// Failing the daemon-side carrier is a physical loss on the broker pump.
+		require.NoError(t, daemonPump.Close())
+		awaitClosed(t, brokerPump.Done(), 5*time.Second)
 
-	for i, connection := range connections {
-		require.Eventually(t, func() bool { return channelClosed(connection.Done()) }, 5*time.Second, time.Millisecond)
-		var loss ports.BrokerStreamLost
-		require.ErrorAs(t, connection.Err(), &loss, "connection %d", i)
-		require.Equal(t, ports.BrokerStreamID(i+1), loss.Stream, "connection %d", i)
-		require.Equal(t, ports.BrokerConnectionID{1}, loss.Connection, "connection %d", i)
-		require.Equal(t, domain.RemoteFailureTransport, loss.Cause, "connection %d", i)
-		var boxed ports.BrokerError
-		require.ErrorAs(t, connection.Err(), &boxed, "connection %d", i)
-		require.Equal(t, ports.BrokerErrorAttachmentLost, boxed.Code, "connection %d", i)
-	}
-	require.Error(t, brokerPump.Err())
-	require.Equal(t, domain.RemoteFailureTransport, brokerPump.FailureKind())
+		for i, connection := range connections {
+			awaitClosed(t, connection.Done(), 5*time.Second)
+			var loss ports.BrokerStreamLost
+			require.ErrorAs(t, connection.Err(), &loss, "connection %d", i)
+			require.Equal(t, ports.BrokerStreamID(i+1), loss.Stream, "connection %d", i)
+			require.Equal(t, ports.BrokerConnectionID{1}, loss.Connection, "connection %d", i)
+			require.Equal(t, domain.RemoteFailureTransport, loss.Cause, "connection %d", i)
+			var boxed ports.BrokerError
+			require.ErrorAs(t, connection.Err(), &boxed, "connection %d", i)
+			require.Equal(t, ports.BrokerErrorAttachmentLost, boxed.Code, "connection %d", i)
+		}
+		require.Error(t, brokerPump.Err())
+		require.Equal(t, domain.RemoteFailureTransport, brokerPump.FailureKind())
+	})
 }
 
 // connections leaves no goroutine behind.
 func TestLogicalNoGoroutineLeak(t *testing.T) {
-	before := runtime.NumGoroutine()
+	inBubble(t, func(t *testing.T) {
+		before := runtime.NumGoroutine()
 
-	brokerPump, daemonPump := newPairedPumps(t, DefaultMuxCeilings())
-	connector := mustConnector(t, brokerPump)
-	deadline := time.Now().Add(15 * time.Second)
+		brokerPump, daemonPump := newPairedPumps(t, DefaultMuxCeilings())
+		connector := mustConnector(t, brokerPump)
+		deadline := time.Now().Add(15 * time.Second)
 
-	const count = 5
-	acceptor := newDaemonAcceptor(daemonPump, 1)
-	for i := 1; i <= count; i++ {
-		acceptor.start(PhysicalStreamID(i), deadline)
-	}
-	connections := make([]typedLogical, 0, count)
-	for i := 1; i <= count; i++ {
-		connection := openWithDeadline(t, connector, i)
-		require.NoError(t, connection.SendClient(protocol.Ping{}))
-		message, err := connection.ReceiveServer()
-		require.NoError(t, err)
-		require.Equal(t, protocol.Pong{}, message)
-		connections = append(connections, connection)
-	}
-	require.NoError(t, acceptor.wait(count, deadline))
+		const count = 5
+		acceptor := newDaemonAcceptor(t, daemonPump, 1)
+		for i := 1; i <= count; i++ {
+			acceptor.start(PhysicalStreamID(i), deadline)
+		}
+		connections := make([]*portsmocks.MockBrokerLogicalConnection, 0, count)
+		for i := 1; i <= count; i++ {
+			connection := openWithDeadline(t, connector, i)
+			require.NoError(t, connection.SendClient(protocol.Ping{}))
+			message, err := connection.ReceiveServer()
+			require.NoError(t, err)
+			require.Equal(t, protocol.Pong{}, message)
+			connections = append(connections, connection)
+		}
+		require.NoError(t, acceptor.wait(count, deadline))
 
-	for _, connection := range connections {
-		require.NoError(t, connection.Close())
-	}
-	acceptor.closePeers()
-	require.NoError(t, brokerPump.Close())
-	require.NoError(t, daemonPump.Close())
+		for _, connection := range connections {
+			require.NoError(t, connection.Close())
+		}
+		acceptor.closePeers()
+		require.NoError(t, brokerPump.Close())
+		require.NoError(t, daemonPump.Close())
 
-	require.Eventually(t, func() bool { return runtime.NumGoroutine() <= before+3 }, 5*time.Second, time.Millisecond,
-		"logical connection goroutines leaked")
+		requireSettled(t, func() bool { return runtime.NumGoroutine() <= before+3 }, "logical connection goroutines leaked")
+	})
 }
 
 // TestLogicalPeerCloseReleasesGoroutines proves a stream terminated by a peer
 // mux Close joins its watcher and framed-transport goroutines without an
 // explicit local Close.
 func TestLogicalPeerCloseReleasesGoroutines(t *testing.T) {
-	before := runtime.NumGoroutine()
+	inBubble(t, func(t *testing.T) {
+		before := runtime.NumGoroutine()
 
-	brokerPump, daemonPump := newPairedPumps(t, DefaultMuxCeilings())
-	connector := mustConnector(t, brokerPump)
-	deadline := time.Now().Add(15 * time.Second)
+		brokerPump, daemonPump := newPairedPumps(t, DefaultMuxCeilings())
+		connector := mustConnector(t, brokerPump)
+		deadline := time.Now().Add(15 * time.Second)
 
-	acceptor := newDaemonAcceptor(daemonPump, 1)
-	acceptor.start(1, deadline)
-	connection := openWithDeadline(t, connector, 1)
-	require.NoError(t, acceptor.wait(1, deadline))
-	require.NoError(t, connection.SendClient(protocol.Ping{}))
-	message, err := connection.ReceiveServer()
-	require.NoError(t, err)
-	require.Equal(t, protocol.Pong{}, message)
+		acceptor := newDaemonAcceptor(t, daemonPump, 1)
+		acceptor.start(1, deadline)
+		connection := openWithDeadline(t, connector, 1)
+		require.NoError(t, acceptor.wait(1, deadline))
+		require.NoError(t, connection.SendClient(protocol.Ping{}))
+		message, err := connection.ReceiveServer()
+		require.NoError(t, err)
+		require.Equal(t, protocol.Pong{}, message)
 
-	// The daemon ends the stream orderly; the logical connection must settle
-	// itself and join its goroutines without a local Close.
-	if _, err := daemonPump.Engine().Close(Close{Physical: 1}); err != nil {
-		t.Fatalf("daemon close: %v", err)
-	}
-	require.NoError(t, daemonPump.Send(Close{Physical: 1}))
-	require.Eventually(t, func() bool { return channelClosed(connection.Done()) }, 5*time.Second, time.Millisecond)
-	require.NoError(t, connection.Err())
+		// The daemon ends the stream orderly; the logical connection must settle
+		// itself and join its goroutines without a local Close.
+		if _, err := daemonPump.Engine().Close(Close{Physical: 1}); err != nil {
+			t.Fatalf("daemon close: %v", err)
+		}
+		require.NoError(t, daemonPump.Send(Close{Physical: 1}))
+		awaitClosed(t, connection.Done(), 5*time.Second)
+		require.NoError(t, connection.Err())
 
-	acceptor.closePeers()
-	require.NoError(t, brokerPump.Close())
-	require.NoError(t, daemonPump.Close())
+		acceptor.closePeers()
+		require.NoError(t, brokerPump.Close())
+		require.NoError(t, daemonPump.Close())
 
-	require.Eventually(t, func() bool { return runtime.NumGoroutine() <= before+3 }, 5*time.Second, time.Millisecond,
-		"peer-closed logical connection goroutines leaked")
+		requireSettled(t, func() bool { return runtime.NumGoroutine() <= before+3 }, "peer-closed logical connection goroutines leaked")
+	})
 }
 
 // TestLogicalPhysicalLossBlockedReadReturnsLoss proves a read blocked on an
@@ -939,49 +992,51 @@ func TestLogicalPeerCloseReleasesGoroutines(t *testing.T) {
 // its terminal state before the engine terminalizes each stream, so the read
 // must consult the pump's physical cause instead of assuming an orderly end.
 func TestLogicalPhysicalLossBlockedReadReturnsLoss(t *testing.T) {
-	brokerPump, daemonPump := newPairedPumps(t, DefaultMuxCeilings())
-	connector := mustConnector(t, brokerPump)
-	deadline := time.Now().Add(15 * time.Second)
+	inBubble(t, func(t *testing.T) {
+		brokerPump, daemonPump := newPairedPumps(t, DefaultMuxCeilings())
+		connector := mustConnector(t, brokerPump)
+		deadline := time.Now().Add(15 * time.Second)
 
-	acceptor := newDaemonAcceptor(daemonPump, 1)
-	acceptor.start(1, deadline)
-	connection := openWithDeadline(t, connector, 1)
-	require.NoError(t, acceptor.wait(1, deadline))
+		acceptor := newDaemonAcceptor(t, daemonPump, 1)
+		acceptor.start(1, deadline)
+		connection := openWithDeadline(t, connector, 1)
+		require.NoError(t, acceptor.wait(1, deadline))
 
-	require.NoError(t, connection.SendClient(protocol.Ping{}))
-	message, err := connection.ReceiveServer()
-	require.NoError(t, err)
-	require.Equal(t, protocol.Pong{}, message)
+		require.NoError(t, connection.SendClient(protocol.Ping{}))
+		message, err := connection.ReceiveServer()
+		require.NoError(t, err)
+		require.Equal(t, protocol.Pong{}, message)
 
-	type result struct {
-		message protocol.ServerMessage
-		err     error
-	}
-	blocked := make(chan result, 1)
-	go func() {
-		msg, err := connection.ReceiveServer()
-		blocked <- result{message: msg, err: err}
-	}()
-	// Let the reader reach the inner stream and block there.
-	time.Sleep(50 * time.Millisecond)
-	require.False(t, channelClosed(connection.Done()), "the read is blocked, not settled")
+		type result struct {
+			message protocol.ServerMessage
+			err     error
+		}
+		blocked := make(chan result, 1)
+		go func() {
+			msg, err := connection.ReceiveServer()
+			blocked <- result{message: msg, err: err}
+		}()
+		// Let the reader reach the inner stream and block there.
+		synctest.Wait()
+		require.False(t, channelClosed(connection.Done()), "the read is blocked, not settled")
 
-	// Fail the daemon side; the broker observes a physical loss.
-	require.NoError(t, daemonPump.Close())
+		// Fail the daemon side; the broker observes a physical loss.
+		require.NoError(t, daemonPump.Close())
 
-	select {
-	case got := <-blocked:
-		require.Nil(t, got.message)
-		require.Error(t, got.err)
-		require.NotErrorIs(t, got.err, io.EOF, "a physical failure must not surface as a clean EOF")
-		var loss ports.BrokerStreamLost
-		require.ErrorAs(t, got.err, &loss)
-		require.Equal(t, ports.BrokerStreamID(1), loss.Stream)
-		require.Equal(t, domain.RemoteFailureTransport, loss.Cause)
-	case <-time.After(5 * time.Second):
-		t.Fatal("blocked read did not return after the physical failure")
-	}
-	require.True(t, channelClosed(connection.Done()))
+		select {
+		case got := <-blocked:
+			require.Nil(t, got.message)
+			require.Error(t, got.err)
+			require.NotErrorIs(t, got.err, io.EOF, "a physical failure must not surface as a clean EOF")
+			var loss ports.BrokerStreamLost
+			require.ErrorAs(t, got.err, &loss)
+			require.Equal(t, ports.BrokerStreamID(1), loss.Stream)
+			require.Equal(t, domain.RemoteFailureTransport, loss.Cause)
+		case <-time.After(5 * time.Second):
+			t.Fatal("blocked read did not return after the physical failure")
+		}
+		require.True(t, channelClosed(connection.Done()))
+	})
 }
 
 // TestLogicalTerminalCauseSurvivesEngineEviction proves a settled logical
@@ -989,44 +1044,46 @@ func TestLogicalPhysicalLossBlockedReadReturnsLoss(t *testing.T) {
 // bounded record. The retained authority outlives the record, so a Reset can
 // never degrade into an orderly close for a reader that observes the end late.
 func TestLogicalTerminalCauseSurvivesEngineEviction(t *testing.T) {
-	pump, _ := newTestPump(t, DirectionServer)
-	require.NoError(t, pump.Engine().Open(openFor(1)))
-	require.NoError(t, pump.Engine().Opened(Opened{Ref: testRef(1)}))
-	status := mustStatus(t, pump.Engine(), 1)
+	inBubble(t, func(t *testing.T) {
+		pump, _ := newTestPump(t, DirectionServer)
+		require.NoError(t, pump.Engine().Open(openFor(1)))
+		require.NoError(t, pump.Engine().Opened(Opened{Ref: testRef(1)}))
+		status := mustStatus(t, pump.Engine(), 1)
 
-	connection := &LogicalConnection{
-		pump:     pump,
-		ref:      status.Ref,
-		terminal: newTerminalState(),
-		cause:    pump.cause(status.Ref.Physical),
-	}
-	require.NotNil(t, connection.cause)
+		connection := &LogicalConnection{
+			pump:     pump,
+			ref:      status.Ref,
+			terminal: newTerminalState(),
+			cause:    pump.cause(status.Ref.Physical),
+		}
+		require.NotNil(t, connection.cause)
 
-	// Retire stream 1 with a stream-local Reset, then retire more streams than
-	// the engine retains so its record is evicted before any reader consults it.
-	_, err := pump.Engine().Reset(Reset{
-		Physical: 1,
-		HasError: true,
-		Error:    ErrorDetail{Code: ports.BrokerErrorUnavailable, Text: "reset", FailureKind: domain.RemoteFailureInvalidResponse},
+		// Retire stream 1 with a stream-local Reset, then retire more streams than
+		// the engine retains so its record is evicted before any reader consults it.
+		_, err := pump.Engine().Reset(Reset{
+			Physical: 1,
+			HasError: true,
+			Error:    ErrorDetail{Code: ports.BrokerErrorUnavailable, Text: "reset", FailureKind: domain.RemoteFailureInvalidResponse},
+		})
+		require.NoError(t, err)
+		for i := 2; i <= MaxRetiredStreamRecords+2; i++ {
+			id := PhysicalStreamID(i)
+			require.NoError(t, pump.Engine().Open(openFor(id)))
+			_, _ = pump.Engine().Close(Close{Physical: id})
+		}
+		_, tracked := pump.Engine().Status(1)
+		require.False(t, tracked, "stream 1 record was evicted")
+
+		connection.syncFromEngine()
+
+		require.True(t, channelClosed(connection.Done()))
+		var loss ports.BrokerStreamLost
+		require.ErrorAs(t, connection.Err(), &loss)
+		require.Equal(t, status.Ref.Client, loss.Stream)
+		require.Equal(t, domain.RemoteFailureInvalidResponse, loss.Cause)
+		require.NotEqual(t, domain.RemoteFailureNone, connection.FailureKind(),
+			"a Reset never degrades into an orderly close")
 	})
-	require.NoError(t, err)
-	for i := 2; i <= MaxRetiredStreamRecords+2; i++ {
-		id := PhysicalStreamID(i)
-		require.NoError(t, pump.Engine().Open(openFor(id)))
-		_, _ = pump.Engine().Close(Close{Physical: id})
-	}
-	_, tracked := pump.Engine().Status(1)
-	require.False(t, tracked, "stream 1 record was evicted")
-
-	connection.syncFromEngine()
-
-	require.True(t, channelClosed(connection.Done()))
-	var loss ports.BrokerStreamLost
-	require.ErrorAs(t, connection.Err(), &loss)
-	require.Equal(t, status.Ref.Client, loss.Stream)
-	require.Equal(t, domain.RemoteFailureInvalidResponse, loss.Cause)
-	require.NotEqual(t, domain.RemoteFailureNone, connection.FailureKind(),
-		"a Reset never degrades into an orderly close")
 }
 
 // TestLogicalWatcherCauseSurvivesEvictionStress retires a stream and then more
@@ -1041,7 +1098,7 @@ func TestLogicalWatcherCauseSurvivesEvictionStress(t *testing.T) {
 			connector := mustConnector(t, brokerPump)
 			deadline := time.Now().Add(15 * time.Second)
 
-			acceptor := newDaemonAcceptor(daemonPump, 1)
+			acceptor := newDaemonAcceptor(t, daemonPump, 1)
 			acceptor.start(1, deadline)
 			connection := openWithDeadline(t, connector, 1)
 			require.NoError(t, acceptor.wait(1, deadline))
@@ -1063,7 +1120,7 @@ func TestLogicalWatcherCauseSurvivesEvictionStress(t *testing.T) {
 			_, tracked := brokerPump.Engine().Status(1)
 			require.False(t, tracked, "stream 1 record was evicted")
 
-			require.Eventually(t, func() bool { return channelClosed(connection.Done()) }, 5*time.Second, time.Millisecond)
+			awaitClosed(t, connection.Done(), 5*time.Second)
 			var loss ports.BrokerStreamLost
 			require.ErrorAs(t, connection.Err(), &loss,
 				"a late watcher must not degrade a Reset into an orderly close")
@@ -1081,38 +1138,40 @@ func TestLogicalWatcherCauseSurvivesEvictionStress(t *testing.T) {
 // classifies it as the admission limit without handing back a connection or
 // recording a daemon-side stream.
 func TestLogicalFreshOpenRefusedByDaemonCeiling(t *testing.T) {
-	brokerPump, daemonPump := newPairedPumps(t, DefaultMuxCeilings())
-	connector := mustConnector(t, brokerPump)
+	inBubble(t, func(t *testing.T) {
+		brokerPump, daemonPump := newPairedPumps(t, DefaultMuxCeilings())
+		connector := mustConnector(t, brokerPump)
 
-	// Fill the daemon's stream ceiling directly so the broker's own admission
-	// stays free: the connector's next allocated identity is the 129th.
-	for i := 1; i <= int(MaxMuxStreams); i++ {
-		require.NoError(t, daemonPump.Engine().Open(openFor(PhysicalStreamID(i))))
-	}
-	require.Equal(t, int(MaxMuxStreams), daemonPump.Engine().Live())
-	connector.next = uint64(MaxMuxStreams)
+		// Fill the daemon's stream ceiling directly so the broker's own admission
+		// stays free: the connector's next allocated identity is the 129th.
+		for i := 1; i <= int(MaxMuxStreams); i++ {
+			require.NoError(t, daemonPump.Engine().Open(openFor(PhysicalStreamID(i))))
+		}
+		require.Equal(t, int(MaxMuxStreams), daemonPump.Engine().Live())
+		connector.next = uint64(MaxMuxStreams)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	connection, err := connector.Open(ctx, controlRequest(1))
-	require.ErrorIs(t, err, ports.BrokerAdmissionLimit)
-	require.Nil(t, connection)
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		connection, err := connector.Open(ctx, controlRequest(1))
+		require.ErrorIs(t, err, ports.BrokerAdmissionLimit)
+		require.Nil(t, connection)
 
-	refusedID := PhysicalStreamID(MaxMuxStreams + 1)
-	require.Eventually(t, func() bool {
-		status, ok := brokerPump.Engine().Status(refusedID)
-		return ok && status.State == StreamTerminal
-	}, 15*time.Second, time.Millisecond)
-	status := mustStatus(t, brokerPump.Engine(), refusedID)
-	require.True(t, status.Refused, "the daemon's fresh refusal reached the broker")
-	require.Equal(t, uint32(1), status.Refusal.AdmissionCode)
+		refusedID := PhysicalStreamID(MaxMuxStreams + 1)
+		requireSettled(t, func() bool {
+			status, ok := brokerPump.Engine().Status(refusedID)
+			return ok && status.State == StreamTerminal
+		})
+		status := mustStatus(t, brokerPump.Engine(), refusedID)
+		require.True(t, status.Refused, "the daemon's fresh refusal reached the broker")
+		require.Equal(t, uint32(1), status.Refusal.AdmissionCode)
 
-	// The daemon recorded no stream for the refused identity, the broker
-	// released its local reservation, and the physical connection stays open.
-	_, tracked := daemonPump.Engine().Status(refusedID)
-	require.False(t, tracked, "a refused fresh open records no daemon stream")
-	require.Equal(t, int(MaxMuxStreams), daemonPump.Engine().Live())
-	require.Zero(t, brokerPump.Engine().Live(), "the broker released its local reservation")
-	require.False(t, channelClosed(brokerPump.Done()))
-	require.False(t, channelClosed(daemonPump.Done()))
+		// The daemon recorded no stream for the refused identity, the broker
+		// released its local reservation, and the physical connection stays open.
+		_, tracked := daemonPump.Engine().Status(refusedID)
+		require.False(t, tracked, "a refused fresh open records no daemon stream")
+		require.Equal(t, int(MaxMuxStreams), daemonPump.Engine().Live())
+		require.Zero(t, brokerPump.Engine().Live(), "the broker released its local reservation")
+		require.False(t, channelClosed(brokerPump.Done()))
+		require.False(t, channelClosed(daemonPump.Done()))
+	})
 }

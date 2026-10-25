@@ -12,6 +12,7 @@ import (
 	"github.com/bnema/vev/pkg/safedir"
 )
 
+// real I/O: real flock lifecycle locks.
 func TestWaitForTargetOrLifecycleNamesAHeldLock(t *testing.T) {
 	cfg := backoffConfig{initial: time.Millisecond, max: 2 * time.Millisecond, total: 200 * time.Millisecond}
 	refuse := func(context.Context) (struct{}, error) { return struct{}{}, errors.New("no carriage") }

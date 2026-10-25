@@ -133,9 +133,10 @@ type superviseServer struct {
 	dials      atomic.Int64
 	adoptions  chan error
 
-	mu       sync.Mutex
-	accepted []ports.ServerConnection
-	serveOne sync.Once
+	mu              sync.Mutex
+	accepted        []ports.ServerConnection
+	acceptedChanged chan struct{}
+	serveOne        sync.Once
 }
 
 func newSuperviseServer(t *testing.T, binding ServerBinding, ceilings MuxCeilings, limit int, timeSource ports.Clock) *superviseServer {
@@ -154,10 +155,11 @@ func newSuperviseServer(t *testing.T, binding ServerBinding, ceilings MuxCeiling
 		_ = aggregate.Close()
 	})
 	return &superviseServer{
-		t:          t,
-		aggregate:  aggregate,
-		supervisor: supervisor,
-		adoptions:  make(chan error, 16),
+		t:               t,
+		aggregate:       aggregate,
+		supervisor:      supervisor,
+		adoptions:       make(chan error, 16),
+		acceptedChanged: make(chan struct{}),
 	}
 }
 
@@ -202,11 +204,22 @@ func (s *superviseServer) serve() {
 				}
 				s.mu.Lock()
 				s.accepted = append(s.accepted, connection)
+				close(s.acceptedChanged)
+				s.acceptedChanged = make(chan struct{})
 				s.mu.Unlock()
 				go func() { _ = servePongs(connection) }()
 			}
 		}()
 	})
+}
+
+// notifyReaped returns a channel closed when the supervisor reaped its first
+// lost child, so a test waits for the reap instead of polling Children.
+func (s *superviseServer) notifyReaped() <-chan struct{} {
+	reaped := make(chan struct{})
+	var once sync.Once
+	s.supervisor.afterReap = func() { once.Do(func() { close(reaped) }) }
+	return reaped
 }
 
 // acceptedCount reports how many typed connections the aggregate delivered.
@@ -218,53 +231,69 @@ func (s *superviseServer) acceptedCount() int {
 
 func (s *superviseServer) awaitAccepted(t *testing.T, count int) {
 	t.Helper()
-	require.Eventually(t, func() bool { return s.acceptedCount() >= count }, p3cTestDeadline, time.Millisecond,
-		"server accepted %d of %d streams", s.acceptedCount(), count)
+	guard := time.After(p3cTestDeadline)
+	for {
+		s.mu.Lock()
+		accepted, ch := len(s.accepted), s.acceptedChanged
+		s.mu.Unlock()
+		if accepted >= count {
+			return
+		}
+		select {
+		case <-ch:
+		case <-guard:
+			t.Fatalf("server accepted %d of %d streams", accepted, count)
+		}
+	}
 }
 
 // TestNewEndpointConnectorValidation proves a connector refuses a nil dial
 // function or an invalid ceiling advertisement, and Connect refuses an invalid
 // resolved endpoint.
 func TestNewEndpointConnectorValidation(t *testing.T) {
-	_, err := NewEndpointConnector(nil, DefaultMuxCeilings())
-	require.ErrorIs(t, err, ErrConnectorConfig)
+	inBubble(t, func(t *testing.T) {
+		_, err := NewEndpointConnector(nil, DefaultMuxCeilings())
+		require.ErrorIs(t, err, ErrConnectorConfig)
 
-	_, err = NewEndpointConnector(func(context.Context, ports.BrokerDialTarget) (RawFramedTransport, error) { return nil, nil }, MuxCeilings{})
-	require.ErrorIs(t, err, ErrConnectorConfig)
+		_, err = NewEndpointConnector(func(context.Context, ports.BrokerDialTarget) (RawFramedTransport, error) { return nil, nil }, MuxCeilings{})
+		require.ErrorIs(t, err, ErrConnectorConfig)
 
-	connector, err := NewEndpointConnector(func(context.Context, ports.BrokerDialTarget) (RawFramedTransport, error) {
-		t.Fatal("dial must not run for an invalid endpoint")
-		return nil, nil
-	}, DefaultMuxCeilings())
-	require.NoError(t, err)
+		connector, err := NewEndpointConnector(func(context.Context, ports.BrokerDialTarget) (RawFramedTransport, error) {
+			t.Fatal("dial must not run for an invalid endpoint")
+			return nil, nil
+		}, DefaultMuxCeilings())
+		require.NoError(t, err)
 
-	_, err = connector.Connect(context.Background(), ports.BrokerDialTarget{})
-	require.Error(t, err)
-	var typed ports.BrokerError
-	require.ErrorAs(t, err, &typed)
-	require.Equal(t, ports.BrokerErrorIncompatible, typed.Code)
+		_, err = connector.Connect(context.Background(), ports.BrokerDialTarget{})
+		require.Error(t, err)
+		var typed ports.BrokerError
+		require.ErrorAs(t, err, &typed)
+		require.Equal(t, ports.BrokerErrorIncompatible, typed.Code)
+	})
 }
 
 // TestEndpointConnectorRefusesPolicyMismatch proves the resolved endpoint stays
 // authoritative: a daemon that does not accept the endpoint policy is refused,
 // no physical connection is published, and the daemon admits no child.
 func TestEndpointConnectorRefusesPolicyMismatch(t *testing.T) {
-	binding := mustServerBinding(t)
-	server := newSuperviseServer(t, binding, DefaultMuxCeilings(), 0, nil)
+	inBubble(t, func(t *testing.T) {
+		binding := mustServerBinding(t)
+		server := newSuperviseServer(t, binding, DefaultMuxCeilings(), 0, nil)
 
-	connector, err := NewEndpointConnector(server.dial(), DefaultMuxCeilings())
-	require.NoError(t, err)
-	physical, err := connector.Connect(context.Background(), muxEndpoint(binding.Identity(), alternatePolicy(binding.Policy()), "raw://mismatch"))
-	require.Error(t, err)
-	require.Nil(t, physical)
-	require.ErrorIs(t, err, ErrHandshakeRejected)
-	var typed ports.BrokerError
-	require.ErrorAs(t, err, &typed)
-	require.Equal(t, ports.BrokerErrorConflictingPolicy, typed.Code)
+		connector, err := NewEndpointConnector(server.dial(), DefaultMuxCeilings())
+		require.NoError(t, err)
+		physical, err := connector.Connect(context.Background(), muxEndpoint(binding.Identity(), alternatePolicy(binding.Policy()), "raw://mismatch"))
+		require.Error(t, err)
+		require.Nil(t, physical)
+		require.ErrorIs(t, err, ErrHandshakeRejected)
+		var typed ports.BrokerError
+		require.ErrorAs(t, err, &typed)
+		require.Equal(t, ports.BrokerErrorConflictingPolicy, typed.Code)
 
-	require.ErrorIs(t, server.awaitAdoption(t), ErrHandshakeRejected)
-	require.Zero(t, server.supervisor.Children(), "a refused handshake admits no physical child")
-	require.Equal(t, int64(1), server.dials.Load())
+		require.ErrorIs(t, server.awaitAdoption(t), ErrHandshakeRejected)
+		require.Zero(t, server.supervisor.Children(), "a refused handshake admits no physical child")
+		require.Equal(t, int64(1), server.dials.Load())
+	})
 }
 
 // TestEndpointConnectorExposesAuthorityAndPolicyGuard proves one successful
@@ -272,76 +301,80 @@ func TestEndpointConnectorRefusesPolicyMismatch(t *testing.T) {
 // results to the pump, refuses a mismatched Open without touching the carriage,
 // and admits a matching Open over the real carriage.
 func TestEndpointConnectorExposesAuthorityAndPolicyGuard(t *testing.T) {
-	binding := mustServerBinding(t)
-	server := newSuperviseServer(t, binding, DefaultMuxCeilings(), 0, nil)
-	server.serve()
+	inBubble(t, func(t *testing.T) {
+		binding := mustServerBinding(t)
+		server := newSuperviseServer(t, binding, DefaultMuxCeilings(), 0, nil)
+		server.serve()
 
-	connector, err := NewEndpointConnector(server.dial(), DefaultMuxCeilings())
-	require.NoError(t, err)
-	physical, err := connector.Connect(context.Background(), muxEndpoint(binding.Identity(), binding.Policy(), "raw://authority"))
-	require.NoError(t, err)
-	require.NotNil(t, physical)
-	t.Cleanup(func() { _ = physical.Close() })
-	require.NoError(t, server.awaitAdoption(t))
+		connector, err := NewEndpointConnector(server.dial(), DefaultMuxCeilings())
+		require.NoError(t, err)
+		physical, err := connector.Connect(context.Background(), muxEndpoint(binding.Identity(), binding.Policy(), "raw://authority"))
+		require.NoError(t, err)
+		require.NotNil(t, physical)
+		t.Cleanup(func() { _ = physical.Close() })
+		require.NoError(t, server.awaitAdoption(t))
 
-	require.Equal(t, binding.Identity(), physical.Identity())
-	require.Equal(t, binding.Incarnation(), physical.Incarnation())
-	require.Equal(t, binding.Policy(), physical.Policy())
-	require.False(t, channelClosed(physical.Done()))
-	require.NoError(t, physical.Err())
-	require.Equal(t, domain.RemoteFailureNone, physical.FailureKind())
+		require.Equal(t, binding.Identity(), physical.Identity())
+		require.Equal(t, binding.Incarnation(), physical.Incarnation())
+		require.Equal(t, binding.Policy(), physical.Policy())
+		require.False(t, channelClosed(physical.Done()))
+		require.NoError(t, physical.Err())
+		require.Equal(t, domain.RemoteFailureNone, physical.FailureKind())
 
-	// A mismatched request policy is refused before the wire is touched.
-	_, err = openTyped(physical, context.Background(), muxOpenRequest(1, alternatePolicy(binding.Policy())))
-	require.Error(t, err)
-	var typed ports.BrokerError
-	require.ErrorAs(t, err, &typed)
-	require.Equal(t, ports.BrokerErrorConflictingPolicy, typed.Code)
-	require.Zero(t, server.acceptedCount(), "a policy-mismatched open is never admitted")
+		// A mismatched request policy is refused before the wire is touched.
+		_, err = openTyped(t, physical, context.Background(), muxOpenRequest(1, alternatePolicy(binding.Policy())))
+		require.Error(t, err)
+		var typed ports.BrokerError
+		require.ErrorAs(t, err, &typed)
+		require.Equal(t, ports.BrokerErrorConflictingPolicy, typed.Code)
+		require.Zero(t, server.acceptedCount(), "a policy-mismatched open is never admitted")
 
-	// The matching open is admitted and usable over the real carriage.
-	logical, err := openTyped(physical, context.Background(), muxOpenRequest(1, binding.Policy()))
-	require.NoError(t, err)
-	server.awaitAccepted(t, 1)
-	require.NoError(t, logical.SendClient(protocol.Ping{}))
-	message, err := logical.ReceiveServer()
-	require.NoError(t, err)
-	require.Equal(t, protocol.Pong{}, message)
+		// The matching open is admitted and usable over the real carriage.
+		logical, err := openTyped(t, physical, context.Background(), muxOpenRequest(1, binding.Policy()))
+		require.NoError(t, err)
+		server.awaitAccepted(t, 1)
+		require.NoError(t, logical.SendClient(protocol.Ping{}))
+		message, err := logical.ReceiveServer()
+		require.NoError(t, err)
+		require.Equal(t, protocol.Pong{}, message)
 
-	require.NoError(t, logical.Close())
-	require.NoError(t, physical.Close())
-	require.True(t, channelClosed(physical.Done()))
-	require.NoError(t, physical.Err(), "an orderly local Close is not a failure")
-	require.Equal(t, domain.RemoteFailureNone, physical.FailureKind())
+		require.NoError(t, logical.Close())
+		require.NoError(t, physical.Close())
+		require.True(t, channelClosed(physical.Done()))
+		require.NoError(t, physical.Err(), "an orderly local Close is not a failure")
+		require.Equal(t, domain.RemoteFailureNone, physical.FailureKind())
+	})
 }
 
 // TestEndpointConnectorDetachesSetupContext proves a successful connection is
 // not coupled to the caller's setup context: cancelling it after Connect
 // returned does not stop the pooled physical connection.
 func TestEndpointConnectorDetachesSetupContext(t *testing.T) {
-	binding := mustServerBinding(t)
-	server := newSuperviseServer(t, binding, DefaultMuxCeilings(), 0, nil)
-	server.serve()
+	inBubble(t, func(t *testing.T) {
+		binding := mustServerBinding(t)
+		server := newSuperviseServer(t, binding, DefaultMuxCeilings(), 0, nil)
+		server.serve()
 
-	connector, err := NewEndpointConnector(server.dial(), DefaultMuxCeilings())
-	require.NoError(t, err)
-	setupCtx, cancel := context.WithCancel(context.Background())
-	physical, err := connector.Connect(setupCtx, muxEndpoint(binding.Identity(), binding.Policy(), "raw://detach"))
-	require.NoError(t, err)
-	require.NoError(t, server.awaitAdoption(t))
-	t.Cleanup(func() { _ = physical.Close() })
+		connector, err := NewEndpointConnector(server.dial(), DefaultMuxCeilings())
+		require.NoError(t, err)
+		setupCtx, cancel := context.WithCancel(context.Background())
+		physical, err := connector.Connect(setupCtx, muxEndpoint(binding.Identity(), binding.Policy(), "raw://detach"))
+		require.NoError(t, err)
+		require.NoError(t, server.awaitAdoption(t))
+		t.Cleanup(func() { _ = physical.Close() })
 
-	cancel()
-	// The setup context ended; the pooled connection must still work.
-	require.False(t, channelClosed(physical.Done()))
-	logical, err := openTyped(physical, context.Background(), muxOpenRequest(1, binding.Policy()))
-	require.NoError(t, err)
-	server.awaitAccepted(t, 1)
-	require.NoError(t, logical.SendClient(protocol.Ping{}))
-	message, err := logical.ReceiveServer()
-	require.NoError(t, err)
-	require.Equal(t, protocol.Pong{}, message)
-	require.NoError(t, logical.Close())
+		cancel()
+		// The setup context ended; the pooled connection must still work.
+		require.False(t, channelClosed(physical.Done()))
+		logical, err := openTyped(t, physical, context.Background(), muxOpenRequest(1, binding.Policy()))
+		require.NoError(t, err)
+		server.awaitAccepted(t, 1)
+		require.NoError(t, logical.SendClient(protocol.Ping{}))
+		message, err := logical.ReceiveServer()
+		require.NoError(t, err)
+		require.Equal(t, protocol.Pong{}, message)
+		require.NoError(t, logical.Close())
+	})
 }
 
 // TestPhysicalDoneBeforeLogicalLoss proves a carriage loss publishes the
@@ -349,53 +382,55 @@ func TestEndpointConnectorDetachesSetupContext(t *testing.T) {
 // by the time the logical Done fires, the physical Done is already closed, and
 // both carry the loss cause.
 func TestPhysicalDoneBeforeLogicalLoss(t *testing.T) {
-	binding := mustServerBinding(t)
-	server := newSuperviseServer(t, binding, DefaultMuxCeilings(), 0, nil)
-	server.serve()
+	inBubble(t, func(t *testing.T) {
+		binding := mustServerBinding(t)
+		server := newSuperviseServer(t, binding, DefaultMuxCeilings(), 0, nil)
+		server.serve()
 
-	connector, err := NewEndpointConnector(server.dial(), DefaultMuxCeilings())
-	require.NoError(t, err)
-	physical, err := connector.Connect(context.Background(), muxEndpoint(binding.Identity(), binding.Policy(), "raw://loss"))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = physical.Close() })
-	require.NoError(t, server.awaitAdoption(t))
+		connector, err := NewEndpointConnector(server.dial(), DefaultMuxCeilings())
+		require.NoError(t, err)
+		physical, err := connector.Connect(context.Background(), muxEndpoint(binding.Identity(), binding.Policy(), "raw://loss"))
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = physical.Close() })
+		require.NoError(t, server.awaitAdoption(t))
 
-	logical, err := openTyped(physical, context.Background(), muxOpenRequest(1, binding.Policy()))
-	require.NoError(t, err)
-	server.awaitAccepted(t, 1)
-	require.False(t, channelClosed(physical.Done()))
+		logical, err := openTyped(t, physical, context.Background(), muxOpenRequest(1, binding.Policy()))
+		require.NoError(t, err)
+		server.awaitAccepted(t, 1)
+		require.False(t, channelClosed(physical.Done()))
 
-	ordered := make(chan bool, 1)
-	go func() {
-		select {
-		case <-logical.Done():
-		case <-time.After(p3cTestDeadline):
-			ordered <- false
-			return
+		ordered := make(chan bool, 1)
+		go func() {
+			select {
+			case <-logical.Done():
+			case <-time.After(p3cTestDeadline):
+				ordered <- false
+				return
+			}
+			select {
+			case <-physical.Done():
+				ordered <- true
+			case <-time.After(p3cTestDeadline):
+				ordered <- false
+			}
+		}()
+
+		// Kill the daemon's carriage: the broker pump observes the carrier error.
+		server.supervisor.mu.Lock()
+		children := make([]*supervisedPhysical, 0, len(server.supervisor.children))
+		for child := range server.supervisor.children {
+			children = append(children, child)
 		}
-		select {
-		case <-physical.Done():
-			ordered <- true
-		case <-time.After(p3cTestDeadline):
-			ordered <- false
-		}
-	}()
+		server.supervisor.mu.Unlock()
+		require.Len(t, children, 1)
+		require.NoError(t, children[0].Close())
 
-	// Kill the daemon's carriage: the broker pump observes the carrier error.
-	server.supervisor.mu.Lock()
-	children := make([]*supervisedPhysical, 0, len(server.supervisor.children))
-	for child := range server.supervisor.children {
-		children = append(children, child)
-	}
-	server.supervisor.mu.Unlock()
-	require.Len(t, children, 1)
-	require.NoError(t, children[0].Close())
-
-	require.True(t, <-ordered, "the logical Done fired before the physical Done")
-	require.True(t, channelClosed(physical.Done()))
-	require.Error(t, physical.Err())
-	require.NotEqual(t, domain.RemoteFailureNone, physical.FailureKind())
-	require.Error(t, logical.Err())
+		require.True(t, <-ordered, "the logical Done fired before the physical Done")
+		require.True(t, channelClosed(physical.Done()))
+		require.Error(t, physical.Err())
+		require.NotEqual(t, domain.RemoteFailureNone, physical.FailureKind())
+		require.Error(t, logical.Err())
+	})
 }
 
 // TestEndpointConnectorStableIdentityDifferentIncarnationRestart proves a
@@ -403,32 +438,34 @@ func TestPhysicalDoneBeforeLogicalLoss(t *testing.T) {
 // the identity and policy stay equal, the incarnation changes, and each
 // connection reports its own captured authority.
 func TestEndpointConnectorStableIdentityDifferentIncarnationRestart(t *testing.T) {
-	first, err := NewServerBinding(testIdentity(), testIncarnation(), testPolicy())
-	require.NoError(t, err)
-	second, err := NewServerBinding(testIdentity(), ports.BrokerDaemonIncarnation{9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 1, 2, 3, 4, 5, 6}, testPolicy())
-	require.NoError(t, err)
-	require.Equal(t, first.Identity(), second.Identity())
-	require.NotEqual(t, first.Incarnation(), second.Incarnation())
+	inBubble(t, func(t *testing.T) {
+		first, err := NewServerBinding(testIdentity(), testIncarnation(), testPolicy())
+		require.NoError(t, err)
+		second, err := NewServerBinding(testIdentity(), ports.BrokerDaemonIncarnation{9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 1, 2, 3, 4, 5, 6}, testPolicy())
+		require.NoError(t, err)
+		require.Equal(t, first.Identity(), second.Identity())
+		require.NotEqual(t, first.Incarnation(), second.Incarnation())
 
-	serverA := newSuperviseServer(t, first, DefaultMuxCeilings(), 0, nil)
-	serverB := newSuperviseServer(t, second, DefaultMuxCeilings(), 0, nil)
+		serverA := newSuperviseServer(t, first, DefaultMuxCeilings(), 0, nil)
+		serverB := newSuperviseServer(t, second, DefaultMuxCeilings(), 0, nil)
 
-	connectorA, err := NewEndpointConnector(serverA.dial(), DefaultMuxCeilings())
-	require.NoError(t, err)
-	physicalA, err := connectorA.Connect(context.Background(), muxEndpoint(first.Identity(), first.Policy(), "raw://restart-a"))
-	require.NoError(t, err)
-	require.NoError(t, serverA.awaitAdoption(t))
-	require.Equal(t, first.Incarnation(), physicalA.Incarnation())
-	require.NoError(t, physicalA.Close())
+		connectorA, err := NewEndpointConnector(serverA.dial(), DefaultMuxCeilings())
+		require.NoError(t, err)
+		physicalA, err := connectorA.Connect(context.Background(), muxEndpoint(first.Identity(), first.Policy(), "raw://restart-a"))
+		require.NoError(t, err)
+		require.NoError(t, serverA.awaitAdoption(t))
+		require.Equal(t, first.Incarnation(), physicalA.Incarnation())
+		require.NoError(t, physicalA.Close())
 
-	connectorB, err := NewEndpointConnector(serverB.dial(), DefaultMuxCeilings())
-	require.NoError(t, err)
-	physicalB, err := connectorB.Connect(context.Background(), muxEndpoint(second.Identity(), second.Policy(), "raw://restart-b"))
-	require.NoError(t, err)
-	require.NoError(t, serverB.awaitAdoption(t))
-	t.Cleanup(func() { _ = physicalB.Close() })
+		connectorB, err := NewEndpointConnector(serverB.dial(), DefaultMuxCeilings())
+		require.NoError(t, err)
+		physicalB, err := connectorB.Connect(context.Background(), muxEndpoint(second.Identity(), second.Policy(), "raw://restart-b"))
+		require.NoError(t, err)
+		require.NoError(t, serverB.awaitAdoption(t))
+		t.Cleanup(func() { _ = physicalB.Close() })
 
-	require.Equal(t, physicalA.Identity(), physicalB.Identity(), "the authenticated identity is stable across a restart")
-	require.Equal(t, physicalA.Policy(), physicalB.Policy())
-	require.NotEqual(t, physicalA.Incarnation(), physicalB.Incarnation(), "a restart carries a fresh incarnation")
+		require.Equal(t, physicalA.Identity(), physicalB.Identity(), "the authenticated identity is stable across a restart")
+		require.Equal(t, physicalA.Policy(), physicalB.Policy())
+		require.NotEqual(t, physicalA.Incarnation(), physicalB.Incarnation(), "a restart carries a fresh incarnation")
+	})
 }

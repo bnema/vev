@@ -5,49 +5,31 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 )
 
-type fakeClock struct{ timers []*fakeTimer }
+type routerClockState struct{ timers []*routerTimerState }
 
-func (c *fakeClock) Now() time.Time { return time.Time{} }
-func (c *fakeClock) NewTimer(d time.Duration) ports.Timer {
-	t := &fakeTimer{ch: make(chan time.Time, 1), d: d}
-	c.timers = append(c.timers, t)
-	return t
-}
-
-type fakeTimer struct {
+type routerTimerState struct {
 	ch      chan time.Time
 	d       time.Duration
 	stopped bool
 }
 
-func (t *fakeTimer) C() <-chan time.Time        { return t.ch }
-func (t *fakeTimer) Reset(d time.Duration) bool { t.d = d; return t.stopped }
-func (t *fakeTimer) Stop() bool                 { t.stopped = true; return true }
-func (t *fakeTimer) fire()                      { t.ch <- time.Time{} }
+func (t *routerTimerState) fire() { t.ch <- time.Time{} }
 
-type captureHandler struct {
+type handlerCalls struct {
 	forwards  [][]byte
 	actions   []Action
 	actionRaw [][]byte
 	notify    chan struct{}
-}
-
-func (h *captureHandler) Forward(data []byte) {
-	h.forwards = append(h.forwards, append([]byte(nil), data...))
-	if h.notify != nil {
-		h.notify <- struct{}{}
-	}
-}
-func (h *captureHandler) Action(a Action, raw []byte) {
-	h.actions = append(h.actions, a)
-	h.actionRaw = append(h.actionRaw, append([]byte(nil), raw...))
 }
 
 func TestRouterRawActionPreservesExactConsumedBytes(t *testing.T) {
@@ -70,15 +52,19 @@ func TestRouterRawActionPreservesExactConsumedBytes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			clk := &fakeClock{}
-			h := &captureHandler{}
-			router := NewRouter(clk, h, &bindings)
-			for _, read := range tt.reads {
-				router.Route(read)
-			}
-			require.Equal(t, []Action{tt.action}, h.actions)
-			require.Equal(t, [][]byte{tt.raw}, h.actionRaw)
-			require.Empty(t, h.forwards)
+			synctest.Test(t, func(t *testing.T) {
+				clk := &routerClockState{}
+				h := &handlerCalls{}
+				router := testRouter(t, clk, h, &bindings)
+				for _, read := range tt.reads {
+					router.Route(read)
+				}
+				require.Equal(t, []Action{tt.action}, h.actions)
+				require.Equal(t, [][]byte{tt.raw}, h.actionRaw)
+				require.Empty(t, h.forwards)
+
+				synctest.Wait()
+			})
 		})
 	}
 }
@@ -108,33 +94,45 @@ func TestDefaultBindingsParityRoutesBuiltInBindings(t *testing.T) {
 	bindings.Store(DefaultBindings())
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			clk := &fakeClock{}
-			h := &captureHandler{}
-			NewRouter(clk, h, &bindings).Route(tc.in)
-			require.Equal(t, []Action{tc.want}, h.actions)
-			require.Empty(t, h.forwards)
+			synctest.Test(t, func(t *testing.T) {
+				clk := &routerClockState{}
+				h := &handlerCalls{}
+				testRouter(t, clk, h, &bindings).Route(tc.in)
+				require.Equal(t, []Action{tc.want}, h.actions)
+				require.Empty(t, h.forwards)
+
+				synctest.Wait()
+			})
 		})
 	}
 }
 
 func TestRouterInterceptsAltSpaceForPalette(t *testing.T) {
-	clk := &fakeClock{}
-	h := &captureHandler{}
-	NewRouter(clk, h, nil).Route([]byte{ESC, ' '})
-	require.Equal(t, []Action{ActionOpenPalette}, h.actions)
-	require.Empty(t, h.forwards)
-	require.Empty(t, clk.timers)
+	synctest.Test(t, func(t *testing.T) {
+		clk := &routerClockState{}
+		h := &handlerCalls{}
+		testRouter(t, clk, h, nil).Route([]byte{ESC, ' '})
+		require.Equal(t, []Action{ActionOpenPalette}, h.actions)
+		require.Empty(t, h.forwards)
+		require.Empty(t, clk.timers)
+
+		synctest.Wait()
+	})
 }
 
 func TestRouterInterceptsAltDigits(t *testing.T) {
-	clk := &fakeClock{}
-	h := &captureHandler{}
-	r := NewRouter(clk, h, nil)
-	for b := byte('1'); b <= '9'; b++ {
-		r.Route([]byte{ESC, b})
-	}
-	require.Equal(t, switchTabActions(), h.actions)
-	require.Empty(t, h.forwards)
+	synctest.Test(t, func(t *testing.T) {
+		clk := &routerClockState{}
+		h := &handlerCalls{}
+		r := testRouter(t, clk, h, nil)
+		for b := byte('1'); b <= '9'; b++ {
+			r.Route([]byte{ESC, b})
+		}
+		require.Equal(t, switchTabActions(), h.actions)
+		require.Empty(t, h.forwards)
+
+		synctest.Wait()
+	})
 }
 
 func TestRouterInterceptsAltLayoutDigitAliases(t *testing.T) {
@@ -149,91 +147,111 @@ func TestRouterInterceptsAltLayoutDigitAliases(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			clk := &fakeClock{}
-			h := &captureHandler{}
-			r := NewRouter(clk, h, nil)
-			for _, key := range tc.keys {
-				r.Route(append([]byte{ESC}, []byte(key)...))
-			}
-			require.Equal(t, switchTabActions(), h.actions)
-			require.Empty(t, h.forwards)
+			synctest.Test(t, func(t *testing.T) {
+				clk := &routerClockState{}
+				h := &handlerCalls{}
+				r := testRouter(t, clk, h, nil)
+				for _, key := range tc.keys {
+					r.Route(append([]byte{ESC}, []byte(key)...))
+				}
+				require.Equal(t, switchTabActions(), h.actions)
+				require.Empty(t, h.forwards)
+
+				synctest.Wait()
+			})
 		})
 	}
 }
 
 func TestRouterInterceptsAltAZERTYUTF8SplitAcrossReads(t *testing.T) {
-	clk := &fakeClock{}
-	h := &captureHandler{}
-	r := NewRouter(clk, h, nil)
+	synctest.Test(t, func(t *testing.T) {
+		clk := &routerClockState{}
+		h := &handlerCalls{}
+		r := testRouter(t, clk, h, nil)
 
-	r.Route([]byte{ESC, 0xc3})
-	require.Empty(t, h.actions)
-	require.Empty(t, h.forwards)
-	require.Len(t, clk.timers, 1)
+		r.Route([]byte{ESC, 0xc3})
+		require.Empty(t, h.actions)
+		require.Empty(t, h.forwards)
+		require.Len(t, clk.timers, 1)
 
-	r.Route([]byte{0xa9})
-	require.Equal(t, []Action{ActionSwitchTab2}, h.actions)
-	require.Empty(t, h.forwards)
-	assertRouterPendingCleared(t, r)
+		r.Route([]byte{0xa9})
+		require.Equal(t, []Action{ActionSwitchTab2}, h.actions)
+		require.Empty(t, h.forwards)
+		assertRouterPendingCleared(t, r)
 
-	r.Route([]byte{ESC, ' '})
-	require.Equal(t, []Action{ActionSwitchTab2, ActionOpenPalette}, h.actions)
-	require.Empty(t, h.forwards)
+		r.Route([]byte{ESC, ' '})
+		require.Equal(t, []Action{ActionSwitchTab2, ActionOpenPalette}, h.actions)
+		require.Empty(t, h.forwards)
+
+		synctest.Wait()
+	})
 }
 
 func TestRouterInterceptsRetainedAltAZERTYUTF8SplitAcrossReads(t *testing.T) {
-	clk := &fakeClock{}
-	h := &captureHandler{}
-	r := NewRouter(clk, h, nil)
+	synctest.Test(t, func(t *testing.T) {
+		clk := &routerClockState{}
+		h := &handlerCalls{}
+		r := testRouter(t, clk, h, nil)
 
-	r.Route([]byte{ESC})
-	r.Route([]byte{0xc3})
-	require.Empty(t, h.actions)
-	require.Empty(t, h.forwards)
-	require.Len(t, clk.timers, 2)
+		r.Route([]byte{ESC})
+		r.Route([]byte{0xc3})
+		require.Empty(t, h.actions)
+		require.Empty(t, h.forwards)
+		require.Len(t, clk.timers, 2)
 
-	r.Route([]byte{0xa9})
-	require.Equal(t, []Action{ActionSwitchTab2}, h.actions)
-	require.Empty(t, h.forwards)
-	assertRouterPendingCleared(t, r)
+		r.Route([]byte{0xa9})
+		require.Equal(t, []Action{ActionSwitchTab2}, h.actions)
+		require.Empty(t, h.forwards)
+		assertRouterPendingCleared(t, r)
 
-	r.Route([]byte{ESC, ' '})
-	require.Equal(t, []Action{ActionSwitchTab2, ActionOpenPalette}, h.actions)
-	require.Empty(t, h.forwards)
+		r.Route([]byte{ESC, ' '})
+		require.Equal(t, []Action{ActionSwitchTab2, ActionOpenPalette}, h.actions)
+		require.Empty(t, h.forwards)
+
+		synctest.Wait()
+	})
 }
 
 func TestRouterForwardsUnboundAltUTF8SplitAcrossReads(t *testing.T) {
-	clk := &fakeClock{}
-	h := &captureHandler{}
-	r := NewRouter(clk, h, nil)
+	synctest.Test(t, func(t *testing.T) {
+		clk := &routerClockState{}
+		h := &handlerCalls{}
+		r := testRouter(t, clk, h, nil)
 
-	r.Route([]byte{ESC, 0xc3})
-	r.Route([]byte{0xb1})
+		r.Route([]byte{ESC, 0xc3})
+		r.Route([]byte{0xb1})
 
-	require.Empty(t, h.actions)
-	require.Equal(t, [][]byte{{ESC, 0xc3, 0xb1}}, h.forwards)
-	assertRouterPendingCleared(t, r)
+		require.Empty(t, h.actions)
+		require.Equal(t, [][]byte{{ESC, 0xc3, 0xb1}}, h.forwards)
+		assertRouterPendingCleared(t, r)
 
-	r.Route([]byte("Z"))
-	require.Empty(t, h.actions)
-	require.Equal(t, [][]byte{{ESC, 0xc3, 0xb1}, []byte("Z")}, h.forwards)
+		r.Route([]byte("Z"))
+		require.Empty(t, h.actions)
+		require.Equal(t, [][]byte{{ESC, 0xc3, 0xb1}, []byte("Z")}, h.forwards)
+
+		synctest.Wait()
+	})
 }
 
 func TestRouterForwardsInvalidSplitAltUTF8WithoutDroppingBytes(t *testing.T) {
-	clk := &fakeClock{}
-	h := &captureHandler{}
-	r := NewRouter(clk, h, nil)
+	synctest.Test(t, func(t *testing.T) {
+		clk := &routerClockState{}
+		h := &handlerCalls{}
+		r := testRouter(t, clk, h, nil)
 
-	r.Route([]byte{ESC, 0xc3})
-	r.Route([]byte("X"))
+		r.Route([]byte{ESC, 0xc3})
+		r.Route([]byte("X"))
 
-	require.Empty(t, h.actions)
-	require.Equal(t, [][]byte{{ESC, 0xc3}, []byte("X")}, h.forwards)
-	assertRouterPendingCleared(t, r)
+		require.Empty(t, h.actions)
+		require.Equal(t, [][]byte{{ESC, 0xc3}, []byte("X")}, h.forwards)
+		assertRouterPendingCleared(t, r)
 
-	r.Route([]byte{ESC, ' '})
-	require.Equal(t, []Action{ActionOpenPalette}, h.actions)
-	require.Equal(t, [][]byte{{ESC, 0xc3}, []byte("X")}, h.forwards)
+		r.Route([]byte{ESC, ' '})
+		require.Equal(t, []Action{ActionOpenPalette}, h.actions)
+		require.Equal(t, [][]byte{{ESC, 0xc3}, []byte("X")}, h.forwards)
+
+		synctest.Wait()
+	})
 }
 
 func assertRouterPendingCleared(t *testing.T, r *Router) {
@@ -245,26 +263,30 @@ func assertRouterPendingCleared(t *testing.T, r *Router) {
 }
 
 func TestTopRowDigitIndexAcceptsLayoutAliases(t *testing.T) {
-	for want, aliases := range [][]rune{
-		{'1', '&'},
-		{'2', 'é'},
-		{'3', '"'},
-		{'4', '\''},
-		{'5', '('},
-		{'6', '-', '§'},
-		{'7', 'è'},
-		{'8', '_', '!'},
-		{'9', 'ç'},
-	} {
-		for _, key := range aliases {
-			got, ok := topRowDigitIndex(key)
-			require.True(t, ok, "key %q", key)
-			require.Equal(t, want, got, "key %q", key)
+	synctest.Test(t, func(t *testing.T) {
+		for want, aliases := range [][]rune{
+			{'1', '&'},
+			{'2', 'é'},
+			{'3', '"'},
+			{'4', '\''},
+			{'5', '('},
+			{'6', '-', '§'},
+			{'7', 'è'},
+			{'8', '_', '!'},
+			{'9', 'ç'},
+		} {
+			for _, key := range aliases {
+				got, ok := topRowDigitIndex(key)
+				require.True(t, ok, "key %q", key)
+				require.Equal(t, want, got, "key %q", key)
+			}
 		}
-	}
 
-	_, ok := topRowDigitIndex('0')
-	require.False(t, ok)
+		_, ok := topRowDigitIndex('0')
+		require.False(t, ok)
+
+		synctest.Wait()
+	})
 }
 
 func switchTabActions() []Action {
@@ -276,19 +298,27 @@ func switchTabActions() []Action {
 }
 
 func TestSwitchTabActionsRemainContiguous(t *testing.T) {
-	for i, action := range switchTabActions() {
-		require.Equal(t, ActionSwitchTab1+Action(i), action)
-	}
-	require.False(t, ActionToggleFloatingPane >= ActionSwitchTab1 && ActionToggleFloatingPane <= ActionSwitchTab9)
+	synctest.Test(t, func(t *testing.T) {
+		for i, action := range switchTabActions() {
+			require.Equal(t, ActionSwitchTab1+Action(i), action)
+		}
+		require.False(t, ActionToggleFloatingPane >= ActionSwitchTab1 && ActionToggleFloatingPane <= ActionSwitchTab9)
+
+		synctest.Wait()
+	})
 }
 
 func TestRouterInterceptsAltAForJumpAttention(t *testing.T) {
-	clk := &fakeClock{}
-	h := &captureHandler{}
-	NewRouter(clk, h, nil).Route([]byte{ESC, 'a'})
-	require.Equal(t, []Action{ActionJumpAttention}, h.actions)
-	require.Empty(t, h.forwards)
-	require.Empty(t, clk.timers)
+	synctest.Test(t, func(t *testing.T) {
+		clk := &routerClockState{}
+		h := &handlerCalls{}
+		testRouter(t, clk, h, nil).Route([]byte{ESC, 'a'})
+		require.Equal(t, []Action{ActionJumpAttention}, h.actions)
+		require.Empty(t, h.forwards)
+		require.Empty(t, clk.timers)
+
+		synctest.Wait()
+	})
 }
 
 func TestRouterInterceptsAltHJKLForPaneFocus(t *testing.T) {
@@ -304,12 +334,16 @@ func TestRouterInterceptsAltHJKLForPaneFocus(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			clk := &fakeClock{}
-			h := &captureHandler{}
-			NewRouter(clk, h, nil).Route([]byte{ESC, tc.key})
-			require.Equal(t, []Action{tc.want}, h.actions)
-			require.Empty(t, h.forwards)
-			require.Empty(t, clk.timers)
+			synctest.Test(t, func(t *testing.T) {
+				clk := &routerClockState{}
+				h := &handlerCalls{}
+				testRouter(t, clk, h, nil).Route([]byte{ESC, tc.key})
+				require.Equal(t, []Action{tc.want}, h.actions)
+				require.Empty(t, h.forwards)
+				require.Empty(t, clk.timers)
+
+				synctest.Wait()
+			})
 		})
 	}
 }
@@ -317,33 +351,45 @@ func TestRouterInterceptsAltHJKLForPaneFocus(t *testing.T) {
 func TestRouterForwardsRemovedAltLetterBindings(t *testing.T) {
 	for _, b := range []byte("cnpdxurt") {
 		t.Run(string(b), func(t *testing.T) {
-			clk := &fakeClock{}
-			h := &captureHandler{}
-			NewRouter(clk, h, nil).Route([]byte{ESC, b})
-			require.Empty(t, h.actions)
-			require.Equal(t, [][]byte{{ESC, b}}, h.forwards)
+			synctest.Test(t, func(t *testing.T) {
+				clk := &routerClockState{}
+				h := &handlerCalls{}
+				testRouter(t, clk, h, nil).Route([]byte{ESC, b})
+				require.Empty(t, h.actions)
+				require.Equal(t, [][]byte{{ESC, b}}, h.forwards)
+
+				synctest.Wait()
+			})
 		})
 	}
 }
 
 func TestRouterForwardsOnlyNonInterceptedBytes(t *testing.T) {
-	clk := &fakeClock{}
-	h := &captureHandler{}
-	NewRouter(clk, h, nil).Route([]byte{'a', ESC, ' ', 'b'})
-	require.Equal(t, []Action{ActionOpenPalette}, h.actions)
-	require.Equal(t, [][]byte{[]byte("a"), []byte("b")}, h.forwards)
+	synctest.Test(t, func(t *testing.T) {
+		clk := &routerClockState{}
+		h := &handlerCalls{}
+		testRouter(t, clk, h, nil).Route([]byte{'a', ESC, ' ', 'b'})
+		require.Equal(t, []Action{ActionOpenPalette}, h.actions)
+		require.Equal(t, [][]byte{[]byte("a"), []byte("b")}, h.forwards)
+
+		synctest.Wait()
+	})
 }
 
 func TestRouterPassesThroughTerminalEscapePrefixes(t *testing.T) {
-	cases := [][]byte{{ESC, '[', 'A'}, {ESC, 'O', 'P'}}
-	for _, in := range cases {
-		clk := &fakeClock{}
-		h := &captureHandler{}
-		NewRouter(clk, h, nil).Route(in)
-		require.Empty(t, h.actions)
-		require.Equal(t, [][]byte{in}, h.forwards)
-		require.Empty(t, clk.timers)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		cases := [][]byte{{ESC, '[', 'A'}, {ESC, 'O', 'P'}}
+		for _, in := range cases {
+			clk := &routerClockState{}
+			h := &handlerCalls{}
+			testRouter(t, clk, h, nil).Route(in)
+			require.Empty(t, h.actions)
+			require.Equal(t, [][]byte{in}, h.forwards)
+			require.Empty(t, clk.timers)
+		}
+
+		synctest.Wait()
+	})
 }
 
 func TestRouterInterceptsAltArrowCSIForPaneFocus(t *testing.T) {
@@ -364,12 +410,16 @@ func TestRouterInterceptsAltArrowCSIForPaneFocus(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			clk := &fakeClock{}
-			h := &captureHandler{}
-			NewRouter(clk, h, nil).Route(tc.in)
-			require.Equal(t, []Action{tc.want}, h.actions)
-			require.Empty(t, h.forwards)
-			require.Empty(t, clk.timers)
+			synctest.Test(t, func(t *testing.T) {
+				clk := &routerClockState{}
+				h := &handlerCalls{}
+				testRouter(t, clk, h, nil).Route(tc.in)
+				require.Equal(t, []Action{tc.want}, h.actions)
+				require.Empty(t, h.forwards)
+				require.Empty(t, clk.timers)
+
+				synctest.Wait()
+			})
 		})
 	}
 }
@@ -389,16 +439,20 @@ func TestRouterAltArrowCSIPartialsAcrossReads(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			clk := &fakeClock{}
-			h := &captureHandler{}
-			r := NewRouter(clk, h, nil)
-			for _, read := range tc.reads {
-				r.Route(read)
-			}
-			require.Equal(t, []Action{tc.want}, h.actions)
-			require.Empty(t, h.forwards)
-			require.Len(t, clk.timers, tc.timers)
-			assertRouterPendingCleared(t, r)
+			synctest.Test(t, func(t *testing.T) {
+				clk := &routerClockState{}
+				h := &handlerCalls{}
+				r := testRouter(t, clk, h, nil)
+				for _, read := range tc.reads {
+					r.Route(read)
+				}
+				require.Equal(t, []Action{tc.want}, h.actions)
+				require.Empty(t, h.forwards)
+				require.Len(t, clk.timers, tc.timers)
+				assertRouterPendingCleared(t, r)
+
+				synctest.Wait()
+			})
 		})
 	}
 }
@@ -435,14 +489,18 @@ func TestRouterAltArrowCSIPrefixRouting(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			clk := &fakeClock{}
-			h := &captureHandler{}
-			r := NewRouter(clk, h, nil)
-			for _, read := range tc.reads {
-				r.Route(read)
-			}
-			require.Equal(t, tc.wantActions, h.actions)
-			require.Equal(t, tc.wantForwards, h.forwards)
+			synctest.Test(t, func(t *testing.T) {
+				clk := &routerClockState{}
+				h := &handlerCalls{}
+				r := testRouter(t, clk, h, nil)
+				for _, read := range tc.reads {
+					r.Route(read)
+				}
+				require.Equal(t, tc.wantActions, h.actions)
+				require.Equal(t, tc.wantForwards, h.forwards)
+
+				synctest.Wait()
+			})
 		})
 	}
 }
@@ -455,37 +513,49 @@ func TestRouterPassesThroughBareArrows(t *testing.T) {
 		{ESC, '[', 'D'},
 	} {
 		t.Run(string(in), func(t *testing.T) {
-			clk := &fakeClock{}
-			h := &captureHandler{}
-			NewRouter(clk, h, nil).Route(in)
-			require.Empty(t, h.actions)
-			require.Equal(t, [][]byte{in}, h.forwards)
-			require.Empty(t, clk.timers)
+			synctest.Test(t, func(t *testing.T) {
+				clk := &routerClockState{}
+				h := &handlerCalls{}
+				testRouter(t, clk, h, nil).Route(in)
+				require.Empty(t, h.actions)
+				require.Equal(t, [][]byte{in}, h.forwards)
+				require.Empty(t, clk.timers)
+
+				synctest.Wait()
+			})
 		})
 	}
 }
 
 func TestRouterRetainsSplitESCAndInterceptsNextBoundByte(t *testing.T) {
-	clk := &fakeClock{}
-	h := &captureHandler{}
-	r := NewRouter(clk, h, nil)
-	r.Route([]byte{ESC})
-	require.Len(t, clk.timers, 1)
-	require.Equal(t, ESCDelay, clk.timers[0].d)
-	require.Empty(t, h.forwards)
+	synctest.Test(t, func(t *testing.T) {
+		clk := &routerClockState{}
+		h := &handlerCalls{}
+		r := testRouter(t, clk, h, nil)
+		r.Route([]byte{ESC})
+		require.Len(t, clk.timers, 1)
+		require.Equal(t, ESCDelay, clk.timers[0].d)
+		require.Empty(t, h.forwards)
 
-	r.Route([]byte{' '})
-	require.True(t, clk.timers[0].stopped)
-	require.Equal(t, []Action{ActionOpenPalette}, h.actions)
-	require.Empty(t, h.forwards)
+		r.Route([]byte{' '})
+		require.True(t, clk.timers[0].stopped)
+		require.Equal(t, []Action{ActionOpenPalette}, h.actions)
+		require.Empty(t, h.forwards)
+
+		synctest.Wait()
+	})
 }
 
 func TestRouterForwardsBareT(t *testing.T) {
-	clk := &fakeClock{}
-	h := &captureHandler{}
-	NewRouter(clk, h, nil).Route([]byte{'t'})
-	require.Empty(t, h.actions)
-	require.Equal(t, [][]byte{[]byte("t")}, h.forwards)
+	synctest.Test(t, func(t *testing.T) {
+		clk := &routerClockState{}
+		h := &handlerCalls{}
+		testRouter(t, clk, h, nil).Route([]byte{'t'})
+		require.Empty(t, h.actions)
+		require.Equal(t, [][]byte{[]byte("t")}, h.forwards)
+
+		synctest.Wait()
+	})
 }
 
 func TestRouterForwardsCSIAfterRetainedESCAcrossReads(t *testing.T) {
@@ -500,49 +570,63 @@ func TestRouterForwardsCSIAfterRetainedESCAcrossReads(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			clk := &fakeClock{}
-			h := &captureHandler{}
-			r := NewRouter(clk, h, nil)
-			r.Route([]byte{ESC})
-			require.Len(t, clk.timers, 1)
-			require.Empty(t, h.forwards)
+			synctest.Test(t, func(t *testing.T) {
+				clk := &routerClockState{}
+				h := &handlerCalls{}
+				r := testRouter(t, clk, h, nil)
+				r.Route([]byte{ESC})
+				require.Len(t, clk.timers, 1)
+				require.Empty(t, h.forwards)
 
-			r.Route(tc.secondInput)
+				r.Route(tc.secondInput)
 
-			require.True(t, clk.timers[0].stopped)
-			require.Empty(t, h.actions)
-			require.Equal(t, [][]byte{tc.want[:2], tc.want[2:]}, h.forwards)
+				require.True(t, clk.timers[0].stopped)
+				require.Empty(t, h.actions)
+				require.Equal(t, [][]byte{tc.want[:2], tc.want[2:]}, h.forwards)
+
+				synctest.Wait()
+			})
 		})
 	}
 }
 
 func TestRouterRoutesBytesAfterRetainedEscapePrefix(t *testing.T) {
-	clk := &fakeClock{}
-	h := &captureHandler{}
-	r := NewRouter(clk, h, nil)
-	r.Route([]byte{ESC})
+	synctest.Test(t, func(t *testing.T) {
+		clk := &routerClockState{}
+		h := &handlerCalls{}
+		r := testRouter(t, clk, h, nil)
+		r.Route([]byte{ESC})
 
-	r.Route([]byte{'[', 'A', ESC, ' '})
+		r.Route([]byte{'[', 'A', ESC, ' '})
 
-	require.True(t, clk.timers[0].stopped)
-	require.Equal(t, [][]byte{{ESC, '['}, []byte("A")}, h.forwards)
-	require.Equal(t, []Action{ActionOpenPalette}, h.actions)
+		require.True(t, clk.timers[0].stopped)
+		require.Equal(t, [][]byte{{ESC, '['}, []byte("A")}, h.forwards)
+		require.Equal(t, []Action{ActionOpenPalette}, h.actions)
+
+		synctest.Wait()
+	})
 }
 
 func TestRouterCancelsPendingESCWaiterWhenNextReadConsumesESC(t *testing.T) {
-	clk := &fakeClock{}
-	h := &captureHandler{}
-	r := NewRouter(clk, h, nil)
+	synctest.Test(t, func(t *testing.T) {
+		clk := &routerClockState{}
+		h := &handlerCalls{}
+		r := testRouter(t, clk, h, nil)
 
-	before := retainESCWaiters()
-	r.Route([]byte{ESC})
-	require.Eventually(t, func() bool { return retainESCWaiters() > before }, time.Second, time.Millisecond)
+		before := retainESCWaiters()
+		r.Route([]byte{ESC})
+		synctest.Wait()
+		require.Greater(t, retainESCWaiters(), before)
 
-	r.Route([]byte{' '})
-	require.Eventually(t, func() bool { return retainESCWaiters() == before }, time.Second, time.Millisecond)
-	require.True(t, clk.timers[0].stopped)
-	require.Equal(t, []Action{ActionOpenPalette}, h.actions)
-	require.Empty(t, h.forwards)
+		r.Route([]byte{' '})
+		synctest.Wait()
+		require.Equal(t, before, retainESCWaiters())
+		require.True(t, clk.timers[0].stopped)
+		require.Equal(t, []Action{ActionOpenPalette}, h.actions)
+		require.Empty(t, h.forwards)
+
+		synctest.Wait()
+	})
 }
 
 func retainESCWaiters() int {
@@ -552,28 +636,37 @@ func retainESCWaiters() int {
 }
 
 func TestRouterFlushesLoneESCAfterTimer(t *testing.T) {
-	clk := &fakeClock{}
-	h := &captureHandler{notify: make(chan struct{}, 1)}
-	r := NewRouter(clk, h, nil)
-	r.Route([]byte{ESC})
-	clk.timers[0].fire()
-	select {
-	case <-h.notify:
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for flushed ESC")
-	}
-	require.Equal(t, [][]byte{{ESC}}, h.forwards)
-	require.Empty(t, h.actions)
+	synctest.Test(t, func(t *testing.T) {
+		clk := &routerClockState{}
+		h := &handlerCalls{notify: make(chan struct{}, 1)}
+		r := testRouter(t, clk, h, nil)
+		r.Route([]byte{ESC})
+		clk.timers[0].fire()
+		synctest.Wait()
+		select {
+		case <-h.notify:
+		default:
+			t.Fatal("timed out waiting for flushed ESC")
+		}
+		require.Equal(t, [][]byte{{ESC}}, h.forwards)
+		require.Empty(t, h.actions)
+
+		synctest.Wait()
+	})
 }
 
 func TestRouterFlushesPendingESCBeforeOtherByte(t *testing.T) {
-	clk := &fakeClock{}
-	h := &captureHandler{}
-	r := NewRouter(clk, h, nil)
-	r.Route([]byte{ESC})
-	r.Route([]byte{'z'})
-	require.Equal(t, [][]byte{{ESC}, []byte("z")}, h.forwards)
-	require.Empty(t, h.actions)
+	synctest.Test(t, func(t *testing.T) {
+		clk := &routerClockState{}
+		h := &handlerCalls{}
+		r := testRouter(t, clk, h, nil)
+		r.Route([]byte{ESC})
+		r.Route([]byte{'z'})
+		require.Equal(t, [][]byte{{ESC}, []byte("z")}, h.forwards)
+		require.Empty(t, h.actions)
+
+		synctest.Wait()
+	})
 }
 
 // pasteBindingLookalikes are content bytes that, seen outside a paste, each map
@@ -581,47 +674,59 @@ func TestRouterFlushesPendingESCBeforeOtherByte(t *testing.T) {
 var pasteBindingLookalikes = []byte("\x1bj\x1b \x1b1\x1b[1;3A")
 
 func TestRouterForwardsSingleFramePasteVerbatim(t *testing.T) {
-	clk := &fakeClock{}
-	h := &captureHandler{}
-	r := NewRouter(clk, h, nil)
+	synctest.Test(t, func(t *testing.T) {
+		clk := &routerClockState{}
+		h := &handlerCalls{}
+		r := testRouter(t, clk, h, nil)
 
-	paste := append(append(append([]byte(nil), ports.BracketedPasteOpenMarker...), pasteBindingLookalikes...), ports.BracketedPasteCloseMarker...)
-	r.Route(paste)
+		paste := append(append(append([]byte(nil), ports.BracketedPasteOpenMarker...), pasteBindingLookalikes...), ports.BracketedPasteCloseMarker...)
+		r.Route(paste)
 
-	require.Empty(t, h.actions, "paste content must not fire any binding")
-	require.Equal(t, [][]byte{paste}, h.forwards, "the whole paste must be forwarded byte-identical")
-	require.Empty(t, clk.timers, "a fully bracketed paste retains no trailing ESC")
+		require.Empty(t, h.actions, "paste content must not fire any binding")
+		require.Equal(t, [][]byte{paste}, h.forwards, "the whole paste must be forwarded byte-identical")
+		require.Empty(t, clk.timers, "a fully bracketed paste retains no trailing ESC")
+
+		synctest.Wait()
+	})
 }
 
 func TestRouterFiresBindingsForSameBytesOutsidePaste(t *testing.T) {
-	clk := &fakeClock{}
-	h := &captureHandler{}
-	r := NewRouter(clk, h, nil)
+	synctest.Test(t, func(t *testing.T) {
+		clk := &routerClockState{}
+		h := &handlerCalls{}
+		r := testRouter(t, clk, h, nil)
 
-	r.Route(pasteBindingLookalikes)
+		r.Route(pasteBindingLookalikes)
 
-	require.Equal(t, []Action{
-		ActionFocusPaneDown, // Alt-j
-		ActionOpenPalette,   // Alt-space
-		ActionSwitchTab1,    // Alt-1
-		ActionFocusPaneUp,   // Alt-arrow up
-	}, h.actions)
-	require.Empty(t, h.forwards)
+		require.Equal(t, []Action{
+			ActionFocusPaneDown, // Alt-j
+			ActionOpenPalette,   // Alt-space
+			ActionSwitchTab1,    // Alt-1
+			ActionFocusPaneUp,   // Alt-arrow up
+		}, h.actions)
+		require.Empty(t, h.forwards)
+
+		synctest.Wait()
+	})
 }
 
 func TestRouterPasteMarkerSplitAcrossFramesKeepsCurrentBehavior(t *testing.T) {
-	clk := &fakeClock{}
-	h := &captureHandler{}
-	r := NewRouter(clk, h, nil)
+	synctest.Test(t, func(t *testing.T) {
+		clk := &routerClockState{}
+		h := &handlerCalls{}
+		r := testRouter(t, clk, h, nil)
 
-	// Opening marker + content in one frame, closing marker in the next: with
-	// no closing marker in-frame the router keeps its historical per-byte
-	// routing, forwarding each frame's bytes as they arrive.
-	r.Route([]byte("\x1b[200~hello"))
-	r.Route([]byte("\x1b[201~"))
+		// Opening marker + content in one frame, closing marker in the next: with
+		// no closing marker in-frame the router keeps its historical per-byte
+		// routing, forwarding each frame's bytes as they arrive.
+		r.Route([]byte("\x1b[200~hello"))
+		r.Route([]byte("\x1b[201~"))
 
-	require.Empty(t, h.actions)
-	require.Equal(t, [][]byte{[]byte("\x1b[200~hello"), []byte("\x1b[201~")}, h.forwards)
+		require.Empty(t, h.actions)
+		require.Equal(t, [][]byte{[]byte("\x1b[200~hello"), []byte("\x1b[201~")}, h.forwards)
+
+		synctest.Wait()
+	})
 }
 
 func TestRouterKittyKeyboardEvents(t *testing.T) {
@@ -652,20 +757,24 @@ func TestRouterKittyKeyboardEvents(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			clk := &fakeClock{}
-			h := &captureHandler{}
-			r := NewRouter(clk, h, nil)
-			r.SetKittyKeyboard(true)
-			for _, read := range tt.reads {
-				r.Route([]byte(read))
-			}
-			require.Equal(t, tt.wantActions, h.actions)
-			var forwards []string
-			for _, f := range h.forwards {
-				forwards = append(forwards, string(f))
-			}
-			require.Equal(t, tt.wantForwards, forwards)
-			assertRouterPendingCleared(t, r)
+			synctest.Test(t, func(t *testing.T) {
+				clk := &routerClockState{}
+				h := &handlerCalls{}
+				r := testRouter(t, clk, h, nil)
+				r.SetKittyKeyboard(true)
+				for _, read := range tt.reads {
+					r.Route([]byte(read))
+				}
+				require.Equal(t, tt.wantActions, h.actions)
+				var forwards []string
+				for _, f := range h.forwards {
+					forwards = append(forwards, string(f))
+				}
+				require.Equal(t, tt.wantForwards, forwards)
+				assertRouterPendingCleared(t, r)
+
+				synctest.Wait()
+			})
 		})
 	}
 }
@@ -687,20 +796,68 @@ func TestRouterKittyKeyboardAltShiftBindings(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := &captureHandler{}
-			r := NewRouter(&fakeClock{}, h, &bindings)
-			r.SetKittyKeyboard(true)
-			r.Route([]byte(tt.in))
-			require.Equal(t, []Action{tt.want}, h.actions)
-			require.Empty(t, h.forwards)
+			synctest.Test(t, func(t *testing.T) {
+				h := &handlerCalls{}
+				r := testRouter(t, &routerClockState{}, h, &bindings)
+				r.SetKittyKeyboard(true)
+				r.Route([]byte(tt.in))
+				require.Equal(t, []Action{tt.want}, h.actions)
+				require.Empty(t, h.forwards)
+
+				synctest.Wait()
+			})
 		})
 	}
 }
 
 func TestRouterIgnoresKittyKeysUnlessEnabled(t *testing.T) {
-	h := &captureHandler{}
-	r := NewRouter(&fakeClock{}, h, nil)
-	r.Route([]byte("\x1b[49;5u"))
-	require.Empty(t, h.actions)
-	require.Equal(t, [][]byte{[]byte("\x1b[49;5u")}, h.forwards)
+	synctest.Test(t, func(t *testing.T) {
+		h := &handlerCalls{}
+		r := testRouter(t, &routerClockState{}, h, nil)
+		r.Route([]byte("\x1b[49;5u"))
+		require.Empty(t, h.actions)
+		require.Equal(t, [][]byte{[]byte("\x1b[49;5u")}, h.forwards)
+
+		synctest.Wait()
+	})
+}
+
+func newRouterClockStateMock(testingT *testing.T, c *routerClockState) *portsmocks.MockClock {
+	m := portsmocks.NewMockClock(testingT)
+	m.EXPECT().Now().RunAndReturn(func() time.Time { return time.Time{} }).Maybe()
+	m.EXPECT().NewTimer(mock.Anything).RunAndReturn(func(d time.Duration) ports.Timer {
+		t := &routerTimerState{ch: make(chan time.Time, 1), d: d}
+		c.timers = append(c.timers, t)
+		return newRouterTimerStateMock(testingT, t)
+	}).Maybe()
+	return m
+}
+
+func newRouterTimerStateMock(testingT *testing.T, t *routerTimerState) *portsmocks.MockTimer {
+	m := portsmocks.NewMockTimer(testingT)
+	m.EXPECT().C().RunAndReturn(func() <-chan time.Time { return t.ch }).Maybe()
+	m.EXPECT().Reset(mock.Anything).RunAndReturn(func(d time.Duration) bool { t.d = d; return t.stopped }).Maybe()
+	m.EXPECT().Stop().RunAndReturn(func() bool { t.stopped = true; return true }).Maybe()
+	return m
+}
+
+func newHandlerCallsMock(t *testing.T, h *handlerCalls) *MockHandler {
+	t.Helper()
+	m := NewMockHandler(t)
+	m.EXPECT().Forward(mock.Anything).Run(func(data []byte) {
+		h.forwards = append(h.forwards, append([]byte(nil), data...))
+		if h.notify != nil {
+			h.notify <- struct{}{}
+		}
+	}).Maybe()
+	m.EXPECT().Action(mock.Anything, mock.Anything).Run(func(a Action, raw []byte) {
+		h.actions = append(h.actions, a)
+		h.actionRaw = append(h.actionRaw, append([]byte(nil), raw...))
+	}).Maybe()
+	return m
+}
+
+func testRouter(t *testing.T, c *routerClockState, h *handlerCalls, b *atomic.Pointer[Bindings]) *Router {
+	t.Helper()
+	return NewRouter(newRouterClockStateMock(t, c), newHandlerCallsMock(t, h), b)
 }

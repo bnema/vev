@@ -5,13 +5,16 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	renderer "github.com/bnema/vev-vt"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 )
 
@@ -19,6 +22,8 @@ import (
 // server step; ReceiveServer blocks until a step arrives or the stream closes,
 // exactly like a live daemon connection.
 type previewWatchConn struct {
+	typed  *portsmocks.MockClientConnection
+	raw    *portsmocks.MockBrokerEnvelopeStream
 	stream ports.BrokerStreamID
 	sent   chan protocol.ClientMessage
 	steps  chan previewStep
@@ -31,11 +36,30 @@ type previewStep struct {
 	err     error
 }
 
-func newPreviewWatchConn(stream ports.BrokerStreamID) *previewWatchConn {
-	return &previewWatchConn{stream: stream, sent: make(chan protocol.ClientMessage, 4), steps: make(chan previewStep, 8), done: make(chan struct{})}
+func newPreviewWatchConn(t testing.TB, stream ports.BrokerStreamID) *previewWatchConn {
+	c := &previewWatchConn{stream: stream, sent: make(chan protocol.ClientMessage, 4), steps: make(chan previewStep, 8), done: make(chan struct{})}
+	// Streams may be opened by teardown goroutines after cleanup starts. Every
+	// expectation is optional, so bind failures without registering a cleanup
+	// that could race with construction.
+	c.typed = &portsmocks.MockClientConnection{}
+	c.typed.Test(t)
+	c.typed.EXPECT().SendClient(mock.Anything).RunAndReturn(c.sendClient).Maybe()
+	c.typed.EXPECT().ReceiveServer().RunAndReturn(c.receiveServer).Maybe()
+	c.typed.EXPECT().Capabilities().Return(protocol.ConnectionCapabilities{OutputDataLimit: protocol.MaxOutputDataLen}).Maybe()
+	c.typed.EXPECT().LinkState().Return(ports.LinkStateConnected).Maybe()
+	c.typed.EXPECT().LinkEvents().Return(nil).Maybe()
+	c.typed.EXPECT().Close().RunAndReturn(c.close).Maybe()
+	c.raw = &portsmocks.MockBrokerEnvelopeStream{}
+	c.raw.Test(t)
+	c.raw.EXPECT().Done().Return((<-chan struct{})(c.done)).Maybe()
+	c.raw.EXPECT().Err().Return(nil).Maybe()
+	c.raw.EXPECT().Close().RunAndReturn(c.close).Maybe()
+	c.raw.EXPECT().SendEnvelope(mock.Anything).Return(nil).Maybe()
+	c.raw.EXPECT().RecvEnvelope().RunAndReturn(func() ([]byte, error) { <-c.done; return nil, errors.New("closed") }).Maybe()
+	return c
 }
 
-func (c *previewWatchConn) SendClient(message protocol.ClientMessage) error {
+func (c *previewWatchConn) sendClient(message protocol.ClientMessage) error {
 	select {
 	case <-c.done:
 		return errors.New("closed")
@@ -44,7 +68,7 @@ func (c *previewWatchConn) SendClient(message protocol.ClientMessage) error {
 	}
 }
 
-func (c *previewWatchConn) ReceiveServer() (protocol.ServerMessage, error) {
+func (c *previewWatchConn) receiveServer() (protocol.ServerMessage, error) {
 	select {
 	case <-c.done:
 		return nil, errors.New("closed")
@@ -53,16 +77,7 @@ func (c *previewWatchConn) ReceiveServer() (protocol.ServerMessage, error) {
 	}
 }
 
-func (c *previewWatchConn) Capabilities() protocol.ConnectionCapabilities {
-	return protocol.ConnectionCapabilities{OutputDataLimit: protocol.MaxOutputDataLen}
-}
-func (c *previewWatchConn) LinkState() ports.LinkState         { return ports.LinkStateConnected }
-func (c *previewWatchConn) LinkEvents() <-chan ports.LinkEvent { return nil }
-func (c *previewWatchConn) SendEnvelope([]byte) error          { return nil }
-func (c *previewWatchConn) RecvEnvelope() ([]byte, error)      { <-c.done; return nil, errors.New("closed") }
-func (c *previewWatchConn) Done() <-chan struct{}              { return c.done }
-func (c *previewWatchConn) Err() error                         { return nil }
-func (c *previewWatchConn) Close() error {
+func (c *previewWatchConn) close() error {
 	c.once.Do(func() { close(c.done) })
 	return nil
 }
@@ -76,19 +91,25 @@ func (c *previewWatchConn) fail(err error) { c.steps <- previewStep{err: err} }
 // previewTestConnector dials one scripted physical whose every logical open
 // yields a fresh watch stream, published on opened for the test to drive.
 type previewTestConnector struct {
+	mu       sync.Mutex
+	streams  []*previewWatchConn
+	t        testing.TB
 	opened   chan *previewWatchConn
 	scripted *fakePhysical
 }
 
-func (c *previewTestConnector) Connect(_ context.Context, e ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
+func (c *previewTestConnector) connect(_ context.Context, e ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
 	if c.scripted == nil {
 		c.scripted = &fakePhysical{endpoint: e, done: make(chan struct{}), open: func(_ context.Context, r ports.BrokerOpenStreamRequest) (ports.BrokerEnvelopeStream, error) {
-			conn := newPreviewWatchConn(r.Stream)
+			conn := newPreviewWatchConn(c.t, r.Stream)
+			c.mu.Lock()
+			c.streams = append(c.streams, conn)
+			c.mu.Unlock()
 			c.opened <- conn
-			return conn, nil
+			return conn.raw, nil
 		}}
 	}
-	return c.scripted, nil
+	return mockPhysical(c.t, c.scripted), nil
 }
 
 func previewTarget(lifecycle byte, tab string) domain.RemoteSessionTarget {
@@ -122,12 +143,27 @@ type previewFixture struct {
 // fresh authority driven by a manual clock.
 func newPreviewFixture(t *testing.T, target domain.RemoteSessionTarget) *previewFixture {
 	t.Helper()
-	connector := &previewTestConnector{opened: make(chan *previewWatchConn, 8)}
-	clock := newManualClock(time.Unix(0, 0))
-	registry, err := NewRegistryWithConfig(1, newTestStore(), nil, clock, nil, RegistryConfig{ObservationDisabled: true})
+	connector := &previewTestConnector{t: t, opened: make(chan *previewWatchConn, 8)}
+	clock := newManualClock(t, time.Unix(0, 0))
+	registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, newTestStore()), mockProbe(t, nil), clock.mock, nil, RegistryConfig{ObservationDisabled: true})
 	require.NoError(t, err)
-	authority, _, _, _ := composeTestAuthority(t, 1, registry, connector.Connect, clock)
-	authority.codec = testSessionCodec{}
+	t.Cleanup(func() { registry.store.close() })
+	authority, _, _, _ := composeTestAuthority(t, 1, registry, connector.connect, clock)
+	codec := portsmocks.NewMockSessionCodec(t)
+	codec.EXPECT().Client(mock.MatchedBy(func(ports.BrokerEnvelopeStream) bool { return true })).RunAndReturn(func(stream ports.BrokerEnvelopeStream) ports.ClientConnection {
+		if pooled, ok := stream.(*pooledStream); ok {
+			stream = pooled.BrokerEnvelopeStream
+		}
+		connector.mu.Lock()
+		defer connector.mu.Unlock()
+		for _, conn := range connector.streams {
+			if conn.raw == stream {
+				return conn.typed
+			}
+		}
+		panic("unknown preview stream")
+	}).Maybe()
+	authority.codec = codec
 	service, err := authority.AdmitClient(context.Background())
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, service.Close()) })
@@ -168,13 +204,12 @@ func (f *previewFixture) awaitPublication() ports.BrokerPreviewPublication {
 	}
 }
 
-// advanceUntilOpen drives the manual clock until the reopen backoff fires.
-func (f *previewFixture) advanceUntilOpen(step time.Duration) {
+// advanceUntilOpen advances the expected reopen delay after the failure settles.
+func (f *previewFixture) advanceUntilOpen(delay time.Duration) {
 	f.t.Helper()
-	require.Eventually(f.t, func() bool {
-		f.clock.Advance(step)
-		return len(f.connector.opened) > 0
-	}, 5*time.Second, time.Millisecond)
+	synctest.Wait()
+	f.clock.Advance(delay)
+	require.NotEmpty(f.t, f.connector.opened)
 }
 
 func awaitClosed(t *testing.T, conn *previewWatchConn) {
@@ -193,70 +228,79 @@ func TestServicePreviewStreamIDsDoNotConsumeClientIDs(t *testing.T) {
 			name = "preview first"
 		}
 		t.Run(name, func(t *testing.T) {
-			f := newPreviewFixture(t, previewTarget(0x11, "tab-alpha"))
-			service := f.service.(*Service)
-			openClient := func(want ports.BrokerStreamID) {
-				t.Helper()
-				id, err := service.NextStreamID()
-				require.NoError(t, err)
-				require.Equal(t, want, id)
-				stream, err := service.OpenEnvelopeStream(context.Background(), poolRequest(service.ConnectionID(), uint64(id)))
-				require.NoError(t, err)
-				t.Cleanup(func() { require.NoError(t, stream.Close()) })
-			}
-			if !previewFirst {
-				openClient(1)
-			}
-			for range 3 {
-				req, err := service.previewStreamRequest(ports.BrokerPreviewRoute{Local: true, Policy: poolPolicy()})
-				require.NoError(t, err)
-				stream, err := service.pool.OpenStream(context.Background(), req)
-				require.NoError(t, err)
-				require.NoError(t, stream.Close())
-			}
-			if previewFirst {
-				openClient(1)
-			} else {
-				openClient(2)
-			}
+			synctest.Test(t, func(t *testing.T) {
+				f := newPreviewFixture(t, previewTarget(0x11, "tab-alpha"))
+				service := f.service.(*Service)
+				openClient := func(want ports.BrokerStreamID) {
+					t.Helper()
+					id, err := service.NextStreamID()
+					require.NoError(t, err)
+					require.Equal(t, want, id)
+					stream, err := service.OpenEnvelopeStream(context.Background(), poolRequest(service.ConnectionID(), uint64(id)))
+					require.NoError(t, err)
+					t.Cleanup(func() { require.NoError(t, stream.Close()) })
+				}
+				if !previewFirst {
+					openClient(1)
+				}
+				for range 3 {
+					req, err := service.previewStreamRequest(ports.BrokerPreviewRoute{Local: true, Policy: poolPolicy()})
+					require.NoError(t, err)
+					stream, err := service.pool.OpenStream(context.Background(), req)
+					require.NoError(t, err)
+					require.NoError(t, stream.Close())
+				}
+				if previewFirst {
+					openClient(1)
+				} else {
+					openClient(2)
+				}
+
+			})
 		})
 	}
 }
 
 func TestServicePreviewKeepsOneStreamAcrossFrames(t *testing.T) {
-	target := previewTarget(0x11, "tab-alpha")
-	f := newPreviewFixture(t, target)
-	conn, watch := f.awaitOpen()
-	require.Equal(t, previewLocalInterval, watch.MinInterval, "the broker picks the local rate")
-	require.Equal(t, target, watch.Request.Target)
-	require.NoError(t, protocol.ValidateRemotePreviewWatch(watch))
+	synctest.Test(t, func(t *testing.T) {
+		target := previewTarget(0x11, "tab-alpha")
+		f := newPreviewFixture(t, target)
+		conn, watch := f.awaitOpen()
+		require.Equal(t, previewLocalInterval, watch.MinInterval, "the broker picks the local rate")
+		require.Equal(t, target, watch.Request.Target)
+		require.NoError(t, protocol.ValidateRemotePreviewWatch(watch))
 
-	for revision := range uint64(3) {
-		frame := previewAnswer(0x11, "tab-alpha", 2, 1)
-		frame.Revision = revision + 1
-		conn.push(frame)
-		publication := f.awaitPublication()
-		require.NoError(t, publication.Err)
-		require.Equal(t, frame.Revision, publication.Preview.Revision)
-	}
-	require.Empty(t, f.connector.opened, "every frame arrives on the one watch stream")
+		for revision := range uint64(3) {
+			frame := previewAnswer(0x11, "tab-alpha", 2, 1)
+			frame.Revision = revision + 1
+			conn.push(frame)
+			publication := f.awaitPublication()
+			require.NoError(t, publication.Err)
+			require.Equal(t, frame.Revision, publication.Preview.Revision)
+		}
+		require.Empty(t, f.connector.opened, "every frame arrives on the one watch stream")
+
+	})
 }
 
 func TestServicePreviewFirstFrameDeadlinePublishesUnavailableAndKeepsWaiting(t *testing.T) {
-	f := newPreviewFixture(t, previewTarget(0x11, "tab-alpha"))
-	conn, _ := f.awaitOpen()
-	require.Eventually(t, func() bool {
-		f.clock.Advance(previewFirstFrameLimit)
-		return len(f.sub.Changed()) > 0
-	}, 5*time.Second, time.Millisecond)
-	publication := f.awaitPublication()
-	var brokerErr ports.BrokerError
-	require.ErrorAs(t, publication.Err, &brokerErr)
-	require.Equal(t, ports.BrokerErrorUnavailable, brokerErr.Code)
+	synctest.Test(t, func(t *testing.T) {
+		f := newPreviewFixture(t, previewTarget(0x11, "tab-alpha"))
+		conn, _ := f.awaitOpen()
+		requireQuiescent(t, func() bool {
+			f.clock.Advance(previewFirstFrameLimit)
+			return len(f.sub.Changed()) > 0
+		}, 5*time.Second, time.Millisecond)
+		publication := f.awaitPublication()
+		var brokerErr ports.BrokerError
+		require.ErrorAs(t, publication.Err, &brokerErr)
+		require.Equal(t, ports.BrokerErrorUnavailable, brokerErr.Code)
 
-	conn.push(previewAnswer(0x11, "tab-alpha", 2, 1))
-	require.NoError(t, f.awaitPublication().Err, "a slow stream still delivers once it answers")
-	require.Empty(t, f.connector.opened)
+		conn.push(previewAnswer(0x11, "tab-alpha", 2, 1))
+		require.NoError(t, f.awaitPublication().Err, "a slow stream still delivers once it answers")
+		require.Empty(t, f.connector.opened)
+
+	})
 }
 
 func TestServicePreviewFailureReopensWithBackoff(t *testing.T) {
@@ -272,50 +316,59 @@ func TestServicePreviewFailureReopensWithBackoff(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newPreviewFixture(t, previewTarget(0x11, "tab-alpha"))
-			first, _ := f.awaitOpen()
-			tc.fail(first)
-			publication := f.awaitPublication()
-			require.Error(t, publication.Err)
-			require.Equal(t, protocol.RemotePreview{}, publication.Preview, "a failure never publishes foreign content")
-			awaitClosed(t, first)
+			synctest.Test(t, func(t *testing.T) {
+				f := newPreviewFixture(t, previewTarget(0x11, "tab-alpha"))
+				first, _ := f.awaitOpen()
+				tc.fail(first)
+				publication := f.awaitPublication()
+				require.Error(t, publication.Err)
+				require.Equal(t, protocol.RemotePreview{}, publication.Preview, "a failure never publishes foreign content")
+				awaitClosed(t, first)
 
-			f.advanceUntilOpen(previewReopenMin)
-			second, _ := f.awaitOpen()
-			require.NotEqual(t, first.stream, second.stream, "a reopen allocates a new stream identity")
-			second.push(previewAnswer(0x11, "tab-alpha", 2, 1))
-			require.NoError(t, f.awaitPublication().Err)
+				f.advanceUntilOpen(previewReopenMin)
+				second, _ := f.awaitOpen()
+				require.NotEqual(t, first.stream, second.stream, "a reopen allocates a new stream identity")
+				second.push(previewAnswer(0x11, "tab-alpha", 2, 1))
+				require.NoError(t, f.awaitPublication().Err)
+
+			})
 		})
 	}
 }
 
 func TestServicePreviewBackoffDoublesUntilCap(t *testing.T) {
-	f := newPreviewFixture(t, previewTarget(0x11, "tab-alpha"))
-	conn, _ := f.awaitOpen()
-	want := []time.Duration{previewReopenMin, 2 * previewReopenMin, 4 * previewReopenMin}
-	for _, delay := range want {
-		conn.fail(errors.New("stream lost"))
-		f.awaitPublication()
-		awaitClosed(t, conn)
-		start := f.clock.Now()
-		f.advanceUntilOpen(previewReopenMin / 5)
-		require.GreaterOrEqual(t, f.clock.Now().Sub(start), delay)
-		conn, _ = f.awaitOpen()
-	}
+	synctest.Test(t, func(t *testing.T) {
+		f := newPreviewFixture(t, previewTarget(0x11, "tab-alpha"))
+		conn, _ := f.awaitOpen()
+		want := []time.Duration{previewReopenMin, 2 * previewReopenMin, 4 * previewReopenMin}
+		for _, delay := range want {
+			conn.fail(errors.New("stream lost"))
+			f.awaitPublication()
+			awaitClosed(t, conn)
+			start := f.clock.Now()
+			f.advanceUntilOpen(delay)
+			require.GreaterOrEqual(t, f.clock.Now().Sub(start), delay)
+			conn, _ = f.awaitOpen()
+		}
+
+	})
 }
 
 func TestServicePreviewNoSuchTargetStopsRecovery(t *testing.T) {
-	f := newPreviewFixture(t, previewTarget(0x11, "tab-alpha"))
-	conn, _ := f.awaitOpen()
-	conn.push(protocol.RemotePreview{Version: protocol.RemotePreviewSchemaVersion, Status: protocol.RemotePreviewNoSuchTarget})
-	publication := f.awaitPublication()
-	require.NoError(t, publication.Err)
-	require.Equal(t, protocol.RemotePreviewNoSuchTarget, publication.Preview.Status)
-	awaitClosed(t, conn)
-	require.Never(t, func() bool {
-		f.clock.Advance(previewReopenMax)
-		return len(f.connector.opened) > 0
-	}, 100*time.Millisecond, 5*time.Millisecond, "a dead target is never reopened")
+	synctest.Test(t, func(t *testing.T) {
+		f := newPreviewFixture(t, previewTarget(0x11, "tab-alpha"))
+		conn, _ := f.awaitOpen()
+		conn.push(protocol.RemotePreview{Version: protocol.RemotePreviewSchemaVersion, Status: protocol.RemotePreviewNoSuchTarget})
+		publication := f.awaitPublication()
+		require.NoError(t, publication.Err)
+		require.Equal(t, protocol.RemotePreviewNoSuchTarget, publication.Preview.Status)
+		awaitClosed(t, conn)
+		require.Never(t, func() bool {
+			f.clock.Advance(previewReopenMax)
+			return len(f.connector.opened) > 0
+		}, 100*time.Millisecond, 5*time.Millisecond, "a dead target is never reopened")
+
+	})
 }
 
 func TestServicePreviewCloseClosesTheStream(t *testing.T) {
@@ -333,13 +386,16 @@ func TestServicePreviewCloseClosesTheStream(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newPreviewFixture(t, previewTarget(0x11, "tab-alpha"))
-			conn, _ := f.awaitOpen()
-			conn.push(previewAnswer(0x11, "tab-alpha", 2, 1))
-			f.awaitPublication()
-			tc.close(f)
-			awaitClosed(t, conn)
-			require.NotPanics(t, func() { _ = f.sub.Latest() }, "Latest stays observable after Close")
+			synctest.Test(t, func(t *testing.T) {
+				f := newPreviewFixture(t, previewTarget(0x11, "tab-alpha"))
+				conn, _ := f.awaitOpen()
+				conn.push(previewAnswer(0x11, "tab-alpha", 2, 1))
+				f.awaitPublication()
+				tc.close(f)
+				awaitClosed(t, conn)
+				require.NotPanics(t, func() { _ = f.sub.Latest() }, "Latest stays observable after Close")
+
+			})
 		})
 	}
 }
@@ -370,16 +426,30 @@ func TestServicePreviewRouteValidation(t *testing.T) {
 		{name: "zero generation", mutate: func(r *ports.BrokerPreviewRequest) { r.Generation = 0 }},
 		{name: "invalid viewport", mutate: func(r *ports.BrokerPreviewRequest) { r.Preview.Width = 0 }},
 	}
-	f := newPreviewFixture(t, previewTarget(0x11, "tab-alpha"))
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			request := previewRequestFor(f.service, 5, previewTarget(0x11, "tab-alpha"))
-			tc.mutate(&request)
-			_, err := f.service.SubscribePreview(request)
-			require.ErrorIs(t, err, ports.BrokerAdmissionInvalid)
+			synctest.Test(t, func(t *testing.T) {
+				f := newPreviewFixture(t, previewTarget(0x11, "tab-alpha"))
+				f.awaitOpen()
+				request := previewRequestFor(f.service, 5, previewTarget(0x11, "tab-alpha"))
+				tc.mutate(&request)
+				_, err := f.service.SubscribePreview(request)
+				require.ErrorIs(t, err, ports.BrokerAdmissionInvalid)
+
+			})
 		})
 	}
-	stale := previewRequestFor(f.service, 1, previewTarget(0x11, "tab-alpha"))
-	_, err := f.service.SubscribePreview(stale)
-	require.ErrorIs(t, err, ports.BrokerAdmissionStale, "a generation is never reused")
+	synctest.Test(t, func(t *testing.T) {
+		f := newPreviewFixture(t, previewTarget(0x11, "tab-alpha"))
+		f.awaitOpen()
+		stale := previewRequestFor(f.service, 1, previewTarget(0x11, "tab-alpha"))
+		_, err := f.service.SubscribePreview(stale)
+		require.ErrorIs(t, err, ports.BrokerAdmissionStale, "a generation is never reused")
+	})
+}
+
+func mockPreviewConnector(t testing.TB, c *previewTestConnector) *portsmocks.MockBrokerEndpointConnector {
+	m := portsmocks.NewMockBrokerEndpointConnector(t)
+	m.EXPECT().Connect(mock.Anything, mock.Anything).RunAndReturn(c.connect).Maybe()
+	return m
 }

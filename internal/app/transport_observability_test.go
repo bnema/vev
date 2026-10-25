@@ -143,7 +143,7 @@ func TestPerformanceTraceSetupRollbackJoinsCloseError(t *testing.T) {
 			t.Setenv("VEV_PERF_RUN", tc.rawRun)
 
 			newSink := func(string, ports.Clock, string) (ports.RuntimeObserver, io.Closer, error) {
-				return runtimeObserverFunc(func(ports.RuntimeMark) {}), errorCloser{err: closeErr}, nil
+				return newQuietRuntimeObserver(t), errorCloser{err: closeErr}, nil
 			}
 			newCorrelation := func(observer ports.RuntimeObserver, inputs ports.RuntimeCorrelationInputs) (ports.RuntimeObserver, error) {
 				if tc.correlationErr != nil {
@@ -179,6 +179,10 @@ type errorCloser struct{ err error }
 
 func (c errorCloser) Close() error { return c.err }
 
-type runtimeObserverFunc func(ports.RuntimeMark)
-
-func (f runtimeObserverFunc) ObserveRuntime(mark ports.RuntimeMark) { f(mark) }
+// newQuietRuntimeObserver is a ports.RuntimeObserver that ignores every mark.
+func newQuietRuntimeObserver(t *testing.T) *portsmocks.MockRuntimeObserver {
+	t.Helper()
+	observer := portsmocks.NewMockRuntimeObserver(t)
+	observer.EXPECT().ObserveRuntime(mock.Anything).Maybe()
+	return observer
+}

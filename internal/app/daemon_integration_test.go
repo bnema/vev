@@ -9,15 +9,16 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	vt "github.com/bnema/vev-vt"
@@ -31,8 +32,10 @@ import (
 	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
+	wiremocks "github.com/bnema/vev/internal/protocol/wire/mocks"
 	"github.com/bnema/vev/internal/usecase/daemon"
 	"github.com/bnema/vev/internal/usecase/recovery"
 )
@@ -231,37 +234,33 @@ func awaitKillResult(conn ports.ClientConnection, requestID uint64, timeout time
 	return killResult, nil
 }
 
-// blockingClientConnection parks ReceiveServer until Close, so a test can prove
-// the bounded await returns on timeout rather than hanging.
-type blockingClientConnection struct {
-	closed chan struct{}
-	once   sync.Once
-}
-
-func (*blockingClientConnection) SendClient(protocol.ClientMessage) error { return nil }
-
-func (c *blockingClientConnection) ReceiveServer() (protocol.ServerMessage, error) {
-	<-c.closed
-	return nil, io.ErrClosedPipe
-}
-
-func (*blockingClientConnection) Capabilities() protocol.ConnectionCapabilities {
-	return protocol.ConnectionCapabilities{}
-}
-
-func (*blockingClientConnection) LinkState() ports.LinkState         { return ports.LinkState(0) }
-func (*blockingClientConnection) LinkEvents() <-chan ports.LinkEvent { return nil }
-
-func (c *blockingClientConnection) Close() error {
-	c.once.Do(func() { close(c.closed) })
-	return nil
+// newBlockingClientConnection parks ReceiveServer until Close, so a test can
+// prove the bounded await returns on timeout rather than hanging.
+func newBlockingClientConnection(t *testing.T) *portsmocks.MockClientConnection {
+	t.Helper()
+	closed := make(chan struct{})
+	var once sync.Once
+	conn := portsmocks.NewMockClientConnection(t)
+	conn.EXPECT().SendClient(mock.Anything).Return(nil).Maybe()
+	conn.EXPECT().ReceiveServer().RunAndReturn(func() (protocol.ServerMessage, error) {
+		<-closed
+		return nil, io.ErrClosedPipe
+	}).Maybe()
+	conn.EXPECT().Capabilities().Return(protocol.ConnectionCapabilities{}).Maybe()
+	conn.EXPECT().LinkState().Return(ports.LinkState(0)).Maybe()
+	conn.EXPECT().LinkEvents().Return(nil).Maybe()
+	conn.EXPECT().Close().RunAndReturn(func() error {
+		once.Do(func() { close(closed) })
+		return nil
+	}).Maybe()
+	return conn
 }
 
 // TestAwaitKillResultTimesOut proves the bounded result await reports a timeout
 // (never a silent success) and closes the exact connection when no
 // KillResult arrives.
 func TestAwaitKillResultTimesOut(t *testing.T) {
-	conn := &blockingClientConnection{closed: make(chan struct{})}
+	conn := newBlockingClientConnection(t)
 	_, err := awaitKillResult(conn, 1, 10*time.Millisecond)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	require.ErrorIs(t, err, io.ErrClosedPipe)
@@ -280,36 +279,33 @@ func TestAwaitKillResultRejectsUncorrelatedReply(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			conn := &scriptedKillReplyConnection{reply: tt.reply}
+			conn := newScriptedKillReplyConnection(t, tt.reply)
 			_, err := awaitKillResult(conn, 1, time.Second)
 			require.Error(t, err)
 		})
 	}
 }
 
-// scriptedKillReplyConnection returns exactly one canned server message.
-type scriptedKillReplyConnection struct {
-	reply protocol.ServerMessage
+// newScriptedKillReplyConnection returns exactly one canned server message,
+// then EOF.
+func newScriptedKillReplyConnection(t *testing.T, reply protocol.ServerMessage) *portsmocks.MockClientConnection {
+	t.Helper()
+	conn := portsmocks.NewMockClientConnection(t)
+	conn.EXPECT().SendClient(mock.Anything).Return(nil).Maybe()
+	conn.EXPECT().ReceiveServer().RunAndReturn(func() (protocol.ServerMessage, error) {
+		if reply == nil {
+			return nil, io.EOF
+		}
+		message := reply
+		reply = nil
+		return message, nil
+	}).Maybe()
+	conn.EXPECT().Capabilities().Return(protocol.ConnectionCapabilities{}).Maybe()
+	conn.EXPECT().LinkState().Return(ports.LinkState(0)).Maybe()
+	conn.EXPECT().LinkEvents().Return(nil).Maybe()
+	conn.EXPECT().Close().Return(nil).Maybe()
+	return conn
 }
-
-func (*scriptedKillReplyConnection) SendClient(protocol.ClientMessage) error { return nil }
-
-func (c *scriptedKillReplyConnection) ReceiveServer() (protocol.ServerMessage, error) {
-	if c.reply == nil {
-		return nil, io.EOF
-	}
-	reply := c.reply
-	c.reply = nil
-	return reply, nil
-}
-
-func (*scriptedKillReplyConnection) Capabilities() protocol.ConnectionCapabilities {
-	return protocol.ConnectionCapabilities{}
-}
-
-func (*scriptedKillReplyConnection) LinkState() ports.LinkState         { return ports.LinkState(0) }
-func (*scriptedKillReplyConnection) LinkEvents() <-chan ports.LinkEvent { return nil }
-func (*scriptedKillReplyConnection) Close() error                       { return nil }
 
 // mustHelloBytes encodes a minimal valid Hello for first-frame shape probes.
 func mustHelloBytes() []byte {
@@ -322,6 +318,7 @@ func mustHelloBytes() []byte {
 	return raw
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestIntegration_MalformedCommandPreservesVersionAndRequestID(t *testing.T) {
 	versionMismatch, err := sessionwire.EncodeClientMessage(protocol.CommandRequest{
 		Version: protocol.Version + 1, RequestID: 42, Slug: "list-sessions",
@@ -549,6 +546,7 @@ func displayShellFixture(t *testing.T) string {
 	return path
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestIntegration_AttachEnvironmentRefreshesFuturePTYChildren(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	dir, _ := startDaemon(t)
@@ -583,6 +581,7 @@ func TestIntegration_AttachEnvironmentRefreshesFuturePTYChildren(t *testing.T) {
 	assertChildEnvironment(t, tr2, p2, sz, "first", firstShell, "/run/second", "wayland-second")
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestIntegration_TwoAttachmentsReceiveSharedMutationPTYOutput(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	dir, _ := startDaemon(t)
@@ -626,6 +625,7 @@ func TestIntegration_TwoAttachmentsReceiveSharedMutationPTYOutput(t *testing.T) 
 	awaitText(t, p1, sz, sharedOutput)
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestIntegration_AttachFirstOutput(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	dir, _ := startDaemon(t, daemon.WithShell("/bin/sh", []string{"-c", "printf HELLO; sleep 30"}))
@@ -636,6 +636,7 @@ func TestIntegration_AttachFirstOutput(t *testing.T) {
 	awaitText(t, p, sz, "HELLO")
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestIntegration_InputRoundtrip(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	dir, _ := startDaemon(t, daemon.WithShell("/bin/cat", nil))
@@ -647,6 +648,7 @@ func TestIntegration_InputRoundtrip(t *testing.T) {
 	awaitText(t, p, sz, "PINGPONG")
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestIntegration_CommandPaletteCreatesTab(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	dir, _ := startDaemon(t, daemon.WithShell("/bin/sh", []string{"-c", "printf READY; sleep 30"}))
@@ -666,6 +668,7 @@ func TestIntegration_CommandPaletteCreatesTab(t *testing.T) {
 	require.Contains(t, text, " 1 (sh)  2 (sh) ")
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestIntegration_CommandPaletteRenamesEphemeralSession(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	dir, _ := startDaemon(t, daemon.WithShell("/bin/sh", []string{"-c", "printf READY; sleep 30"}))
@@ -699,6 +702,7 @@ func TestIntegration_CommandPaletteRenamesEphemeralSession(t *testing.T) {
 	require.False(t, sessions.Sessions[0].Ephemeral)
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestIntegration_AltCWithoutPaletteDoesNotCreateTab(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	dir, _ := startDaemon(t, daemon.WithShell("/bin/sh", []string{"-c", "printf READY; sleep 30"}))
@@ -712,6 +716,7 @@ func TestIntegration_AltCWithoutPaletteDoesNotCreateTab(t *testing.T) {
 	assertNoTextAfterInput(t, p, sz, " 1  2 ")
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestIntegration_EphemeralSurvivesDetachAndReattaches(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	dir, served := startDaemon(t, daemon.WithShell("/bin/sh", []string{"-c", "printf MARKER; sleep 30"}))
@@ -740,6 +745,7 @@ func TestIntegration_EphemeralSurvivesDetachAndReattaches(t *testing.T) {
 	}
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestIntegration_EphemeralNotListedAfterDaemonRestart(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	stateRoot, runtimeRoot := t.TempDir(), t.TempDir()
@@ -775,6 +781,7 @@ func TestIntegration_EphemeralNotListedAfterDaemonRestart(t *testing.T) {
 	}
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestIntegration_KillDaemonPreservesMultipleNamedSessions(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	stateDir := filepath.Join(t.TempDir(), "state")
@@ -838,6 +845,7 @@ func TestIntegration_KillDaemonPreservesMultipleNamedSessions(t *testing.T) {
 	}
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestIntegration_NamedSurvivesReattach(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	dir, served := startDaemon(t, daemon.WithShell("/bin/sh", []string{"-c", "printf MARKER; sleep 30"}))
@@ -869,6 +877,7 @@ func TestIntegration_NamedSurvivesReattach(t *testing.T) {
 // A named session's final live removal is a durable purge, so the re-attached
 // name carries a fresh persisted incarnation rather than resuming the deleted
 // one.
+// real I/O: real unix-socket broker/daemon stack.
 func TestIntegration_NamedSessionLastRemovalKeepsDaemonServing(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	stateDir := filepath.Join(t.TempDir(), "state")
@@ -896,8 +905,10 @@ func TestIntegration_NamedSessionLastRemovalKeepsDaemonServing(t *testing.T) {
 	// shutdown in the P4.1 model.
 	require.NoError(t, killNamedSession(dir, "work"))
 	awaitDetached(t, p1, protocol.ReasonSessionKilled)
-	require.Eventually(t, func() bool { return len(listRemoteSessions(t, dir).Sessions) == 0 },
-		5*time.Second, 10*time.Millisecond, "session was not removed")
+	// The daemon is reached only through a listing request and publishes no
+	// event, so this polls.
+	require.True(t, pollUntil(5*time.Second, func() bool { return len(listRemoteSessions(t, dir).Sessions) == 0 }),
+		"session was not removed")
 	select {
 	case err := <-served:
 		t.Fatalf("Serve stopped after the last session was removed: %v", err)
@@ -938,6 +949,7 @@ func TestIntegration_NamedSessionLastRemovalKeepsDaemonServing(t *testing.T) {
 // session as its only registry entry, which preserves it as stopped authority;
 // the daemon under test then resumes it over a real socket with the production
 // catalogue/recovery/snapshot options and serves a fresh operation.
+// real I/O: real unix-socket broker/daemon stack.
 func TestIntegration_NamedSessionRestoresPersistedIdentity(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	stateDir := filepath.Join(t.TempDir(), "state")
@@ -969,10 +981,12 @@ func TestIntegration_NamedSessionRestoresPersistedIdentity(t *testing.T) {
 	conn, p := attach(t, dir, protocol.IntentAttach, name, sz)
 	require.NoError(t, conn.SendClient(protocol.Input{Data: []byte("revived\n")}))
 	awaitText(t, p, sz, "revived")
-	require.Eventually(t, func() bool {
+	// The daemon is reached only through a listing request and publishes no
+	// event, so this polls.
+	require.True(t, pollUntil(5*time.Second, func() bool {
 		sessions := listRemoteSessions(t, dir).Sessions
 		return len(sessions) == 1 && sessions[0].State == protocol.SessionUp
-	}, 5*time.Second, 10*time.Millisecond, "named session was not restored")
+	}), "named session was not restored")
 
 	restored, ok, err := opened.Catalogue.Record(name)
 	require.NoError(t, err)
@@ -997,18 +1011,30 @@ func TestIntegration_NamedSessionRestoresPersistedIdentity(t *testing.T) {
 	}
 }
 
+// real I/O: real flock lifecycle locks.
 func TestMultipleClientsOneLifecycleOwner(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "runtime")
 	owner, err := lifecycle.TryAcquire(dir)
 	require.NoError(t, err)
 
 	ready := make(chan struct{})
-	transport := &integrationTransport{}
+	transport := wiremocks.NewMockTransport(t)
+	transport.EXPECT().Send(mock.Anything).Return(nil).Maybe()
+	transport.EXPECT().Recv().Return(wire.Envelope{}, io.EOF).Maybe()
+	transport.EXPECT().Close().Return(nil).Maybe()
+	// Every refused dial is an observable retry: the clients keep waiting on the
+	// held lifecycle instead of spawning, so the test waits for retries, not time.
+	const retriesBeforeRelease = 16
+	refused := make(chan struct{}, retriesBeforeRelease)
 	dial := func(context.Context, string) (wire.Transport, error) {
 		select {
 		case <-ready:
 			return transport, nil
 		default:
+			select {
+			case refused <- struct{}{}:
+			default:
+			}
 			return nil, os.ErrNotExist
 		}
 	}
@@ -1027,7 +1053,10 @@ func TestMultipleClientsOneLifecycleOwner(t *testing.T) {
 			errs <- err
 		})
 	}
-	require.Never(t, func() bool { return spawns.Load() != 0 }, 50*time.Millisecond, time.Millisecond)
+	for range retriesBeforeRelease {
+		<-refused
+		require.Zero(t, spawns.Load(), "no client spawns while the lifecycle owner is held")
+	}
 	close(ready)
 	require.NoError(t, owner.Release())
 	wg.Wait()
@@ -1038,26 +1067,35 @@ func TestMultipleClientsOneLifecycleOwner(t *testing.T) {
 	require.Zero(t, spawns.Load())
 }
 
+// real I/O: real unix-socket broker/daemon stack, a real PTY, real flock lifecycle locks.
 func TestLifecycleOwnershipOutlivesMaintenanceWriter(t *testing.T) {
 	runtimeDir := filepath.Join(t.TempDir(), "runtime")
 	stateDir := filepath.Join(t.TempDir(), "state")
-	catalogue := &lifecycleObservedCatalogue{
-		Catalogue: newTestPersister(t, stateDir),
-		closed:    make(chan struct{}),
-	}
+	catalogueClosed := make(chan struct{})
+	var catalogueCloseOnce sync.Once
+	realCatalogue := newTestPersister(t, stateDir)
+	catalogue := newForwardingCatalogue(t, realCatalogue, func(c *portsmocks.MockCatalogue) {
+		c.EXPECT().Close().RunAndReturn(func() error {
+			err := realCatalogue.Close()
+			catalogueCloseOnce.Do(func() { close(catalogueClosed) })
+			return err
+		}).Maybe()
+	})
 	require.NoError(t, catalogue.Create(domain.CatalogueRecord{Name: "work", IncarnationID: domain.IncarnationID{1}}))
 	repository := snapshot.NewRepository(filepath.Join(stateDir, "snapshots"))
-	shutdownClock := newLifecycleShutdownClock(t)
-	maintenanceRepository := &lifecycleBlockingMaintenanceRepository{
-		SnapshotRepository: repository,
-		entered:            make(chan struct{}),
-		release:            make(chan struct{}),
-		returned:           make(chan struct{}),
-	}
+	shutdownClock, _ := newLifecycleShutdownClock(t)
+	maintenance := newBlockingRepositoryState()
+	maintenanceRepository := newForwardingRepository(t, repository, func(r *portsmocks.MockSnapshotRepository) {
+		r.EXPECT().SnapshotIncarnations(mock.Anything).Return([]domain.IncarnationID{{1}}, nil).Maybe()
+		r.EXPECT().CollectIncarnationGarbage(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(func(context.Context, domain.IncarnationID, *domain.CheckpointRef) error {
+			maintenance.park()
+			return nil
+		}).Maybe()
+	})
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	var releaseOnce sync.Once
-	releaseMaintenance := func() { releaseOnce.Do(func() { close(maintenanceRepository.release) }) }
+	releaseMaintenance := func() { releaseOnce.Do(func() { close(maintenance.release) }) }
 	t.Cleanup(releaseMaintenance)
 
 	callbackReturned := make(chan struct{})
@@ -1082,21 +1120,21 @@ func TestLifecycleOwnershipOutlivesMaintenanceWriter(t *testing.T) {
 		})
 	}()
 
-	awaitLifecycleStage(t, maintenanceRepository.entered, "background maintenance repository call")
+	awaitLifecycleStage(t, maintenance.entered, "background maintenance repository call")
 	cancel()
 	select {
 	case <-callbackReturned:
 		t.Fatal("Serve callback returned after shutdown deadline while maintenance was blocked")
 	case <-time.After(100 * time.Millisecond):
 	}
-	assertLifecycleStagePending(t, catalogue.closed, "catalogue close while maintenance is blocked")
+	assertLifecycleStagePending(t, catalogueClosed, "catalogue close while maintenance is blocked")
 	assertLifecycleResultPending(t, wrapperReturned, "lifecycle wrapper return while maintenance is blocked")
 	_, err := lifecycle.TryAcquire(runtimeDir)
 	require.ErrorIs(t, err, lifecycle.ErrBusy)
 
 	releaseMaintenance()
-	awaitLifecycleStage(t, maintenanceRepository.returned, "maintenance repository return")
-	awaitLifecycleStage(t, catalogue.closed, "catalogue close after maintenance")
+	awaitLifecycleStage(t, maintenance.returned, "maintenance repository return")
+	awaitLifecycleStage(t, catalogueClosed, "catalogue close after maintenance")
 	awaitLifecycleStage(t, callbackReturned, "Serve callback return after catalogue close")
 	require.NoError(t, awaitLifecycleResult(t, wrapperReturned, "lifecycle wrapper return"))
 	owner, err := lifecycle.TryAcquire(runtimeDir)
@@ -1104,38 +1142,7 @@ func TestLifecycleOwnershipOutlivesMaintenanceWriter(t *testing.T) {
 	require.NoError(t, owner.Release())
 }
 
-type lifecycleBlockingMaintenanceRepository struct {
-	ports.SnapshotRepository
-	entered    chan struct{}
-	release    chan struct{}
-	returned   chan struct{}
-	enterOnce  sync.Once
-	returnOnce sync.Once
-}
-
-func (r *lifecycleBlockingMaintenanceRepository) SnapshotIncarnations(context.Context) ([]domain.IncarnationID, error) {
-	return []domain.IncarnationID{{1}}, nil
-}
-
-func (r *lifecycleBlockingMaintenanceRepository) CollectIncarnationGarbage(context.Context, domain.IncarnationID, *domain.CheckpointRef) error {
-	r.enterOnce.Do(func() { close(r.entered) })
-	<-r.release // Intentionally ignore cancellation: lifecycle ownership must outlive this call.
-	r.returnOnce.Do(func() { close(r.returned) })
-	return nil
-}
-
-type lifecycleObservedCatalogue struct {
-	ports.Catalogue
-	closed    chan struct{}
-	closeOnce sync.Once
-}
-
-func (c *lifecycleObservedCatalogue) Close() error {
-	err := c.Catalogue.Close()
-	c.closeOnce.Do(func() { close(c.closed) })
-	return err
-}
-
+// real I/O: real flock lifecycle locks.
 func TestLifecycleOwnershipOutlivesSnapshotWriter(t *testing.T) {
 	result := runBlockedSnapshotWriterShutdown(t)
 	assertLifecycleStagePending(t, result.callbackReturned, "Serve callback return while snapshot writer is blocked")
@@ -1161,6 +1168,7 @@ func TestLifecycleCallbackWaitsForEveryWriter(t *testing.T) {
 	require.NoError(t, awaitLifecycleResult(t, result.wrapperReturned, "lifecycle wrapper return"))
 }
 
+// real I/O: real flock lifecycle locks.
 func TestFinalCheckpointTimeoutKeepsOwner(t *testing.T) {
 	result := runBlockedSnapshotWriterShutdown(t)
 	assertLifecycleResultPending(t, result.wrapperReturned, "ownership release after checkpoint timeout with writer alive")
@@ -1175,23 +1183,33 @@ func TestFinalCheckpointTimeoutKeepsOwner(t *testing.T) {
 // records. Lifecycle ownership must therefore outlive it: releasing the flock
 // while a restoration repository call is still running would let a second
 // daemon mutate the same durable state.
+// real I/O: real unix-socket broker/daemon stack, a real PTY, real flock lifecycle locks.
 func TestLifecycleOwnershipOutlivesRestorationWriter(t *testing.T) {
 	stateDir := filepath.Join(t.TempDir(), "state")
 	repository := snapshot.NewRepository(filepath.Join(stateDir, "snapshots"))
 	checkpointed := publishRestorableCheckpoint(t, stateDir, repository)
 
 	runtimeDir := filepath.Join(t.TempDir(), "runtime")
-	blocking := &lifecycleBlockingRestore{
-		SnapshotRepository: repository,
-		entered:            make(chan struct{}),
-		release:            make(chan struct{}),
-		returned:           make(chan struct{}),
-	}
+	restore := newBlockingRepositoryState()
+	var repairedMu sync.Mutex
+	var repaired string
+	blocking := newForwardingRepository(t, repository, func(r *portsmocks.MockSnapshotRepository) {
+		r.EXPECT().LoadCheckpoint(mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(func(ctx context.Context, id domain.IncarnationID, name string, ref domain.CheckpointRef) (ports.SnapshotGeneration, error) {
+			repairedMu.Lock()
+			repaired = name
+			repairedMu.Unlock()
+			return repository.LoadCheckpoint(ctx, id, name, ref)
+		}).Maybe()
+		r.EXPECT().ReconcileCheckpoint(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(func(ctx context.Context, id domain.IncarnationID, ref domain.CheckpointRef) error {
+			restore.park()
+			return repository.ReconcileCheckpoint(ctx, id, ref)
+		}).Maybe()
+	})
 	var releaseOnce sync.Once
-	releaseRestore := func() { releaseOnce.Do(func() { close(blocking.release) }) }
+	releaseRestore := func() { releaseOnce.Do(func() { close(restore.release) }) }
 	t.Cleanup(releaseRestore)
 
-	shutdownClock := newLifecycleShutdownClock(t)
+	shutdownClock, shutdownTimers := newLifecycleShutdownClock(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	listenerReady := make(chan struct{})
@@ -1222,11 +1240,13 @@ func TestLifecycleOwnershipOutlivesRestorationWriter(t *testing.T) {
 	}()
 
 	awaitLifecycleStage(t, listenerReady, "daemon listener")
-	awaitLifecycleStage(t, blocking.entered, "restoration repository call")
-	require.Equal(t, checkpointed, blocking.repairedName(), "restoration must target the checkpointed session")
+	awaitLifecycleStage(t, restore.entered, "restoration repository call")
+	repairedMu.Lock()
+	require.Equal(t, checkpointed, repaired, "restoration must target the checkpointed session")
+	repairedMu.Unlock()
 
 	cancel()
-	shutdownClock.nextTimer(t).fire()
+	shutdownTimers.nextTimer(t).fire()
 	select {
 	case <-callbackReturned:
 		t.Fatal("Serve callback returned after shutdown deadline while restoration was blocked")
@@ -1238,7 +1258,7 @@ func TestLifecycleOwnershipOutlivesRestorationWriter(t *testing.T) {
 	require.ErrorIs(t, err, lifecycle.ErrBusy)
 
 	releaseRestore()
-	awaitLifecycleStage(t, blocking.returned, "restoration repository return")
+	awaitLifecycleStage(t, restore.returned, "restoration repository return")
 	awaitLifecycleStage(t, callbackReturned, "Serve callback return after restoration")
 	require.NoError(t, awaitLifecycleResult(t, wrapperReturned, "lifecycle wrapper return"))
 	owner, err := lifecycle.TryAcquire(runtimeDir)
@@ -1275,46 +1295,16 @@ func publishRestorableCheckpoint(t *testing.T, stateDir string, repository *snap
 
 	tr, _ := attach(t, runtimeDir, protocol.IntentNew, name, domain.Size{Cols: 80, Rows: 24})
 	require.NoError(t, tr.SendClient(protocol.Input{Data: []byte("checkpoint me\n")}))
-	require.Eventually(t, func() bool {
+	// The checkpoint lands in the on-disk catalogue, which publishes no event.
+	require.True(t, pollUntil(5*time.Second, func() bool {
 		record, ok, _ := opened.Catalogue.Record(name)
 		return ok && record.Committed != nil && record.DegradedReason == ""
-	}, 5*time.Second, 10*time.Millisecond, "session never committed a checkpoint")
+	}), "session never committed a checkpoint")
 	require.NoError(t, tr.Close())
 
 	cancel()
 	require.NoError(t, awaitLifecycleResult(t, served, "seed daemon shutdown"))
 	return name
-}
-
-type lifecycleBlockingRestore struct {
-	ports.SnapshotRepository
-	entered    chan struct{}
-	release    chan struct{}
-	returned   chan struct{}
-	enterOnce  sync.Once
-	returnOnce sync.Once
-	mu         sync.Mutex
-	repaired   string
-}
-
-func (r *lifecycleBlockingRestore) LoadCheckpoint(ctx context.Context, id domain.IncarnationID, name string, ref domain.CheckpointRef) (ports.SnapshotGeneration, error) {
-	r.mu.Lock()
-	r.repaired = name
-	r.mu.Unlock()
-	return r.SnapshotRepository.LoadCheckpoint(ctx, id, name, ref)
-}
-
-func (r *lifecycleBlockingRestore) ReconcileCheckpoint(ctx context.Context, id domain.IncarnationID, ref domain.CheckpointRef) error {
-	r.enterOnce.Do(func() { close(r.entered) })
-	<-r.release // Intentionally ignore cancellation: lifecycle ownership must outlive this call.
-	r.returnOnce.Do(func() { close(r.returned) })
-	return r.SnapshotRepository.ReconcileCheckpoint(ctx, id, ref)
-}
-
-func (r *lifecycleBlockingRestore) repairedName() string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.repaired
 }
 
 type blockedSnapshotWriterShutdown struct {
@@ -1329,8 +1319,13 @@ func runBlockedSnapshotWriterShutdown(t *testing.T) blockedSnapshotWriterShutdow
 	t.Helper()
 	runtimeDir := filepath.Join(t.TempDir(), "runtime")
 	stateDir := filepath.Join(t.TempDir(), "state")
-	shutdownClock := newLifecycleShutdownClock(t)
-	repository := newLifecycleBlockingRepository()
+	shutdownClock, shutdownTimers := newLifecycleShutdownClock(t)
+	writer := newBlockingRepositoryState()
+	repository := portsmocks.NewMockSnapshotRepository(t)
+	repository.EXPECT().Publish(mock.Anything, mock.Anything).RunAndReturn(func(context.Context, ports.SnapshotPublication) error {
+		writer.park()
+		return nil
+	}).Maybe()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
@@ -1345,7 +1340,14 @@ func runBlockedSnapshotWriterShutdown(t *testing.T) blockedSnapshotWriterShutdow
 			if err != nil {
 				return err
 			}
-			observed := &lifecycleObservedListener{Listener: listener, closed: listenerClosed}
+			var listenerCloseOnce sync.Once
+			observed := newForwardingListener(t, listener, func(l *wiremocks.MockListener) {
+				l.EXPECT().Close().RunAndReturn(func() error {
+					err := listener.Close()
+					listenerCloseOnce.Do(func() { close(listenerClosed) })
+					return err
+				}).Maybe()
+			})
 			close(listenerReady)
 			d := daemon.New(
 				pty.NewFactory(),
@@ -1361,16 +1363,18 @@ func runBlockedSnapshotWriterShutdown(t *testing.T) blockedSnapshotWriterShutdow
 	awaitLifecycleStage(t, listenerReady, "daemon listener")
 	tr, _ := attach(t, runtimeDir, protocol.IntentNew, "work", domain.Size{Cols: 80, Rows: 24})
 	require.NoError(t, tr.SendClient(protocol.Input{Data: []byte("dirty state\n")}))
-	awaitLifecycleStage(t, repository.entered, "snapshot publication")
+	awaitLifecycleStage(t, writer.entered, "snapshot publication")
 	require.NoError(t, tr.Close())
-	require.Eventually(t, func() bool {
+	// The daemon is reached only through a listing request and publishes no
+	// event, so this polls.
+	require.True(t, pollUntil(time.Second, func() bool {
 		sessions := listRemoteSessions(t, runtimeDir)
 		return len(sessions.Sessions) == 1 && !sessions.Sessions[0].Attached
-	}, time.Second, 10*time.Millisecond)
+	}), "the detached session was never listed as unattached")
 	cancel()
 	awaitLifecycleStage(t, listenerClosed, "listener close")
 
-	shutdownClock.nextTimer(t).fire()
+	shutdownTimers.nextTimer(t).fire()
 	select {
 	case <-callbackReturned:
 		t.Fatal("Serve callback returned after checkpoint timeout while snapshot writer was blocked")
@@ -1380,132 +1384,38 @@ func runBlockedSnapshotWriterShutdown(t *testing.T) blockedSnapshotWriterShutdow
 	assertLifecycleResultPending(t, wrapperReturned, "lifecycle wrapper return after checkpoint timeout")
 
 	var releaseOnce sync.Once
-	releaseWriter := func() { releaseOnce.Do(func() { close(repository.release) }) }
+	releaseWriter := func() { releaseOnce.Do(func() { close(writer.release) }) }
 	t.Cleanup(releaseWriter)
 	return blockedSnapshotWriterShutdown{
 		runtimeDir:       runtimeDir,
 		callbackReturned: callbackReturned,
 		wrapperReturned:  wrapperReturned,
-		publishReturned:  repository.returned,
+		publishReturned:  writer.returned,
 		releaseWriter:    releaseWriter,
 	}
 }
 
-type lifecycleBlockingRepository struct {
-	ports.SnapshotRepository
-	entered    chan struct{}
-	release    chan struct{}
-	returned   chan struct{}
-	enterOnce  sync.Once
-	returnOnce sync.Once
-}
-
-func newLifecycleBlockingRepository() *lifecycleBlockingRepository {
-	return &lifecycleBlockingRepository{
-		entered:  make(chan struct{}),
-		release:  make(chan struct{}),
-		returned: make(chan struct{}),
-	}
-}
-
-func (r *lifecycleBlockingRepository) Publish(context.Context, ports.SnapshotPublication) error {
-	r.enterOnce.Do(func() { close(r.entered) })
-	<-r.release // Intentionally ignore cancellation: lifecycle ownership must outlive this call.
-	r.returnOnce.Do(func() { close(r.returned) })
-	return nil
-}
-
-type lifecycleShutdownClock struct {
-	t      *testing.T
-	base   ports.Clock
-	timers chan *lifecycleManualTimer
-}
-
-func newLifecycleShutdownClock(t *testing.T) *lifecycleShutdownClock {
-	t.Helper()
-	return &lifecycleShutdownClock{t: t, base: clock.New(), timers: make(chan *lifecycleManualTimer, 4)}
-}
-
-func (c *lifecycleShutdownClock) Now() time.Time { return c.base.Now() }
-func (c *lifecycleShutdownClock) NewTimer(delay time.Duration) ports.Timer {
-	if delay != daemon.SnapshotShutdownTimeout() {
-		return c.base.NewTimer(delay)
-	}
-	timer := &lifecycleManualTimer{t: c.t, ch: make(chan time.Time, 1)}
-	select {
-	case c.timers <- timer:
-	default:
-		c.t.Errorf("unexpected additional snapshot shutdown timer with delay %s", delay)
-		timer.fire()
-	}
-	return timer
-}
-
-func (c *lifecycleShutdownClock) nextTimer(t *testing.T) *lifecycleManualTimer {
-	t.Helper()
-	select {
-	case timer := <-c.timers:
-		return timer
-	case <-time.After(3 * time.Second):
-		t.Fatal("timed out waiting for shutdown deadline timer")
-		return nil
-	}
-}
-
-type lifecycleManualTimer struct {
-	t       *testing.T
-	ch      chan time.Time
-	stopped atomic.Bool
-}
-
-func (t *lifecycleManualTimer) C() <-chan time.Time { return t.ch }
-func (t *lifecycleManualTimer) Reset(delay time.Duration) bool {
-	if delay != daemon.SnapshotShutdownTimeout() {
-		t.t.Errorf("snapshot shutdown timer reset with delay %s, want %s", delay, daemon.SnapshotShutdownTimeout())
-	}
-	t.stopped.Store(false)
-	return false
-}
-func (t *lifecycleManualTimer) Stop() bool { return !t.stopped.Swap(true) }
-func (t *lifecycleManualTimer) fire() {
-	if t.stopped.Load() {
-		return
-	}
-	select {
-	case t.ch <- time.Now():
-	default:
-	}
-}
-
 func TestLifecycleManualTimerRepeatedFireIsNonBlocking(t *testing.T) {
-	timer := &lifecycleManualTimer{t: t, ch: make(chan time.Time, 1)}
-	timer.fire()
-
-	returned := make(chan struct{})
-	go func() {
+	synctest.Test(t, func(t *testing.T) {
+		_, timer := newLifecycleTimerMock(t)
 		timer.fire()
-		close(returned)
-	}()
 
-	select {
-	case <-returned:
-	case <-time.After(time.Second):
-		t.Fatal("repeated manual timer fire blocked on a pending tick")
-	}
+		returned := make(chan struct{})
+		go func() {
+			timer.fire()
+			close(returned)
+		}()
+
+		synctest.Wait()
+		select {
+		case <-returned:
+		default:
+			t.Fatal("repeated manual timer fire blocked on a pending tick")
+		}
+	})
 }
 
-type lifecycleObservedListener struct {
-	wire.Listener
-	closed chan struct{}
-	once   sync.Once
-}
-
-func (l *lifecycleObservedListener) Close() error {
-	err := l.Listener.Close()
-	l.once.Do(func() { close(l.closed) })
-	return err
-}
-
+// real I/O: real unix-socket broker/daemon stack, a real PTY, real flock lifecycle locks.
 func TestLifecycleSocketCloseCatalogueRace(t *testing.T) {
 	runtimeDir := filepath.Join(t.TempDir(), "runtime")
 	stateDir := filepath.Join(t.TempDir(), "state")
@@ -1527,20 +1437,35 @@ func TestLifecycleSocketCloseCatalogueRace(t *testing.T) {
 	ownerReleased := make(chan struct{})
 	teardownEvents := make(chan string, 3)
 
-	controlledListener := &lifecycleControlledListener{
-		Listener: oldListener,
-		entered:  socketCloseEntered,
-		proceed:  allowSocketClose,
-		closed:   socketClosed,
-		events:   teardownEvents,
-	}
-	controlledCatalogue := &lifecycleControlledCatalogue{
-		Catalogue: oldOpened.Catalogue,
-		entered:   catalogueCloseEntered,
-		proceed:   allowCatalogueClose,
-		closed:    catalogueClosed,
-		events:    teardownEvents,
-	}
+	// Each Close announces itself, parks until the test lets it proceed, closes
+	// the real resource once, and reports completion; later calls repeat the
+	// first result.
+	var socketCloseOnce, catalogueCloseOnce sync.Once
+	var socketCloseErr, catalogueCloseErr error
+	controlledListener := newForwardingListener(t, oldListener, func(l *wiremocks.MockListener) {
+		l.EXPECT().Close().RunAndReturn(func() error {
+			socketCloseOnce.Do(func() {
+				teardownEvents <- "socket-close"
+				close(socketCloseEntered)
+				<-allowSocketClose
+				socketCloseErr = oldListener.Close()
+				close(socketClosed)
+			})
+			return socketCloseErr
+		}).Maybe()
+	})
+	controlledCatalogue := newForwardingCatalogue(t, oldOpened.Catalogue, func(c *portsmocks.MockCatalogue) {
+		c.EXPECT().Close().RunAndReturn(func() error {
+			catalogueCloseOnce.Do(func() {
+				teardownEvents <- "catalogue-close"
+				close(catalogueCloseEntered)
+				<-allowCatalogueClose
+				catalogueCloseErr = oldOpened.Catalogue.Close()
+				close(catalogueClosed)
+			})
+			return catalogueCloseErr
+		}).Maybe()
+	})
 	oldDaemon := daemon.New(pty.NewFactory(), clock.New(), discardLog(), daemon.WithCatalogue(controlledCatalogue, oldOpened.Records))
 	oldCtx, stopOld := context.WithCancel(context.Background())
 	oldDone := make(chan error, 1)
@@ -1668,61 +1593,12 @@ func assertNewDaemonStartupPending(t *testing.T, durableOpen, listen <-chan stru
 	assertLifecycleStagePending(t, listen, "new listen while old daemon held at "+heldAt)
 }
 
-type lifecycleControlledListener struct {
-	wire.Listener
-	entered chan struct{}
-	proceed chan struct{}
-	closed  chan struct{}
-	events  chan<- string
-	once    sync.Once
-	err     error
-}
-
-func (l *lifecycleControlledListener) Close() error {
-	l.once.Do(func() {
-		l.events <- "socket-close"
-		close(l.entered)
-		<-l.proceed
-		l.err = l.Listener.Close()
-		close(l.closed)
-	})
-	return l.err
-}
-
-type lifecycleControlledCatalogue struct {
-	ports.Catalogue
-	entered chan struct{}
-	proceed chan struct{}
-	closed  chan struct{}
-	events  chan<- string
-	once    sync.Once
-	err     error
-}
-
-func (c *lifecycleControlledCatalogue) Close() error {
-	c.once.Do(func() {
-		c.events <- "catalogue-close"
-		close(c.entered)
-		<-c.proceed
-		c.err = c.Catalogue.Close()
-		close(c.closed)
-	})
-	return c.err
-}
-
-type integrationTransport struct{}
-
-func (*integrationTransport) Send(wire.Envelope) error     { return nil }
-func (*integrationTransport) Recv() (wire.Envelope, error) { return wire.Envelope{}, io.EOF }
-func (*integrationTransport) Close() error                 { return nil }
-func (*integrationTransport) LocalAddr() net.Addr          { return nil }
-func (*integrationTransport) RemoteAddr() net.Addr         { return nil }
-
 // TestIntegration_KillSessionsPurgesSessionsAndKeepsDaemon is the P4.2 app-level
 // contract: `kill --sessions` removes every live and stopped session but leaves the
 // daemon serving, and the same process accepts fresh named and ephemeral
 // sessions that start PTYs, forward input, and open a tab through the ordinary
 // command palette. Only the distinct explicit daemon stop ends it.
+// real I/O: real unix-socket broker/daemon stack, a real PTY.
 func TestIntegration_KillSessionsPurgesSessionsAndKeepsDaemon(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	dir, served := startDaemon(t, daemon.WithShell("/bin/cat", nil))
@@ -1744,8 +1620,10 @@ func TestIntegration_KillSessionsPurgesSessionsAndKeepsDaemon(t *testing.T) {
 		t.Fatalf("KillAll stopped Serve: %v", err)
 	default:
 	}
-	require.Eventually(t, func() bool { return len(listRemoteSessions(t, dir).Sessions) == 0 },
-		5*time.Second, 10*time.Millisecond, "kill-all did not purge every session")
+	// The daemon is reached only through a listing request and publishes no
+	// event, so this polls.
+	require.True(t, pollUntil(5*time.Second, func() bool { return len(listRemoteSessions(t, dir).Sessions) == 0 }),
+		"kill-all did not purge every session")
 
 	// Reuse: a fresh named session starts its PTY and forwards input.
 	third, thirdPump := attach(t, dir, protocol.IntentNew, "again", sz)
@@ -1760,14 +1638,16 @@ func TestIntegration_KillSessionsPurgesSessionsAndKeepsDaemon(t *testing.T) {
 	require.NoError(t, third.SendClient(protocol.Input{Data: []byte("\x1b ")}))
 	awaitText(t, thirdPump, sz, "Commands")
 	require.NoError(t, third.SendClient(protocol.Input{Data: []byte("CNT\r")}))
-	require.Eventually(t, func() bool {
+	// The daemon is reached only through a listing request and publishes no
+	// event, so this polls.
+	require.True(t, pollUntil(5*time.Second, func() bool {
 		for _, info := range listRemoteSessions(t, dir).Sessions {
 			if info.Name == "again" {
 				return info.Tabs == 2
 			}
 		}
 		return false
-	}, 5*time.Second, 10*time.Millisecond, "a tab created after the purge was not published")
+	}), "a tab created after the purge was not published")
 
 	_ = first.Close()
 	require.NoError(t, third.Close())

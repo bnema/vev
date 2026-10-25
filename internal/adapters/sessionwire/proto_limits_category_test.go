@@ -132,17 +132,17 @@ func TestClientSendCategoryEnvelopeCeilings(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			raw := &scriptedTransport{}
+			raw, rawState := newScriptedTransport(t)
 			conn := &clientConnection{handshake: handshake{raw: raw, ceilings: tt.ceilings}}
 			conn.preambleOnce.Do(func() {})
 			err := conn.SendClient(tt.message)
 			if tt.wantErr != nil {
 				require.ErrorIs(t, err, tt.wantErr)
-				require.Zero(t, raw.sentLen())
+				require.Zero(t, rawState.sentLen())
 				return
 			}
 			require.NoError(t, err)
-			require.Equal(t, 1, raw.sentLen())
+			require.Equal(t, 1, rawState.sentLen())
 		})
 	}
 }
@@ -193,16 +193,16 @@ func TestServerSendCategoryEnvelopeCeilings(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			raw := &scriptedTransport{}
+			raw, rawState := newScriptedTransport(t)
 			conn := &serverConnection{handshake: handshake{raw: raw, ceilings: tt.ceilings}}
 			err := conn.SendServer(tt.message)
 			if tt.wantErr != nil {
 				require.ErrorIs(t, err, tt.wantErr)
-				require.Zero(t, raw.sentLen())
+				require.Zero(t, rawState.sentLen())
 				return
 			}
 			require.NoError(t, err)
-			require.Equal(t, 1, raw.sentLen())
+			require.Equal(t, 1, rawState.sentLen())
 		})
 	}
 }
@@ -211,13 +211,13 @@ func TestServerSendCategoryEnvelopeCeilings(t *testing.T) {
 // synchronous server sends enforce the same control cap as the normal path.
 func TestServerSendModesShareControlCategoryCap(t *testing.T) {
 	controlOver := protocol.Sessions{Sessions: []protocol.SessionInfo{{Name: strings.Repeat("x", overControlCap)}}}
-	raw := &asyncScriptedTransport{scriptedTransport: &scriptedTransport{}}
+	raw, rawState := newAsyncScriptedTransport(t)
 	conn := &serverConnection{handshake: handshake{raw: raw, ceilings: defaultProtoCeilings()}}
 
 	require.ErrorIs(t, conn.SendServerAsync(controlOver), wire.ErrScanLength)
 	require.ErrorIs(t, conn.SendServerSynchronous(controlOver), wire.ErrScanLength)
-	require.Empty(t, raw.async)
-	require.Empty(t, raw.synchronous)
+	require.Zero(t, rawState.asyncLen())
+	require.Zero(t, rawState.synchronousLen())
 }
 
 // TestReceiveCategoryEnvelopeCeilings proves both typed receive paths apply
@@ -328,7 +328,7 @@ func TestReceiveCategoryEnvelopeCeilings(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			raw := &scriptedTransport{recv: []wire.Envelope{{Payload: tt.payload}}}
+			raw, _ := newScriptedTransport(t, withRecv(wire.Envelope{Payload: tt.payload}))
 			var err error
 			if tt.receiver == "server" {
 				conn := &serverConnection{handshake: handshake{raw: raw, ceilings: tt.ceilings}}

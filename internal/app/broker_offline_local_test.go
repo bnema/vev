@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -16,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/adapters/brokerconfig"
@@ -26,6 +28,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/bnema/vev/internal/usecase/broker"
@@ -104,6 +107,37 @@ type scriptedLocalDaemon struct {
 	mu       sync.Mutex
 	streams  int
 	received []protocol.ClientMessage
+	// changed is signaled (coalesced) whenever a stream is admitted or a message
+	// is recorded, so waiters block on the event instead of polling.
+	changed chan struct{}
+}
+
+// signal wakes any waiter without ever blocking the serving goroutine.
+func (d *scriptedLocalDaemon) signal() {
+	select {
+	case d.changed <- struct{}{}:
+	default:
+	}
+}
+
+// awaitState blocks until ready reports true under the daemon lock, waking on
+// every recorded change and failing once brokerTestWait elapses.
+func (d *scriptedLocalDaemon) awaitState(t *testing.T, ready func() bool, what string) {
+	t.Helper()
+	deadline := time.After(brokerTestWait)
+	for {
+		d.mu.Lock()
+		ok := ready()
+		d.mu.Unlock()
+		if ok {
+			return
+		}
+		select {
+		case <-d.changed:
+		case <-deadline:
+			t.Fatal(what)
+		}
+	}
 }
 
 // newScriptedLocalDaemon serves one scripted daemonmux daemon over in-memory
@@ -111,7 +145,7 @@ type scriptedLocalDaemon struct {
 // the stream without an answer.
 func newScriptedLocalDaemon(t *testing.T, binding daemonmux.ServerBinding, respond func(protocol.ClientMessage) protocol.ServerMessage) *scriptedLocalDaemon {
 	t.Helper()
-	daemon := &scriptedLocalDaemon{respond: respond}
+	daemon := &scriptedLocalDaemon{respond: respond, changed: make(chan struct{}, 1)}
 	aggregate := daemonmux.NewAggregateListener()
 	supervisor, err := daemonmux.NewServerSupervisor(aggregate, binding, daemonmux.DefaultMuxCeilings(), 0)
 	require.NoError(t, err)
@@ -128,6 +162,7 @@ func newScriptedLocalDaemon(t *testing.T, binding daemonmux.ServerBinding, respo
 			daemon.mu.Lock()
 			daemon.streams++
 			daemon.mu.Unlock()
+			daemon.signal()
 			go daemon.serveStream(connection)
 		}
 	}()
@@ -161,6 +196,7 @@ func (d *scriptedLocalDaemon) serveStream(connection ports.ServerConnection) {
 		d.mu.Lock()
 		d.received = append(d.received, message)
 		d.mu.Unlock()
+		d.signal()
 		if d.respond == nil {
 			return
 		}
@@ -184,22 +220,15 @@ func (d *scriptedLocalDaemon) messages() []protocol.ClientMessage {
 // awaitMessages waits until the daemon recorded at least count messages.
 func (d *scriptedLocalDaemon) awaitMessages(t *testing.T, count int) []protocol.ClientMessage {
 	t.Helper()
-	require.Eventually(t, func() bool {
-		d.mu.Lock()
-		defer d.mu.Unlock()
-		return len(d.received) >= count
-	}, brokerTestWait, time.Millisecond, "scripted local daemon recorded %d messages", len(d.messages()))
+	d.awaitState(t, func() bool { return len(d.received) >= count },
+		fmt.Sprintf("scripted local daemon never recorded %d messages", count))
 	return d.messages()
 }
 
 // awaitStreams waits until the daemon admitted at least count logical streams.
 func (d *scriptedLocalDaemon) awaitStreams(t *testing.T, count int) {
 	t.Helper()
-	require.Eventually(t, func() bool {
-		d.mu.Lock()
-		defer d.mu.Unlock()
-		return d.streams >= count
-	}, brokerTestWait, time.Millisecond, "scripted local daemon admitted too few streams")
+	d.awaitState(t, func() bool { return d.streams >= count }, "scripted local daemon admitted too few streams")
 }
 
 // TestBrokerLocalProbeObservesAuthenticatedCatalogue proves the broker-owned
@@ -542,7 +571,7 @@ func TestBrokerLocalObservationPublishesReachableCatalogueWhenIdentityAppears(t 
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	// A deterministic clock: the identity retry is a jittered multi-second
 	// delay, so wall time would race the test's wait bound.
-	clk := newSandboxClock()
+	clk, clkState := newSandboxClockMock(t)
 	registry, err := broker.NewRegistryWithConfig(brokerLocalTestEpoch, store, nil, clk, discardLog(), broker.RegistryConfig{Local: local, MembershipMode: broker.MembershipMutable})
 	require.NoError(t, err)
 	startLocalRegistry(t, registry)
@@ -553,7 +582,7 @@ func TestBrokerLocalObservationPublishesReachableCatalogueWhenIdentityAppears(t 
 	identity.Store(daemonIdentity)
 	// Step past the longest jittered retry (retry base plus 10%) so the next
 	// attempt reads the published identity.
-	clk.Advance(6 * time.Second)
+	clkState.Advance(6 * time.Second)
 	observed := waitLocalEntry(t, registry, func(entry ports.BrokerDaemonObservation) bool {
 		return entry.Availability == domain.RemoteAvailabilityReachable
 	})
@@ -577,7 +606,7 @@ func TestBrokerLocalObservationNeverSpawnsDaemon(t *testing.T) {
 	_, binding := testLocalSandboxConfig(t)
 	var modes []ports.BrokerDaemonStartMode
 	var mu sync.Mutex
-	probe, err := newDynamicLocalRouteProbe(binding.Route, binding.Policy, brokerLocalTestEpoch, testEndpointConnectorFunc(func(_ context.Context, target ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
+	probe, err := newDynamicLocalRouteProbe(binding.Route, binding.Policy, brokerLocalTestEpoch, newEndpointConnectorMock(t, func(_ context.Context, target ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
 		mu.Lock()
 		modes = append(modes, target.StartMode)
 		mu.Unlock()
@@ -662,11 +691,9 @@ func TestBrokerLocalObservationRegistryPublishesLocalFirst(t *testing.T) {
 	t.Cleanup(func() { cancel(); <-done })
 	registry.RequestProbe("")
 
-	require.Eventually(t, func() bool {
-		snapshot := registry.Snapshot()
-		return len(snapshot.Daemons) == 1 && snapshot.Daemons[0].Local &&
-			!snapshot.Daemons[0].Checking && snapshot.Daemons[0].Availability == domain.RemoteAvailabilityReachable
-	}, 3*time.Second, 2*time.Millisecond)
+	waitLocalEntry(t, registry, func(entry ports.BrokerDaemonObservation) bool {
+		return !entry.Checking && entry.Availability == domain.RemoteAvailabilityReachable
+	})
 
 	snapshot := registry.Snapshot()
 	require.Len(t, snapshot.Daemons, 1)
@@ -679,10 +706,12 @@ func TestBrokerLocalObservationRegistryPublishesLocalFirst(t *testing.T) {
 
 	// The durable store persists remote observations only: the local entry never
 	// reaches disk.
-	require.Eventually(t, func() bool {
+	// The store is on disk and publishes no event, so this is the one place
+	// that polls.
+	require.True(t, pollUntil(3*time.Second, func() bool {
 		stored, err := store.Load()
 		return err == nil && stored.Revision > 0
-	}, 3*time.Second, 2*time.Millisecond)
+	}), "the broker store never persisted a revision")
 	stored, err := store.Load()
 	require.NoError(t, err)
 	for _, entry := range stored.Daemons {
@@ -694,17 +723,20 @@ func TestBrokerLocalObservationRegistryPublishesLocalFirst(t *testing.T) {
 // observation dial target carries the existing-only authorization: an
 // observation must never start a stopped daemon, and the resolved target is
 // where that decision is carried to the transport.
-type testEndpointConnectorFunc func(context.Context, ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error)
-
-func (f testEndpointConnectorFunc) Connect(ctx context.Context, target ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
-	return f(ctx, target)
+// newEndpointConnectorMock is a ports.BrokerEndpointConnector whose Connect runs
+// the supplied function.
+func newEndpointConnectorMock(t *testing.T, connect func(context.Context, ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error)) *portsmocks.MockBrokerEndpointConnector {
+	t.Helper()
+	connector := portsmocks.NewMockBrokerEndpointConnector(t)
+	connector.EXPECT().Connect(mock.Anything, mock.Anything).RunAndReturn(connect).Maybe()
+	return connector
 }
 
 func TestBrokerLocalProbeLoadsIdentityOnEveryAttempt(t *testing.T) {
 	_, binding := testLocalSandboxConfig(t)
 	var identity ports.BrokerDaemonIdentity
 	var dials []ports.BrokerDialTarget
-	probe, err := newDynamicLocalRouteProbe(binding.Route, binding.Policy, brokerLocalTestEpoch, testEndpointConnectorFunc(func(_ context.Context, target ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
+	probe, err := newDynamicLocalRouteProbe(binding.Route, binding.Policy, brokerLocalTestEpoch, newEndpointConnectorMock(t, func(_ context.Context, target ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
 		dials = append(dials, target)
 		return nil, errors.New("socket absent")
 	}), func() (ports.BrokerDaemonIdentity, error) {
@@ -729,7 +761,7 @@ func TestBrokerLocalProbeLoadsIdentityOnEveryAttempt(t *testing.T) {
 func TestBrokerLocalProbeIdentityCorruptionIsDiagnosticWithoutDial(t *testing.T) {
 	_, binding := testLocalSandboxConfig(t)
 	dialed := false
-	probe, err := newDynamicLocalRouteProbe(binding.Route, binding.Policy, brokerLocalTestEpoch, testEndpointConnectorFunc(func(context.Context, ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
+	probe, err := newDynamicLocalRouteProbe(binding.Route, binding.Policy, brokerLocalTestEpoch, newEndpointConnectorMock(t, func(context.Context, ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
 		dialed = true
 		return nil, nil
 	}), func() (ports.BrokerDaemonIdentity, error) {
@@ -820,16 +852,12 @@ func waitLocalEntry(t *testing.T, registry *broker.Registry, predicate func(port
 	}
 }
 
-// noDialHostProbe is a ports.BrokerHostProbe that never dials: a membership test
-// supplies it only because the registry requires a remote probe to observe
-// hosts, never to own their authority.
-type noDialHostProbe struct{}
-
-func (noDialHostProbe) Probe(context.Context, domain.RemoteRegistration) (ports.BrokerDaemonObservation, error) {
-	return ports.BrokerDaemonObservation{}, errors.New("membership authority must not dial")
-}
-
+// unreachableHostProbe is a ports.BrokerHostProbe that never dials: a
+// membership test supplies it only because the registry requires a remote probe
+// to observe hosts, never to own their authority.
 func unreachableHostProbe(t *testing.T) ports.BrokerHostProbe {
 	t.Helper()
-	return noDialHostProbe{}
+	probe := portsmocks.NewMockBrokerHostProbe(t)
+	probe.EXPECT().Probe(mock.Anything, mock.Anything).Return(ports.BrokerDaemonObservation{}, errors.New("membership authority must not dial")).Maybe()
+	return probe
 }

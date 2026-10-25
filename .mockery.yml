@@ -49,6 +49,22 @@ packages:
     interfaces:
       RawFramedTransport:
       FramedCarrier:
+  github.com/bnema/vev/internal/app:
+    config:
+      dir: internal/app
+      filename: lifecycle_ownership_mock_test.go
+      pkgname: app
+    interfaces:
+      lifecycleOwnership:
+  github.com/bnema/vev/internal/usecase/broker:
+    config:
+      dir: internal/usecase/broker
+      filename: broker_seams_mock_test.go
+      pkgname: broker
+    interfaces:
+      Runner:
+      Closeable:
+      LocalProbe:
   github.com/bnema/vev/internal/usecase/keys:
     config:
       dir: internal/usecase/keys
@@ -95,6 +111,11 @@ packages:
         config:
           dir: internal/usecase/client
           filename: picker_presentation_host_mock_test.go
+          pkgname: client
+      pickerHost:
+        config:
+          dir: internal/usecase/client
+          filename: picker_host_mock_test.go
           pkgname: client
   github.com/bnema/vev/internal/usecase/command:
     interfaces:
