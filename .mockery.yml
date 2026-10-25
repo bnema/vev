@@ -40,12 +40,44 @@ packages:
       OwnedSynchronousTransport:
       Dialer:
       Listener:
+      BoundedTransport:
+  github.com/bnema/vev/internal/adapters/daemonmux:
+    config:
+      dir: internal/adapters/daemonmux
+      filename: daemonmux_mock_test.go
+      pkgname: daemonmux
+    interfaces:
+      RawFramedTransport:
+      FramedCarrier:
+  github.com/bnema/vev/internal/usecase/keys:
+    config:
+      dir: internal/usecase/keys
+      filename: handler_mock_test.go
+      pkgname: keys
+    interfaces:
+      Handler:
+  github.com/bnema/vev/cmd/vev-perf-harness:
+    config:
+      dir: cmd/vev-perf-harness
+      filename: harness_mock_test.go
+      pkgname: main
+      template-data:
+        mock-build-tags: linux
+    interfaces:
+      clock:
+      launchedProcess:
+      launcher:
   github.com/bnema/vev/internal/usecase/daemon:
     interfaces:
       daemonActionRunner:
         config:
           dir: internal/usecase/daemon
           filename: action_runner_mock_test.go
+          pkgname: daemon
+      barScriptExecutor:
+        config:
+          dir: internal/usecase/daemon
+          filename: bar_script_executor_mock_test.go
           pkgname: daemon
   github.com/bnema/vev/internal/usecase/client:
     interfaces:
@@ -54,10 +86,25 @@ packages:
           dir: internal/usecase/client
           filename: prediction_foreground_mock_test.go
           pkgname: client
+      AttachmentWorker:
+        config:
+          dir: internal/usecase/client
+          filename: attachment_worker_mock_test.go
+          pkgname: client
+      pickerPresentationHost:
+        config:
+          dir: internal/usecase/client
+          filename: picker_presentation_host_mock_test.go
+          pkgname: client
   github.com/bnema/vev/internal/usecase/command:
     interfaces:
       Context:
         config:
           dir: internal/usecase/command
           filename: context_mock_test.go
+          pkgname: command
+      ControlContext:
+        config:
+          dir: internal/usecase/command
+          filename: control_context_mock_test.go
           pkgname: command
