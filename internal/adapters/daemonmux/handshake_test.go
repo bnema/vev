@@ -3,7 +3,6 @@ package daemonmux
 import (
 	"context"
 	"testing"
-	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -95,7 +94,7 @@ func awaitSentFrame(t *testing.T, carrier *carrierFixture) []byte {
 // accepted, yields the server authority, leaves the carrier open, and offers
 // exactly the requested policy and ceilings.
 func TestClientHandshakeAcceptsVerifiedResponse(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		carrier := newCarrierFixture(t)
 		carrier.inbound <- fakeFrame{payload: encodedAcceptedResponse(t, nil)}
 
@@ -251,7 +250,7 @@ func TestClientHandshakeRejectsUntrustedResponses(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
+			inBubble(t, func(t *testing.T) {
 				carrier := newCarrierFixture(t)
 				carrier.inbound <- fakeFrame{payload: test.response(t)}
 
@@ -272,7 +271,7 @@ func TestClientHandshakeRejectsUntrustedResponses(t *testing.T) {
 // request with the immutable binding and the element-wise minima, and leaves
 // the carrier open.
 func TestServerHandshakeAcceptsAndNegotiates(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		binding := mustServerBinding(t)
 		clientCeilings := MuxCeilings{
 			MaxReceiveEnvelopeBytes: MinMuxEnvelopeBytes,
@@ -325,7 +324,7 @@ func TestServerHandshakeEnforcesBindingPolicy(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
+			inBubble(t, func(t *testing.T) {
 				requested := testPolicy()
 				test.mutate(&requested)
 
@@ -404,7 +403,7 @@ func TestServerHandshakeRefusesMalformedRequest(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
+			inBubble(t, func(t *testing.T) {
 				carrier := newCarrierFixture(t)
 				carrier.inbound <- fakeFrame{payload: test.request(t)}
 
@@ -427,13 +426,13 @@ func TestServerHandshakeRefusesMalformedRequest(t *testing.T) {
 // configuration sentinel.
 func TestHandshakeRefusesInvalidConfiguration(t *testing.T) {
 	t.Run("client nil carrier", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		inBubble(t, func(t *testing.T) {
 			_, err := RunClientHandshake(context.Background(), nil, handshakeEndpoint(testIdentity(), testPolicy()), DefaultMuxCeilings())
 			require.ErrorIs(t, err, ErrHandshakeConfig)
 		})
 	})
 	t.Run("client invalid endpoint", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		inBubble(t, func(t *testing.T) {
 			carrier := newCarrierFixture(t)
 			_, err := RunClientHandshake(context.Background(), carrier.mock, handshakeEndpoint("", testPolicy()), DefaultMuxCeilings())
 			require.ErrorIs(t, err, ErrHandshakeConfig)
@@ -441,7 +440,7 @@ func TestHandshakeRefusesInvalidConfiguration(t *testing.T) {
 		})
 	})
 	t.Run("client invalid ceilings", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		inBubble(t, func(t *testing.T) {
 			carrier := newCarrierFixture(t)
 			_, err := RunClientHandshake(context.Background(), carrier.mock, handshakeEndpoint(testIdentity(), testPolicy()), MuxCeilings{})
 			require.ErrorIs(t, err, ErrHandshakeConfig)
@@ -449,13 +448,13 @@ func TestHandshakeRefusesInvalidConfiguration(t *testing.T) {
 		})
 	})
 	t.Run("server nil carrier", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		inBubble(t, func(t *testing.T) {
 			_, err := RunServerHandshake(context.Background(), nil, mustServerBinding(t), DefaultMuxCeilings())
 			require.ErrorIs(t, err, ErrHandshakeConfig)
 		})
 	})
 	t.Run("server invalid binding", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		inBubble(t, func(t *testing.T) {
 			carrier := newCarrierFixture(t)
 			_, err := RunServerHandshake(context.Background(), carrier.mock, ServerBinding{}, DefaultMuxCeilings())
 			require.ErrorIs(t, err, ErrHandshakeConfig)
@@ -463,7 +462,7 @@ func TestHandshakeRefusesInvalidConfiguration(t *testing.T) {
 		})
 	})
 	t.Run("server invalid ceilings", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		inBubble(t, func(t *testing.T) {
 			carrier := newCarrierFixture(t)
 			_, err := RunServerHandshake(context.Background(), carrier.mock, mustServerBinding(t), MuxCeilings{})
 			require.ErrorIs(t, err, ErrHandshakeConfig)
@@ -536,7 +535,7 @@ func TestHandshakeHonorsCallerContext(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
+			inBubble(t, func(t *testing.T) {
 				ctx, cancel := test.ctx()
 				defer cancel()
 				carrier := newCarrierFixture(t)
@@ -552,7 +551,7 @@ func TestHandshakeHonorsCallerContext(t *testing.T) {
 // in-memory link and proves they agree on the element-wise minima and the
 // binding the daemon enforced.
 func TestHandshakeEndToEndNegotiates(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		clientCarrier, serverCarrier := newMemCarrierPair(t, 4)
 		clientCeilings := MuxCeilings{
 			MaxReceiveEnvelopeBytes: MinMuxEnvelopeBytes,

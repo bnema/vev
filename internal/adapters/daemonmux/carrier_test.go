@@ -112,7 +112,7 @@ func carrierTestCeilings() MuxCeilings {
 // every receive to wire.PreambleLimit before Negotiate and to the negotiated
 // envelope ceiling afterwards, refusing an oversized frame at each phase.
 func TestFramedCarrierBridgeBoundsPreambleThenNegotiated(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		raw := newRawTransport(t)
 		bridge, err := NewPreambleCarrier(raw.mock)
 		require.NoError(t, err)
@@ -149,7 +149,7 @@ func TestFramedCarrierBridgeBoundsPreambleThenNegotiated(t *testing.T) {
 // transition is explicit: an invalid advertisement is refused, a second
 // negotiation is refused, and negotiation after Close is refused.
 func TestFramedCarrierBridgeNegotiateIsExplicitAndOneWay(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		raw := newRawTransport(t)
 		bridge, err := NewPreambleCarrier(raw.mock)
 		require.NoError(t, err)
@@ -167,7 +167,7 @@ func TestFramedCarrierBridgeNegotiateIsExplicitAndOneWay(t *testing.T) {
 // TestNewPreambleCarrierRefusesNil proves construction validates its raw
 // transport.
 func TestNewPreambleCarrierRefusesNil(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		_, err := NewPreambleCarrier(nil)
 		require.ErrorIs(t, err, ErrCarrierState)
 	})
@@ -177,7 +177,7 @@ func TestNewPreambleCarrierRefusesNil(t *testing.T) {
 // write result: it does not return while the write is held, records the payload
 // byte for byte, and propagates the raw error.
 func TestFramedCarrierBridgeSendIsSynchronousAndExact(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		raw := newRawTransport(t)
 		bridge, err := NewPreambleCarrier(raw.mock)
 		require.NoError(t, err)
@@ -212,7 +212,7 @@ func TestFramedCarrierBridgeSendIsSynchronousAndExact(t *testing.T) {
 // receive closes the raw carriage to release the blocked call, returns the
 // context error, and leaves no goroutine behind.
 func TestFramedCarrierBridgeReceiveContextCancelReleasesRead(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		raw := newRawTransport(t)
 		bridge, err := NewPreambleCarrier(raw.mock)
 		require.NoError(t, err)
@@ -242,7 +242,7 @@ func TestFramedCarrierBridgeReceiveContextCancelReleasesRead(t *testing.T) {
 // proves Close unblocks a blocked receive, is idempotent across concurrent
 // callers, closes the raw carriage exactly once, and joins its workers.
 func TestFramedCarrierBridgeCloseInterruptsBlockedReceiveAndIsConcurrentSafe(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		raw := newRawTransport(t)
 		bridge, err := NewPreambleCarrier(raw.mock)
 		require.NoError(t, err)

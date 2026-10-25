@@ -6,7 +6,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"testing/synctest"
 
 	"github.com/bnema/vev/internal/domain"
 )
@@ -25,7 +24,7 @@ func terminalDone(s *terminalState) bool {
 }
 
 func TestTerminalStatePreTerminalGetters(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		s := newTerminalState()
 
 		if terminalDone(s) {
@@ -41,7 +40,7 @@ func TestTerminalStatePreTerminalGetters(t *testing.T) {
 }
 
 func TestTerminalStateLocalClose(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		s := newTerminalState()
 		s.Close()
 
@@ -74,7 +73,7 @@ func (w wrappedError) Error() string { return w.err.Error() }
 func (w wrappedError) Unwrap() error { return w.err }
 
 func TestTerminalStateFailurePreservesErrorIdentity(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		s := newTerminalState()
 		cause := wrappedError{err: fmt.Errorf("dial daemon: %w", errTerminalSentinel)}
 		s.Fail(domain.RemoteFailureTimeout, cause)
@@ -108,7 +107,7 @@ func TestTerminalStateFailurePreservesErrorIdentity(t *testing.T) {
 // supplies no cause still publishes a non-nil Err() carrying the package
 // sentinel, paired with a nonzero valid kind.
 func TestTerminalStateNilCauseUsesSentinel(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		s := newTerminalState()
 		s.Fail(domain.RemoteFailureTimeout, nil)
 
@@ -160,7 +159,7 @@ func TestTerminalStateFailureKindNormalization(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
+			inBubble(t, func(t *testing.T) {
 				s := newTerminalState()
 				s.Fail(tt.give, errors.New("boom"))
 				if got := s.FailureKind(); got != tt.want {
@@ -175,7 +174,7 @@ func TestTerminalStateFailureKindNormalization(t *testing.T) {
 }
 
 func TestTerminalStateFirstWinsConcurrentPublishers(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		const publishers = 100
 		validKinds := []domain.RemoteFailureKind{
 			domain.RemoteFailureTransport,
@@ -241,7 +240,7 @@ func TestTerminalStateFirstWinsConcurrentPublishers(t *testing.T) {
 }
 
 func TestTerminalStateConcurrentGettersAndPublishers(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		const goroutines = 100
 
 		s := newTerminalState()

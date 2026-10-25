@@ -5,7 +5,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -52,7 +51,7 @@ func overflowOne(t *testing.T, scheduler *Scheduler, id PhysicalStreamID) {
 // TestSchedulerConstants pins the negotiated bounds the scheduler is specified
 // to enforce.
 func TestSchedulerConstants(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		require.Equal(t, 64<<20, int(MaxMuxAggregateBytes))
 		require.Equal(t, uint64(512<<10), DefaultMuxCeilings().StreamWindow())
 		require.Equal(t, int64(64<<10), SchedulerQuantum)
@@ -61,7 +60,7 @@ func TestSchedulerConstants(t *testing.T) {
 }
 
 func TestSchedulerStrings(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		require.Equal(t, "data", FrameData.String())
 		require.Equal(t, "control", FrameControl.String())
 		require.Equal(t, "unknown", FrameClass(0).String())
@@ -72,7 +71,7 @@ func TestSchedulerStrings(t *testing.T) {
 }
 
 func TestSchedulerNilSafety(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		var scheduler *Scheduler
 		_, ok := scheduler.Dequeue()
 		require.False(t, ok)
@@ -92,7 +91,7 @@ func TestSchedulerNilSafety(t *testing.T) {
 // caller.
 func TestSchedulerAdmissionGate(t *testing.T) {
 	t.Run("engine gate", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		inBubble(t, func(t *testing.T) {
 			engine := testEngine()
 			scheduler := NewScheduler(engine)
 			require.ErrorIs(t, scheduler.EnqueueClient(Data{Physical: 9, Data: []byte("x")}), ErrSchedulerUnadmitted)
@@ -110,7 +109,7 @@ func TestSchedulerAdmissionGate(t *testing.T) {
 	})
 
 	t.Run("nil gate", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		inBubble(t, func(t *testing.T) {
 			scheduler := NewScheduler(nil)
 			require.NoError(t, scheduler.EnqueueClient(Data{Physical: 7, Data: []byte("x")}))
 			require.ErrorIs(t, scheduler.EnqueueClient(Data{Physical: 0, Data: []byte("x")}), ErrInvalidMessage)
@@ -118,7 +117,7 @@ func TestSchedulerAdmissionGate(t *testing.T) {
 	})
 
 	t.Run("unknown variant fails closed", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		inBubble(t, func(t *testing.T) {
 			scheduler := NewScheduler(nil)
 			require.ErrorIs(t, scheduler.EnqueueClient(unknownClientMessage{}), ErrWrongDirection)
 			require.ErrorIs(t, scheduler.EnqueueServer(unknownServerMessage{}), ErrWrongDirection)
@@ -130,7 +129,7 @@ func TestSchedulerAdmissionGate(t *testing.T) {
 // complete serialized directional envelope, decoded by the matching codec, and
 // that neither the bytes nor the committed message aliases caller memory.
 func TestSchedulerEnvelopeRoundTrip(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		ceiling := DefaultMuxCeilings()
 		_, scheduler, ids := testScheduler(t, 1)
 
@@ -170,7 +169,7 @@ func TestSchedulerEnvelopeRoundTrip(t *testing.T) {
 func TestSchedulerTwoAndHundredStreamsFairness(t *testing.T) {
 	for _, count := range []int{2, 100} {
 		t.Run(fmt.Sprintf("%d streams", count), func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
+			inBubble(t, func(t *testing.T) {
 				_, scheduler, ids := testScheduler(t, count)
 				const rounds = 2
 				for round := 0; round < rounds; round++ {
@@ -204,7 +203,7 @@ func TestSchedulerTwoAndHundredStreamsFairness(t *testing.T) {
 // never starves a sibling, and a full stalled backlog never blocks another
 // stream: every stream is served once per round while all queues stay full.
 func TestSchedulerStalledAndHotStream(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		_, scheduler, ids := testScheduler(t, 4)
 
 		// The hot stream keeps a maximal backlog; the siblings are refilled to full
@@ -242,7 +241,7 @@ func TestSchedulerStalledAndHotStream(t *testing.T) {
 // data of its own stream while control metadata still gets bounded priority
 // over another stream's data.
 func TestSchedulerCloseOrdering(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		_, scheduler, ids := testScheduler(t, 2)
 
 		require.NoError(t, scheduler.EnqueueClient(Data{Physical: ids[0], Data: []byte("a")}))
@@ -285,7 +284,7 @@ func TestSchedulerCloseOrdering(t *testing.T) {
 // over data but only for a bounded burst, so control metadata can never starve
 // data.
 func TestSchedulerControlPriorityBounded(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		_, scheduler, ids := testScheduler(t, 5)
 		const backlog = 8
 		for round := 0; round < backlog; round++ {
@@ -321,7 +320,7 @@ func TestSchedulerControlPriorityBounded(t *testing.T) {
 // TestSchedulerResetDiscard proves a reset discards exactly its own queue,
 // frees its bytes immediately, is idempotent, and never affects a sibling.
 func TestSchedulerResetDiscard(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		engine, scheduler, ids := testScheduler(t, 2)
 		require.NoError(t, scheduler.EnqueueClient(Data{Physical: ids[0], Data: []byte("one")}))
 		require.NoError(t, scheduler.EnqueueClient(Data{Physical: ids[0], Data: []byte("two")}))
@@ -356,7 +355,7 @@ func TestSchedulerResetDiscard(t *testing.T) {
 // offending stream and leaves its siblings' budget intact.
 func TestSchedulerAggregateCap(t *testing.T) {
 	t.Run("aggregate byte bound", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		inBubble(t, func(t *testing.T) {
 			_, scheduler, ids := testScheduler(t, 3)
 			payload := make([]byte, 300)
 			require.NoError(t, scheduler.EnqueueClient(Data{Physical: ids[0], Data: payload}))
@@ -381,7 +380,7 @@ func TestSchedulerAggregateCap(t *testing.T) {
 // from many goroutines so the race detector can prove the shared state is
 // serialized and the accounting stays consistent.
 func TestSchedulerConcurrentEnqueueDequeueReset(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		const streams = 8
 		_, scheduler, ids := testScheduler(t, streams)
 
@@ -529,7 +528,7 @@ func maxEnvOpen(t *testing.T, id PhysicalStreamID) Open {
 // copies the value so a caller cannot mutate live enforcement.
 func TestNewSchedulerWithCeilings(t *testing.T) {
 	t.Run("invalid advertisement refused", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		inBubble(t, func(t *testing.T) {
 			bad := DefaultMuxCeilings()
 			bad.StreamChunkLimit = 0
 			scheduler, err := NewSchedulerWithCeilings(nil, bad)
@@ -541,7 +540,7 @@ func TestNewSchedulerWithCeilings(t *testing.T) {
 	})
 
 	t.Run("negotiated chunk and aggregate limits enforced", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		inBubble(t, func(t *testing.T) {
 			probeCeiling := MuxCeilings{
 				MaxReceiveEnvelopeBytes: MinMuxEnvelopeBytes,
 				StreamChunkLimit:        8,
@@ -586,7 +585,7 @@ func TestNewSchedulerWithCeilings(t *testing.T) {
 // refused, and that data stays refused.
 func TestSchedulerTerminalBypass(t *testing.T) {
 	t.Run("settled identity signals once", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		inBubble(t, func(t *testing.T) {
 			engine := testEngine()
 			scheduler := NewScheduler(engine)
 			openTestStream(t, engine, 1)
@@ -614,7 +613,7 @@ func TestSchedulerTerminalBypass(t *testing.T) {
 	})
 
 	t.Run("queue overflow signals the peer", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		inBubble(t, func(t *testing.T) {
 			engine := testEngine()
 			scheduler := NewScheduler(engine)
 			openTestStream(t, engine, 1)
@@ -636,7 +635,7 @@ func TestSchedulerTerminalBypass(t *testing.T) {
 	})
 
 	t.Run("nil gate trusts one terminal", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		inBubble(t, func(t *testing.T) {
 			scheduler := NewScheduler(nil)
 			require.NoError(t, scheduler.EnqueueClient(Close{Physical: 7}))
 			require.ErrorIs(t, scheduler.EnqueueClient(Close{Physical: 7}), ErrSchedulerSettled)
@@ -650,7 +649,7 @@ func TestSchedulerTerminalBypass(t *testing.T) {
 // without spinning.
 func TestSchedulerLargeFrameProgress(t *testing.T) {
 	t.Run("maximum chunk fits the quantum", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		inBubble(t, func(t *testing.T) {
 			_, scheduler, ids := testScheduler(t, 1)
 			chunk := make([]byte, MaxMuxChunkBytes)
 			require.NoError(t, scheduler.EnqueueClient(Data{Physical: ids[0], Data: chunk}))
@@ -662,7 +661,7 @@ func TestSchedulerLargeFrameProgress(t *testing.T) {
 	})
 
 	t.Run("maximum environment Open exceeds the quantum", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		inBubble(t, func(t *testing.T) {
 			scheduler := NewScheduler(nil)
 			const streams = 5
 			ids := make([]PhysicalStreamID, streams)
@@ -689,7 +688,7 @@ func TestSchedulerLargeFrameProgress(t *testing.T) {
 // bounded record table: the oldest settled records are evicted, while the
 // newest identity still refuses a duplicate terminal.
 func TestSchedulerBoundedRetiredRecords(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		scheduler := NewScheduler(nil)
 		const churn = 4000
 		for i := 1; i <= churn; i++ {
@@ -762,7 +761,7 @@ func TestSchedulerOverflowAllowsOneTerminal(t *testing.T) {
 	}
 	for _, terminal := range terminals {
 		t.Run(terminal.name, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
+			inBubble(t, func(t *testing.T) {
 				_, scheduler, ids := testScheduler(t, 1)
 				id := ids[0]
 				require.NoError(t, scheduler.EnqueueClient(Data{Physical: id, Data: []byte("a")}))
@@ -798,7 +797,7 @@ func TestSchedulerOverflowAllowsOneTerminal(t *testing.T) {
 // their terminal stay bounded: they are evicted oldest-first past
 // MaxRetiredSchedulerRecords.
 func TestSchedulerOverflowRecordsBounded(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		scheduler := NewScheduler(nil)
 		const churn = MaxRetiredSchedulerRecords * 4
 		for i := 1; i <= churn; i++ {
@@ -818,7 +817,7 @@ func TestSchedulerOverflowRecordsBounded(t *testing.T) {
 // record. Every terminal stays deliverable, and draining them returns the
 // stream table to the configured bound.
 func TestSchedulerOverflowTerminalReclaimsRetiredRecords(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		scheduler := NewScheduler(nil)
 		const churn = MaxRetiredSchedulerRecords + 64
 
@@ -861,7 +860,7 @@ func TestSchedulerOverflowTerminalReclaimsRetiredRecords(t *testing.T) {
 // seals the record, so a duplicate and every later frame are refused; an
 // unencodable refusal creates no record.
 func TestSchedulerRefuseAdmitsFreshRefusalOnce(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		s := NewScheduler(nil)
 		detail := testErrorDetail()
 		detail.AdmissionCode = 1

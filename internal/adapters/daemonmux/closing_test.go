@@ -4,7 +4,6 @@ import (
 	"context"
 	"io"
 	"testing"
-	"testing/synctest"
 
 	"github.com/stretchr/testify/require"
 )
@@ -14,7 +13,7 @@ import (
 // accepted bytes and only then observes io.EOF, at which point the stream is
 // terminal and its bytes are released.
 func TestPumpInboundDataClosePipelineDrainsThenEOF(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		pump, carrier := newTestPump(t, DirectionClient)
 		pump.Start(context.Background())
 		require.NoError(t, pump.Engine().Open(openFor(1)))
@@ -51,7 +50,7 @@ func TestPumpInboundDataClosePipelineDrainsThenEOF(t *testing.T) {
 // queued chunk, and its admission slot while the closing stream's data is
 // preserved. Draining the sibling never closes it.
 func TestPumpInboundCloseSiblingIsolation(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		pump, carrier := newTestPump(t, DirectionClient)
 		pump.Start(context.Background())
 		require.NoError(t, pump.Engine().Open(openFor(1)))
@@ -92,7 +91,7 @@ func TestPumpInboundCloseSiblingIsolation(t *testing.T) {
 // stream holds exactly its unread bytes until the draining Take releases them,
 // and the engine's retained record set never grows past its retention bound.
 func TestPumpInboundCloseChurnAccountingBounded(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		pump, _ := newTestPump(t, DirectionClient)
 		pump.Start(context.Background())
 		const churn = int(MaxMuxStreams) * 8
@@ -125,7 +124,7 @@ func TestPumpInboundCloseChurnAccountingBounded(t *testing.T) {
 // closing stream's preserved queue immediately, releasing the bytes and the
 // slot without waiting for a consumer.
 func TestPumpInboundResetDiscardsClosingQueue(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		pump, _ := newTestPump(t, DirectionClient)
 		require.NoError(t, pump.Engine().Open(openFor(1)))
 		require.NoError(t, pump.Engine().Opened(Opened{Ref: testRef(1)}))

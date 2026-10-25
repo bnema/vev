@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"testing"
-	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -20,7 +19,7 @@ import (
 // mark stays unrecorded.
 func TestPumpApplyOpenDuplicateIsolation(t *testing.T) {
 	t.Run("live stream", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		inBubble(t, func(t *testing.T) {
 			pump, carrier := newTestPump(t, DirectionClient)
 			require.NoError(t, pump.Engine().Open(openFor(1)))
 			require.NoError(t, pump.Engine().Opened(Opened{Ref: testRef(1)}))
@@ -50,7 +49,7 @@ func TestPumpApplyOpenDuplicateIsolation(t *testing.T) {
 	})
 
 	t.Run("retired stream", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		inBubble(t, func(t *testing.T) {
 			pump, carrier := newTestPump(t, DirectionClient)
 			require.NoError(t, pump.Engine().Open(openFor(1)))
 			require.NoError(t, pump.Engine().Opened(Opened{Ref: testRef(1)}))
@@ -70,7 +69,7 @@ func TestPumpApplyOpenDuplicateIsolation(t *testing.T) {
 	})
 
 	t.Run("replayed identity below the high-water mark", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		inBubble(t, func(t *testing.T) {
 			pump, carrier := newTestPump(t, DirectionClient)
 			require.NoError(t, pump.Engine().Open(openFor(3)))
 			require.NoError(t, pump.Engine().Opened(Opened{Ref: testRef(3)}))
@@ -91,7 +90,7 @@ func TestPumpApplyOpenDuplicateIsolation(t *testing.T) {
 // its admission code, records no stream, and leaves the live sibling and the
 // physical connection untouched.
 func TestPumpFreshOpenRefusedSendsTypedRefused(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		ceilings := DefaultMuxCeilings()
 		ceilings.MaxStreams = 1
 		pump, carrier := newTestPumpWithCeilings(t, DirectionClient, ceilings)
@@ -144,7 +143,7 @@ func TestOpenRefusalDetail(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
+			inBubble(t, func(t *testing.T) {
 				detail := openRefusalDetail(tt.cause)
 				require.Equal(t, tt.code, detail.AdmissionCode)
 				require.Equal(t, tt.text, detail.Text)

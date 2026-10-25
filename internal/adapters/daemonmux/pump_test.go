@@ -332,14 +332,14 @@ func decodeReset(t *testing.T, payload []byte, direction EnvelopeDirection) Rese
 
 func TestNewPumpValidation(t *testing.T) {
 	t.Run("missing carrier", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		inBubble(t, func(t *testing.T) {
 			pump, err := NewPump(nil, DirectionClient, DefaultMuxCeilings())
 			require.ErrorIs(t, err, ErrPumpConfig)
 			require.Nil(t, pump)
 		})
 	})
 	t.Run("unknown inbound direction", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		inBubble(t, func(t *testing.T) {
 			for _, direction := range []EnvelopeDirection{0, EnvelopeDirection(200)} {
 				pump, err := NewPump(newCarrierFixture(t).mock, direction, DefaultMuxCeilings())
 				require.ErrorIs(t, err, ErrPumpConfig)
@@ -348,14 +348,14 @@ func TestNewPumpValidation(t *testing.T) {
 		})
 	})
 	t.Run("invalid ceilings", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		inBubble(t, func(t *testing.T) {
 			pump, err := NewPump(newCarrierFixture(t).mock, DirectionClient, MuxCeilings{})
 			require.ErrorIs(t, err, ErrInvalidCeilings)
 			require.Nil(t, pump)
 		})
 	})
 	t.Run("valid", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		inBubble(t, func(t *testing.T) {
 			pump, carrier := newTestPumpWithCeilings(t, DirectionServer, MuxCeilings{
 				MaxReceiveEnvelopeBytes: MinMuxEnvelopeBytes,
 				StreamChunkLimit:        MinMuxChunkBytes,
@@ -383,7 +383,7 @@ func TestNewPumpValidation(t *testing.T) {
 func TestPumpTwoAndHundredStreams(t *testing.T) {
 	for _, count := range []int{2, 100} {
 		t.Run(fmt.Sprintf("%d streams", count), func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
+			inBubble(t, func(t *testing.T) {
 				pump, carrier := newTestPump(t, DirectionClient)
 				pump.Start(context.Background())
 
@@ -467,7 +467,7 @@ func TestPumpTwoAndHundredStreams(t *testing.T) {
 // sibling: the stalled stream is reset by its own bound while the sibling keeps
 // receiving.
 func TestPumpBlockedConsumerDoesNotBlockReaderOrSibling(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		pump, carrier := newTestPump(t, DirectionClient)
 		pump.Start(context.Background())
 
@@ -518,7 +518,7 @@ func TestPumpBlockedConsumerDoesNotBlockReaderOrSibling(t *testing.T) {
 // TestPumpBlockedWriterDoesNotBlockReader proves the reader keeps applying
 // inbound frames while the writer is blocked inside a slow carrier Send.
 func TestPumpBlockedWriterDoesNotBlockReader(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		pump, carrier := newTestPump(t, DirectionClient)
 		pump.Start(context.Background())
 
@@ -550,7 +550,7 @@ func TestPumpBlockedWriterDoesNotBlockReader(t *testing.T) {
 // TestPumpFairWriterProgress proves the writer preserves the scheduler's
 // deterministic byte-deficit round-robin order and each stream's own order.
 func TestPumpFairWriterProgress(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		pump, carrier := newTestPump(t, DirectionClient)
 		pump.Start(context.Background())
 
@@ -591,7 +591,7 @@ func TestPumpFairWriterProgress(t *testing.T) {
 // connection and every sibling healthy.
 func TestPumpResetIsolation(t *testing.T) {
 	t.Run("semantic refusal", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		inBubble(t, func(t *testing.T) {
 			pump, carrier := newTestPump(t, DirectionClient)
 			pump.Start(context.Background())
 
@@ -638,7 +638,7 @@ func TestPumpResetIsolation(t *testing.T) {
 	})
 
 	t.Run("queue overflow", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		inBubble(t, func(t *testing.T) {
 			pump, carrier := newTestPump(t, DirectionClient)
 			pump.Start(context.Background())
 
@@ -699,7 +699,7 @@ func TestPumpMalformedPhysicalFatal(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
+			inBubble(t, func(t *testing.T) {
 				pump, carrier := newTestPumpWithCeilings(t, DirectionClient, tc.ceilings)
 				pump.Start(context.Background())
 				deliverClientFrame(t, carrier, openFor(1))
@@ -729,7 +729,7 @@ func TestPumpMalformedPhysicalFatal(t *testing.T) {
 // that the physical Done closes before every stream Done, and that every live
 // stream observes the same transport cause.
 func TestPumpCarrierLossFanoutOrdering(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		pump, carrier := newTestPump(t, DirectionClient)
 		pump.Start(context.Background())
 
@@ -788,7 +788,7 @@ func TestPumpCarrierLossFanoutOrdering(t *testing.T) {
 // close: the physical connection settles with a nil cause, streams settle with
 // nil, the carrier is closed, and no pump goroutine survives.
 func TestPumpCancellationNoLeak(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		before := runtime.NumGoroutine()
 		pump, carrier := newTestPump(t, DirectionClient)
 		ctx, cancel := context.WithCancel(context.Background())
@@ -822,7 +822,7 @@ func TestPumpCancellationNoLeak(t *testing.T) {
 // unblocks a writer blocked inside the carrier and joins both goroutines
 // within the adapter prompt-close contract.
 func TestPumpConcurrentClose(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		pump, carrier := newTestPump(t, DirectionClient)
 		pump.Start(context.Background())
 
@@ -871,7 +871,7 @@ func TestPumpConcurrentClose(t *testing.T) {
 // TestPumpCloseBeforeStart proves Close never starts or joins goroutines that
 // were never launched, and that Start after Close is a no-op.
 func TestPumpCloseBeforeStart(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		pump, carrier := newTestPump(t, DirectionClient)
 		require.NoError(t, pump.Close())
 		require.True(t, channelClosed(pump.Done()))
@@ -890,7 +890,7 @@ func TestPumpCloseBeforeStart(t *testing.T) {
 // match the pump's local side before it encodes or queues anything.
 func TestPumpSendDirection(t *testing.T) {
 	t.Run("daemon side writes server messages", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		inBubble(t, func(t *testing.T) {
 			pump, carrier := newTestPump(t, DirectionClient)
 			pump.Start(context.Background())
 			deliverClientFrame(t, carrier, openFor(1))
@@ -909,7 +909,7 @@ func TestPumpSendDirection(t *testing.T) {
 	})
 
 	t.Run("client side writes client messages", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		inBubble(t, func(t *testing.T) {
 			pump, carrier := newTestPump(t, DirectionServer)
 			pump.Start(context.Background())
 			require.NoError(t, pump.Engine().Open(Open{Ref: testRef(1)}))
@@ -935,7 +935,7 @@ func TestPumpSendDirection(t *testing.T) {
 // TestPumpFlushWaitsForInflightSend proves Flush does not return while a send
 // is in flight inside the carrier, and returns once the writer finished it.
 func TestPumpFlushWaitsForInflightSend(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		pump, carrier := newTestPump(t, DirectionClient)
 		pump.Start(context.Background())
 		require.NoError(t, pump.Engine().Open(Open{Ref: testRef(1)}))
@@ -973,7 +973,7 @@ func TestPumpFlushWaitsForInflightSend(t *testing.T) {
 // the final Close observable on the wire: Send accepted means queued only, and
 // Flush is the explicit barrier that drains it.
 func TestPumpFlushPublishesFinalClose(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		pump, carrier := newTestPump(t, DirectionClient)
 		pump.Start(context.Background())
 		require.NoError(t, pump.Engine().Open(Open{Ref: testRef(1)}))
@@ -995,7 +995,7 @@ func TestPumpFlushPublishesFinalClose(t *testing.T) {
 // TestPumpFlushHonoursContext proves Flush returns the context error when the
 // deadline wins before the scheduler drains.
 func TestPumpFlushHonoursContext(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		pump, carrier := newTestPump(t, DirectionClient)
 		require.NoError(t, pump.Engine().Open(Open{Ref: testRef(1)}))
 		require.NoError(t, pump.Engine().Opened(Opened{Ref: testRef(1)}))
@@ -1021,7 +1021,7 @@ func TestPumpFlushHonoursContext(t *testing.T) {
 // behind a blocked write is dropped when the context is cancelled rather than
 // drained, so a caller that must publish a final frame flushes first.
 func TestPumpFlushCancellationMayDrop(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		pump, carrier := newTestPump(t, DirectionClient)
 		ctx, cancel := context.WithCancel(context.Background())
 		pump.Start(ctx)
@@ -1046,7 +1046,7 @@ func TestPumpFlushCancellationMayDrop(t *testing.T) {
 // credit waits instead of overflowing or resetting the stream, resumes once
 // the peer returns credit, and that the stream stays open throughout.
 func TestPumpSendDataBackpressure(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		pump, carrier := newTestPump(t, DirectionClient)
 		pump.Start(context.Background())
 		deliverClientFrame(t, carrier, openFor(1))
@@ -1108,7 +1108,7 @@ func TestPumpSendDataCancel(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
+			inBubble(t, func(t *testing.T) {
 				pump, carrier := newTestPump(t, DirectionClient)
 				pump.Start(context.Background())
 				deliverClientFrame(t, carrier, openFor(1))
@@ -1137,7 +1137,7 @@ func TestPumpSendDataCancel(t *testing.T) {
 // TestPumpReturnsCreditInBatches proves the receiver grants consumed credit
 // back with one WindowUpdate per batch, not one per chunk.
 func TestPumpReturnsCreditInBatches(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		pump, carrier := newTestPump(t, DirectionClient)
 		pump.Start(context.Background())
 		deliverClientFrame(t, carrier, openFor(1))
@@ -1171,7 +1171,7 @@ func TestPumpReturnsCreditInBatches(t *testing.T) {
 // record, and that 3000 stream cycles stay bounded with no post-terminal
 // dequeue.
 func TestPumpInboundTerminalRetiresQueuedOutbound(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		pump, _ := newTestPump(t, DirectionClient)
 		const churn = 3000
 		for i := 1; i <= churn; i++ {
@@ -1210,7 +1210,7 @@ func watchEntries(pump *Pump) int {
 // retaining a watch entry, and returns one stable open channel for a live
 // stream that rotates on every applied frame.
 func TestPumpWatchUnknownAndTerminalClosed(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		pump, _ := newTestPump(t, DirectionClient)
 
 		require.True(t, channelClosed(pump.Watch(0)), "zero identity is closed")

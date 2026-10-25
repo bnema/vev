@@ -2,7 +2,6 @@ package daemonmux
 
 import (
 	"testing"
-	"testing/synctest"
 
 	"github.com/stretchr/testify/require"
 
@@ -14,7 +13,7 @@ import (
 // before that Open records anything, leaves a replayed identity classified as a
 // duplicate rather than a policy refusal, and admits a matching Open.
 func TestStreamEngineRestrictAdmissions(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		engine := NewStreamEngine()
 		require.NoError(t, engine.RestrictAdmissions(testPolicy()))
 		require.ErrorIs(t, engine.RestrictAdmissions(testPolicy()), ErrStreamState, "the policy is fixed once")
@@ -44,7 +43,7 @@ func TestStreamEngineRestrictAdmissions(t *testing.T) {
 // policy, a terminal engine, and a nil receiver, and that a policy gate is
 // optional: an unrestricted engine admits any validly encoded Open.
 func TestStreamEngineRestrictAdmissionsGuards(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		var nilEngine *StreamEngine
 		require.ErrorIs(t, nilEngine.RestrictAdmissions(testPolicy()), ErrPhysicalClosed)
 

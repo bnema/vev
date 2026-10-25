@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"sync"
 	"testing"
-	"testing/synctest"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -49,7 +48,7 @@ func channelClosed(ch <-chan struct{}) bool {
 }
 
 func TestNewStreamEngine(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		e := NewStreamEngine()
 		require.Zero(t, e.Live())
 		require.Zero(t, e.AggregateBytes())
@@ -61,7 +60,7 @@ func TestNewStreamEngine(t *testing.T) {
 }
 
 func TestStreamStateStrings(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		require.Equal(t, "opening", StreamOpening.String())
 		require.Equal(t, "open", StreamOpen.String())
 		require.Equal(t, "closing", StreamClosing.String())
@@ -76,7 +75,7 @@ func TestStreamStateStrings(t *testing.T) {
 // pending-plus-live ceiling.
 func TestStreamEngineOpenAdmission(t *testing.T) {
 	t.Run("incomplete identities refused", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		inBubble(t, func(t *testing.T) {
 			e := testEngine()
 			cases := []struct {
 				name string
@@ -98,7 +97,7 @@ func TestStreamEngineOpenAdmission(t *testing.T) {
 	})
 
 	t.Run("strictly increasing and never reused", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		inBubble(t, func(t *testing.T) {
 			e := testEngine()
 			admitTestStream(t, e, 5)
 			require.ErrorIs(t, e.Open(Open{Ref: testRef(5)}), ErrStreamIDReused)
@@ -117,7 +116,7 @@ func TestStreamEngineOpenAdmission(t *testing.T) {
 	})
 
 	t.Run("pending and live share the ceiling", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		inBubble(t, func(t *testing.T) {
 			e := testEngine()
 			for i := 1; i <= int(MaxMuxStreams); i++ {
 				require.NoError(t, e.Open(Open{Ref: testRef(PhysicalStreamID(i))}))
@@ -146,7 +145,7 @@ func TestStreamEngineOpenAdmission(t *testing.T) {
 // is no longer live belongs to a retired stream and is ignored.
 func TestStreamEngineFutureAndRetired(t *testing.T) {
 	t.Run("future identity refused", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		inBubble(t, func(t *testing.T) {
 			e := testEngine()
 			openTestStream(t, e, 2)
 			future := PhysicalStreamID(3)
@@ -166,7 +165,7 @@ func TestStreamEngineFutureAndRetired(t *testing.T) {
 	})
 
 	t.Run("retired traffic ignored including gaps", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		inBubble(t, func(t *testing.T) {
 			e := testEngine()
 			openTestStream(t, e, 5)
 			disposition, err := e.Reset(Reset{Physical: 5})
@@ -319,7 +318,7 @@ func TestStreamEngineLifecycle(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
+			inBubble(t, func(t *testing.T) {
 				e := testEngine()
 				id := PhysicalStreamID(4)
 				for _, s := range tc.steps {
@@ -342,7 +341,7 @@ func TestStreamEngineLifecycle(t *testing.T) {
 // TestStreamEngineRejectedAdmissionLeavesNothing proves a refused admission
 // records nothing and cannot resurrect a settled identity.
 func TestStreamEngineRejectedAdmissionLeavesNothing(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		e := testEngine()
 		require.ErrorIs(t, e.Open(Open{}), ErrInvalidStream)
 		require.Zero(t, e.Live())
@@ -361,7 +360,7 @@ func TestStreamEngineRejectedAdmissionLeavesNothing(t *testing.T) {
 // TestStreamEngineRefFence proves Opened and Refused are legal only for the
 // opening stream whose full reference was recorded at admission.
 func TestStreamEngineRefFence(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		e := testEngine()
 		ref := admitTestStream(t, e, 4)
 
@@ -385,7 +384,7 @@ func TestStreamEngineRefFence(t *testing.T) {
 // TestStreamEngineRefusalRetained proves a refusal settles the stream
 // orderly and retains the typed refusal for the caller.
 func TestStreamEngineRefusalRetained(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		e := testEngine()
 		admitTestStream(t, e, 2)
 		detail := testErrorDetail()
@@ -410,7 +409,7 @@ func TestStreamEngineRefusalRetained(t *testing.T) {
 func TestStreamEngineTwoAndHundredStreams(t *testing.T) {
 	for _, count := range []int{2, 100} {
 		t.Run(fmt.Sprintf("%d streams", count), func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
+			inBubble(t, func(t *testing.T) {
 				e := testEngine()
 				for i := 1; i <= count; i++ {
 					ref := openTestStream(t, e, PhysicalStreamID(i))
@@ -475,7 +474,7 @@ func TestStreamEngineTwoAndHundredStreams(t *testing.T) {
 // TestStreamEngineIsolation proves one stream's close or reset terminalizes
 // neither the physical connection nor a sibling.
 func TestStreamEngineIsolation(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		e := testEngine()
 		openTestStream(t, e, 1)
 		openTestStream(t, e, 2)
@@ -519,7 +518,7 @@ func floodWindow(ceilings MuxCeilings) ([]byte, int) {
 // window resets exactly its own stream, frees that stream's budget, and leaves
 // a sibling progressing.
 func TestStreamEngineQueueOverflow(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		e := testEngine()
 		openTestStream(t, e, 1)
 		openTestStream(t, e, 2)
@@ -570,7 +569,7 @@ func TestStreamEngineQueueOverflow(t *testing.T) {
 // only the offending stream.
 func TestStreamEngineQueueByteBounds(t *testing.T) {
 	t.Run("aggregate byte bound", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		inBubble(t, func(t *testing.T) {
 			e := testEngine()
 			// Bypass the codec-level chunk ceiling and widen the window so this
 			// test reaches the defensive aggregate byte bound with oversized
@@ -614,7 +613,7 @@ func TestStreamEngineQueueByteBounds(t *testing.T) {
 // TestStreamEngineTake proves the FIFO pop returns an engine-owned copy and
 // releases the chunk's bytes.
 func TestStreamEngineTake(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		e := testEngine()
 		openTestStream(t, e, 1)
 		chunk := []byte("payload")
@@ -638,7 +637,7 @@ func TestStreamEngineTake(t *testing.T) {
 // cause when present and the terminal sentinel otherwise.
 func TestStreamEngineResetCause(t *testing.T) {
 	t.Run("typed detail", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		inBubble(t, func(t *testing.T) {
 			e := testEngine()
 			openTestStream(t, e, 1)
 			detail := ErrorDetail{
@@ -660,7 +659,7 @@ func TestStreamEngineResetCause(t *testing.T) {
 	})
 
 	t.Run("no detail", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		inBubble(t, func(t *testing.T) {
 			e := testEngine()
 			openTestStream(t, e, 1)
 			disposition, err := e.Reset(Reset{Physical: 1})
@@ -678,7 +677,7 @@ func TestStreamEngineResetCause(t *testing.T) {
 // Done before terminalizing every live stream, that every stream observes the
 // physical outcome, and that a stream settled beforehand keeps its own cause.
 func TestStreamEnginePhysicalFailureOrdering(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		e := testEngine()
 		const live = 5
 		for i := 1; i <= live; i++ {
@@ -732,7 +731,7 @@ func TestStreamEnginePhysicalFailureOrdering(t *testing.T) {
 // TestStreamEngineTerminate proves an orderly physical close terminalizes
 // every stream with a nil error and refuses further admission.
 func TestStreamEngineTerminate(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		e := testEngine()
 		for i := 1; i <= 3; i++ {
 			openTestStream(t, e, PhysicalStreamID(i))
@@ -763,7 +762,7 @@ func TestStreamEngineTerminate(t *testing.T) {
 // outcome stay classified: settled streams discard traffic, admission is
 // closed, and a future identity is still refused.
 func TestStreamEnginePhysicalClosedFrames(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		e := testEngine()
 		openTestStream(t, e, 1)
 		e.Fail(domain.RemoteFailureTransport, errors.New("gone"))
@@ -790,7 +789,7 @@ func TestStreamEnginePhysicalClosedFrames(t *testing.T) {
 // TestStreamEngineConcurrentStreams exercises concurrent confirmation, data,
 // orderly close, abnormal reset, and admission over one engine.
 func TestStreamEngineConcurrentStreams(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		const streams = 64
 		const admitted = 32
 		e := testEngine()
@@ -860,7 +859,7 @@ func TestStreamEngineConcurrentStreams(t *testing.T) {
 // TestStreamEngineConcurrentPhysicalFailure races stream work against a
 // physical failure and proves the engine settles consistently.
 func TestStreamEngineConcurrentPhysicalFailure(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		const streams = 64
 		e := testEngine()
 		for i := 1; i <= streams; i++ {
@@ -909,7 +908,7 @@ func TestStreamEngineConcurrentPhysicalFailure(t *testing.T) {
 
 // TestStreamEngineNilSafety proves the nil-receiver paths.
 func TestStreamEngineNilSafety(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		var e *StreamEngine
 		require.ErrorIs(t, e.Open(Open{Ref: testRef(1)}), ErrPhysicalClosed)
 		require.ErrorIs(t, e.Opened(Opened{Ref: testRef(1)}), ErrPhysicalClosed)
@@ -940,7 +939,7 @@ func TestStreamEngineNilSafety(t *testing.T) {
 // value so a caller cannot mutate live enforcement.
 func TestNewStreamEngineWithCeilings(t *testing.T) {
 	t.Run("invalid advertisement refused", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		inBubble(t, func(t *testing.T) {
 			bad := DefaultMuxCeilings()
 			bad.MaxStreams = 0
 			engine, err := NewStreamEngineWithCeilings(bad)
@@ -958,7 +957,7 @@ func TestNewStreamEngineWithCeilings(t *testing.T) {
 	})
 
 	t.Run("negotiated small limits enforced", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		inBubble(t, func(t *testing.T) {
 			ceilings := MuxCeilings{
 				MaxReceiveEnvelopeBytes: MinMuxEnvelopeBytes,
 				StreamChunkLimit:        32768,
@@ -995,7 +994,7 @@ func TestNewStreamEngineWithCeilings(t *testing.T) {
 	})
 
 	t.Run("ceilings are copied", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		inBubble(t, func(t *testing.T) {
 			ceilings := DefaultMuxCeilings()
 			ceilings.MaxStreams = 1
 			e, err := NewStreamEngineWithCeilings(ceilings)
@@ -1012,7 +1011,7 @@ func TestNewStreamEngineWithCeilings(t *testing.T) {
 // keeps a bounded table: the oldest retired records are evicted, while the
 // high-water mark still classifies them as retired rather than future.
 func TestStreamEngineBoundedRetiredRecords(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		e := testEngine()
 		const churn = 4000
 		for i := 1; i <= churn; i++ {
@@ -1044,7 +1043,7 @@ func TestStreamEngineBoundedRetiredRecords(t *testing.T) {
 // connection and every live stream's outcome.
 func TestStreamEnginePhysicalFirstWins(t *testing.T) {
 	t.Run("failure wins an orderly close", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		inBubble(t, func(t *testing.T) {
 			e := testEngine()
 			openTestStream(t, e, 1)
 			cause := errors.New("physical loss")
@@ -1060,7 +1059,7 @@ func TestStreamEnginePhysicalFirstWins(t *testing.T) {
 	})
 
 	t.Run("orderly close wins a failure", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+		inBubble(t, func(t *testing.T) {
 			e := testEngine()
 			openTestStream(t, e, 1)
 			e.Terminate()
@@ -1081,7 +1080,7 @@ func TestStreamEnginePhysicalFirstWins(t *testing.T) {
 // in order, and the first Take that empties the queue terminalizes the stream
 // and releases its slot and bytes. A sibling is untouched throughout.
 func TestStreamEngineClosingPreservesQueuedData(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		e := testEngine()
 		closingRef := openTestStream(t, e, 1)
 		siblingRef := openTestStream(t, e, 2)
@@ -1159,7 +1158,7 @@ func TestStreamEngineClosingPreservesQueuedData(t *testing.T) {
 // closing stream's preserved queue at once: the bytes, the admission slot, and
 // the terminal outcome are released without waiting for a consumer.
 func TestStreamEngineClosingResetDiscardsImmediately(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		e := testEngine()
 		openTestStream(t, e, 1)
 		_, err := e.Data(Data{Physical: 1, Data: []byte("queued")})
@@ -1189,7 +1188,7 @@ func TestStreamEngineClosingResetDiscardsImmediately(t *testing.T) {
 // slot and bytes until the draining Take releases them, and the retired record
 // set never grows past its retention bound.
 func TestStreamEngineClosingAccountingBounded(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	inBubble(t, func(t *testing.T) {
 		e := testEngine()
 		const churn = MaxRetiredStreamRecords * 3
 		for i := 1; i <= churn; i++ {
