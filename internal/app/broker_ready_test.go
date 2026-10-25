@@ -23,6 +23,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -333,7 +334,7 @@ func TestBrokerReadyObservationTable(t *testing.T) {
 	tests := []struct {
 		name         string
 		require      string
-		snapshot     ports.BrokerSnapshot
+		snapshot     func() ports.BrokerSnapshot
 		subErr       error
 		wantNil      bool
 		wantStatus   string
@@ -343,9 +344,11 @@ func TestBrokerReadyObservationTable(t *testing.T) {
 		wantPending  []string
 	}{
 		{
-			name:         "unknown availability satisfies the authority requirement",
-			require:      "local-authority",
-			snapshot:     readyTestSnapshot(func(local *ports.BrokerDaemonObservation) { local.Availability = domain.RemoteAvailabilityUnknown }),
+			name:    "unknown availability satisfies the authority requirement",
+			require: "local-authority",
+			snapshot: func() ports.BrokerSnapshot {
+				return readyTestSnapshot(func(local *ports.BrokerDaemonObservation) { local.Availability = domain.RemoteAvailabilityUnknown })
+			},
 			wantStatus:   "ready",
 			wantReason:   "authority",
 			wantEpoch:    "42",
@@ -355,7 +358,7 @@ func TestBrokerReadyObservationTable(t *testing.T) {
 		{
 			name:         "reachable known empty inventory satisfies the catalogue requirement",
 			require:      "local-catalogue",
-			snapshot:     readyTestSnapshot(nil),
+			snapshot:     func() ports.BrokerSnapshot { return readyTestSnapshot(nil) },
 			wantStatus:   "ready",
 			wantReason:   "catalogue",
 			wantEpoch:    "42",
@@ -363,41 +366,51 @@ func TestBrokerReadyObservationTable(t *testing.T) {
 			wantPending:  []string{},
 		},
 		{
-			name:        "unreachable local stays pending",
-			require:     "local-catalogue",
-			snapshot:    readyTestSnapshot(func(local *ports.BrokerDaemonObservation) { local.Availability = domain.RemoteAvailabilityUnreachable }),
+			name:    "unreachable local stays pending",
+			require: "local-catalogue",
+			snapshot: func() ports.BrokerSnapshot {
+				return readyTestSnapshot(func(local *ports.BrokerDaemonObservation) { local.Availability = domain.RemoteAvailabilityUnreachable })
+			},
 			wantNil:     true,
 			wantStatus:  "pending",
 			wantPending: []string{"local-catalogue"},
 		},
 		{
-			name:        "unknown inventory stays pending",
-			require:     "local-catalogue",
-			snapshot:    readyTestSnapshot(func(local *ports.BrokerDaemonObservation) { local.InventoryKnown = false }),
+			name:    "unknown inventory stays pending",
+			require: "local-catalogue",
+			snapshot: func() ports.BrokerSnapshot {
+				return readyTestSnapshot(func(local *ports.BrokerDaemonObservation) { local.InventoryKnown = false })
+			},
 			wantNil:     true,
 			wantStatus:  "pending",
 			wantPending: []string{"local-catalogue"},
 		},
 		{
-			name:        "stale observation stays pending",
-			require:     "local-catalogue",
-			snapshot:    readyTestSnapshot(func(local *ports.BrokerDaemonObservation) { local.LastSuccess = time.Now().Add(-time.Hour) }),
+			name:    "stale observation stays pending",
+			require: "local-catalogue",
+			snapshot: func() ports.BrokerSnapshot {
+				return readyTestSnapshot(func(local *ports.BrokerDaemonObservation) { local.LastSuccess = time.Now().Add(-time.Hour) })
+			},
 			wantNil:     true,
 			wantStatus:  "pending",
 			wantPending: []string{"local-catalogue"},
 		},
 		{
-			name:        "missing observation time stays pending",
-			require:     "local-catalogue",
-			snapshot:    readyTestSnapshot(func(local *ports.BrokerDaemonObservation) { local.LastSuccess = time.Time{} }),
+			name:    "missing observation time stays pending",
+			require: "local-catalogue",
+			snapshot: func() ports.BrokerSnapshot {
+				return readyTestSnapshot(func(local *ports.BrokerDaemonObservation) { local.LastSuccess = time.Time{} })
+			},
 			wantNil:     true,
 			wantStatus:  "pending",
 			wantPending: []string{"local-catalogue"},
 		},
 		{
-			name:        "incompatible protocol version stays pending",
-			require:     "local-catalogue",
-			snapshot:    readyTestSnapshot(func(local *ports.BrokerDaemonObservation) { local.ProtocolVersion = protocol.Version + 1 }),
+			name:    "incompatible protocol version stays pending",
+			require: "local-catalogue",
+			snapshot: func() ports.BrokerSnapshot {
+				return readyTestSnapshot(func(local *ports.BrokerDaemonObservation) { local.ProtocolVersion = protocol.Version + 1 })
+			},
 			wantNil:     true,
 			wantStatus:  "pending",
 			wantPending: []string{"local-catalogue"},
@@ -405,9 +418,11 @@ func TestBrokerReadyObservationTable(t *testing.T) {
 		{
 			name:    "unobserved local stays pending",
 			require: "local-catalogue",
-			snapshot: readyTestSnapshot(func(local *ports.BrokerDaemonObservation) {
-				*local = ports.BrokerDaemonObservation{Local: true, DisplayOrigin: "local", Policy: readyTestPolicy(), Availability: domain.RemoteAvailabilityUnknown}
-			}),
+			snapshot: func() ports.BrokerSnapshot {
+				return readyTestSnapshot(func(local *ports.BrokerDaemonObservation) {
+					*local = ports.BrokerDaemonObservation{Local: true, DisplayOrigin: "local", Policy: readyTestPolicy(), Availability: domain.RemoteAvailabilityUnknown}
+				})
+			},
 			wantNil:     true,
 			wantStatus:  "pending",
 			wantPending: []string{"local-catalogue"},
@@ -415,15 +430,17 @@ func TestBrokerReadyObservationTable(t *testing.T) {
 		{
 			name:        "snapshot without an epoch is no observation at all",
 			require:     "local-authority",
-			snapshot:    ports.BrokerSnapshot{},
+			snapshot:    func() ports.BrokerSnapshot { return ports.BrokerSnapshot{} },
 			wantNil:     true,
 			wantStatus:  "pending",
 			wantPending: []string{"local-authority"},
 		},
 		{
-			name:         "snapshot without a revision is terminal",
-			require:      "local-authority",
-			snapshot:     ports.BrokerSnapshot{Epoch: readyTestEpoch, Revision: 0, Daemons: []ports.BrokerDaemonObservation{readyTestLocal(nil)}},
+			name:    "snapshot without a revision is terminal",
+			require: "local-authority",
+			snapshot: func() ports.BrokerSnapshot {
+				return ports.BrokerSnapshot{Epoch: readyTestEpoch, Revision: 0, Daemons: []ports.BrokerDaemonObservation{readyTestLocal(nil)}}
+			},
 			wantStatus:   "terminal",
 			wantReason:   "protocol",
 			wantEpoch:    "0",
@@ -433,9 +450,11 @@ func TestBrokerReadyObservationTable(t *testing.T) {
 		{
 			name:    "two local daemons are terminal",
 			require: "local-authority",
-			snapshot: ports.BrokerSnapshot{
-				Epoch: readyTestEpoch, Revision: readyTestRevision,
-				Daemons: []ports.BrokerDaemonObservation{readyTestLocal(nil), readyTestLocal(nil)},
+			snapshot: func() ports.BrokerSnapshot {
+				return ports.BrokerSnapshot{
+					Epoch: readyTestEpoch, Revision: readyTestRevision,
+					Daemons: []ports.BrokerDaemonObservation{readyTestLocal(nil), readyTestLocal(nil)},
+				}
 			},
 			wantStatus:   "terminal",
 			wantReason:   "protocol",
@@ -446,7 +465,7 @@ func TestBrokerReadyObservationTable(t *testing.T) {
 		{
 			name:         "subscription refusal is terminal",
 			require:      "local-authority",
-			snapshot:     readyTestSnapshot(nil),
+			snapshot:     func() ports.BrokerSnapshot { return readyTestSnapshot(nil) },
 			subErr:       errors.Join(brokeripc.ErrProtocol, errors.New("broker refused the subscription")),
 			wantStatus:   "terminal",
 			wantReason:   "protocol",
@@ -457,28 +476,30 @@ func TestBrokerReadyObservationTable(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			service, state := newReadyScriptedService(t, tt.snapshot, func(_ *portsmocks.MockBrokerService, state *brokerServiceState) { state.subErr = tt.subErr })
-			ctx, cancel := context.WithTimeout(context.Background(), readyTestObserveMax)
-			defer cancel()
+			synctest.Test(t, func(t *testing.T) {
+				service, state := newReadyScriptedService(t, tt.snapshot(), func(_ *portsmocks.MockBrokerService, state *brokerServiceState) { state.subErr = tt.subErr })
+				ctx, cancel := context.WithTimeout(context.Background(), readyTestObserveMax)
+				defer cancel()
 
-			result := observeBrokerReady(ctx, brokerReadyOptions{require: tt.require, timeout: time.Second, maxAge: time.Second}, service)
-			require.Empty(t, state.mutationNames(), "readiness must never open a stream, reconcile, or mutate membership")
-			if tt.subErr != nil {
-				require.Zero(t, state.subscriptionCloses(), "a refused subscription is never closed as if it existed")
-			} else {
-				require.Equal(t, 1, state.subscriptionCloses(), "the probe closes the subscription it opened")
-			}
-			if tt.wantNil {
-				require.Nil(t, result, "an unsatisfied observation publishes nothing")
-				return
-			}
-			require.NotNil(t, result)
-			require.Equal(t, tt.wantStatus, result.Status)
-			require.Equal(t, tt.wantReason, result.Reason)
-			require.Equal(t, tt.wantEpoch, result.Epoch)
-			require.Equal(t, tt.wantRevision, result.Revision)
-			require.Equal(t, tt.wantPending, result.Pending)
-			require.Equal(t, "vev.broker-ready/v1", result.Schema)
+				result := observeBrokerReady(ctx, brokerReadyOptions{require: tt.require, timeout: time.Second, maxAge: time.Second}, service)
+				require.Empty(t, state.mutationNames(), "readiness must never open a stream, reconcile, or mutate membership")
+				if tt.subErr != nil {
+					require.Zero(t, state.subscriptionCloses(), "a refused subscription is never closed as if it existed")
+				} else {
+					require.Equal(t, 1, state.subscriptionCloses(), "the probe closes the subscription it opened")
+				}
+				if tt.wantNil {
+					require.Nil(t, result, "an unsatisfied observation publishes nothing")
+					return
+				}
+				require.NotNil(t, result)
+				require.Equal(t, tt.wantStatus, result.Status)
+				require.Equal(t, tt.wantReason, result.Reason)
+				require.Equal(t, tt.wantEpoch, result.Epoch)
+				require.Equal(t, tt.wantRevision, result.Revision)
+				require.Equal(t, tt.wantPending, result.Pending)
+				require.Equal(t, "vev.broker-ready/v1", result.Schema)
+			})
 		})
 	}
 }
@@ -627,27 +648,29 @@ func TestBrokerReadyRunOutcomeTable(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			options := readyTestOptions(t, tt.require, 80*time.Millisecond)
-			script := scriptReadyDial(t, tt.produce)
+			synctest.Test(t, func(t *testing.T) {
+				options := readyTestOptions(t, tt.require, 80*time.Millisecond)
+				script := scriptReadyDial(t, tt.produce)
 
-			out, err := runReadyProbe(t, options)
-			require.Equal(t, tt.wantCode, ExitCode(err), "probe outcome %q", out)
+				out, err := runReadyProbe(t, options)
+				require.Equal(t, tt.wantCode, ExitCode(err), "probe outcome %q", out)
 
-			decoded := decodeReadyDocument(t, out)
-			require.Equal(t, tt.wantStatus, decoded["status"])
-			require.Equal(t, tt.wantReason, decoded["reason"])
-			require.Equal(t, tt.require, decoded["require"])
-			require.Equal(t, toAnySlice(tt.wantPending), decoded["pending"])
+				decoded := decodeReadyDocument(t, out)
+				require.Equal(t, tt.wantStatus, decoded["status"])
+				require.Equal(t, tt.wantReason, decoded["reason"])
+				require.Equal(t, tt.require, decoded["require"])
+				require.Equal(t, toAnySlice(tt.wantPending), decoded["pending"])
 
-			services := script.createdServices()
-			for _, service := range services {
-				require.Equal(t, 1, service.closeCount(), "every dialed connection is closed exactly once")
-				require.Empty(t, service.mutationNames(), "readiness opens no stream, reconciles nothing, and mutates no membership")
-				require.Equal(t, 1, service.subscriptionCloses(), "the probe closes the subscription it opened")
-			}
-			if tt.wantCode == 0 {
-				require.Equal(t, 1, script.dialCount(), "a satisfied probe dials exactly once")
-			}
+				services := script.createdServices()
+				for _, service := range services {
+					require.Equal(t, 1, service.closeCount(), "every dialed connection is closed exactly once")
+					require.Empty(t, service.mutationNames(), "readiness opens no stream, reconciles nothing, and mutates no membership")
+					require.Equal(t, 1, service.subscriptionCloses(), "the probe closes the subscription it opened")
+				}
+				if tt.wantCode == 0 {
+					require.Equal(t, 1, script.dialCount(), "a satisfied probe dials exactly once")
+				}
+			})
 		})
 	}
 }
@@ -657,69 +680,73 @@ func TestBrokerReadyRunOutcomeTable(t *testing.T) {
 // it opens is closed, every subscription is closed, and no logical stream,
 // reconcile, or membership mutation is ever attempted.
 func TestBrokerReadyNeverEnsuresSpawnsOrMutates(t *testing.T) {
-	options := readyTestOptions(t, "local-authority", 80*time.Millisecond)
-	script := scriptReadyDial(t, func(script *readyDialScript) (ports.BrokerService, error) {
-		return script.newService(readyTestSnapshot(nil)), nil
+	synctest.Test(t, func(t *testing.T) {
+		options := readyTestOptions(t, "local-authority", 80*time.Millisecond)
+		script := scriptReadyDial(t, func(script *readyDialScript) (ports.BrokerService, error) {
+			return script.newService(readyTestSnapshot(nil)), nil
+		})
+
+		out, err := runReadyProbe(t, options)
+		require.NoError(t, err, "outcome %q", out)
+		require.Equal(t, 1, script.dialCount(), "a satisfied probe dials exactly once")
+		require.Len(t, script.createdServices(), 1)
+
+		service := script.createdServices()[0]
+		require.Empty(t, service.mutationNames(), "readiness opens no stream, reconciles nothing, and mutates no membership")
+		require.Equal(t, 1, service.closeCount())
+		require.Equal(t, 1, service.subscriptionCloses())
+
+		decoded := decodeReadyDocument(t, out)
+		require.Equal(t, "ready", decoded["status"])
+		observed, ok := decoded["local"].(map[string]any)
+		require.True(t, ok)
+		require.Equal(t, "reachable", observed["availability"])
+		require.Equal(t, true, observed["inventory_known"])
 	})
-
-	out, err := runReadyProbe(t, options)
-	require.NoError(t, err, "outcome %q", out)
-	require.Equal(t, 1, script.dialCount(), "a satisfied probe dials exactly once")
-	require.Len(t, script.createdServices(), 1)
-
-	service := script.createdServices()[0]
-	require.Empty(t, service.mutationNames(), "readiness opens no stream, reconciles nothing, and mutates no membership")
-	require.Equal(t, 1, service.closeCount())
-	require.Equal(t, 1, service.subscriptionCloses())
-
-	decoded := decodeReadyDocument(t, out)
-	require.Equal(t, "ready", decoded["status"])
-	observed, ok := decoded["local"].(map[string]any)
-	require.True(t, ok)
-	require.Equal(t, "reachable", observed["availability"])
-	require.Equal(t, true, observed["inventory_known"])
 }
 
 // TestBrokerReadyReconnectUsesTheNewEpoch pins that a broker connection that
 // ends before readiness is replaced by a fresh dial, and that the report carries
 // the new broker epoch: a retired epoch is never reused as readiness authority.
 func TestBrokerReadyReconnectUsesTheNewEpoch(t *testing.T) {
-	freshSnapshot := ports.BrokerSnapshot{Epoch: ports.BrokerEpoch(2), Revision: 3, Daemons: []ports.BrokerDaemonObservation{readyTestLocal(nil)}}
+	synctest.Test(t, func(t *testing.T) {
+		freshSnapshot := ports.BrokerSnapshot{Epoch: ports.BrokerEpoch(2), Revision: 3, Daemons: []ports.BrokerDaemonObservation{readyTestLocal(nil)}}
 
-	options := readyTestOptions(t, "local-authority", 2*time.Second)
-	var (
-		mu       sync.Mutex
-		first    *brokerServiceState
-		attempts int
-	)
-	scriptReadyDial(t, func(script *readyDialScript) (ports.BrokerService, error) {
+		options := readyTestOptions(t, "local-authority", 2*time.Second)
+		var (
+			mu       sync.Mutex
+			first    *brokerServiceState
+			attempts int
+		)
+		scriptReadyDial(t, func(script *readyDialScript) (ports.BrokerService, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			attempts++
+			if attempts == 1 {
+				// The first connection commits no snapshot before it retires: the
+				// probe must reconnect rather than report the retired connection.
+				service, state := newReadyScriptedService(script.t, ports.BrokerSnapshot{})
+				first = state
+				first.finish()
+				return service, nil
+			}
+			return script.newService(freshSnapshot), nil
+		})
+
+		out, err := runReadyProbe(t, options)
+		require.NoError(t, err, "outcome %q", out)
+
+		decoded := decodeReadyDocument(t, out)
+		require.Equal(t, "ready", decoded["status"])
+		require.Equal(t, "2", decoded["epoch"], "the report carries the epoch of the connection that answered")
+		require.NotEqual(t, "1", decoded["epoch"], "a retired epoch is never reused")
+
 		mu.Lock()
 		defer mu.Unlock()
-		attempts++
-		if attempts == 1 {
-			// The first connection commits no snapshot before it retires: the
-			// probe must reconnect rather than report the retired connection.
-			service, state := newReadyScriptedService(script.t, ports.BrokerSnapshot{})
-			first = state
-			first.finish()
-			return service, nil
-		}
-		return script.newService(freshSnapshot), nil
+		require.Equal(t, 2, attempts, "a retired connection is replaced by exactly one fresh dial")
+		require.NotNil(t, first)
+		require.Equal(t, 1, first.closeCount(), "the retired connection is closed exactly once")
 	})
-
-	out, err := runReadyProbe(t, options)
-	require.NoError(t, err, "outcome %q", out)
-
-	decoded := decodeReadyDocument(t, out)
-	require.Equal(t, "ready", decoded["status"])
-	require.Equal(t, "2", decoded["epoch"], "the report carries the epoch of the connection that answered")
-	require.NotEqual(t, "1", decoded["epoch"], "a retired epoch is never reused")
-
-	mu.Lock()
-	defer mu.Unlock()
-	require.Equal(t, 2, attempts, "a retired connection is replaced by exactly one fresh dial")
-	require.NotNil(t, first)
-	require.Equal(t, 1, first.closeCount(), "the retired connection is closed exactly once")
 }
 
 // TestBrokerReadyCancellationIsExitFiveAndClosesEverything pins the
@@ -727,35 +754,39 @@ func TestBrokerReadyReconnectUsesTheNewEpoch(t *testing.T) {
 // and the connection and subscription the probe opened are closed rather than
 // leaked.
 func TestBrokerReadyCancellationIsExitFiveAndClosesEverything(t *testing.T) {
-	options := readyTestOptions(t, "local-authority", 5*time.Second)
-	script := scriptReadyDial(t, func(script *readyDialScript) (ports.BrokerService, error) {
-		return script.newService(ports.BrokerSnapshot{}), nil
+	synctest.Test(t, func(t *testing.T) {
+		options := readyTestOptions(t, "local-authority", 5*time.Second)
+		script := scriptReadyDial(t, func(script *readyDialScript) (ports.BrokerService, error) {
+			return script.newService(ports.BrokerSnapshot{}), nil
+		})
+
+		ctx, cancel := context.WithCancel(context.Background())
+		var out bytes.Buffer
+		results := make(chan error, 1)
+		go func() { results <- runBrokerReady(ctx, options, &out) }()
+
+		synctest.Wait()
+		require.Equal(t, 1, script.dialCount(), "the probe dials before it is cancelled")
+		cancel()
+
+		synctest.Wait()
+		select {
+		case err := <-results:
+			require.Equal(t, 5, ExitCode(err))
+		default:
+			t.Fatal("a cancelled probe must return promptly")
+		}
+
+		decoded := decodeReadyDocument(t, out.String())
+		require.Equal(t, "canceled", decoded["status"])
+		require.Equal(t, "canceled", decoded["reason"])
+
+		services := script.createdServices()
+		require.Len(t, services, 1)
+		require.Equal(t, 1, services[0].closeCount(), "cancellation closes the connection")
+		require.Equal(t, 1, services[0].subscriptionCloses(), "cancellation closes the subscription")
+		require.Empty(t, services[0].mutationNames())
 	})
-
-	ctx, cancel := context.WithCancel(context.Background())
-	var out bytes.Buffer
-	results := make(chan error, 1)
-	go func() { results <- runBrokerReady(ctx, options, &out) }()
-
-	require.Eventually(t, func() bool { return script.dialCount() == 1 }, time.Second, 5*time.Millisecond, "the probe dials before it is cancelled")
-	cancel()
-
-	select {
-	case err := <-results:
-		require.Equal(t, 5, ExitCode(err))
-	case <-time.After(2 * time.Second):
-		t.Fatal("a cancelled probe must return promptly")
-	}
-
-	decoded := decodeReadyDocument(t, out.String())
-	require.Equal(t, "canceled", decoded["status"])
-	require.Equal(t, "canceled", decoded["reason"])
-
-	services := script.createdServices()
-	require.Len(t, services, 1)
-	require.Equal(t, 1, services[0].closeCount(), "cancellation closes the connection")
-	require.Equal(t, 1, services[0].subscriptionCloses(), "cancellation closes the subscription")
-	require.Empty(t, services[0].mutationNames())
 }
 
 // TestBrokerReadyEndpointSecurityClassificationTable pins the endpoint check the
