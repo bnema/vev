@@ -10,6 +10,9 @@ import (
 	"github.com/bnema/vev/internal/domain"
 )
 
+// TestSessionMoveLocatorSynchronizesMutableNameRead runs real goroutines outside
+// synctest because it exists for -race coverage of concurrent mutation and
+// reads; it uses no timers.
 func TestSessionMoveLocatorSynchronizesMutableNameRead(t *testing.T) {
 	sess := &session{sessionCore: sessionCore{id: domain.SessionID("session-id"),
 		incarnation: domain.IncarnationID{1},
