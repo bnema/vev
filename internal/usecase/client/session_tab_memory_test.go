@@ -160,7 +160,9 @@ func TestSessionTabMemoryLifecycleCleanup(t *testing.T) {
 		{name: "other host retained", authority: remote, target: alpha, want: "t_remote"},
 		{name: "other session retained", authority: local, target: beta, want: "t_beta"},
 	} {
-		t.Run(tt.name, func(t *testing.T) { require.Equal(t, tt.want, memory.preferred(tt.authority, tt.target, "")) })
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) { require.Equal(t, tt.want, memory.preferred(tt.authority, tt.target, "")) })
+		})
 	}
 }
 
