@@ -12,13 +12,14 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/adapters/observability"
-	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol/wire"
 )
 
+// real I/O: writes and reads JSONL trace files.
 func TestTransportObservabilitySSHStdioEOFEndsReceive(t *testing.T) {
 	tracePath := t.TempDir() + "/ssh-eof.jsonl"
-	observer, closer, err := observability.NewJSONL(tracePath, sshRuntimeClock{now: time.Unix(0, 309)}, "ssh-process")
+	observer, closer, err := observability.NewJSONL(tracePath, newRuntimeClock(t, time.Unix(0, 309)), "ssh-process")
 	if err != nil {
 		t.Fatalf("NewJSONL() error = %v", err)
 	}
@@ -34,9 +35,10 @@ func TestTransportObservabilitySSHStdioEOFEndsReceive(t *testing.T) {
 	assertSSHReceiveFailurePair(t, tracePath)
 }
 
+// real I/O: writes and reads JSONL trace files.
 func TestTransportObservabilitySSHStdioCloseEndsBlockedReceive(t *testing.T) {
 	tracePath := t.TempDir() + "/ssh-close.jsonl"
-	observer, closer, err := observability.NewJSONL(tracePath, sshRuntimeClock{now: time.Unix(0, 311)}, "ssh-process")
+	observer, closer, err := observability.NewJSONL(tracePath, newRuntimeClock(t, time.Unix(0, 311)), "ssh-process")
 	if err != nil {
 		t.Fatalf("NewJSONL() error = %v", err)
 	}
@@ -146,9 +148,10 @@ func TestTransportCloseLeavesProcessStdinOpen(t *testing.T) {
 	}
 }
 
+// real I/O: writes and reads JSONL trace files.
 func TestTransportObservabilitySSHStdioCloseDoesNotWaitForUnownedReceive(t *testing.T) {
 	tracePath := t.TempDir() + "/ssh-unowned-close.jsonl"
-	observer, closer, err := observability.NewJSONL(tracePath, sshRuntimeClock{now: time.Unix(0, 313)}, "ssh-process")
+	observer, closer, err := observability.NewJSONL(tracePath, newRuntimeClock(t, time.Unix(0, 313)), "ssh-process")
 	if err != nil {
 		t.Fatalf("NewJSONL() error = %v", err)
 	}
@@ -204,9 +207,10 @@ func (r *sshUnownedBlockedReader) unblock() {
 	r.releaseOnce.Do(func() { close(r.release) })
 }
 
+// real I/O: writes and reads JSONL trace files.
 func TestTransportObservabilitySSHStdioPreservesCarriage(t *testing.T) {
 	tracePath := t.TempDir() + "/ssh.jsonl"
-	observer, closer, err := observability.NewJSONL(tracePath, sshRuntimeClock{now: time.Unix(0, 307)}, "ssh-process")
+	observer, closer, err := observability.NewJSONL(tracePath, newRuntimeClock(t, time.Unix(0, 307)), "ssh-process")
 	if err != nil {
 		t.Fatalf("NewJSONL() error = %v", err)
 	}
@@ -246,15 +250,9 @@ func TestTransportObservabilitySSHStdioPreservesCarriage(t *testing.T) {
 	}
 }
 
-type sshRuntimeClock struct{ now time.Time }
-
-func (c sshRuntimeClock) Now() time.Time { return c.now }
-func (c sshRuntimeClock) NewTimer(d time.Duration) ports.Timer {
-	return sshRuntimeTimer{timer: time.NewTimer(d)}
+func newRuntimeClock(t *testing.T, now time.Time) *portsmocks.MockClock {
+	t.Helper()
+	clock := portsmocks.NewMockClock(t)
+	clock.EXPECT().Now().Return(now).Maybe()
+	return clock
 }
-
-type sshRuntimeTimer struct{ timer *time.Timer }
-
-func (t sshRuntimeTimer) C() <-chan time.Time        { return t.timer.C }
-func (t sshRuntimeTimer) Reset(d time.Duration) bool { return t.timer.Reset(d) }
-func (t sshRuntimeTimer) Stop() bool                 { return t.timer.Stop() }
