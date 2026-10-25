@@ -261,7 +261,7 @@ func TestP54BrokerRestartDoesNotReattachOrReplayUnknownMutation(t *testing.T) {
 			return second.port, nil
 		})
 		notices := make(chan LifecycleNotice, 4)
-		sup := mustSupervisor(t, SupervisorConfig{Connector: connector, Terminal: newSupervisorTestTerminal(reader), Clock: clock.port, Jitter: func() float64 { return 0 }, NotifyLifecycle: func(n LifecycleNotice) { notices <- n }})
+		sup := mustSupervisor(t, SupervisorConfig{Connector: connector, Terminal: newSupervisorTestTerminal(t, reader).port, Clock: clock.port, Jitter: func() float64 { return 0 }, NotifyLifecycle: func(n LifecycleNotice) { notices <- n }})
 		done := make(chan error, 1)
 		go func() { done <- sup.Run(ctx) }()
 		require.Equal(t, 1, connector.awaitStart(t))

@@ -453,13 +453,13 @@ func TestNewSupervisorRefusesContradictoryInitialConfiguration(t *testing.T) {
 		clock := newSupervisorTestClock(t)
 		reader := newSupervisorTestReader()
 		t.Cleanup(reader.unblock)
-		terminal := newSupervisorTestTerminal(reader)
+		terminal := newSupervisorTestTerminal(t, reader)
 		connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) {
 			return nil, ports.BrokerError{Code: ports.BrokerErrorUnavailable}
 		})
 
 		base := func() SupervisorConfig {
-			return SupervisorConfig{Connector: connector, Terminal: terminal, Clock: clock.port, Jitter: func() float64 { return 0 }, SessionEnvironment: SessionEnvironment{Provenance: SessionEnvironmentLocalCLI}}
+			return SupervisorConfig{Connector: connector, Terminal: terminal.port, Clock: clock.port, Jitter: func() float64 { return 0 }, SessionEnvironment: SessionEnvironment{Provenance: SessionEnvironmentLocalCLI}}
 		}
 
 		both := base()
