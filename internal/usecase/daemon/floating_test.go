@@ -243,7 +243,7 @@ func TestFloatingBlockedOpenReconcilesLatestResponsiveSize(t *testing.T) {
 		d.ApplyConfig(domain.Config{Floating: cfg})
 		tabCtx, cancelTab := context.WithCancel(t.Context())
 		t.Cleanup(cancelTab)
-		tb := newTab(&transactionalResizePTY{}, tabSize(initial))
+		tb := newTab(newTransactionalResizePTY(t), tabSize(initial))
 		tb.ctx, tb.cancel = tabCtx, cancelTab
 		sess := &session{sessionCore: sessionCore{id: "responsive-open", name: "work"}, tabs: []*tab{tb}, ctx: t.Context()}
 

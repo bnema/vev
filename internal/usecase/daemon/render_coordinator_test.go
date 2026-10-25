@@ -1763,10 +1763,10 @@ func TestRenderCoordinatorResizeEpochDispatch(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				resizeStarted := make(chan struct{})
 				releaseResize := make(chan struct{})
-				pty := &transactionalResizePTY{onResize: func() {
+				pty := newTransactionalResizePTY(t, transactionalResizeScript{onResize: func() {
 					close(resizeStarted)
 					<-releaseResize
-				}}
+				}})
 				d, sess, ac, _ := newManualSessionWithPTYs(t, pty)
 				clk := newCoordinatorMockClock(t, 2)
 				d.clock = clk.clock

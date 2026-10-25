@@ -151,7 +151,7 @@ func attachmentEffectGatePublicationSnapshot(ac *attachedClient) (attachmentEffe
 
 func TestKillSessionAcquisitionTimeoutDoesNotPublishPartialInvalidation(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		d, sess, first, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
+		d, sess, first, _ := newManualSessionWithPTYs(t, newTransactionalResizePTY(t))
 		firstTransport, firstTransportLog := newTrackedConnection(t)
 		first.replaceTransport(firstTransport)
 
@@ -273,7 +273,7 @@ func TestKillSessionAcquisitionTimeoutDoesNotPublishPartialInvalidation(t *testi
 
 func TestKillSessionInterruptsOnlyExactParticipantBlockedSends(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		d, sess, snatched, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
+		d, sess, snatched, _ := newManualSessionWithPTYs(t, newTransactionalResizePTY(t))
 		snatchedTransport, snatchedLog, snatchedGate := newTeardownBlockingConnection(t)
 		snatched.replaceTransport(snatchedTransport)
 		d.attachCoordinator(sess, nil, snatched, true)
@@ -331,7 +331,7 @@ func TestKillSessionInterruptsOnlyExactParticipantBlockedSends(t *testing.T) {
 
 func TestKillSessionInterruptsCapturedSendWithoutClosingNewerIncarnation(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		d, sess, ac, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
+		d, sess, ac, _ := newManualSessionWithPTYs(t, newTransactionalResizePTY(t))
 		stale, staleLog, staleGate := newTeardownBlockingConnection(t)
 		ac.replaceTransport(stale)
 		d.attachCoordinator(sess, nil, ac, true)
@@ -365,7 +365,7 @@ func TestKillSessionInterruptsCapturedSendWithoutClosingNewerIncarnation(t *test
 
 func TestShutdownSignalsServeWhenParticipantGateAcquisitionTimesOut(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		d, sess, active, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
+		d, sess, active, _ := newManualSessionWithPTYs(t, newTransactionalResizePTY(t))
 		transport := newQuietConnection(t)
 		active.replaceTransport(transport)
 		d.attachCoordinator(sess, nil, active, true)
@@ -398,7 +398,7 @@ func TestShutdownSignalsServeWhenParticipantGateAcquisitionTimesOut(t *testing.T
 
 func TestShutdownInterruptsBlockedParticipantSend(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		d, sess, active, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
+		d, sess, active, _ := newManualSessionWithPTYs(t, newTransactionalResizePTY(t))
 		blocked, blockedLog, blockedGate := newTeardownBlockingConnection(t)
 		active.replaceTransport(blocked)
 		d.attachCoordinator(sess, nil, active, true)
@@ -426,7 +426,7 @@ func TestShutdownInterruptsBlockedParticipantSend(t *testing.T) {
 
 func TestRenderSendFailureCleanupIsDeadlineBoundedWhileAttachmentEffectGateIsBusy(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		d, sess, ac, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
+		d, sess, ac, _ := newManualSessionWithPTYs(t, newTransactionalResizePTY(t))
 		transport, transportLog := newTrackedConnection(t)
 		ac.replaceTransport(transport)
 		rc := d.attachCoordinator(sess, nil, ac, true)
@@ -458,7 +458,7 @@ func TestRenderSendFailureCleanupIsDeadlineBoundedWhileAttachmentEffectGateIsBus
 
 func TestAttachmentEffectGateReplacementInterruptsBlockedOldRenderBeforePublication(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		d, sess, old, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
+		d, sess, old, _ := newManualSessionWithPTYs(t, newTransactionalResizePTY(t))
 		oldTransport, oldLog, oldGate, oldLocksFree := newBlockedRenderReplacementConnection(t, d, sess)
 		old.replaceTransport(oldTransport)
 		rc := d.attachCoordinator(sess, nil, old, true)
@@ -508,7 +508,7 @@ func TestAttachmentEffectGateReplacementInterruptsBlockedOldRenderBeforePublicat
 
 func TestAttachmentEffectGateAdmittedEffectCompletesBeforeConflictingTransition(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		d, sess, old, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
+		d, sess, old, _ := newManualSessionWithPTYs(t, newTransactionalResizePTY(t))
 		oldTransport, _, _ := newChannelConnection(t)
 		old.replaceTransport(oldTransport)
 		rc := d.attachCoordinator(sess, nil, old, true)
@@ -608,7 +608,7 @@ func TestAttachmentEffectGateAdmittedActiveEffectsFinishBeforeReplacement(t *tes
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			pty := &transactionalResizePTY{}
+			pty := newTransactionalResizePTY(t)
 			d, sess, old, _ := newManualSessionWithPTYs(t, pty)
 			oldTransport, _, _ := newChannelConnection(t)
 			old.replaceTransport(oldTransport)
@@ -824,7 +824,7 @@ func TestPickerDeleteSourceForCurrentInitiatorDoesNotDeadlock(t *testing.T) {
 
 func TestAttachmentEffectGateAdmittedFirstPaintFinishesBeforeReplacement(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		d, sess, old, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
+		d, sess, old, _ := newManualSessionWithPTYs(t, newTransactionalResizePTY(t))
 		oldTransport, _, _ := newChannelConnection(t)
 		old.replaceTransport(oldTransport)
 		rc := d.attachCoordinator(sess, nil, old, true)
@@ -861,7 +861,7 @@ func TestAttachmentEffectGateAdmittedFirstPaintFinishesBeforeReplacement(t *test
 
 func TestAttachmentEffectGateReversedConcurrentTransitionsDoNotDeadlock(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		d, first, a, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
+		d, first, a, _ := newManualSessionWithPTYs(t, newTransactionalResizePTY(t))
 		aTransport, _, _ := newChannelConnection(t)
 		a.replaceTransport(aTransport)
 		d.attachCoordinator(first, nil, a, true)
@@ -920,7 +920,7 @@ func TestAttachmentEffectGateReversedConcurrentTransitionsDoNotDeadlock(t *testi
 }
 
 func TestAttachmentEffectGateFrozenConnectionRejectsLateEffect(t *testing.T) {
-	d, sess, ac, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
+	d, sess, ac, _ := newManualSessionWithPTYs(t, newTransactionalResizePTY(t))
 	transport, _, _ := newChannelConnection(t)
 	ac.replaceTransport(transport)
 	rc := d.attachCoordinator(sess, nil, ac, true)

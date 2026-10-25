@@ -348,7 +348,7 @@ func TestPTYReaderClipboardNoAttachedClientDoesNotPanic(t *testing.T) {
 }
 
 func TestQueuedClipboardAfterPaneMoveDoesNotSendToFormerOwner(t *testing.T) {
-	d, sess, ac, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
+	d, sess, ac, _ := newManualSessionWithPTYs(t, newTransactionalResizePTY(t))
 	oldTransport, oldLog := newTrackedConnection(t, withSendError(errors.New("stale clipboard send")))
 	ac.replaceTransport(oldTransport)
 	publishActiveClipboardCapability(d, sess, ac, oldTransport)
@@ -373,7 +373,7 @@ func TestQueuedClipboardAfterPaneMoveDoesNotSendToFormerOwner(t *testing.T) {
 func TestQueuedClipboardRevalidatesOwnerAfterWaitingForClientSendLock(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		clock, clockTimers := newSignalClock(t, 8)
-		d, sess, ac, _ := newManualSessionWithPTYsClock(t, clock, &transactionalResizePTY{})
+		d, sess, ac, _ := newManualSessionWithPTYsClock(t, clock, newTransactionalResizePTY(t))
 		oldTransport, oldLog := newTrackedConnection(t, withSendError(errors.New("stale clipboard send")))
 		ac.replaceTransport(oldTransport)
 		publishActiveClipboardCapability(d, sess, ac, oldTransport)
@@ -417,7 +417,7 @@ func TestQueuedClipboardRevalidatesOwnerAfterWaitingForClientSendLock(t *testing
 
 func TestClipboardSendErrorAfterPaneMoveDoesNotDetachFormerOwner(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		d, sess, ac, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
+		d, sess, ac, _ := newManualSessionWithPTYs(t, newTransactionalResizePTY(t))
 		gate := newSendGate()
 		oldTransport, oldLog := newTrackedConnection(t, withSendFunc(func(wire.Envelope, *connLog) error {
 			gate.enter()
@@ -454,7 +454,7 @@ func TestClipboardSendErrorAfterPaneMoveDoesNotDetachFormerOwner(t *testing.T) {
 
 func TestForwardClipboardAsyncSerializesClipboardWrites(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		d, sess, ac, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
+		d, sess, ac, _ := newManualSessionWithPTYs(t, newTransactionalResizePTY(t))
 		started := make(chan string, 2)
 		sent := make(chan string, 2)
 		releaseFirst := newSendGate()

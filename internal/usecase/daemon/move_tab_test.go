@@ -198,7 +198,7 @@ func TestMoveTabFinalSourceVisibleFloatingRejectsStaleSlotTransitions(t *testing
 
 func TestMoveTabWaitsForSourceResizeAndAppliesDestinationGeometryLast(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		pty := &transactionalResizePTY{}
+		pty := newTransactionalResizePTY(t)
 		d, source, _, _ := newManualSessionWithPTYs(t, pty, newQuietPTY(t))
 		moved := source.tabs[0]
 		moved.stableID = "moved-tab"

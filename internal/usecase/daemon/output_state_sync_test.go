@@ -265,7 +265,7 @@ func TestResizeGrowthFirstFrameIncludesConcurrentPTYRedraw(t *testing.T) {
 				// resizeReaderPTY delivers the child's SIGWINCH redraw through the
 				// actual ptyReader. Its Resize callback does not return until Read has
 				// accepted the bytes, at which point resizeApplying is still true.
-				p := newResizeReaderPTY([]byte("\x1b[1;81H" + strings.Repeat("B", 40)))
+				p := newResizeReaderPTY(t, []byte("\x1b[1;81H"+strings.Repeat("B", 40)))
 				d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 				ac.output.maxOutstanding = tc.window
 				pane := testAttachmentTab(sess).focusedPane()

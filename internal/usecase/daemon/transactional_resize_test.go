@@ -9,58 +9,75 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/domain/layout"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/internal/usecase/visualsearch"
 )
 
-// transactionalResizePTY is deliberately channel-scripted: a test can stop a
-// transaction at PTY.Resize without relying on scheduler timing.
-//
-//testpolicy:double constructed as a literal (&transactionalResizePTY{}) by ~60 call sites in test files owned by other batches (attachment_effect_gate, clipboard, move_tab, render_coordinator, terminal_focus, ...); converting it needs a cross-batch rename. TODO(orchestrator): convert to a MockPTY helper once all batches are merged.
+// transactionalResizeScript scripts a transactionalResizePTY: per-call Resize
+// errors and hooks that run outside the recorder lock.
+type transactionalResizeScript struct {
+	errs     []error
+	onResize func()
+	onWrite  func([]byte)
+}
+
+// transactionalResizePTY is a MockPTY that records Resize sizes and Write
+// payloads. Its hooks let a test stop a transaction at PTY.Resize without
+// relying on scheduler timing.
 type transactionalResizePTY struct {
+	*portsmocks.MockPTY
+	transactionalResizeScript
 	mu        sync.Mutex
 	sizes     []domain.Size
 	writeData [][]byte
-	errs      []error
-	onResize  func()
-	onWrite   func([]byte)
 }
 
-func (p *transactionalResizePTY) Resize(geometry domain.Geometry) error {
-	p.mu.Lock()
-	p.sizes = append(p.sizes, geometry.Size)
-	n := len(p.sizes)
-	hook := p.onResize
-	var err error
-	if n <= len(p.errs) {
-		err = p.errs[n-1]
+func newTransactionalResizePTY(t testing.TB, scripts ...transactionalResizeScript) *transactionalResizePTY {
+	t.Helper()
+	p := &transactionalResizePTY{MockPTY: portsmocks.NewMockPTY(t)}
+	for _, script := range scripts {
+		p.transactionalResizeScript = script
 	}
-	p.mu.Unlock()
-	if hook != nil {
-		hook()
-	}
-	return err
+	p.EXPECT().Resize(mock.Anything).RunAndReturn(func(geometry domain.Geometry) error {
+		p.mu.Lock()
+		p.sizes = append(p.sizes, geometry.Size)
+		n := len(p.sizes)
+		hook := p.onResize
+		var err error
+		if n <= len(p.errs) {
+			err = p.errs[n-1]
+		}
+		p.mu.Unlock()
+		if hook != nil {
+			hook()
+		}
+		return err
+	}).Maybe()
+	p.EXPECT().Write(mock.Anything).RunAndReturn(func(b []byte) (int, error) {
+		p.mu.Lock()
+		copied := append([]byte(nil), b...)
+		p.writeData = append(p.writeData, copied)
+		hook := p.onWrite
+		p.mu.Unlock()
+		if hook != nil {
+			hook(copied)
+		}
+		return len(b), nil
+	}).Maybe()
+	p.EXPECT().Read(mock.Anything).Return(0, io.EOF).Maybe()
+	p.EXPECT().Close().Return(nil).Maybe()
+	p.EXPECT().Pid().Return(0).Maybe()
+	p.EXPECT().ForegroundPgid().Return(0, nil).Maybe()
+	return p
 }
-func (*transactionalResizePTY) Read([]byte) (int, error) { return 0, io.EOF }
-func (p *transactionalResizePTY) Write(b []byte) (int, error) {
-	p.mu.Lock()
-	copied := append([]byte(nil), b...)
-	p.writeData = append(p.writeData, copied)
-	hook := p.onWrite
-	p.mu.Unlock()
-	if hook != nil {
-		hook(copied)
-	}
-	return len(b), nil
-}
-func (*transactionalResizePTY) Close() error                 { return nil }
-func (*transactionalResizePTY) Pid() int                     { return 0 }
-func (*transactionalResizePTY) ForegroundPgid() (int, error) { return 0, nil }
+
 func (p *transactionalResizePTY) requested() []domain.Size {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -80,9 +97,8 @@ func (p *transactionalResizePTY) writes() [][]byte {
 // resizeReaderPTY is a deterministic child: Resize releases its redraw only
 // after the daemon has installed resizeApplying, and waits until ptyReader has
 // accepted that read. It deliberately has no timing dependency.
-//
-//testpolicy:double its only user is output_state_sync_test.go, owned by another batch; convert both together. TODO(orchestrator).
 type resizeReaderPTY struct {
+	*portsmocks.MockPTY
 	redraw    []byte
 	reads     chan []byte
 	accepted  chan struct{}
@@ -93,39 +109,41 @@ type resizeReaderPTY struct {
 	delivered bool
 }
 
-func newResizeReaderPTY(redraw []byte) *resizeReaderPTY {
-	return &resizeReaderPTY{redraw: redraw, reads: make(chan []byte), accepted: make(chan struct{}), closed: make(chan struct{})}
+func newResizeReaderPTY(t testing.TB, redraw []byte) *resizeReaderPTY {
+	t.Helper()
+	p := &resizeReaderPTY{MockPTY: portsmocks.NewMockPTY(t), redraw: redraw, reads: make(chan []byte), accepted: make(chan struct{}), closed: make(chan struct{})}
+	p.EXPECT().Resize(mock.Anything).RunAndReturn(func(domain.Geometry) error {
+		p.reads <- p.redraw
+		<-p.accepted
+		// A second, empty read cannot begin until ptyReader has processed the
+		// redraw from the first read. This is a channel rendezvous, not a timing
+		// assumption, and proves the redraw entered resizePending before Resize
+		// returns to replay it.
+		p.reads <- nil
+		<-p.accepted
+		p.mu.Lock()
+		p.delivered = p.applying != nil && p.applying()
+		p.mu.Unlock()
+		return nil
+	}).Maybe()
+	p.EXPECT().Read(mock.Anything).RunAndReturn(func(dst []byte) (int, error) {
+		select {
+		case data := <-p.reads:
+			n := copy(dst, data)
+			p.accepted <- struct{}{}
+			return n, nil
+		case <-p.closed:
+			return 0, io.EOF
+		}
+	}).Maybe()
+	p.EXPECT().Write(mock.Anything).RunAndReturn(func(b []byte) (int, error) { return len(b), nil }).Maybe()
+	p.EXPECT().Close().RunAndReturn(func() error { p.close(); return nil }).Maybe()
+	p.EXPECT().Pid().Return(0).Maybe()
+	p.EXPECT().ForegroundPgid().Return(0, nil).Maybe()
+	return p
 }
 
-func (p *resizeReaderPTY) Resize(domain.Geometry) error {
-	p.reads <- p.redraw
-	<-p.accepted
-	// A second, empty read cannot begin until ptyReader has processed the
-	// redraw from the first read. This is a channel rendezvous, not a timing
-	// assumption, and proves the redraw entered resizePending before Resize
-	// returns to replay it.
-	p.reads <- nil
-	<-p.accepted
-	p.mu.Lock()
-	p.delivered = p.applying != nil && p.applying()
-	p.mu.Unlock()
-	return nil
-}
-func (p *resizeReaderPTY) Read(dst []byte) (int, error) {
-	select {
-	case data := <-p.reads:
-		n := copy(dst, data)
-		p.accepted <- struct{}{}
-		return n, nil
-	case <-p.closed:
-		return 0, io.EOF
-	}
-}
-func (*resizeReaderPTY) Write(b []byte) (int, error)  { return len(b), nil }
-func (*resizeReaderPTY) Pid() int                     { return 0 }
-func (*resizeReaderPTY) ForegroundPgid() (int, error) { return 0, nil }
-func (p *resizeReaderPTY) Close() error               { p.close(); return nil }
-func (p *resizeReaderPTY) close()                     { p.closeOnce.Do(func() { close(p.closed) }) }
+func (p *resizeReaderPTY) close() { p.closeOnce.Do(func() { close(p.closed) }) }
 func (p *resizeReaderPTY) deliveredWhileApplying() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -135,7 +153,7 @@ func (p *resizeReaderPTY) deliveredWhileApplying() bool {
 func TestReplayResizePendingBuffersSuccessFailureAndBatchOrder(t *testing.T) {
 	t.Run("success resizes then replays", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			pty := &transactionalResizePTY{}
+			pty := newTransactionalResizePTY(t)
 			d, sess, ac, _ := newManualSessionWithPTYs(t, pty)
 			stopOverlayTimersAtCleanup(t, ac)
 			tb, p := testAttachmentTab(sess), testAttachmentTab(sess).focusedPane()
@@ -149,7 +167,7 @@ func TestReplayResizePendingBuffersSuccessFailureAndBatchOrder(t *testing.T) {
 	})
 	t.Run("failure retains old parser width", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			pty := &transactionalResizePTY{}
+			pty := newTransactionalResizePTY(t)
 			d, sess, ac, _ := newManualSessionWithPTYs(t, pty)
 			stopOverlayTimersAtCleanup(t, ac)
 			tb, p := testAttachmentTab(sess), testAttachmentTab(sess).focusedPane()
@@ -162,7 +180,7 @@ func TestReplayResizePendingBuffersSuccessFailureAndBatchOrder(t *testing.T) {
 	})
 	t.Run("batches retain read order", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			pty := &transactionalResizePTY{}
+			pty := newTransactionalResizePTY(t)
 			d, sess, ac, _ := newManualSessionWithPTYs(t, pty)
 			stopOverlayTimersAtCleanup(t, ac)
 			tb, p := testAttachmentTab(sess), testAttachmentTab(sess).focusedPane()
@@ -183,7 +201,7 @@ func TestReplayResizePendingBuffersSuccessFailureAndBatchOrder(t *testing.T) {
 func TestProcessPTYDataRetainsCallbacksDuringResizeReplay(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		responses := make(chan []byte, 1)
-		pty := &transactionalResizePTY{onWrite: func(b []byte) { responses <- b }}
+		pty := newTransactionalResizePTY(t, transactionalResizeScript{onWrite: func(b []byte) { responses <- b }})
 		d, sess, ac, sends := newManualSessionWithPTYs(t, pty)
 		stopOverlayTimersAtCleanup(t, ac)
 		publishActiveClipboardCapability(d, sess, ac, ac.transport())
@@ -222,7 +240,7 @@ func TestProcessPTYDataRetainsCallbacksDuringResizeReplay(t *testing.T) {
 // daemon state.
 func TestApplySessionLayoutStopsRetryWhenSessionCanceled(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		pty := &transactionalResizePTY{}
+		pty := newTransactionalResizePTY(t)
 		d, sess, ac, _ := newManualSessionWithPTYs(t, pty)
 		stopOverlayTimersAtCleanup(t, ac)
 		tb, p := testAttachmentTab(sess), testAttachmentTab(sess).focusedPane()
@@ -244,7 +262,7 @@ func TestApplySessionLayoutStopsRetryWhenSessionCanceled(t *testing.T) {
 
 func TestTransactionalResizeApplyDoesNotHoldTabOrPaneLocks(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		pty := &transactionalResizePTY{}
+		pty := newTransactionalResizePTY(t)
 		d, sess, ac, _ := newManualSessionWithPTYs(t, pty)
 		stopOverlayTimersAtCleanup(t, ac)
 		tb := testAttachmentTab(sess)
@@ -285,8 +303,8 @@ func TestApplySessionLayoutReportsResizeFailuresOnce(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				first := &transactionalResizePTY{}
-				second := &transactionalResizePTY{}
+				first := newTransactionalResizePTY(t)
+				second := newTransactionalResizePTY(t)
 				if tc.failureCount >= 1 {
 					first.errs = []error{errors.New("first failure")}
 				}
@@ -314,8 +332,8 @@ func TestApplySessionLayoutReportsResizeFailuresOnce(t *testing.T) {
 
 func TestTransactionalResizePartialFailureCommitsOnlySuccessfulPTYState(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		ok := &transactionalResizePTY{}
-		failed := &transactionalResizePTY{errs: []error{errors.New("scripted resize failure")}}
+		ok := newTransactionalResizePTY(t)
+		failed := newTransactionalResizePTY(t, transactionalResizeScript{errs: []error{errors.New("scripted resize failure")}})
 		d, sess, ac, _ := newManualSessionWithPTYs(t, ok)
 		stopOverlayTimersAtCleanup(t, ac)
 		tb := testAttachmentTab(sess)
@@ -358,7 +376,7 @@ func TestTransactionalResizeRetryMarksNamedSnapshotDirtyOnlyOnSuccess(t *testing
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				pty := &transactionalResizePTY{errs: tc.errs}
+				pty := newTransactionalResizePTY(t, transactionalResizeScript{errs: tc.errs})
 				d, sess, ac, _ := newManualSessionWithPTYs(t, pty)
 				stopOverlayTimersAtCleanup(t, ac)
 				sess.snapEligible.Store(true)
@@ -385,8 +403,8 @@ func TestTransactionalResizeRetryMarksNamedSnapshotDirtyOnlyOnSuccess(t *testing
 // retry must resize its VT before the forced full-frame emission.
 func TestTransactionalResizeRetryTargetsNewestCommittedEpoch(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		ok := &transactionalResizePTY{}
-		failed := &transactionalResizePTY{errs: []error{errors.New("first epoch fails"), nil}}
+		ok := newTransactionalResizePTY(t)
+		failed := newTransactionalResizePTY(t, transactionalResizeScript{errs: []error{errors.New("first epoch fails"), nil}})
 		d, sess, ac, _ := newManualSessionWithPTYs(t, ok)
 		stopOverlayTimersAtCleanup(t, ac)
 		tb := testAttachmentTab(sess)
@@ -441,7 +459,7 @@ func TestTransactionalResizeEpochLifecycleAndRetryContract(t *testing.T) {
 // channels make callback order explicit and do not use wall-clock waits.
 func TestTransactionalResizeRejectsNewerEpochBeforeSessionPublication(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		first, second := &transactionalResizePTY{}, &transactionalResizePTY{}
+		first, second := newTransactionalResizePTY(t), newTransactionalResizePTY(t)
 		d, sess, ac, _ := newManualSessionWithPTYs(t, first, second)
 		stopOverlayTimersAtCleanup(t, ac)
 		observer := &daemonRuntimeObserver{}
@@ -507,7 +525,7 @@ func TestTransactionalResizeRechecksLeaseAtAttachmentPublication(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				pty := &transactionalResizePTY{}
+				pty := newTransactionalResizePTY(t)
 				d, sess, ac, _ := newManualSessionWithPTYs(t, pty)
 				stopOverlayTimersAtCleanup(t, ac)
 				rc := d.attachCoordinator(sess, nil, ac, true)
@@ -543,7 +561,7 @@ func TestTransactionalResizeRechecksLeaseAtAttachmentPublication(t *testing.T) {
 
 func TestStaleRemovedMemberGateIsCanceledOnceByFreshPlan(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		pty := &transactionalResizePTY{}
+		pty := newTransactionalResizePTY(t)
 		d, sess, ac, _ := newManualSessionWithPTYs(t, pty)
 		stopOverlayTimersAtCleanup(t, ac)
 		tb := testAttachmentTab(sess)
@@ -570,7 +588,7 @@ func TestStaleRemovedMemberGateIsCanceledOnceByFreshPlan(t *testing.T) {
 
 func TestHeadlessResizeRetriesInvalidatedPlan(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		pty := &transactionalResizePTY{}
+		pty := newTransactionalResizePTY(t)
 		d, sess, ac, _ := newManualSessionWithPTYs(t, pty)
 		stopOverlayTimersAtCleanup(t, ac)
 		tb := testAttachmentTab(sess)
@@ -593,8 +611,8 @@ func TestHeadlessResizeRetriesInvalidatedPlan(t *testing.T) {
 
 func TestRetryOwnerCannotPublishFloatingGeometryAfterMove(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		popupPTY := &transactionalResizePTY{errs: []error{errors.New("initial popup failure")}}
-		d, source, ac, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
+		popupPTY := newTransactionalResizePTY(t, transactionalResizeScript{errs: []error{errors.New("initial popup failure")}})
+		d, source, ac, _ := newManualSessionWithPTYs(t, newTransactionalResizePTY(t))
 		stopOverlayTimersAtCleanup(t, ac)
 		tb := testAttachmentTab(source)
 		popup := newPane("popup", popupPTY, domain.Size{Cols: 80, Rows: 23})
@@ -646,7 +664,7 @@ func TestTransactionalResizeFloatingBreakpointRace(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				d, sess, ac, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
+				d, sess, ac, _ := newManualSessionWithPTYs(t, newTransactionalResizePTY(t))
 				stopOverlayTimersAtCleanup(t, ac)
 				d.ApplyConfig(domain.Config{Floating: cfg})
 				require.True(t, sess.geometry.requestResize(d, sess, nil, tc.from, true))
@@ -656,10 +674,10 @@ func TestTransactionalResizeFloatingBreakpointRace(t *testing.T) {
 				toGeometry := calculateContentFloatingGeometry(tabSize(tc.to), cfg)
 				entered, release := make(chan struct{}), make(chan struct{})
 				var once sync.Once
-				popupPTY := &transactionalResizePTY{onResize: func() {
+				popupPTY := newTransactionalResizePTY(t, transactionalResizeScript{onResize: func() {
 					once.Do(func() { close(entered) })
 					<-release
-				}}
+				}})
 				popup := newPane("floating", popupPTY, rectSize(fromGeometry.Inner))
 				popup.rect = fromGeometry.Inner
 				popup.popupGeometry = fromGeometry
@@ -697,7 +715,7 @@ func TestApplyVisibleFloatingLayoutPreservesCommittedGeometryOnPTYResizeFailure(
 		require.Equal(t, ui.PresentationFloating, committed.Mode)
 		require.Equal(t, ui.PresentationDrawer, requested.Mode)
 		resizeErr := errors.New("floating resize failed")
-		pty := &transactionalResizePTY{errs: []error{resizeErr}}
+		pty := newTransactionalResizePTY(t, transactionalResizeScript{errs: []error{resizeErr}})
 		popup := newPane("floating", pty, rectSize(committed.Inner))
 		popup.rect = committed.Inner
 		popup.popupGeometry = committed
@@ -751,7 +769,7 @@ func TestApplyVisibleFloatingLayoutPublishesSameSizeGeometryWithoutPTYResize(t *
 		committed.Mode = ui.PresentationFloating
 		committed.Bounds.X++
 		committed.Inner.X++
-		pty := &transactionalResizePTY{}
+		pty := newTransactionalResizePTY(t)
 		popup := newPane("floating", pty, rectSize(committed.Inner))
 		popup.rect = committed.Inner
 		popup.popupGeometry = committed
@@ -779,7 +797,7 @@ func TestZeroInnerFloatingDrawerPublicationDoesNotRecheckCurrent(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		cfg := domain.FloatingConfig{Width: 100, Height: 100}
 		committed := calculateContentFloatingGeometry(domain.Size{Cols: 80, Rows: 22}, cfg)
-		pty := &transactionalResizePTY{}
+		pty := newTransactionalResizePTY(t)
 		popup := newPane("floating", pty, rectSize(committed.Inner))
 		popup.rect = committed.Inner
 		popup.popupGeometry = committed
@@ -812,7 +830,7 @@ func TestZeroInnerFloatingDrawerRejectsStaleRequestWithoutPhysicalPublication(t 
 	synctest.Test(t, func(t *testing.T) {
 		cfg := domain.FloatingConfig{Width: 100, Height: 100}
 		committed := calculateContentFloatingGeometry(domain.Size{Cols: 80, Rows: 22}, cfg)
-		pty := &transactionalResizePTY{}
+		pty := newTransactionalResizePTY(t)
 		popup := newPane("floating", pty, rectSize(committed.Inner))
 		popup.rect = committed.Inner
 		popup.popupGeometry = committed
@@ -837,8 +855,8 @@ func TestZeroInnerFloatingDrawerRejectsStaleRequestWithoutPhysicalPublication(t 
 
 func TestTransactionalResizeRetriesAcceptedFloatingSlotByIdentity(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		popupPTY := &transactionalResizePTY{errs: []error{errors.New("first popup resize fails")}}
-		d, sess, ac, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
+		popupPTY := newTransactionalResizePTY(t, transactionalResizeScript{errs: []error{errors.New("first popup resize fails")}})
+		d, sess, ac, _ := newManualSessionWithPTYs(t, newTransactionalResizePTY(t))
 		stopOverlayTimersAtCleanup(t, ac)
 		tb := testAttachmentTab(sess)
 		popup := newPane("popup", popupPTY, domain.Size{Cols: 80, Rows: 23})
@@ -862,7 +880,7 @@ func TestTransactionalResizeRetriesAcceptedFloatingSlotByIdentity(t *testing.T) 
 		require.False(t, popup.resizeRetry)
 		popup.mu.Unlock()
 
-		replacementPTY := &transactionalResizePTY{}
+		replacementPTY := newTransactionalResizePTY(t)
 		replacement := newPane("replacement", replacementPTY, domain.Size{Cols: 80, Rows: 23})
 		replacement.resizeRetry = true
 		tb.mu.Lock()
@@ -876,7 +894,7 @@ func TestTransactionalResizeRetriesAcceptedFloatingSlotByIdentity(t *testing.T) 
 func TestTransactionalResizeObsoleteTimerCallbacksCommitOnlyLatestEpoch(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		clock := newCoordinatorMockClock(t, 8)
-		pty := &transactionalResizePTY{}
+		pty := newTransactionalResizePTY(t)
 		d, sess, ac, frames := newManualSessionWithPTYs(t, pty)
 		stopOverlayTimersAtCleanup(t, ac)
 		d.clock = clock.clock
@@ -930,7 +948,7 @@ func TestTransactionalResizeFloatingMouseCopyAndSearchContract(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				entered, release := make(chan struct{}), make(chan struct{})
-				pty := &transactionalResizePTY{errs: tc.errs, onResize: func() { close(entered); <-release }}
+				pty := newTransactionalResizePTY(t, transactionalResizeScript{errs: tc.errs, onResize: func() { close(entered); <-release }})
 				d, sess, ac, _ := newManualSessionWithPTYs(t, pty)
 				stopOverlayTimersAtCleanup(t, ac)
 				tb := testAttachmentTab(sess)

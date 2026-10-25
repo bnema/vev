@@ -156,7 +156,7 @@ func TestFocusGainClaimsSharedGeometry(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d, sess, first, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
+			d, sess, first, _ := newManualSessionWithPTYs(t, newTransactionalResizePTY(t))
 			first.setGeometry(domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
 			first.setTerminalFocus(tt.prior)
 			second := addMultiplexTestAttachment(t, sess, domain.Geometry{Size: domain.Size{Cols: 120, Rows: 40}})
@@ -197,7 +197,7 @@ func TestUnfocusedClaimDoesNotTakeGeometry(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d, sess, first, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
+			d, sess, first, _ := newManualSessionWithPTYs(t, newTransactionalResizePTY(t))
 			first.setGeometry(domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
 			first.setTerminalFocus(tt.firstFocus)
 			require.True(t, sess.geometry.reconcile(d, sess, first))

@@ -15,7 +15,7 @@ import (
 // captured before a later claim cannot publish. Removing the current claimant
 // would make the stale transaction win and fail this test.
 func TestMultiplexLatestValidGeometryClaimant(t *testing.T) {
-	pty := &transactionalResizePTY{}
+	pty := newTransactionalResizePTY(t)
 	d, sess, first, _ := newManualSessionWithPTYs(t, pty)
 	first.setGeometry(domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}, PixelWidth: 800, PixelHeight: 480})
 	addMultiplexTestAttachment(t, sess, domain.Geometry{Size: domain.Size{Cols: 100, Rows: 30}, PixelWidth: 1000, PixelHeight: 600})
@@ -51,7 +51,7 @@ func TestMultiplexLatestValidGeometryClaimant(t *testing.T) {
 // newest remaining claim, not attachment insertion order or a default. Picking
 // the oldest claim would produce 80x22 after third is suspended.
 func TestMultiplexClaimantSuspendDisconnectFallback(t *testing.T) {
-	d, sess, first, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
+	d, sess, first, _ := newManualSessionWithPTYs(t, newTransactionalResizePTY(t))
 	first.setGeometry(domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
 	second := addMultiplexTestAttachment(t, sess, domain.Geometry{Size: domain.Size{Cols: 100, Rows: 30}})
 	third := addMultiplexTestAttachment(t, sess, domain.Geometry{Size: domain.Size{Cols: 120, Rows: 40}})
@@ -80,7 +80,7 @@ func TestMultiplexClaimantSuspendDisconnectFallback(t *testing.T) {
 // attachment registries are session-owned. Accidentally using daemon-global
 // claimant state would mutate the unrelated session and fail these snapshots.
 func TestMultiplexClaimantRemovalDoesNotTouchUnrelatedSession(t *testing.T) {
-	d, affected, first, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
+	d, affected, first, _ := newManualSessionWithPTYs(t, newTransactionalResizePTY(t))
 	first.setGeometry(domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
 	claimant := addMultiplexTestAttachment(t, affected, domain.Geometry{Size: domain.Size{Cols: 120, Rows: 40}})
 	require.True(t, affected.geometry.reconcile(d, affected, nil))
@@ -150,7 +150,7 @@ func TestMultiplexAttachmentLocalStateAndFrames(t *testing.T) {
 // Accepting the old token would change size or execute its command.
 func TestMultiplexReconnectGenerationFencesOldEffects(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		d, sess, reconnecting, oldFrames := newManualSessionWithPTYs(t, &transactionalResizePTY{})
+		d, sess, reconnecting, oldFrames := newManualSessionWithPTYs(t, newTransactionalResizePTY(t))
 		peer := addMultiplexTestAttachment(t, sess, domain.Geometry{Size: domain.Size{Cols: 100, Rows: 30}})
 		rc := d.attachCoordinator(sess, nil, reconnecting, true)
 		d.attachCoordinator(sess, nil, peer, true)
@@ -192,7 +192,7 @@ func TestMultiplexReconnectGenerationFencesOldEffects(t *testing.T) {
 // removed without retiring its siblings or session. Detaching every attachment
 // on one transport error, or deleting the session, fails the registry checks.
 func TestMultiplexSingleStreamErrorIsolation(t *testing.T) {
-	d, sess, failed, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
+	d, sess, failed, _ := newManualSessionWithPTYs(t, newTransactionalResizePTY(t))
 	failedTransport, failedTransportLog := newTrackedConnection(t)
 	failed.replaceTransport(failedTransport)
 	peer := addMultiplexTestAttachment(t, sess, domain.Geometry{Size: domain.Size{Cols: 100, Rows: 30}})

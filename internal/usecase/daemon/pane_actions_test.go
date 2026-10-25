@@ -77,7 +77,7 @@ func awaitLayoutRetryTimer(t *testing.T, timers <-chan *testTimer) *testTimer {
 func TestLayoutRetryIsBoundedDeduplicatedAndCanceled(t *testing.T) {
 	t.Run("persistent failure is bounded and reports once", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			pty := &transactionalResizePTY{errs: []error{errors.New("initial"), errors.New("retry 1"), errors.New("retry 2"), errors.New("retry 3")}}
+			pty := newTransactionalResizePTY(t, transactionalResizeScript{errs: []error{errors.New("initial"), errors.New("retry 1"), errors.New("retry 2"), errors.New("retry 3")}})
 			d, sess, ac, _ := newManualSessionWithPTYs(t, pty)
 			stopOverlayTimersAtCleanup(t, ac)
 			clock, timers := newSignalClock(t, 16)
@@ -113,7 +113,7 @@ func TestLayoutRetryIsBoundedDeduplicatedAndCanceled(t *testing.T) {
 
 	t.Run("tab cancellation stops a waiting retry", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			pty := &transactionalResizePTY{errs: []error{errors.New("initial")}}
+			pty := newTransactionalResizePTY(t, transactionalResizeScript{errs: []error{errors.New("initial")}})
 			d, sess, ac, _ := newManualSessionWithPTYs(t, pty)
 			stopOverlayTimersAtCleanup(t, ac)
 			clock, timers := newSignalClock(t, 16)
@@ -139,7 +139,7 @@ func TestLayoutRetryIsBoundedDeduplicatedAndCanceled(t *testing.T) {
 
 func TestFocusDirAtDoesNotApplyUncommittedCandidate(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		pty := &transactionalResizePTY{}
+		pty := newTransactionalResizePTY(t)
 		d, sess, ac, _ := newManualSessionWithPTYs(t, pty)
 		stopOverlayTimersAtCleanup(t, ac)
 		tb := testAttachmentTab(sess)
@@ -159,7 +159,7 @@ func TestFocusDirAtDoesNotApplyUncommittedCandidate(t *testing.T) {
 
 func TestLayoutApplicationRetriesOnlyAcceptedFailedGeometry(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		pty := &transactionalResizePTY{errs: []error{errors.New("first resize fails")}}
+		pty := newTransactionalResizePTY(t, transactionalResizeScript{errs: []error{errors.New("first resize fails")}})
 		d, sess, ac, _ := newManualSessionWithPTYs(t, pty)
 		stopOverlayTimersAtCleanup(t, ac)
 		clock, timers := newSignalClock(t, 16)
@@ -198,7 +198,7 @@ func TestDelayedRetryUsesFreshLayoutAfterPaneResize(t *testing.T) {
 		// The failed apply also posts its preserved degradation warning; its toast
 		// lifetime is unrelated to the coordinator deadlines driven below.
 		clock.clock.EXPECT().NewTimer(6 * time.Second).Return(newStubTimer(t)).Once()
-		failed := &transactionalResizePTY{errs: []error{errors.New("first resize fails")}}
+		failed := newTransactionalResizePTY(t, transactionalResizeScript{errs: []error{errors.New("first resize fails")}})
 		d, sess, ac, _ := newManualSessionWithPTYs(t, failed)
 		stopOverlayTimersAtCleanup(t, ac)
 		d.clock = clock.clock
@@ -330,18 +330,18 @@ func TestLayoutApplicationRejectsStaleCloseFocusAndSize(t *testing.T) {
 		entered := make(chan struct{})
 		release := make(chan struct{})
 		var once sync.Once
-		return &transactionalResizePTY{onResize: func() {
+		return newTransactionalResizePTY(t, transactionalResizeScript{onResize: func() {
 			once.Do(func() {
 				close(entered)
 				<-release
 			})
-		}}, entered, release
+		}}), entered, release
 	}
 
 	t.Run("close removes a stale plan member", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			first, entered, release := newBlockedPTY()
-			second := &transactionalResizePTY{}
+			second := newTransactionalResizePTY(t)
 			d, sess, ac, _ := newManualSessionWithPTYs(t, first)
 			stopOverlayTimersAtCleanup(t, ac)
 			tb := testAttachmentTab(sess)
@@ -395,7 +395,7 @@ func TestLayoutApplicationRejectsStaleCloseFocusAndSize(t *testing.T) {
 	t.Run("focus expansion replaces a stale stack placement", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			first, entered, release := newBlockedPTY()
-			second := &transactionalResizePTY{}
+			second := newTransactionalResizePTY(t)
 			d, sess, ac, _ := newManualSessionWithPTYs(t, first)
 			stopOverlayTimersAtCleanup(t, ac)
 			tb := testAttachmentTab(sess)
