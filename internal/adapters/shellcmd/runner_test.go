@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// real I/O: runs real shell subprocesses.
 func TestRunnerRun(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -40,6 +41,7 @@ func TestRunnerRun(t *testing.T) {
 	}
 }
 
+// real I/O: runs real shell subprocesses.
 func TestRunnerRunReturnsPartialStdoutOnError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -53,6 +55,7 @@ func TestRunnerRunReturnsPartialStdoutOnError(t *testing.T) {
 	}
 }
 
+// real I/O: runs real shell subprocesses.
 func TestRunnerRunTimeoutReturnsPromptly(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
@@ -71,6 +74,7 @@ func TestRunnerRunTimeoutReturnsPromptly(t *testing.T) {
 	}
 }
 
+// real I/O: runs real shell subprocesses.
 func TestRunnerRunBackgroundChildDoesNotWedgeAfterTimeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
@@ -89,6 +93,7 @@ func TestRunnerRunBackgroundChildDoesNotWedgeAfterTimeout(t *testing.T) {
 	}
 }
 
+// real I/O: runs real shell subprocesses.
 func TestRunnerRunUsesProvidedEnvironment(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -107,6 +112,7 @@ func TestRunnerRunUsesProvidedEnvironment(t *testing.T) {
 	}
 }
 
+// real I/O: runs real shell subprocesses.
 func TestRunnerCapturesStderrAndExitCode(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -159,6 +165,7 @@ func TestRunnerCapturesStderrAndExitCode(t *testing.T) {
 	}
 }
 
+// real I/O: runs real shell subprocesses.
 func TestRunnerBoundsStderr(t *testing.T) {
 	res, _ := New().Run(context.Background(), ports.CommandSpec{
 		Command:     "yes badness 2>/dev/null | head -c 100000 >&2",

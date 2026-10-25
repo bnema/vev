@@ -104,6 +104,7 @@ func TestReadImageNoImageOnClipboard(t *testing.T) {
 	}
 }
 
+// real I/O: spawns real subprocesses through exec.CommandContext.
 func TestReadImageListTypesFailureReturnsNoClipboardImage(t *testing.T) {
 	execCommand := func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		return exec.CommandContext(ctx, "false") // exits 1: simulates wl-paste missing/failing
@@ -120,6 +121,7 @@ func TestReadImageListTypesFailureReturnsNoClipboardImage(t *testing.T) {
 // read (not just the --list-types probe) runs under a context carrying a
 // deadline: called with context.Background() (as the client interceptor
 // does), a wl-paste that hangs mid-read must not stall the caller forever.
+// real I/O: spawns real subprocesses through exec.CommandContext.
 func TestReadImageDataReadCommandHasDeadline(t *testing.T) {
 	var readCtx context.Context
 	execCommand := func(ctx context.Context, name string, args ...string) *exec.Cmd {
@@ -147,6 +149,7 @@ func TestReadImageDataReadCommandHasDeadline(t *testing.T) {
 // streaming the actual clipboard bytes (as opposed to during --list-types,
 // covered by listTypesTimeout) is bounded by readTimeout instead of stalling
 // the caller indefinitely.
+// real I/O: spawns real subprocesses through exec.CommandContext.
 func TestReadImageHungDataReadTimesOut(t *testing.T) {
 	execCommand := func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		if name == "wl-paste" && len(args) > 0 && args[0] == "--list-types" {
@@ -171,6 +174,7 @@ func TestReadImageHungDataReadTimesOut(t *testing.T) {
 // TestReadImageAgainstRealWlPaste is a best-effort integration check against
 // the real binary; it skips itself when wl-paste (or a Wayland clipboard) is
 // not available, which is the common case in CI/sandbox environments.
+// real I/O: spawns real subprocesses through exec.CommandContext.
 func TestReadImageAgainstRealWlPaste(t *testing.T) {
 	if _, err := exec.LookPath("wl-paste"); err != nil {
 		t.Skip("wl-paste not installed")
