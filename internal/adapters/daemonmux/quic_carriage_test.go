@@ -243,8 +243,7 @@ func TestQUICCarriageSupervisorTwoThenHundredTypedAdmissions(t *testing.T) {
 	// connection, and the daemon engine accounts for every admitted stream.
 	require.Equal(t, 1, daemon.supervisor.Children(), "all streams must share one physical QUIC connection")
 	pump := daemon.soleChildPump(t)
-	require.Eventually(t, func() bool { return pump.Engine().Live() == 2+extra }, quicCarriageDeadline, time.Millisecond,
-		"daemon engine admitted %d of %d streams", pump.Engine().Live(), 2+extra)
+	require.Equal(t, 2+extra, pump.Engine().Live(), "daemon engine must account for every round-tripped stream")
 
 	all := make([]ports.BrokerLogicalConnection, 0, 2+extra)
 	all = append(all, first, second)
@@ -252,8 +251,10 @@ func TestQUICCarriageSupervisorTwoThenHundredTypedAdmissions(t *testing.T) {
 	for _, connection := range all {
 		require.NoError(t, connection.Close())
 	}
-	require.Eventually(t, func() bool { return pump.Engine().Live() == 0 }, quicCarriageDeadline, time.Millisecond,
-		"daemon engine still holds %d live streams after close", pump.Engine().Live())
+	for id := PhysicalStreamID(1); id <= PhysicalStreamID(2+extra); id++ {
+		requireStreamState(t, pump, id, StreamTerminal)
+	}
+	require.Zero(t, pump.Engine().Live())
 	require.False(t, channelClosed(physical.Done()), "closing every stream must leave the physical carriage open")
 }
 
