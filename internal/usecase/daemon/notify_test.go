@@ -12,11 +12,13 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	vt "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
 )
@@ -35,7 +37,7 @@ func TestReportAttachmentErrorPreservesLocalOrNilScope(t *testing.T) {
 
 func TestClientNoticeMapsFixedActionsAndDismissesOnlyConnectionToast(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		d, sess, ac, _ := newNoticeFixture(t, &noticeClock{})
+		d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
 		stopOverlayTimersAtCleanup(t, ac)
 		d.handleClientNotice(sess, ac, protocol.ClientNotice{Action: protocol.ClientNoticeClipboardFallback})
 		d.handleClientNotice(sess, ac, protocol.ClientNotice{Action: protocol.ClientNoticeClipboardTooLarge})
@@ -60,7 +62,7 @@ func TestClientNoticeMapsFixedActionsAndDismissesOnlyConnectionToast(t *testing.
 
 func TestMalformedClientNoticeIsIgnored(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		d, sess, ac, _ := newNoticeFixture(t, &noticeClock{})
+		d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
 		stopOverlayTimersAtCleanup(t, ac)
 		var logs bytes.Buffer
 		d.log = slog.New(slog.NewTextHandler(&logs, nil))
@@ -199,14 +201,19 @@ func TestNoticeCenterPendingQueue(t *testing.T) {
 
 // noticeClock hands out timers the test fires explicitly by advancing time.
 // Toast TTLs are asserted from the durations recorded here, so the tests never
-// depend on wall-clock progress.
+// depend on wall-clock progress. It embeds a generated MockClock whose Now and
+// NewTimer expectations are backed by the recorded state; it takes no testing.TB
+// because other test files construct it inline.
 type noticeClock struct {
+	*portsmocks.MockClock
 	mu     sync.Mutex
 	now    time.Time
 	timers []*noticeTimer
 }
 
+// noticeTimer embeds a generated MockTimer backed by the recorded channel.
 type noticeTimer struct {
+	*portsmocks.MockTimer
 	ch       chan time.Time
 	duration time.Duration
 	deadline time.Time
@@ -214,30 +221,23 @@ type noticeTimer struct {
 }
 
 func newNoticeClock() *noticeClock {
-	return &noticeClock{now: time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)}
-}
-
-func (c *noticeClock) Now() time.Time {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.now
-}
-
-func (c *noticeClock) NewTimer(d time.Duration) ports.Timer {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	t := &noticeTimer{ch: make(chan time.Time, 1), duration: d, deadline: c.now.Add(d)}
-	c.timers = append(c.timers, t)
-	return t
-}
-
-func (t *noticeTimer) C() <-chan time.Time { return t.ch }
-
-func (t *noticeTimer) Reset(time.Duration) bool { return false }
-
-func (t *noticeTimer) Stop() bool {
-	t.stopped.Store(true)
-	return true
+	c := &noticeClock{MockClock: &portsmocks.MockClock{}, now: time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)}
+	c.EXPECT().Now().RunAndReturn(func() time.Time {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return c.now
+	}).Maybe()
+	c.EXPECT().NewTimer(mock.Anything).RunAndReturn(func(d time.Duration) ports.Timer {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		t := &noticeTimer{MockTimer: &portsmocks.MockTimer{}, ch: make(chan time.Time, 1), duration: d, deadline: c.now.Add(d)}
+		t.EXPECT().C().Return((<-chan time.Time)(t.ch)).Maybe()
+		t.EXPECT().Reset(mock.Anything).Return(false).Maybe()
+		t.EXPECT().Stop().RunAndReturn(func() bool { t.stopped.Store(true); return true }).Maybe()
+		c.timers = append(c.timers, t)
+		return t
+	}).Maybe()
+	return c
 }
 
 // advance moves the clock forward and fires every live timer that came due.
