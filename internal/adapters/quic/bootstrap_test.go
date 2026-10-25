@@ -161,6 +161,7 @@ func TestBootstrapWrongTokenFails(t *testing.T) {
 	_ = server
 }
 
+// real I/O: starts a QUIC server on a real UDP socket.
 func TestBootstrapMalformedReadiness(t *testing.T) {
 	server, readiness, err := NewServer()
 	require.NoError(t, err)

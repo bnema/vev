@@ -83,6 +83,7 @@ func TestQUICConfigUsesTunnelSafeInitialPacketSize(t *testing.T) {
 	}
 }
 
+// real I/O: uses real loopback sockets.
 func TestQUICConfigValidation(t *testing.T) {
 	cert, _, err := GenerateEphemeralCert()
 	require.NoError(t, err)
@@ -117,6 +118,7 @@ func TestQUICOrderlyCloseDeliversFinalEnvelope(t *testing.T) {
 	require.ErrorIs(t, err, io.EOF)
 }
 
+// real I/O: uses real loopback sockets.
 func TestQUICResolveAddrsExpandsLiteralsAndHonorsContext(t *testing.T) {
 	addrs, err := resolveQUICAddrs(context.Background(), "127.0.0.1:4433")
 	require.NoError(t, err)
