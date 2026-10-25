@@ -198,17 +198,11 @@ func TestP54InitialNavigationIsNotReplayedAfterReconnect(t *testing.T) {
 		first.lose(ports.BrokerError{Code: ports.BrokerErrorUnavailable})
 		synctest.Wait()
 		require.True(t, sup.State().Connectivity == ConnectivityRetryWait)
-		for connector.callCount() < 2 {
-			clock.mu.Lock()
-			var timer *supervisorTestTimer
-			if len(clock.timers) != 0 {
-				timer = clock.timers[len(clock.timers)-1]
-			}
-			clock.mu.Unlock()
-			if timer != nil {
-				timer.fire()
-			}
-		}
+		timers := clock.snapshotTimers()
+		require.NotEmpty(t, timers, "the retry wait must have armed a timer")
+		timers[len(timers)-1].fire()
+		synctest.Wait()
+		require.GreaterOrEqual(t, connector.callCount(), 2, "the retry timer must start a second connection attempt")
 		second.publishSnapshot(localDaemonSnapshot(2, 1))
 		synctest.Wait()
 		require.True(t, sup.State().Connectivity == ConnectivityReady)
