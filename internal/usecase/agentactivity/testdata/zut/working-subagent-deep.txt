@@ -1,0 +1,22 @@
+# zut d9588df (from source) layout at 80x24: running child first, many queued children and their usage rows below it push it past 12 rows from the bottom
+---
+▌ question 28
+▌
+
+  answer 28 with some words
+
+▌
+  ⠋ worker · running · activity 3s ago · 1m05s
+    ↑12k ↓3.4k $0.042 8.1%/272k
+  … reviewer-1 · queued · activity 5s ago · 5s
+    ↑0 ↓0 0.0%/272k
+  … reviewer-2 · queued · activity 5s ago · 5s
+    ↑0 ↓0 0.0%/272k
+  … reviewer-3 · queued · activity 5s ago · 5s
+    ↑0 ↓0 0.0%/272k
+  … reviewer-4 · queued · activity 5s ago · 5s
+    ↑0 ↓0 0.0%/272k
+  … reviewer-5 · queued · activity 5s ago · 5s
+    ↑0 ↓0 0.0%/272k
+  [1] gpt-5.4  ctx0%/272k
+  ~/demo

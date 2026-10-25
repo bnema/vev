@@ -1,4 +1,4 @@
-# zut d9588df redraw at 80x24: assistant markdown quoting subagent indicator rows
+# zut d9588df (from source) layout at 80x24: assistant markdown quoting subagent indicator rows
 ---
 ▌
 ▌ question 2
@@ -8,7 +8,7 @@
 
   • ⠋ worker · running · activity 3s ago · 1m05s
   ┃ ⠙ explorer · Zzzz · activity 12s ago · 40s
-  > ⠚ engineer · running · activity 1s ago · 2s
+  ⠚ engineer · running · activity 1s ago · 2s
   worker · running · activity 3s ago · 1m05s
 
   [1] gpt-5.4  ctx0%/272k

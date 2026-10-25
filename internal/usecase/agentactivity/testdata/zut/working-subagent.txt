@@ -1,4 +1,4 @@
-# zut d9588df redraw at 80x24: parent turn yielded, running and queued resident subagents listed below the input
+# zut d9588df (from source) layout at 80x24: parent turn yielded, running and queued resident subagents listed below the input
 ---
 ▌ question 27
 ▌

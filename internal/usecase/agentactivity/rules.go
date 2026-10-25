@@ -43,7 +43,11 @@ type table struct {
 	// the composer below the input prompt. The wrapped input lines between
 	// them are ignored like the prompt line.
 	composerBorder string
-	rules          []rule
+	// anyPromptRow accepts the lowest prompt-marker line as the live prompt
+	// wherever it sits in the window, for agents that draw variable-height
+	// chrome below the prompt.
+	anyPromptRow bool
+	rules        []rule
 }
 
 // promptRows bounds how low a borderless input prompt, or the border closing
@@ -93,7 +97,7 @@ func (t *table) composer(in *Input) composerView {
 			if nearest >= 0 {
 				view.wrapped = lineSpan{lo: nearest + 1, hi: i}
 			}
-			if i < promptRows {
+			if i < promptRows || t.anyPromptRow {
 				return view
 			}
 			boxed := lowest >= 0 && lowest < promptRows &&
@@ -143,6 +147,8 @@ const (
 	// condAbovePrompt: the first line above the input prompt that pass does
 	// not match is re's match.
 	condAbovePrompt
+	// condBelowPrompt: re matches a line below the live input prompt.
+	condBelowPrompt
 )
 
 type cond struct {
@@ -178,7 +184,12 @@ func (c *cond) eval(t *table, in *Input, view composerView) bool {
 	}
 	skip := view.wrapped
 	lines := in.Lines
-	if len(lines) > c.rows {
+	if c.kind == condBelowPrompt {
+		if view.prompt < 0 {
+			return false
+		}
+		lines = lines[:view.prompt]
+	} else if len(lines) > c.rows {
 		lines = lines[:c.rows]
 	}
 	for i, line := range lines {
@@ -190,7 +201,7 @@ func (c *cond) eval(t *table, in *Input, view composerView) bool {
 			if containsFold(line, c.text) {
 				return true
 			}
-		case condLine:
+		case condLine, condBelowPrompt:
 			if c.re.Match(line) {
 				return true
 			}
@@ -234,6 +245,14 @@ func inputPrompt() cond { return cond{kind: condPrompt} }
 // already dropped.
 func abovePrompt(re, pass *regexp.Regexp) cond {
 	return cond{kind: condAbovePrompt, re: re, pass: pass}
+}
+
+// belowPrompt holds when the live input prompt is visible and re matches a
+// line below it. Lines run lowest first, so those are the lines before the
+// prompt. Wrapped input lines and prompt-marker lines are skipped like in
+// line. The search is bounded by the prompt, not by a row count.
+func belowPrompt(re *regexp.Regexp) cond {
+	return cond{kind: condBelowPrompt, re: re}
 }
 
 func blocked(id string) Signal { return Signal{State: Blocked, Strong: true, Rule: id} }

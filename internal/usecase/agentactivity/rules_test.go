@@ -75,6 +75,7 @@ var classifyCases = map[Agent][]classifyCase{
 		{"working-subagent", working("zut.subagent")},
 		{"working-subagent-model", working("zut.subagent")},
 		{"working-subagent-narrow", working("zut.subagent")},
+		{"working-subagent-deep", working("zut.subagent")},
 		{"blocked-confirm", blocked("zut.confirm")},
 		{"blocked-confirm-drawer", blocked("zut.confirm")},
 		{"blocked-approval", blocked("zut.approval")},
@@ -304,7 +305,7 @@ var inlineCases = []struct {
 		want:  working("zut.busy"),
 	},
 	{
-		name:  "zut parent waiting on a subagent spawn",
+		name:  "zut busy line wins over the subagent rule",
 		agent: Zut,
 		lines: []string{"  ⠙ Running tool: subagent - 2m14s  [1] gpt-5.4  ctx0%/272k"},
 		want:  working("zut.busy"),
@@ -312,8 +313,26 @@ var inlineCases = []struct {
 	{
 		name:  "zut subagent waiting for its model",
 		agent: Zut,
-		lines: []string{"  ⣾ explorer · zzzZ · activity 1d02h ago · 1d02h"},
+		lines: []string{"▌", "  ⣾ explorer · zzzZ · activity 1d02h ago · 1d02h"},
 		want:  working("zut.subagent"),
+	},
+	{
+		name:  "zut subagent row truncated after the status word",
+		agent: Zut,
+		lines: []string{"▌", "  ⠋ worker · running ..."},
+		want:  working("zut.subagent"),
+	},
+	{
+		name:  "zut subagent row truncated inside the status word is a documented miss",
+		agent: Zut,
+		lines: []string{"▌", "  ⠋ worker · runn..."},
+		want:  idle("zut.quiet"),
+	},
+	{
+		name:  "zut subagent row above the prompt is chat",
+		agent: Zut,
+		lines: []string{"  ⠋ worker · running · activity 3s ago · 5s", "▌"},
+		want:  idle("zut.quiet"),
 	},
 	{
 		name:  "zut subagent overflow line alone",

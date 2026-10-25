@@ -1,4 +1,4 @@
-# zut d9588df redraw at 80x24: only queued resident subagents, waiting for a scheduler slot
+# zut d9588df (from source) layout at 80x24: only queued resident subagents, waiting for a scheduler slot
 ---
 ▌ question 28
 ▌

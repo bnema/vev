@@ -42,6 +42,7 @@ var benchCases = []struct {
 	{Codex, "idle-composer"},
 	{OpenCode, "idle-quiet"},
 	{Zut, "blocked-confirm"},
+	{Zut, "idle-quiet"},
 }
 
 var sink Signal

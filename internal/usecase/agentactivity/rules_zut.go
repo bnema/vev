@@ -3,7 +3,7 @@ package agentactivity
 import "regexp"
 
 // zut rules, checked against zut HEAD source (packages/agent/modes) and
-// fixtures captured from its own redraw.
+// fixtures captured or derived from zut's rendering source.
 //
 // The input prompt is the ▌ accent bar; conditions skip it. zut's title
 // carries no busy marker. zut renders inline: under a short transcript its
@@ -34,12 +34,19 @@ var (
 	// The busy prefix while a tool call waits for confirmation. It stays
 	// visible when a tall pane centres the dialog above the window.
 	zutApprovalRe = regexp.MustCompile(`^\s*` + zutFrame + ` Waiting for approval: .* - ` + zutElapsed)
+	// The prompt marker ▌ also prefixes chat messages and the editor.
+	zutPromptRe = regexp.MustCompile(`^\s*▌`)
 	// A running resident child: "<spinner> <name> · <activity> · activity
 	// <age> ago · <age>", where activity is "running" or, while the child
 	// waits for its model, one frame of "Zzzz". Usage metadata may follow
 	// on the row. Queued children show "… <name> · queued" and do not
-	// match. Narrow panes cut the row and end it with "...".
-	zutSubagentRe = regexp.MustCompile(`^\s*` + zutFrame + ` .+? · (?:running|Zzzz|zZzz|zzZz|zzzZ) · (?:activity ` + zutAge + ` ago · ` + zutAge + `(?:\s|$)|.*\.\.\.$)`)
+	// match. A pane too narrow for the row cuts it to the width and ends it
+	// with "...". The full status word must survive the cut: the status
+	// word followed by anything ending in "..." matches ("⠋ worker ·
+	// running ...", "⠋ worker · running · activity 3s ag..."). A row cut
+	// inside or before the status word ("⠋ worker · runn...") stays
+	// undetected.
+	zutSubagentRe = regexp.MustCompile(`^\s*` + zutFrame + ` .+? · (?:running|Zzzz|zZzz|zzZz|zzzZ)(?: · activity ` + zutAge + ` ago · ` + zutAge + `(?:\s|$)|.*\.\.\.$)`)
 )
 
 const (
@@ -51,7 +58,10 @@ const (
 )
 
 var zutTable = table{
-	prompt: "▌",
+	prompt:         "▌",
+	composerPrompt: zutPromptRe,
+	// The resident panel below the prompt can be arbitrarily tall.
+	anyPromptRow: true,
 	rules: []rule{
 		// The dialog may be drawn over prompt rows of the transcript, so its
 		// rows are inspected even when they start with the prompt marker.
@@ -60,9 +70,14 @@ var zutTable = table{
 		)},
 		{signal: blocked("zut.approval"), all: conds(line(8, zutApprovalRe))},
 		{signal: working("zut.busy"), all: conds(line(8, zutWorkingRe))},
-		// Each child takes one row plus wrapped usage rows, so a running
-		// child may sit above several queued ones.
-		{signal: working("zut.subagent"), all: conds(line(12, zutSubagentRe))},
+		// zut draws the panel directly below the input prompt, so only rows
+		// below the prompt count; quoted rows in chat above it do not. zut
+		// sorts children newest-first, so queued rows (and their usage
+		// rows) can sit above running ones: the whole region below the
+		// prompt is searched. Known limits: zut hides the panel while the
+		// /subagents dialog or a child view is open, and input_style lines
+		// or block clears the ▌ prompt, so the panel cannot be located.
+		{signal: working("zut.subagent"), all: conds(belowPrompt(zutSubagentRe))},
 		{signal: idle("zut.quiet")},
 	},
 }
