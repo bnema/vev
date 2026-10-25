@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -931,42 +932,44 @@ func TestSnapshotAssemblerAdoptCommitted(t *testing.T) {
 // writer publishes sequential revisions while readers observe the committed
 // snapshot and staging state.
 func TestSnapshotAssemblerConcurrentReaders(t *testing.T) {
-	a := testSnapshotAssembler(t)
-	const revisions = 40
-	const readers = 4
-	var wg sync.WaitGroup
-	done := make(chan struct{})
-	for i := 0; i < readers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for {
-				select {
-				case <-done:
-					return
-				default:
+	synctest.Test(t, func(t *testing.T) {
+		a := testSnapshotAssembler(t)
+		const revisions = 40
+		const readers = 4
+		var wg sync.WaitGroup
+		done := make(chan struct{})
+		for i := 0; i < readers; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for {
+					select {
+					case <-done:
+						return
+					default:
+					}
+					if snapshot, ok := a.Snapshot(); ok {
+						assert.NotZero(t, snapshot.Revision)
+						assert.NotZero(t, snapshot.Epoch)
+					}
+					_ = a.StagingActive()
 				}
-				if snapshot, ok := a.Snapshot(); ok {
-					assert.NotZero(t, snapshot.Revision)
-					assert.NotZero(t, snapshot.Epoch)
-				}
-				_ = a.StagingActive()
-			}
-		}()
-	}
-	for revision := 1; revision <= revisions; revision++ {
-		parts := snapshotPartsFor(5, ports.BrokerRevision(revision), sampleSnapshotDaemons(), nil)
-		for _, part := range parts {
-			_, _, err := a.Add(part)
-			require.NoError(t, err)
+			}()
 		}
-	}
-	close(done)
-	wg.Wait()
-	snapshot, ok := a.Snapshot()
-	require.True(t, ok)
-	require.Equal(t, ports.BrokerRevision(revisions), snapshot.Revision)
-	require.False(t, a.StagingActive())
+		for revision := 1; revision <= revisions; revision++ {
+			parts := snapshotPartsFor(5, ports.BrokerRevision(revision), sampleSnapshotDaemons(), nil)
+			for _, part := range parts {
+				_, _, err := a.Add(part)
+				require.NoError(t, err)
+			}
+		}
+		close(done)
+		wg.Wait()
+		snapshot, ok := a.Snapshot()
+		require.True(t, ok)
+		require.Equal(t, ports.BrokerRevision(revisions), snapshot.Revision)
+		require.False(t, a.StagingActive())
+	})
 }
 
 // assemblerFrames concatenates 4-byte big-endian length-prefixed frames, so one

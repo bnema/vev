@@ -3,6 +3,7 @@ package brokerwire
 import (
 	"sync"
 	"testing"
+	"testing/synctest"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -847,142 +848,148 @@ func TestConnectionStreamsAndOperations(t *testing.T) {
 // exactly MaxPendingOperations distinct operations are admitted concurrently
 // and completed concurrently.
 func TestOperationTrackerConcurrentAdmitComplete(t *testing.T) {
-	scope := testBrokerScope()
-	tr, err := newOperationTracker(scope)
-	require.NoError(t, err)
-	var wg sync.WaitGroup
-	errs := make(chan error, 2*MaxPendingOperations)
-	for i := 0; i < MaxPendingOperations; i++ {
-		op := operationIDAt(i)
-		wg.Add(1)
-		go func(op ports.BrokerOperationID) {
-			defer wg.Done()
-			if err := tr.Admit(scope, op); err != nil {
-				errs <- err
-			}
-		}(op)
-	}
-	wg.Wait()
-	require.Equal(t, MaxPendingOperations, tr.Pending())
-	for i := 0; i < MaxPendingOperations; i++ {
-		op := operationIDAt(i)
-		wg.Add(1)
-		go func(op ports.BrokerOperationID) {
-			defer wg.Done()
-			if err := tr.Complete(scope, op, ports.BrokerOutcomeOK); err != nil {
-				errs <- err
-			}
-		}(op)
-	}
-	wg.Wait()
-	close(errs)
-	for err := range errs {
+	synctest.Test(t, func(t *testing.T) {
+		scope := testBrokerScope()
+		tr, err := newOperationTracker(scope)
 		require.NoError(t, err)
-	}
-	require.Zero(t, tr.Pending())
-	require.Equal(t, MaxPendingOperations, tr.Tracked())
-	require.Equal(t, MaxPendingOperations*operationIDBytes, tr.DedupBytes())
+		var wg sync.WaitGroup
+		errs := make(chan error, 2*MaxPendingOperations)
+		for i := 0; i < MaxPendingOperations; i++ {
+			op := operationIDAt(i)
+			wg.Add(1)
+			go func(op ports.BrokerOperationID) {
+				defer wg.Done()
+				if err := tr.Admit(scope, op); err != nil {
+					errs <- err
+				}
+			}(op)
+		}
+		wg.Wait()
+		require.Equal(t, MaxPendingOperations, tr.Pending())
+		for i := 0; i < MaxPendingOperations; i++ {
+			op := operationIDAt(i)
+			wg.Add(1)
+			go func(op ports.BrokerOperationID) {
+				defer wg.Done()
+				if err := tr.Complete(scope, op, ports.BrokerOutcomeOK); err != nil {
+					errs <- err
+				}
+			}(op)
+		}
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			require.NoError(t, err)
+		}
+		require.Zero(t, tr.Pending())
+		require.Equal(t, MaxPendingOperations, tr.Tracked())
+		require.Equal(t, MaxPendingOperations*operationIDBytes, tr.DedupBytes())
+	})
 }
 
 // TestStreamTrackerConcurrentFrames is a deterministic race test: one stream
 // per goroutine progresses and retires concurrently.
 func TestStreamTrackerConcurrentFrames(t *testing.T) {
-	scope := testBrokerScope()
-	tr, err := newStreamTracker(scope)
-	require.NoError(t, err)
-	for i := 1; i <= MaxStreams; i++ {
-		require.NoError(t, tr.Open(scope, ports.BrokerStreamID(i)))
-	}
-	var wg sync.WaitGroup
-	errs := make(chan error, MaxStreams)
-	for i := 1; i <= MaxStreams; i++ {
-		stream := ports.BrokerStreamID(i)
-		wg.Add(1)
-		go func(stream ports.BrokerStreamID) {
-			defer wg.Done()
-			if _, err := tr.Progress(scope, stream); err != nil {
-				errs <- err
-			}
-			if err := tr.Opened(scope, stream); err != nil {
-				errs <- err
-			}
-			if disposition, err := tr.Data(scope, stream); err != nil || disposition != StreamAccepted {
-				errs <- err
-			}
-			if disposition, err := tr.Close(scope, stream); err != nil || disposition != StreamAccepted {
-				errs <- err
-			}
-		}(stream)
-	}
-	wg.Wait()
-	close(errs)
-	for err := range errs {
+	synctest.Test(t, func(t *testing.T) {
+		scope := testBrokerScope()
+		tr, err := newStreamTracker(scope)
 		require.NoError(t, err)
-	}
-	require.Zero(t, tr.Active())
+		for i := 1; i <= MaxStreams; i++ {
+			require.NoError(t, tr.Open(scope, ports.BrokerStreamID(i)))
+		}
+		var wg sync.WaitGroup
+		errs := make(chan error, MaxStreams)
+		for i := 1; i <= MaxStreams; i++ {
+			stream := ports.BrokerStreamID(i)
+			wg.Add(1)
+			go func(stream ports.BrokerStreamID) {
+				defer wg.Done()
+				if _, err := tr.Progress(scope, stream); err != nil {
+					errs <- err
+				}
+				if err := tr.Opened(scope, stream); err != nil {
+					errs <- err
+				}
+				if disposition, err := tr.Data(scope, stream); err != nil || disposition != StreamAccepted {
+					errs <- err
+				}
+				if disposition, err := tr.Close(scope, stream); err != nil || disposition != StreamAccepted {
+					errs <- err
+				}
+			}(stream)
+		}
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			require.NoError(t, err)
+		}
+		require.Zero(t, tr.Active())
+	})
 }
 
 // TestConnectionConcurrentWork is a deterministic race test: the connection
 // publishes sequential revisions while readers observe it and operations
 // complete concurrently.
 func TestConnectionConcurrentWork(t *testing.T) {
-	conn := readyTestConnection(t)
-	require.NoError(t, conn.Subscribe(1))
-	hosts := sampleSnapshotDaemons()
-	const revisions = 20
-	const operations = 32
-	for i := 0; i < operations; i++ {
-		require.NoError(t, conn.AdmitOperation(operationIDAt(i)))
-	}
+	synctest.Test(t, func(t *testing.T) {
+		conn := readyTestConnection(t)
+		require.NoError(t, conn.Subscribe(1))
+		hosts := sampleSnapshotDaemons()
+		const revisions = 20
+		const operations = 32
+		for i := 0; i < operations; i++ {
+			require.NoError(t, conn.AdmitOperation(operationIDAt(i)))
+		}
 
-	var wg sync.WaitGroup
-	done := make(chan struct{})
-	errs := make(chan error, operations)
-	for i := 0; i < 4; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for {
-				select {
-				case <-done:
-					return
-				default:
+		var wg sync.WaitGroup
+		done := make(chan struct{})
+		errs := make(chan error, operations)
+		for i := 0; i < 4; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for {
+					select {
+					case <-done:
+						return
+					default:
+					}
+					assert.Equal(t, ConnReady, conn.State())
+					assert.Equal(t, testBrokerScope(), conn.Scope())
+					if snapshot, ok := conn.Snapshot(); ok {
+						assert.NotZero(t, snapshot.Revision)
+					}
 				}
-				assert.Equal(t, ConnReady, conn.State())
-				assert.Equal(t, testBrokerScope(), conn.Scope())
-				if snapshot, ok := conn.Snapshot(); ok {
-					assert.NotZero(t, snapshot.Revision)
+			}()
+		}
+		for i := 0; i < operations; i++ {
+			op := operationIDAt(i)
+			wg.Add(1)
+			go func(op ports.BrokerOperationID) {
+				defer wg.Done()
+				if err := conn.CompleteOperation(op, ports.BrokerOutcomeOK); err != nil {
+					errs <- err
 				}
+			}(op)
+		}
+		for revision := 1; revision <= revisions; revision++ {
+			for _, part := range snapshotPartsFor(1, ports.BrokerRevision(revision), hosts, nil) {
+				_, _, err := conn.AddSnapshotPart(part)
+				require.NoError(t, err)
 			}
-		}()
-	}
-	for i := 0; i < operations; i++ {
-		op := operationIDAt(i)
-		wg.Add(1)
-		go func(op ports.BrokerOperationID) {
-			defer wg.Done()
-			if err := conn.CompleteOperation(op, ports.BrokerOutcomeOK); err != nil {
-				errs <- err
-			}
-		}(op)
-	}
-	for revision := 1; revision <= revisions; revision++ {
-		for _, part := range snapshotPartsFor(1, ports.BrokerRevision(revision), hosts, nil) {
-			_, _, err := conn.AddSnapshotPart(part)
+		}
+		close(done)
+		wg.Wait()
+		close(errs)
+		for err := range errs {
 			require.NoError(t, err)
 		}
-	}
-	close(done)
-	wg.Wait()
-	close(errs)
-	for err := range errs {
-		require.NoError(t, err)
-	}
-	require.Zero(t, connectionOperations(conn).Pending())
-	require.Equal(t, operations, connectionOperations(conn).Tracked())
-	snapshot, ok := conn.Snapshot()
-	require.True(t, ok)
-	require.Equal(t, ports.BrokerRevision(revisions), snapshot.Revision)
+		require.Zero(t, connectionOperations(conn).Pending())
+		require.Equal(t, operations, connectionOperations(conn).Tracked())
+		snapshot, ok := conn.Snapshot()
+		require.True(t, ok)
+		require.Equal(t, ports.BrokerRevision(revisions), snapshot.Revision)
+	})
 }
 
 // TestConnectionCloseRaceNoPostCloseAdmission proves the connection lock
@@ -992,80 +999,86 @@ func TestConnectionConcurrentWork(t *testing.T) {
 // is refused.
 func TestConnectionCloseRaceNoPostCloseAdmission(t *testing.T) {
 	t.Run("admit", func(t *testing.T) {
-		for i := 0; i < 500; i++ {
-			conn := readyTestConnection(t)
-			op := operationIDAt(1)
-			var wg sync.WaitGroup
-			start := make(chan struct{})
-			var admitErr error
-			wg.Add(2)
-			go func() { defer wg.Done(); <-start; admitErr = conn.AdmitOperation(op) }()
-			go func() { defer wg.Done(); <-start; _ = conn.BeginClose(); _ = conn.FinishClose() }()
-			close(start)
-			wg.Wait()
-			require.Equal(t, ConnClosed, conn.State(), "iteration %d", i)
-			require.Zero(t, connectionOperations(conn).Pending(), "iteration %d: no admitted operation survives close", i)
-			if admitErr != nil {
-				require.ErrorIs(t, admitErr, ErrConnectionClosed, "iteration %d", i)
+		synctest.Test(t, func(t *testing.T) {
+			for i := 0; i < 500; i++ {
+				conn := readyTestConnection(t)
+				op := operationIDAt(1)
+				var wg sync.WaitGroup
+				start := make(chan struct{})
+				var admitErr error
+				wg.Add(2)
+				go func() { defer wg.Done(); <-start; admitErr = conn.AdmitOperation(op) }()
+				go func() { defer wg.Done(); <-start; _ = conn.BeginClose(); _ = conn.FinishClose() }()
+				close(start)
+				wg.Wait()
+				require.Equal(t, ConnClosed, conn.State(), "iteration %d", i)
+				require.Zero(t, connectionOperations(conn).Pending(), "iteration %d: no admitted operation survives close", i)
+				if admitErr != nil {
+					require.ErrorIs(t, admitErr, ErrConnectionClosed, "iteration %d", i)
+				}
+				// The closed connection admits nothing, and a refused attempt
+				// mutates nothing.
+				require.ErrorIs(t, conn.AdmitOperation(op), ErrConnectionClosed)
+				require.Zero(t, connectionOperations(conn).Pending())
 			}
-			// The closed connection admits nothing, and a refused attempt
-			// mutates nothing.
-			require.ErrorIs(t, conn.AdmitOperation(op), ErrConnectionClosed)
-			require.Zero(t, connectionOperations(conn).Pending())
-		}
+		})
 	})
 
 	t.Run("open", func(t *testing.T) {
-		for i := 0; i < 500; i++ {
-			conn := readyTestConnection(t)
-			var wg sync.WaitGroup
-			start := make(chan struct{})
-			var openErr error
-			wg.Add(2)
-			go func() { defer wg.Done(); <-start; openErr = conn.OpenStream(1) }()
-			go func() { defer wg.Done(); <-start; _ = conn.BeginClose(); _ = conn.FinishClose() }()
-			close(start)
-			wg.Wait()
-			require.Equal(t, ConnClosed, conn.State(), "iteration %d", i)
-			require.Zero(t, connectionStreams(conn).Active(), "iteration %d: no opened stream survives close", i)
-			if openErr != nil {
-				require.ErrorIs(t, openErr, ErrConnectionClosed, "iteration %d", i)
+		synctest.Test(t, func(t *testing.T) {
+			for i := 0; i < 500; i++ {
+				conn := readyTestConnection(t)
+				var wg sync.WaitGroup
+				start := make(chan struct{})
+				var openErr error
+				wg.Add(2)
+				go func() { defer wg.Done(); <-start; openErr = conn.OpenStream(1) }()
+				go func() { defer wg.Done(); <-start; _ = conn.BeginClose(); _ = conn.FinishClose() }()
+				close(start)
+				wg.Wait()
+				require.Equal(t, ConnClosed, conn.State(), "iteration %d", i)
+				require.Zero(t, connectionStreams(conn).Active(), "iteration %d: no opened stream survives close", i)
+				if openErr != nil {
+					require.ErrorIs(t, openErr, ErrConnectionClosed, "iteration %d", i)
+				}
+				require.ErrorIs(t, conn.OpenStream(1), ErrConnectionClosed)
+				require.Zero(t, connectionStreams(conn).Active())
 			}
-			require.ErrorIs(t, conn.OpenStream(1), ErrConnectionClosed)
-			require.Zero(t, connectionStreams(conn).Active())
-		}
+		})
 	})
 
 	t.Run("burst", func(t *testing.T) {
-		conn := readyTestConnection(t)
-		const attempts = MaxPendingOperations
-		var wg sync.WaitGroup
-		start := make(chan struct{})
-		errs := make([]error, attempts)
-		wg.Add(attempts + 1)
-		for i := 0; i < attempts; i++ {
-			go func(i int) {
+		synctest.Test(t, func(t *testing.T) {
+			conn := readyTestConnection(t)
+			const attempts = MaxPendingOperations
+			var wg sync.WaitGroup
+			start := make(chan struct{})
+			errs := make([]error, attempts)
+			wg.Add(attempts + 1)
+			for i := 0; i < attempts; i++ {
+				go func(i int) {
+					defer wg.Done()
+					<-start
+					errs[i] = conn.AdmitOperation(operationIDAt(i))
+				}(i)
+			}
+			go func() {
 				defer wg.Done()
 				<-start
-				errs[i] = conn.AdmitOperation(operationIDAt(i))
-			}(i)
-		}
-		go func() {
-			defer wg.Done()
-			<-start
-			_ = conn.BeginClose()
-			_ = conn.FinishClose()
-		}()
-		close(start)
-		wg.Wait()
-		require.Equal(t, ConnClosed, conn.State())
-		require.Zero(t, connectionOperations(conn).Pending(), "no admitted operation survives the racing close")
-		for i, err := range errs {
-			if err != nil {
-				require.ErrorIs(t, err, ErrConnectionClosed, "attempt %d", i)
+				_ = conn.BeginClose()
+				_ = conn.FinishClose()
+			}()
+			close(start)
+			wg.Wait()
+			require.Equal(t, ConnClosed, conn.State())
+			require.Zero(t, connectionOperations(conn).Pending(), "no admitted operation survives the racing close")
+			for i, err := range errs {
+				if err != nil {
+					require.ErrorIs(t, err, ErrConnectionClosed, "attempt %d", i)
+				}
 			}
-		}
-		require.ErrorIs(t, conn.AdmitOperation(operationIDAt(attempts+1)), ErrConnectionClosed)
+			require.ErrorIs(t, conn.AdmitOperation(operationIDAt(attempts+1)), ErrConnectionClosed)
+		})
 	})
 }
 
