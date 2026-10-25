@@ -148,6 +148,9 @@ func readPacket(t *testing.T, conn *net.UDPConn) []byte {
 	return append([]byte(nil), buf[:n]...)
 }
 
+// awaitPacket uses real I/O; its waits are wall-clock bounded.
+//
+//testpolicy:realtime real QUIC over UDP through the lossy UDP proxy
 func awaitPacket(t *testing.T, packets <-chan datagram) datagram {
 	t.Helper()
 	select {
@@ -159,6 +162,9 @@ func awaitPacket(t *testing.T, packets <-chan datagram) datagram {
 	return datagram{}
 }
 
+// awaitEvent uses real I/O; its waits are wall-clock bounded.
+//
+//testpolicy:realtime real QUIC over UDP through the lossy UDP proxy
 func awaitEvent(t *testing.T, events <-chan Event) Event {
 	t.Helper()
 	select {

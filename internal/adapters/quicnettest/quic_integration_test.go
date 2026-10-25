@@ -100,6 +100,8 @@ func goAccept(listener *quicadapter.Listener) <-chan acceptResult {
 
 // dialRealQUIC accepts on the listener and dials the proxy with the pinned
 // fingerprint, returning both ends of the real QUIC carriage.
+//
+//testpolicy:realtime real QUIC over UDP through the lossy UDP proxy
 func dialRealQUIC(t *testing.T, proxy *quicnettest.Proxy, listener *quicadapter.Listener, fingerprint []byte) (wire.Transport, wire.Transport) {
 	t.Helper()
 	accepted := goAccept(listener)
@@ -162,6 +164,9 @@ func exchangeWithReply(t *testing.T, client ports.ClientConnection, server ports
 	return got
 }
 
+// awaitServerReceive uses real I/O; its waits are wall-clock bounded.
+//
+//testpolicy:realtime real QUIC over UDP through the lossy UDP proxy
 func awaitServerReceive(t *testing.T, received <-chan serverReceive) serverReceive {
 	t.Helper()
 	select {
@@ -416,6 +421,8 @@ func accounted(link quicnettest.LinkStats) bool {
 
 // assertBoundedCleanup closes every resource with a deadline and requires the
 // goroutine count to return near its pre-test baseline.
+//
+//testpolicy:realtime real QUIC over UDP through the lossy UDP proxy
 func assertBoundedCleanup(t *testing.T, proxy *quicnettest.Proxy, listener *quicadapter.Listener, client, server interface{ Close() error }, baseline int) {
 	t.Helper()
 	closed := make(chan error, 1)
