@@ -311,7 +311,8 @@ func TestSnapshotCodecPreservesConsumedAndExpelledPaneLayout(t *testing.T) {
 
 func TestSnapshotRuntimeRestorePreservesConsumedAndExpelledPaneLayout(t *testing.T) {
 	fixture := captureConsumedAndExpelledPaneLayout(t)
-	restoreDaemon := newTestDaemon(t, newFactory(t, &paneRearrangePTY{}), newStubClock(t))
+	restorePTY, _ := newPaneRearrangePTY(t)
+	restoreDaemon := newTestDaemon(t, newFactory(t, restorePTY), newStubClock(t))
 	restoredTabs, err := restoreDaemon.restoreSnapshotTabs(context.Background(), restoreDaemon.serveCtx, fixture.snapshot)
 	require.NoError(t, err)
 	defer closeRestoredTabs(restoredTabs)
