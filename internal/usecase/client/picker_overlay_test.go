@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -21,7 +22,7 @@ import (
 
 // recordOp records one picker decision on the scripted picker, exactly like
 // the controller's coalesced wake.
-func (p *attachTestPicker) recordOp(op pickerOp, key string, request ports.BrokerOpenStreamRequest) {
+func (p *attachTestPickerState) recordOp(op pickerOp, key string, request ports.BrokerOpenStreamRequest) {
 	p.mu.Lock()
 	p.op = op
 	p.key = key
@@ -34,7 +35,7 @@ func (p *attachTestPicker) recordOp(op pickerOp, key string, request ports.Broke
 }
 
 // opTaken reports whether the supervisor consumed the recorded decision.
-func (p *attachTestPicker) opTaken() bool {
+func (p *attachTestPickerState) opTaken() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.op == (pickerOp{})
@@ -42,11 +43,11 @@ func (p *attachTestPicker) opTaken() bool {
 
 // attachLiveSession commits one attachment on the harness and returns its
 // stream once the attachment is presented.
-func attachLiveSession(t *testing.T, harness *attachTestHarness, picker *attachTestPicker) *sessionTestStream {
+func attachLiveSession(t *testing.T, harness *attachTestHarness, picker *attachTestPickerState) *streamLog {
 	t.Helper()
-	stream := newSessionTestStream()
+	stream := newSessionStream(t)
 	harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-		return stream, nil
+		return stream.conn, nil
 	})
 	picker.commit(sessionTestRequest(true))
 	awaitStreamHello(t, &sync.Mutex{}, &stream)
@@ -63,14 +64,16 @@ func publishLiveLocal(harness *attachTestHarness, target protocol.ExactSessionTa
 
 func awaitPresentation(t *testing.T, sup *Supervisor, want Presentation) {
 	t.Helper()
-	require.Eventually(t, func() bool { return sup.State().Presentation == want }, 5*time.Second, time.Millisecond, "presentation never became %s", want)
+	synctest.Wait()
+	require.True(t, sup.State().Presentation == want, "presentation never became %s", want)
 }
 
 // awaitSent waits for the first client message matching match.
-func awaitSent(t *testing.T, stream *sessionTestStream, what string, match func(protocol.ClientMessage) bool) protocol.ClientMessage {
+func awaitSent(t *testing.T, stream *streamLog, what string, match func(protocol.ClientMessage) bool) protocol.ClientMessage {
 	t.Helper()
 	var found protocol.ClientMessage
-	require.Eventually(t, func() bool {
+	synctest.Wait()
+	require.True(t, func() bool {
 		for _, message := range stream.messages() {
 			if match(message) {
 				found = message
@@ -78,11 +81,11 @@ func awaitSent(t *testing.T, stream *sessionTestStream, what string, match func(
 			}
 		}
 		return false
-	}, 5*time.Second, time.Millisecond, "client never sent %s", what)
+	}(), "client never sent %s", what)
 	return found
 }
 
-func countSent[T protocol.ClientMessage](stream *sessionTestStream) int {
+func countSent[T protocol.ClientMessage](stream *streamLog) int {
 	count := 0
 	for _, message := range stream.messages() {
 		if _, ok := message.(T); ok {
@@ -125,49 +128,53 @@ func TestPickerOverlayReturnsToLiveAttachment(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			picker := newAttachTestPicker()
-			harness := startAttachHarness(t, picker)
-			stream := attachLiveSession(t, harness, picker)
-			foreground := harness.sup.attachments.authority.foreground()
-			require.NotNil(t, foreground)
-			require.False(t, picker.owns())
+			synctest.Test(t, func(t *testing.T) {
+				pickerMock, picker := newAttachTestPicker(t)
+				harness := startAttachHarness(t, pickerMock)
+				stream := attachLiveSession(t, harness, picker)
+				foreground := harness.sup.attachments.authority.foreground()
+				require.NotNil(t, foreground)
+				require.False(t, picker.owns())
 
-			stream.deliver(navigationOffer(1))
-			awaitPresentation(t, harness.sup, PresentAttachedPicker)
-			require.True(t, picker.owns(), "the picker owns input while it is open")
+				stream.deliver(navigationOffer(1))
+				awaitPresentation(t, harness.sup, PresentAttachedPicker)
+				require.True(t, picker.owns(), "the picker owns input while it is open")
 
-			// Input belongs to the picker: it is consumed, never sent as session
-			// Input.
-			harness.reader.push([]byte("j"))
-			require.Eventually(t, func() bool { return picker.consumedCount() == 1 }, 5*time.Second, time.Millisecond)
-			require.Zero(t, countSent[protocol.Input](stream), "picker input must never reach the session")
+				// Input belongs to the picker: it is consumed, never sent as session
+				// Input.
+				harness.reader.push([]byte("j"))
+				synctest.Wait()
+				require.True(t, picker.consumedCount() == 1)
+				require.Zero(t, countSent[protocol.Input](stream), "picker input must never reach the session")
 
-			// Attachment output is applied and acknowledged, never written over
-			// the picker.
-			acks := countSent[protocol.Ack](stream)
-			stream.deliver(laterOutput(2, 2, "hidden-frame"))
-			require.Eventually(t, func() bool { return countSent[protocol.Ack](stream) > acks }, 5*time.Second, time.Millisecond)
-			require.NotContains(t, harness.terminal.written(), "hidden-frame")
+				// Attachment output is applied and acknowledged, never written over
+				// the picker.
+				acks := countSent[protocol.Ack](stream)
+				stream.deliver(laterOutput(2, 2, "hidden-frame"))
+				synctest.Wait()
+				require.True(t, countSent[protocol.Ack](stream) > acks)
+				require.NotContains(t, harness.terminal.written(), "hidden-frame")
 
-			picker.recordOp(tt.op, tt.key, sessionTestRequest(true))
-			awaitPresentation(t, harness.sup, PresentAttached)
-			awaitSent(t, stream, "OutputResetRequest", isSent[protocol.OutputResetRequest])
+				picker.recordOp(tt.op, tt.key, sessionTestRequest(true))
+				awaitPresentation(t, harness.sup, PresentAttached)
+				awaitSent(t, stream, "OutputResetRequest", isSent[protocol.OutputResetRequest])
 
-			require.Same(t, foreground, harness.sup.attachments.authority.foreground(), "cancel must keep the same live attachment")
-			require.False(t, stream.closedNow())
-			require.Len(t, harness.service.openedRequests(), 1, "cancel must not reconnect")
-			require.Zero(t, countSent[protocol.Detach](stream))
-			require.False(t, picker.owns())
+				require.Same(t, foreground, harness.sup.attachments.authority.foreground(), "cancel must keep the same live attachment")
+				require.False(t, stream.closedNow())
+				require.Len(t, harness.service.openedRequests(), 1, "cancel must not reconnect")
+				require.Zero(t, countSent[protocol.Detach](stream))
+				require.False(t, picker.owns())
 
-			// The session owns input again.
-			harness.reader.push([]byte("z"))
-			input := awaitSent(t, stream, "session Input", isSent[protocol.Input]).(protocol.Input)
-			require.Equal(t, []byte("z"), input.Data)
-			select {
-			case <-harness.runDone:
-				t.Fatal("cancelling the overlay ended the process")
-			default:
-			}
+				// The session owns input again.
+				harness.reader.push([]byte("z"))
+				input := awaitSent(t, stream, "session Input", isSent[protocol.Input]).(protocol.Input)
+				require.Equal(t, []byte("z"), input.Data)
+				select {
+				case <-harness.runDone:
+					t.Fatal("cancelling the overlay ended the process")
+				default:
+				}
+			})
 		})
 	}
 }
@@ -193,68 +200,71 @@ func TestPickerOverlayCommitElsewhereSwitchesAttachment(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			picker := newAttachTestPicker()
-			notices := make(chan LifecycleNotice, 8)
-			harness := startAttachHarnessConfig(t, picker, func(cfg *SupervisorConfig) {
-				cfg.NotifyLifecycle = func(notice LifecycleNotice) { notices <- notice }
-			})
-			if tt.stopped {
-				harness.service.publishSnapshot(routeTestSnapshot(routeTestLocal(catalogue.RemoteCatalogSession{LifecycleID: beta.LifecycleID, Name: beta.SessionName, State: catalogue.RemoteCatalogSessionDown})))
-			} else {
-				publishLiveLocal(harness, beta)
-			}
-			first := attachLiveSession(t, harness, picker)
-			foreground := harness.sup.attachments.authority.foreground()
-			first.deliver(navigationOffer(1))
-			awaitPresentation(t, harness.sup, PresentAttachedPicker)
-
-			var mu sync.Mutex
-			second := newSessionTestStream()
-			harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-				return second, nil
-			})
-			other := sessionTestRequest(tt.local)
-			other.Target = beta
-			picker.recordOp(pickerOp{commit: true}, "row", other)
-
-			if tt.local && !tt.stopped {
-				request := awaitSent(t, first, "SamePeerSwitchRequest", isSent[protocol.SamePeerSwitchRequest]).(protocol.SamePeerSwitchRequest)
-				require.Equal(t, beta, request.Target)
-				awaitPresentation(t, harness.sup, PresentAttached)
-				if tt.inPlace {
-					destination := laterOutput(2, 2, "\x1b[Hbeta")
-					destination.Context.Route.Target = beta
-					first.deliver(destination)
-					require.Eventually(t, func() bool { return strings.Contains(harness.terminal.written(), "beta") }, 5*time.Second, time.Millisecond)
-					require.Same(t, foreground, harness.sup.attachments.authority.foreground(), "an in-place switch keeps the attachment")
-					require.Len(t, harness.service.openedRequests(), 1, "an in-place switch never reconnects")
-					require.Zero(t, countSent[protocol.Detach](first))
-					require.Zero(t, countSent[protocol.OutputResetRequest](first), "an in-place switch never repaints the source")
-					return
+			synctest.Test(t, func(t *testing.T) {
+				pickerMock, picker := newAttachTestPicker(t)
+				notices := make(chan LifecycleNotice, 8)
+				harness := startAttachHarnessConfig(t, pickerMock, func(cfg *SupervisorConfig) {
+					cfg.NotifyLifecycle = func(notice LifecycleNotice) { notices <- notice }
+				})
+				if tt.stopped {
+					harness.service.publishSnapshot(routeTestSnapshot(routeTestLocal(catalogue.RemoteCatalogSession{LifecycleID: beta.LifecycleID, Name: beta.SessionName, State: catalogue.RemoteCatalogSessionDown})))
+				} else {
+					publishLiveLocal(harness, beta)
 				}
-				first.deliver(protocol.SamePeerSwitchFailure{RequestID: request.RequestID, Code: protocol.SamePeerSwitchStaleTarget})
-			}
+				first := attachLiveSession(t, harness, picker)
+				foreground := harness.sup.attachments.authority.foreground()
+				first.deliver(navigationOffer(1))
+				awaitPresentation(t, harness.sup, PresentAttachedPicker)
 
-			awaitSent(t, first, "Detach", isSent[protocol.Detach])
-			awaitStreamHello(t, &mu, &second)
-			second.deliver(protocol.Welcome{SessionName: "beta"})
-			output := sessionTestOutput(1, "\x1b[Hbeta")
-			output.Context.Route.Target = other.Target
-			second.deliver(output)
-			awaitAttachedState(t, harness.sup)
+				var mu sync.Mutex
+				second := newSessionStream(t)
+				harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+					return second.conn, nil
+				})
+				other := sessionTestRequest(tt.local)
+				other.Target = beta
+				picker.recordOp(pickerOp{commit: true}, "row", other)
 
-			opened := harness.service.openedRequests()
-			require.Len(t, opened, 2)
-			require.Equal(t, other.Target, opened[1].Target)
-			require.True(t, first.closedNow(), "the previous attachment is released")
-			if tt.stopped || !tt.local {
-				require.Zero(t, countSent[protocol.SamePeerSwitchRequest](first), "only a live session on the serving daemon is tried in place")
-			}
-			select {
-			case notice := <-notices:
-				t.Fatalf("a swap must not report a lifecycle transition to the picker: %+v", notice)
-			default:
-			}
+				if tt.local && !tt.stopped {
+					request := awaitSent(t, first, "SamePeerSwitchRequest", isSent[protocol.SamePeerSwitchRequest]).(protocol.SamePeerSwitchRequest)
+					require.Equal(t, beta, request.Target)
+					awaitPresentation(t, harness.sup, PresentAttached)
+					if tt.inPlace {
+						destination := laterOutput(2, 2, "\x1b[Hbeta")
+						destination.Context.Route.Target = beta
+						first.deliver(destination)
+						synctest.Wait()
+						require.True(t, strings.Contains(harness.terminal.written(), "beta"))
+						require.Same(t, foreground, harness.sup.attachments.authority.foreground(), "an in-place switch keeps the attachment")
+						require.Len(t, harness.service.openedRequests(), 1, "an in-place switch never reconnects")
+						require.Zero(t, countSent[protocol.Detach](first))
+						require.Zero(t, countSent[protocol.OutputResetRequest](first), "an in-place switch never repaints the source")
+						return
+					}
+					first.deliver(protocol.SamePeerSwitchFailure{RequestID: request.RequestID, Code: protocol.SamePeerSwitchStaleTarget})
+				}
+
+				awaitSent(t, first, "Detach", isSent[protocol.Detach])
+				awaitStreamHello(t, &mu, &second)
+				second.deliver(protocol.Welcome{SessionName: "beta"})
+				output := sessionTestOutput(1, "\x1b[Hbeta")
+				output.Context.Route.Target = other.Target
+				second.deliver(output)
+				awaitAttachedState(t, harness.sup)
+
+				opened := harness.service.openedRequests()
+				require.Len(t, opened, 2)
+				require.Equal(t, other.Target, opened[1].Target)
+				require.True(t, first.closedNow(), "the previous attachment is released")
+				if tt.stopped || !tt.local {
+					require.Zero(t, countSent[protocol.SamePeerSwitchRequest](first), "only a live session on the serving daemon is tried in place")
+				}
+				select {
+				case notice := <-notices:
+					t.Fatalf("a swap must not report a lifecycle transition to the picker: %+v", notice)
+				default:
+				}
+			})
 		})
 	}
 }
@@ -292,113 +302,117 @@ func TestPickerOverlaySettlesUIActions(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			picker := newAttachTestPicker()
-			var ui *UI
-			harness := startAttachHarnessConfig(t, picker, func(cfg *SupervisorConfig) {
-				ui = NewUI(cfg.Terminal.(ports.UIState), cfg.Clock)
-				cfg.UI = ui
-			})
-			publishLiveLocal(harness, beta)
-			stream := attachLiveSession(t, harness, picker)
-			attached := sessionTestOutput(2, "\x1b[Hattached")
-			attached.Full, attached.Base, attached.New = false, 1, 2
-			stream.deliver(attached)
-			var snapshot ports.UISnapshot
-			require.Eventually(t, func() bool {
-				var err error
-				snapshot, err = ui.Capture(ui.Handle())
-				return err == nil && snapshot.Context.Status == ports.UIStatusAttached && snapshot.Context.ViewPublication == 2
-			}, 5*time.Second, time.Millisecond)
-			if tt.overlayFirst {
-				stream.deliver(navigationOffer(1))
-				awaitPresentation(t, harness.sup, PresentAttachedPicker)
-				// The composition paints the overlay with the live attachment's
-				// context, so the attachment stays the actionable generation.
-				overlayContext, ok := ui.OverlayContext()
-				require.True(t, ok)
-				require.Equal(t, ports.UIStatusAttached, overlayContext.Status)
-				require.Equal(t, snapshot.Context.Generation, overlayContext.Generation)
-				require.Equal(t, alpha, overlayContext.Route.Target)
-			}
-			var mu sync.Mutex
-			second := newSessionTestStream()
-			if tt.commit {
-				harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-					return second, nil
+			synctest.Test(t, func(t *testing.T) {
+				pickerMock, picker := newAttachTestPicker(t)
+				var ui *UI
+				harness := startAttachHarnessConfig(t, pickerMock, func(cfg *SupervisorConfig) {
+					ui = NewUI(cfg.Terminal.(ports.UIState), cfg.Clock)
+					cfg.UI = ui
 				})
-				// A remote target is another daemon, so it swaps.
-				other := sessionTestRequest(tt.inPlace)
-				other.Target = beta
-				picker.decideOnConsume(pickerOp{commit: true}, other)
-			}
-			fences := countSent[protocol.UIFence](stream)
-			consumed := picker.consumedCount()
+				publishLiveLocal(harness, beta)
+				stream := attachLiveSession(t, harness, picker)
+				attached := sessionTestOutput(2, "\x1b[Hattached")
+				attached.Full, attached.Base, attached.New = false, 1, 2
+				stream.deliver(attached)
+				var snapshot ports.UISnapshot
+				synctest.Wait()
+				require.True(t, func() bool {
+					var err error
+					snapshot, err = ui.Capture(ui.Handle())
+					return err == nil && snapshot.Context.Status == ports.UIStatusAttached && snapshot.Context.ViewPublication == 2
+				}())
+				if tt.overlayFirst {
+					stream.deliver(navigationOffer(1))
+					awaitPresentation(t, harness.sup, PresentAttachedPicker)
+					// The composition paints the overlay with the live attachment's
+					// context, so the attachment stays the actionable generation.
+					overlayContext, ok := ui.OverlayContext()
+					require.True(t, ok)
+					require.Equal(t, ports.UIStatusAttached, overlayContext.Status)
+					require.Equal(t, snapshot.Context.Generation, overlayContext.Generation)
+					require.Equal(t, alpha, overlayContext.Route.Target)
+				}
+				var mu sync.Mutex
+				second := newSessionStream(t)
+				if tt.commit {
+					harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+						return second.conn, nil
+					})
+					// A remote target is another daemon, so it swaps.
+					other := sessionTestRequest(tt.inPlace)
+					other.Target = beta
+					picker.decideOnConsume(pickerOp{commit: true}, other)
+				}
+				fences := countSent[protocol.UIFence](stream)
+				consumed := picker.consumedCount()
 
-			done := make(chan actionOutcome, 1)
-			go func() {
-				result, err := ui.Action(t.Context(), ports.UIActionRequest{Attachment: ui.Handle(), Generation: snapshot.Context.Generation, Keys: tt.keys})
-				done <- actionOutcome{result: result, err: err}
-			}()
+				done := make(chan actionOutcome, 1)
+				go func() {
+					result, err := ui.Action(t.Context(), ports.UIActionRequest{Attachment: ui.Handle(), Generation: snapshot.Context.Generation, Keys: tt.keys})
+					done <- actionOutcome{result: result, err: err}
+				}()
 
-			if !tt.overlayFirst {
-				// The Enter reaches the daemon, whose command offers the picker;
-				// the palette-close output then arrives under the overlay.
-				fence := awaitSent(t, stream, "UIFence", isSent[protocol.UIFence]).(protocol.UIFence)
-				stream.deliver(navigationOffer(1))
-				awaitPresentation(t, harness.sup, PresentAttachedPicker)
-				hidden := sessionTestOutput(3, "\x1b[Hhidden")
-				hidden.Full, hidden.Base, hidden.New = false, 2, 3
-				stream.deliver(hidden)
-				require.Eventually(t, func() bool {
-					ui.mu.Lock()
-					defer ui.mu.Unlock()
-					return ui.suppressed.ViewPublication == 3
-				}, 5*time.Second, time.Millisecond, "the suppressed output was never applied")
-				stream.deliver(protocol.UIReceipt{ActionID: fence.ActionID, Epoch: 1, State: 3, ViewPublication: 3, Outcome: protocol.UIReceiptProcessed})
-			}
-			if tt.inPlace {
-				awaitSent(t, stream, "SamePeerSwitchRequest", isSent[protocol.SamePeerSwitchRequest])
-				destination := laterOutput(2, 3, "\x1b[Hbeta")
-				destination.Context.Route.Target = beta
-				stream.deliver(destination)
-			} else if tt.commit {
-				awaitSent(t, stream, "Detach", isSent[protocol.Detach])
-				awaitStreamHello(t, &mu, &second)
-				second.deliver(protocol.Welcome{SessionName: "beta"})
-				output := sessionTestOutput(1, "\x1b[Hbeta")
-				output.Context.Route.Target = beta
-				second.deliver(output)
-			}
+				if !tt.overlayFirst {
+					// The Enter reaches the daemon, whose command offers the picker;
+					// the palette-close output then arrives under the overlay.
+					fence := awaitSent(t, stream, "UIFence", isSent[protocol.UIFence]).(protocol.UIFence)
+					stream.deliver(navigationOffer(1))
+					awaitPresentation(t, harness.sup, PresentAttachedPicker)
+					hidden := sessionTestOutput(3, "\x1b[Hhidden")
+					hidden.Full, hidden.Base, hidden.New = false, 2, 3
+					stream.deliver(hidden)
+					synctest.Wait()
+					require.True(t, func() bool {
+						ui.mu.Lock()
+						defer ui.mu.Unlock()
+						return ui.suppressed.ViewPublication == 3
+					}(), "the suppressed output was never applied")
+					stream.deliver(protocol.UIReceipt{ActionID: fence.ActionID, Epoch: 1, State: 3, ViewPublication: 3, Outcome: protocol.UIReceiptProcessed})
+				}
+				if tt.inPlace {
+					awaitSent(t, stream, "SamePeerSwitchRequest", isSent[protocol.SamePeerSwitchRequest])
+					destination := laterOutput(2, 3, "\x1b[Hbeta")
+					destination.Context.Route.Target = beta
+					stream.deliver(destination)
+				} else if tt.commit {
+					awaitSent(t, stream, "Detach", isSent[protocol.Detach])
+					awaitStreamHello(t, &mu, &second)
+					second.deliver(protocol.Welcome{SessionName: "beta"})
+					output := sessionTestOutput(1, "\x1b[Hbeta")
+					output.Context.Route.Target = beta
+					second.deliver(output)
+				}
 
-			var outcome actionOutcome
-			select {
-			case outcome = <-done:
-			case <-time.After(5 * time.Second):
-				t.Fatal("the UI action never settled across the picker overlay")
-			}
-			require.NoError(t, outcome.err)
-			require.Equal(t, ports.UIActionProcessed, outcome.result.Status)
-			require.Equal(t, ports.UIStatusAttached, outcome.result.Context.Status)
-			require.Equal(t, tt.wantTarget, outcome.result.Context.Route.Target)
-			require.NotContains(t, harness.terminal.written(), "hidden", "suppressed output is never written over the picker")
-			if tt.overlayFirst {
-				require.Equal(t, consumed+1, picker.consumedCount(), "the picker consumed the action's input")
-			}
-			if !tt.wantFence {
-				require.Equal(t, fences, countSent[protocol.UIFence](stream), "a picker-consumed action never fences through the daemon")
-				require.Zero(t, countSent[protocol.Input](stream), "picker input never reaches the session")
-			}
-			if tt.inPlace {
-				require.Equal(t, snapshot.Context.Generation, outcome.result.Context.Generation, "an in-place switch keeps the generation")
-				require.Len(t, harness.service.openedRequests(), 1, "an in-place switch never reconnects")
-			} else if tt.commit {
-				require.Greater(t, outcome.result.Context.Generation, snapshot.Context.Generation, "the swap commits a new generation")
-				opened := harness.service.openedRequests()
-				require.Len(t, opened, 2)
-				require.Equal(t, beta, opened[1].Target)
-				require.Greater(t, opened[1].Stream, picker.lastResolvedStream(),
-					"the swap opens a stream identity allocated at open time, not the one reserved at commit")
-			}
+				var outcome actionOutcome
+				select {
+				case outcome = <-done:
+				case <-time.After(5 * time.Second):
+					t.Fatal("the UI action never settled across the picker overlay")
+				}
+				require.NoError(t, outcome.err)
+				require.Equal(t, ports.UIActionProcessed, outcome.result.Status)
+				require.Equal(t, ports.UIStatusAttached, outcome.result.Context.Status)
+				require.Equal(t, tt.wantTarget, outcome.result.Context.Route.Target)
+				require.NotContains(t, harness.terminal.written(), "hidden", "suppressed output is never written over the picker")
+				if tt.overlayFirst {
+					require.Equal(t, consumed+1, picker.consumedCount(), "the picker consumed the action's input")
+				}
+				if !tt.wantFence {
+					require.Equal(t, fences, countSent[protocol.UIFence](stream), "a picker-consumed action never fences through the daemon")
+					require.Zero(t, countSent[protocol.Input](stream), "picker input never reaches the session")
+				}
+				if tt.inPlace {
+					require.Equal(t, snapshot.Context.Generation, outcome.result.Context.Generation, "an in-place switch keeps the generation")
+					require.Len(t, harness.service.openedRequests(), 1, "an in-place switch never reconnects")
+				} else if tt.commit {
+					require.Greater(t, outcome.result.Context.Generation, snapshot.Context.Generation, "the swap commits a new generation")
+					opened := harness.service.openedRequests()
+					require.Len(t, opened, 2)
+					require.Equal(t, beta, opened[1].Target)
+					require.Greater(t, opened[1].Stream, picker.lastResolvedStream(),
+						"the swap opens a stream identity allocated at open time, not the one reserved at commit")
+				}
+			})
 		})
 	}
 }
@@ -417,27 +431,30 @@ func TestPickerCloseWithoutAttachment(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			picker := newAttachTestPicker()
-			harness := startAttachHarness(t, picker)
-			picker.recordOp(tt.op, "", ports.BrokerOpenStreamRequest{})
-			if tt.wantExit {
-				require.NoError(t, harness.waitRun(t))
-				return
-			}
-			// Prove the close was consumed, then that the run survived it: a
-			// later commit is still admitted.
-			require.Eventually(t, picker.opTaken, 5*time.Second, time.Millisecond)
-			stream := newSessionTestStream()
-			harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-				return stream, nil
+			synctest.Test(t, func(t *testing.T) {
+				pickerMock, picker := newAttachTestPicker(t)
+				harness := startAttachHarness(t, pickerMock)
+				picker.recordOp(tt.op, "", ports.BrokerOpenStreamRequest{})
+				if tt.wantExit {
+					require.NoError(t, harness.waitRun(t))
+					return
+				}
+				// Prove the close was consumed, then that the run survived it: a
+				// later commit is still admitted.
+				synctest.Wait()
+				require.True(t, picker.opTaken())
+				stream := newSessionStream(t)
+				harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+					return stream.conn, nil
+				})
+				picker.commit(sessionTestRequest(true))
+				awaitStreamHello(t, &sync.Mutex{}, &stream)
+				select {
+				case <-harness.runDone:
+					t.Fatal("a cancel with no attachment ended the process")
+				default:
+				}
 			})
-			picker.commit(sessionTestRequest(true))
-			awaitStreamHello(t, &sync.Mutex{}, &stream)
-			select {
-			case <-harness.runDone:
-				t.Fatal("a cancel with no attachment ended the process")
-			default:
-			}
 		})
 	}
 }
@@ -461,11 +478,12 @@ func moveOffer(interaction uint64) protocol.PickerOffer {
 
 // openMovePicker opens one move interaction on a live attachment and waits
 // until its box is drawn.
-func openMovePicker(t *testing.T, harness *attachTestHarness, stream *sessionTestStream, interaction uint64) {
+func openMovePicker(t *testing.T, harness *attachTestHarness, stream *streamLog, interaction uint64) {
 	t.Helper()
 	stream.deliver(moveOffer(interaction))
 	stream.deliver(moveSnapshot(interaction, 1))
-	require.Eventually(t, func() bool { return strings.Contains(harness.terminal.written(), "second") }, 5*time.Second, time.Millisecond, "the move picker was never drawn")
+	synctest.Wait()
+	require.True(t, strings.Contains(harness.terminal.written(), "second"), "the move picker was never drawn")
 }
 
 // TestMovePickerOfferIsPresentedAndAnswered pins PA3: the daemon's move offer
@@ -475,12 +493,12 @@ func TestMovePickerOfferIsPresentedAndAnswered(t *testing.T) {
 	tests := []struct {
 		name  string
 		keys  []string
-		check func(t *testing.T, harness *attachTestHarness, stream *sessionTestStream)
+		check func(t *testing.T, harness *attachTestHarness, stream *streamLog)
 	}{
 		{
 			name: "enter commits the cursor destination",
 			keys: []string{"\x1b[B", "\r"},
-			check: func(t *testing.T, harness *attachTestHarness, stream *sessionTestStream) {
+			check: func(t *testing.T, harness *attachTestHarness, stream *streamLog) {
 				selection := awaitSent(t, stream, "PickerSelection", isSent[protocol.PickerSelection]).(protocol.PickerSelection)
 				require.Equal(t, uint64(7), selection.InteractionID)
 				require.Equal(t, "serving", selection.SourceID)
@@ -496,7 +514,7 @@ func TestMovePickerOfferIsPresentedAndAnswered(t *testing.T) {
 		{
 			name: "q cancels with a typed close",
 			keys: []string{"q"},
-			check: func(t *testing.T, harness *attachTestHarness, stream *sessionTestStream) {
+			check: func(t *testing.T, harness *attachTestHarness, stream *streamLog) {
 				closed := awaitSent(t, stream, "PickerClose", isSent[protocol.PickerClose]).(protocol.PickerClose)
 				require.Equal(t, uint64(7), closed.InteractionID)
 				awaitSent(t, stream, "OutputResetRequest", isSent[protocol.OutputResetRequest])
@@ -505,11 +523,12 @@ func TestMovePickerOfferIsPresentedAndAnswered(t *testing.T) {
 		{
 			name: "a lone escape cancels once its window elapses",
 			keys: []string{"\x1b"},
-			check: func(t *testing.T, harness *attachTestHarness, stream *sessionTestStream) {
+			check: func(t *testing.T, harness *attachTestHarness, stream *streamLog) {
 				// The input path first withholds the Escape as a possible
 				// DECRQM reply prefix; its ambiguity window hands it on.
 				var marker *supervisorTestTimer
-				require.Eventually(t, func() bool {
+				synctest.Wait()
+				require.True(t, func() bool {
 					for _, timer := range harness.clock.snapshotTimers() {
 						if timer.delay == paletteMarkerAmbiguityDeadline && !timer.stopped() {
 							marker = timer
@@ -517,10 +536,11 @@ func TestMovePickerOfferIsPresentedAndAnswered(t *testing.T) {
 						}
 					}
 					return false
-				}, 5*time.Second, time.Millisecond, "the marker ambiguity window was never armed")
+				}(), "the marker ambiguity window was never armed")
 				marker.fire()
 				var escape *supervisorTestTimer
-				require.Eventually(t, func() bool {
+				synctest.Wait()
+				require.True(t, func() bool {
 					for _, timer := range harness.clock.snapshotTimers() {
 						if timer.delay == pickerEscapeDeadline && timer != marker && !timer.stopped() {
 							escape = timer
@@ -528,7 +548,7 @@ func TestMovePickerOfferIsPresentedAndAnswered(t *testing.T) {
 						}
 					}
 					return false
-				}, 5*time.Second, time.Millisecond, "the escape window was never armed")
+				}(), "the escape window was never armed")
 				require.Zero(t, countSent[protocol.PickerClose](stream), "a withheld escape must not close early")
 				escape.fire()
 				closed := awaitSent(t, stream, "PickerClose", isSent[protocol.PickerClose]).(protocol.PickerClose)
@@ -538,29 +558,32 @@ func TestMovePickerOfferIsPresentedAndAnswered(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			picker := newAttachTestPicker()
-			harness := startAttachHarness(t, picker)
-			stream := attachLiveSession(t, harness, picker)
-			openMovePicker(t, harness, stream, 7)
+			synctest.Test(t, func(t *testing.T) {
+				pickerMock, picker := newAttachTestPicker(t)
+				harness := startAttachHarness(t, pickerMock)
+				stream := attachLiveSession(t, harness, picker)
+				openMovePicker(t, harness, stream, 7)
 
-			// Output under the box is applied and acknowledged, never written.
-			acks := countSent[protocol.Ack](stream)
-			stream.deliver(laterOutput(2, 2, "hidden-frame"))
-			require.Eventually(t, func() bool { return countSent[protocol.Ack](stream) > acks }, 5*time.Second, time.Millisecond)
-			require.NotContains(t, harness.terminal.written(), "hidden-frame")
+				// Output under the box is applied and acknowledged, never written.
+				acks := countSent[protocol.Ack](stream)
+				stream.deliver(laterOutput(2, 2, "hidden-frame"))
+				synctest.Wait()
+				require.True(t, countSent[protocol.Ack](stream) > acks)
+				require.NotContains(t, harness.terminal.written(), "hidden-frame")
 
-			for _, key := range tt.keys {
-				harness.reader.push([]byte(key))
-			}
-			tt.check(t, harness, stream)
-			require.Zero(t, countSent[protocol.Input](stream), "move picker input must never reach the session")
+				for _, key := range tt.keys {
+					harness.reader.push([]byte(key))
+				}
+				tt.check(t, harness, stream)
+				require.Zero(t, countSent[protocol.Input](stream), "move picker input must never reach the session")
 
-			// Input is never swallowed after the picker ended: the next key is
-			// session Input again.
-			harness.reader.push([]byte("z"))
-			input := awaitSent(t, stream, "session Input", isSent[protocol.Input]).(protocol.Input)
-			require.Equal(t, []byte("z"), input.Data)
-			require.Equal(t, PresentAttached, harness.sup.State().Presentation)
+				// Input is never swallowed after the picker ended: the next key is
+				// session Input again.
+				harness.reader.push([]byte("z"))
+				input := awaitSent(t, stream, "session Input", isSent[protocol.Input]).(protocol.Input)
+				require.Equal(t, []byte("z"), input.Data)
+				require.Equal(t, PresentAttached, harness.sup.State().Presentation)
+			})
 		})
 	}
 }
@@ -569,16 +592,18 @@ func TestMovePickerOfferIsPresentedAndAnswered(t *testing.T) {
 // move picker cannot be presented: the daemon's interaction is closed at once
 // instead of swallowing input with nothing on screen.
 func TestMovePickerOfferDeclinedUnderSessionPicker(t *testing.T) {
-	picker := newAttachTestPicker()
-	harness := startAttachHarness(t, picker)
-	stream := attachLiveSession(t, harness, picker)
-	stream.deliver(navigationOffer(1))
-	awaitPresentation(t, harness.sup, PresentAttachedPicker)
+	synctest.Test(t, func(t *testing.T) {
+		pickerMock, picker := newAttachTestPicker(t)
+		harness := startAttachHarness(t, pickerMock)
+		stream := attachLiveSession(t, harness, picker)
+		stream.deliver(navigationOffer(1))
+		awaitPresentation(t, harness.sup, PresentAttachedPicker)
 
-	stream.deliver(moveOffer(9))
-	closed := awaitSent(t, stream, "PickerClose", isSent[protocol.PickerClose]).(protocol.PickerClose)
-	require.Equal(t, uint64(9), closed.InteractionID)
-	require.Equal(t, PresentAttachedPicker, harness.sup.State().Presentation)
+		stream.deliver(moveOffer(9))
+		closed := awaitSent(t, stream, "PickerClose", isSent[protocol.PickerClose]).(protocol.PickerClose)
+		require.Equal(t, uint64(9), closed.InteractionID)
+		require.Equal(t, PresentAttachedPicker, harness.sup.State().Presentation)
+	})
 }
 
 // TestSupervisorReducerPickerOverlay pins the Attached+Picker transitions and
@@ -603,10 +628,12 @@ func TestSupervisorReducerPickerOverlay(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			state := reduceSupervisor(State{Presentation: tt.from, Connectivity: ConnectivityReady}, supervisorEvent{kind: tt.event})
-			require.Equal(t, tt.want, state.Presentation)
-			require.Equal(t, ConnectivityReady, state.Connectivity)
-			require.Equal(t, tt.wantPaint, PickerPresentation(state))
+			synctest.Test(t, func(t *testing.T) {
+				state := reduceSupervisor(State{Presentation: tt.from, Connectivity: ConnectivityReady}, supervisorEvent{kind: tt.event})
+				require.Equal(t, tt.want, state.Presentation)
+				require.Equal(t, ConnectivityReady, state.Connectivity)
+				require.Equal(t, tt.wantPaint, PickerPresentation(state))
+			})
 		})
 	}
 }
@@ -615,17 +642,19 @@ func TestSupervisorReducerPickerOverlay(t *testing.T) {
 // presentation pin: the move picker is a bordered box over the session, never
 // a full-screen takeover, so it neither clears the screen nor spans it.
 func TestMovePickerDrawsAFloatingModalOverTheSession(t *testing.T) {
-	picker := newAttachTestPicker()
-	harness := startAttachHarness(t, picker)
-	stream := attachLiveSession(t, harness, picker)
-	before := len(harness.terminal.written())
-	openMovePicker(t, harness, stream, 7)
+	synctest.Test(t, func(t *testing.T) {
+		pickerMock, picker := newAttachTestPicker(t)
+		harness := startAttachHarness(t, pickerMock)
+		stream := attachLiveSession(t, harness, picker)
+		before := len(harness.terminal.written())
+		openMovePicker(t, harness, stream, 7)
 
-	frame := harness.terminal.written()[before:]
-	require.Contains(t, frame, "first", "the destination rows must be drawn")
-	require.Contains(t, frame, "─", "the modal border must be drawn")
-	require.NotContains(t, frame, "\x1b[2J", "the box must not clear the session under it")
-	require.Contains(t, harness.terminal.written(), "ready", "the session frame stays under the box")
+		frame := harness.terminal.written()[before:]
+		require.Contains(t, frame, "first", "the destination rows must be drawn")
+		require.Contains(t, frame, "─", "the modal border must be drawn")
+		require.NotContains(t, frame, "\x1b[2J", "the box must not clear the session under it")
+		require.Contains(t, harness.terminal.written(), "ready", "the session frame stays under the box")
+	})
 }
 
 // TestPickerControllerLoneEscapeResolvesOnItsWindow pins that a real Escape
@@ -642,28 +671,31 @@ func TestPickerControllerLoneEscapeResolvesOnItsWindow(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			controller, clock := pickerTestController(t)
-			controller.ApplySnapshot(pickerTestSnapshot(3, 1, clock.Now(), "alpha", "beta"))
+			synctest.Test(t, func(t *testing.T) {
+				controller, clock := pickerTestController(t)
+				controller.ApplySnapshot(pickerTestSnapshot(3, 1, clock.port.Now(), "alpha", "beta"))
 
-			require.True(t, controller.ConsumeTerminalRead([]byte("\x1b")))
-			escape := clock.awaitTimer(t)
-			require.Equal(t, pickerEscapeDeadline, escape.delay)
-			if tt.follow != nil {
-				require.True(t, controller.ConsumeTerminalRead(tt.follow))
-				require.Eventually(t, escape.stopped, 5*time.Second, time.Millisecond, "a resolving read must disarm the window")
+				require.True(t, controller.ConsumeTerminalRead([]byte("\x1b")))
+				escape := clock.awaitTimer(t)
+				require.Equal(t, pickerEscapeDeadline, escape.delay)
+				if tt.follow != nil {
+					require.True(t, controller.ConsumeTerminalRead(tt.follow))
+					synctest.Wait()
+					require.True(t, escape.stopped(), "a resolving read must disarm the window")
+					op, _ := controller.TakeOp()
+					require.False(t, op.close)
+					return
+				}
+				escape.fire()
+				select {
+				case <-controller.OpsReady():
+				case <-time.After(5 * time.Second):
+					t.Fatal("the elapsed window never woke the supervisor")
+				}
 				op, _ := controller.TakeOp()
-				require.False(t, op.close)
-				return
-			}
-			escape.fire()
-			select {
-			case <-controller.OpsReady():
-			case <-time.After(5 * time.Second):
-				t.Fatal("the elapsed window never woke the supervisor")
-			}
-			op, _ := controller.TakeOp()
-			require.Equal(t, tt.wantClose, op.close)
-			require.False(t, op.exit, "Escape is a cancel, never the explicit exit")
+				require.Equal(t, tt.wantClose, op.close)
+				require.False(t, op.exit, "Escape is a cancel, never the explicit exit")
+			})
 		})
 	}
 }
@@ -685,44 +717,48 @@ func TestPickerOverlayInPlaceSupersededByDaemonOffer(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			picker := newAttachTestPicker()
-			harness := startAttachHarness(t, picker)
-			publishLiveLocal(harness, beta)
-			first := attachLiveSession(t, harness, picker)
-			first.deliver(navigationOffer(1))
-			awaitPresentation(t, harness.sup, PresentAttachedPicker)
+			synctest.Test(t, func(t *testing.T) {
+				pickerMock, picker := newAttachTestPicker(t)
+				harness := startAttachHarness(t, pickerMock)
+				publishLiveLocal(harness, beta)
+				first := attachLiveSession(t, harness, picker)
+				first.deliver(navigationOffer(1))
+				awaitPresentation(t, harness.sup, PresentAttachedPicker)
 
-			other := sessionTestRequest(true)
-			other.Target = beta
-			picker.recordOp(pickerOp{commit: true}, "row", other)
-			toBeta := awaitSent(t, first, "SamePeerSwitchRequest", isSent[protocol.SamePeerSwitchRequest]).(protocol.SamePeerSwitchRequest)
+				other := sessionTestRequest(true)
+				other.Target = beta
+				picker.recordOp(pickerOp{commit: true}, "row", other)
+				toBeta := awaitSent(t, first, "SamePeerSwitchRequest", isSent[protocol.SamePeerSwitchRequest]).(protocol.SamePeerSwitchRequest)
 
-			first.deliver(protocol.AttachTarget{Session: gamma.SessionName, Intent: protocol.IntentAttach, ExactTarget: &gamma, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned, SamePeer: true})
-			var toGamma protocol.SamePeerSwitchRequest
-			require.Eventually(t, func() bool {
-				for _, message := range first.messages() {
-					if request, ok := message.(protocol.SamePeerSwitchRequest); ok && request.Target == gamma {
-						toGamma = request
-						return true
+				first.deliver(protocol.AttachTarget{Session: gamma.SessionName, Intent: protocol.IntentAttach, ExactTarget: &gamma, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned, SamePeer: true})
+				var toGamma protocol.SamePeerSwitchRequest
+				synctest.Wait()
+				require.True(t, func() bool {
+					for _, message := range first.messages() {
+						if request, ok := message.(protocol.SamePeerSwitchRequest); ok && request.Target == gamma {
+							toGamma = request
+							return true
+						}
 					}
+					return false
+				}())
+				// The daemon refuses the older choice because its own offer is pending.
+				first.deliver(protocol.SamePeerSwitchFailure{RequestID: toBeta.RequestID, Code: protocol.SamePeerSwitchStaleTarget})
+				if tt.refuseOffer {
+					first.deliver(protocol.SamePeerSwitchFailure{RequestID: toGamma.RequestID, Code: protocol.SamePeerSwitchStaleTarget})
+					awaitSent(t, first, "OutputResetRequest", isSent[protocol.OutputResetRequest])
+				} else {
+					destination := laterOutput(2, 2, "\x1b[Hgamma")
+					destination.Context.Route.Target = gamma
+					first.deliver(destination)
+					synctest.Wait()
+					require.True(t, strings.Contains(harness.terminal.written(), "gamma"))
 				}
-				return false
-			}, 5*time.Second, time.Millisecond)
-			// The daemon refuses the older choice because its own offer is pending.
-			first.deliver(protocol.SamePeerSwitchFailure{RequestID: toBeta.RequestID, Code: protocol.SamePeerSwitchStaleTarget})
-			if tt.refuseOffer {
-				first.deliver(protocol.SamePeerSwitchFailure{RequestID: toGamma.RequestID, Code: protocol.SamePeerSwitchStaleTarget})
-				awaitSent(t, first, "OutputResetRequest", isSent[protocol.OutputResetRequest])
-			} else {
-				destination := laterOutput(2, 2, "\x1b[Hgamma")
-				destination.Context.Route.Target = gamma
-				first.deliver(destination)
-				require.Eventually(t, func() bool { return strings.Contains(harness.terminal.written(), "gamma") }, 5*time.Second, time.Millisecond)
-			}
 
-			require.Len(t, harness.service.openedRequests(), 1, "a superseded in-place switch never reconnects")
-			require.Zero(t, countSent[protocol.Detach](first))
-			require.Equal(t, tt.wantRepaints, countSent[protocol.OutputResetRequest](first))
+				require.Len(t, harness.service.openedRequests(), 1, "a superseded in-place switch never reconnects")
+				require.Zero(t, countSent[protocol.Detach](first))
+				require.Equal(t, tt.wantRepaints, countSent[protocol.OutputResetRequest](first))
+			})
 		})
 	}
 }
@@ -730,24 +766,27 @@ func TestPickerOverlayInPlaceSupersededByDaemonOffer(t *testing.T) {
 // TestPickerOverlayRepeatInPlaceChoice pins that choosing the destination of
 // an in-flight in-place switch again is a close, not a second switch.
 func TestPickerOverlayRepeatInPlaceChoice(t *testing.T) {
-	beta := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{2}, SessionName: "beta"}
-	picker := newAttachTestPicker()
-	harness := startAttachHarness(t, picker)
-	publishLiveLocal(harness, beta)
-	first := attachLiveSession(t, harness, picker)
-	other := sessionTestRequest(true)
-	other.Target = beta
-	for id := range uint64(2) {
-		first.deliver(navigationOffer(id + 1))
-		awaitPresentation(t, harness.sup, PresentAttachedPicker)
-		picker.recordOp(pickerOp{commit: true}, "row", other)
-		awaitPresentation(t, harness.sup, PresentAttached)
-	}
-	destination := laterOutput(2, 2, "\x1b[Hbeta")
-	destination.Context.Route.Target = beta
-	first.deliver(destination)
-	require.Eventually(t, func() bool { return strings.Contains(harness.terminal.written(), "beta") }, 5*time.Second, time.Millisecond)
+	synctest.Test(t, func(t *testing.T) {
+		beta := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{2}, SessionName: "beta"}
+		pickerMock, picker := newAttachTestPicker(t)
+		harness := startAttachHarness(t, pickerMock)
+		publishLiveLocal(harness, beta)
+		first := attachLiveSession(t, harness, picker)
+		other := sessionTestRequest(true)
+		other.Target = beta
+		for id := range uint64(2) {
+			first.deliver(navigationOffer(id + 1))
+			awaitPresentation(t, harness.sup, PresentAttachedPicker)
+			picker.recordOp(pickerOp{commit: true}, "row", other)
+			awaitPresentation(t, harness.sup, PresentAttached)
+		}
+		destination := laterOutput(2, 2, "\x1b[Hbeta")
+		destination.Context.Route.Target = beta
+		first.deliver(destination)
+		synctest.Wait()
+		require.True(t, strings.Contains(harness.terminal.written(), "beta"))
 
-	require.Equal(t, 1, countSent[protocol.SamePeerSwitchRequest](first))
-	require.Len(t, harness.service.openedRequests(), 1)
+		require.Equal(t, 1, countSent[protocol.SamePeerSwitchRequest](first))
+		require.Len(t, harness.service.openedRequests(), 1)
+	})
 }

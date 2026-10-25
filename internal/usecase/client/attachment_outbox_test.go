@@ -6,8 +6,11 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/protocol"
@@ -16,12 +19,12 @@ import (
 // gatedSessionStream blocks every write until release is closed, like a
 // carriage stalled on a dead link, and can fail writes after release.
 type gatedSessionStream struct {
-	*sessionTestStream
+	*streamLog
 	release chan struct{}
 	fail    error
 }
 
-func (s *gatedSessionStream) SendClient(message protocol.ClientMessage) error {
+func (s *gatedSessionStream) send(message protocol.ClientMessage) error {
 	select {
 	case <-s.release:
 	case <-s.closed:
@@ -30,7 +33,7 @@ func (s *gatedSessionStream) SendClient(message protocol.ClientMessage) error {
 	if s.fail != nil {
 		return s.fail
 	}
-	return s.sessionTestStream.SendClient(message)
+	return s.streamLog.recordSend(message)
 }
 
 func TestAttachmentOutbox(t *testing.T) {
@@ -45,56 +48,60 @@ func TestAttachmentOutbox(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			stream := &gatedSessionStream{sessionTestStream: newSessionTestStream(), release: make(chan struct{}), fail: tt.fail}
-			outbox := newAttachmentOutbox(stream)
-			defer outbox.stop()
+			synctest.Test(t, func(t *testing.T) {
+				stream := newGatedSessionStream(t, tt.fail)
+				outbox := newAttachmentOutbox(stream.conn)
+				defer outbox.stop()
 
-			messages := []protocol.ClientMessage{
-				protocol.Input{InputSeq: 1, Data: []byte("a")},
-				protocol.Input{InputSeq: 2, Data: []byte("b")},
-				protocol.Input{InputSeq: 3, Data: []byte("c")},
-			}
-			enqueued := make(chan struct{})
-			go func() {
-				for _, m := range messages {
-					if err := outbox.SendClient(m); err != nil {
-						t.Errorf("SendClient: %v", err)
-					}
+				messages := []protocol.ClientMessage{
+					protocol.Input{InputSeq: 1, Data: []byte("a")},
+					protocol.Input{InputSeq: 2, Data: []byte("b")},
+					protocol.Input{InputSeq: 3, Data: []byte("c")},
 				}
-				close(enqueued)
-			}()
-			select {
-			case <-enqueued:
-			case <-time.After(5 * time.Second):
-				t.Fatal("SendClient blocked on a stalled link")
-			}
+				enqueued := make(chan struct{})
+				go func() {
+					for _, m := range messages {
+						if err := outbox.SendClient(m); err != nil {
+							t.Errorf("SendClient: %v", err)
+						}
+					}
+					close(enqueued)
+				}()
+				select {
+				case <-enqueued:
+				case <-time.After(5 * time.Second):
+					t.Fatal("SendClient blocked on a stalled link")
+				}
 
-			close(stream.release)
-			if tt.wantErr != nil {
-				<-outbox.Failed()
-				require.ErrorIs(t, outbox.failure(), tt.wantErr)
-				require.ErrorIs(t, outbox.SendClient(protocol.Detach{}), tt.wantErr)
-				return
-			}
-			<-outbox.Idle()
-			stream.mu.Lock()
-			defer stream.mu.Unlock()
-			require.Equal(t, messages, stream.sent)
+				close(stream.release)
+				if tt.wantErr != nil {
+					<-outbox.Failed()
+					require.ErrorIs(t, outbox.failure(), tt.wantErr)
+					require.ErrorIs(t, outbox.SendClient(protocol.Detach{}), tt.wantErr)
+					return
+				}
+				<-outbox.Idle()
+				stream.mu.Lock()
+				defer stream.mu.Unlock()
+				require.Equal(t, messages, stream.sent)
+			})
 		})
 	}
 }
 
 func TestAttachmentOutboxCloseUnblocksStalledWrite(t *testing.T) {
-	stream := &gatedSessionStream{sessionTestStream: newSessionTestStream(), release: make(chan struct{})}
-	outbox := newAttachmentOutbox(stream)
-	require.NoError(t, outbox.SendClient(protocol.Detach{}))
+	synctest.Test(t, func(t *testing.T) {
+		stream := newGatedSessionStream(t, nil)
+		outbox := newAttachmentOutbox(stream.conn)
+		require.NoError(t, outbox.SendClient(protocol.Detach{}))
 
-	require.NoError(t, outbox.Close())
-	select {
-	case <-outbox.done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("sender did not exit after Close")
-	}
+		require.NoError(t, outbox.Close())
+		select {
+		case <-outbox.done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("sender did not exit after Close")
+		}
+	})
 }
 
 // TestResumeWatch proves the resume backoff reads the terminal: Ctrl-C or a
@@ -117,36 +124,39 @@ func TestResumeWatch(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			reader := &inputTestReader{chunks: make(chan []byte, len(tt.reads))}
-			pump := newTerminalInputPump(reader)
-			pump.start()
-			t.Cleanup(func() {
-				pump.stop()
-				close(reader.chunks)
+			synctest.Test(t, func(t *testing.T) {
+				reader := &inputTestReader{chunks: make(chan []byte, len(tt.reads))}
+				pump := newTerminalInputPump(reader)
+				pump.start()
+				t.Cleanup(func() {
+					pump.stop()
+					close(reader.chunks)
+				})
+				lifetime := &terminalInputLifetime{eof: make(chan error, 1), pump: pump}
+				clock := newSupervisorTestClock(t)
+				watch := lifetime.watchResume(clock.port, nil)
+				for _, read := range tt.reads {
+					reader.chunks <- []byte(read)
+				}
+				if tt.wantCancel {
+					if tt.fireEscape {
+						clock.awaitTimer(t).fire()
+					}
+					select {
+					case <-watch.cancelled:
+					case <-time.After(5 * time.Second):
+						t.Fatal("cancel key ignored")
+					}
+				} else {
+					synctest.Wait()
+					require.True(t, watch.heldLen() == len(tt.wantResidual))
+				}
+				watch.release()
+				pump.mu.Lock()
+				defer pump.mu.Unlock()
+				require.Equal(t, tt.wantResidual, string(pump.residual))
+				require.Zero(t, pump.consumer, "release returns the claim")
 			})
-			lifetime := &terminalInputLifetime{eof: make(chan error, 1), pump: pump}
-			clock := newSupervisorTestClock()
-			watch := lifetime.watchResume(clock, nil)
-			for _, read := range tt.reads {
-				reader.chunks <- []byte(read)
-			}
-			if tt.wantCancel {
-				if tt.fireEscape {
-					clock.awaitTimer(t).fire()
-				}
-				select {
-				case <-watch.cancelled:
-				case <-time.After(5 * time.Second):
-					t.Fatal("cancel key ignored")
-				}
-			} else {
-				require.Eventually(t, func() bool { return watch.heldLen() == len(tt.wantResidual) }, 5*time.Second, time.Millisecond)
-			}
-			watch.release()
-			pump.mu.Lock()
-			defer pump.mu.Unlock()
-			require.Equal(t, tt.wantResidual, string(pump.residual))
-			require.Zero(t, pump.consumer, "release returns the claim")
 		})
 	}
 }
@@ -168,46 +178,50 @@ func TestResumeWatchKeepsBacklogVerbatim(t *testing.T) {
 		{name: "new ctrl-c still cancels", residual: "\x03", typed: "\x03", wantCancel: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			reader := &inputTestReader{chunks: make(chan []byte, 2)}
-			pump := newTerminalInputPump(reader)
-			pump.start()
-			t.Cleanup(func() {
-				pump.stop()
-				close(reader.chunks)
-			})
-			pump.mu.Lock()
-			pump.residual = []byte(tt.residual)
-			pump.mu.Unlock()
-			if tt.pending != "" {
-				reader.chunks <- []byte(tt.pending)
-				require.Eventually(t, func() bool {
-					pump.mu.Lock()
-					defer pump.mu.Unlock()
-					return pump.pending != nil
-				}, 5*time.Second, time.Millisecond)
-			}
-			lifetime := &terminalInputLifetime{eof: make(chan error, 1), pump: pump}
-			watch := lifetime.watchResume(newSupervisorTestClock(), nil)
-			require.Eventually(t, func() bool { return watch.heldLen() == len(tt.residual)+len(tt.pending) }, 5*time.Second, time.Millisecond)
-			if tt.typed != "" {
-				reader.chunks <- []byte(tt.typed)
-			}
-			if tt.wantCancel {
+			synctest.Test(t, func(t *testing.T) {
+				reader := &inputTestReader{chunks: make(chan []byte, 2)}
+				pump := newTerminalInputPump(reader)
+				pump.start()
+				t.Cleanup(func() {
+					pump.stop()
+					close(reader.chunks)
+				})
+				pump.mu.Lock()
+				pump.residual = []byte(tt.residual)
+				pump.mu.Unlock()
+				if tt.pending != "" {
+					reader.chunks <- []byte(tt.pending)
+					synctest.Wait()
+					require.True(t, func() bool {
+						pump.mu.Lock()
+						defer pump.mu.Unlock()
+						return pump.pending != nil
+					}())
+				}
+				lifetime := &terminalInputLifetime{eof: make(chan error, 1), pump: pump}
+				watch := lifetime.watchResume(newSupervisorTestClock(t).port, nil)
+				synctest.Wait()
+				require.True(t, watch.heldLen() == len(tt.residual)+len(tt.pending))
+				if tt.typed != "" {
+					reader.chunks <- []byte(tt.typed)
+				}
+				if tt.wantCancel {
+					select {
+					case <-watch.cancelled:
+					case <-time.After(5 * time.Second):
+						t.Fatal("new cancel key ignored")
+					}
+				}
+				watch.release()
 				select {
 				case <-watch.cancelled:
-				case <-time.After(5 * time.Second):
-					t.Fatal("new cancel key ignored")
+					require.True(t, tt.wantCancel, "backlog cancelled the resume")
+				default:
 				}
-			}
-			watch.release()
-			select {
-			case <-watch.cancelled:
-				require.True(t, tt.wantCancel, "backlog cancelled the resume")
-			default:
-			}
-			pump.mu.Lock()
-			defer pump.mu.Unlock()
-			require.Equal(t, tt.wantResidual, string(pump.residual))
+				pump.mu.Lock()
+				defer pump.mu.Unlock()
+				require.Equal(t, tt.wantResidual, string(pump.residual))
+			})
 		})
 	}
 }
@@ -225,104 +239,112 @@ func TestResumeWatchResolvesEscapeAtRelease(t *testing.T) {
 		{name: "arrow key is kept", after: "[A", wantResidual: "\x1b[A"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			reader := &inputTestReader{chunks: make(chan []byte, 2)}
-			pump := newTerminalInputPump(reader)
-			pump.start()
-			t.Cleanup(func() {
-				pump.stop()
-				close(reader.chunks)
+			synctest.Test(t, func(t *testing.T) {
+				reader := &inputTestReader{chunks: make(chan []byte, 2)}
+				pump := newTerminalInputPump(reader)
+				pump.start()
+				t.Cleanup(func() {
+					pump.stop()
+					close(reader.chunks)
+				})
+				lifetime := &terminalInputLifetime{eof: make(chan error, 1), pump: pump}
+				clock := newSupervisorTestClock(t)
+				watch := lifetime.watchResume(clock.port, nil)
+				reader.chunks <- []byte("\x1b")
+				escape := clock.awaitTimer(t)
+				released := make(chan struct{})
+				go func() { watch.release(); close(released) }()
+				select {
+				case <-released:
+					t.Fatal("release returned before the escape was resolved")
+				case <-time.After(50 * time.Millisecond):
+				}
+				if tt.after != "" {
+					reader.chunks <- []byte(tt.after)
+				} else {
+					escape.fire()
+				}
+				select {
+				case <-released:
+				case <-time.After(5 * time.Second):
+					t.Fatal("release never returned")
+				}
+				select {
+				case <-watch.cancelled:
+					require.True(t, tt.wantCancel, "escape sequence cancelled the resume")
+				default:
+					require.False(t, tt.wantCancel, "lone esc at release did not cancel")
+				}
+				pump.mu.Lock()
+				defer pump.mu.Unlock()
+				require.Equal(t, tt.wantResidual, string(pump.residual))
 			})
-			lifetime := &terminalInputLifetime{eof: make(chan error, 1), pump: pump}
-			clock := newSupervisorTestClock()
-			watch := lifetime.watchResume(clock, nil)
-			reader.chunks <- []byte("\x1b")
-			escape := clock.awaitTimer(t)
-			released := make(chan struct{})
-			go func() { watch.release(); close(released) }()
-			select {
-			case <-released:
-				t.Fatal("release returned before the escape was resolved")
-			case <-time.After(50 * time.Millisecond):
-			}
-			if tt.after != "" {
-				reader.chunks <- []byte(tt.after)
-			} else {
-				escape.fire()
-			}
-			select {
-			case <-released:
-			case <-time.After(5 * time.Second):
-				t.Fatal("release never returned")
-			}
-			select {
-			case <-watch.cancelled:
-				require.True(t, tt.wantCancel, "escape sequence cancelled the resume")
-			default:
-				require.False(t, tt.wantCancel, "lone esc at release did not cancel")
-			}
-			pump.mu.Lock()
-			defer pump.mu.Unlock()
-			require.Equal(t, tt.wantResidual, string(pump.residual))
 		})
 	}
 }
 
 func TestResumeWatchHeldOverflowIsSticky(t *testing.T) {
-	lifetime := &terminalInputLifetime{}
-	w := &resumeWatch{lifetime: lifetime}
-	w.hold(bytes.Repeat([]byte("a"), resumeHeldInputLimit-1))
-	w.hold([]byte("bb"))
-	w.hold([]byte("c"))
-	require.Equal(t, resumeHeldInputLimit-1, w.heldLen(), "keys after an overflow must be dropped too")
+	synctest.Test(t, func(t *testing.T) {
+		lifetime := &terminalInputLifetime{}
+		w := &resumeWatch{lifetime: lifetime}
+		w.hold(bytes.Repeat([]byte("a"), resumeHeldInputLimit-1))
+		w.hold([]byte("bb"))
+		w.hold([]byte("c"))
+		require.Equal(t, resumeHeldInputLimit-1, w.heldLen(), "keys after an overflow must be dropped too")
 
-	// The next resume phase of the same outage starts a new watch; it must
-	// keep dropping so the session never receives input with a gap.
-	next := &resumeWatch{lifetime: lifetime}
-	next.hold([]byte("d"))
-	require.Zero(t, next.heldLen(), "a later phase must not accept keys after an overflow")
+		// The next resume phase of the same outage starts a new watch; it must
+		// keep dropping so the session never receives input with a gap.
+		next := &resumeWatch{lifetime: lifetime}
+		next.hold([]byte("d"))
+		require.Zero(t, next.heldLen(), "a later phase must not accept keys after an overflow")
+	})
 }
 
 // TestResumeWatchOverflowKeepsHeldPrefix overflows one phase and checks the
 // next phase still replays the gap-free prefix the first phase handed back.
 // TestResumeWatchHeldOverflowIsSticky covers dropping keys typed after it.
 func TestResumeWatchOverflowKeepsHeldPrefix(t *testing.T) {
-	reader := &inputTestReader{chunks: make(chan []byte, 2)}
-	pump := newTerminalInputPump(reader)
-	pump.start()
-	t.Cleanup(func() {
-		pump.stop()
-		close(reader.chunks)
+	synctest.Test(t, func(t *testing.T) {
+		reader := &inputTestReader{chunks: make(chan []byte, 2)}
+		pump := newTerminalInputPump(reader)
+		pump.start()
+		t.Cleanup(func() {
+			pump.stop()
+			close(reader.chunks)
+		})
+		lifetime := &terminalInputLifetime{eof: make(chan error, 1), pump: pump}
+		clock := newSupervisorTestClock(t)
+
+		first := lifetime.watchResume(clock.port, nil)
+		reader.chunks <- []byte("ls")
+		synctest.Wait()
+		require.True(t, first.heldLen() == 2)
+		first.hold(bytes.Repeat([]byte("x"), resumeHeldInputLimit))
+		require.True(t, lifetime.resumeOverflowed.Load())
+		first.release()
+
+		second := lifetime.watchResume(clock.port, nil)
+		synctest.Wait()
+		require.True(t, second.heldLen() == 2)
+		second.release()
+
+		pump.mu.Lock()
+		defer pump.mu.Unlock()
+		require.Equal(t, "ls", string(pump.residual))
 	})
-	lifetime := &terminalInputLifetime{eof: make(chan error, 1), pump: pump}
-	clock := newSupervisorTestClock()
-
-	first := lifetime.watchResume(clock, nil)
-	reader.chunks <- []byte("ls")
-	require.Eventually(t, func() bool { return first.heldLen() == 2 }, 5*time.Second, time.Millisecond)
-	first.hold(bytes.Repeat([]byte("x"), resumeHeldInputLimit))
-	require.True(t, lifetime.resumeOverflowed.Load())
-	first.release()
-
-	second := lifetime.watchResume(clock, nil)
-	require.Eventually(t, func() bool { return second.heldLen() == 2 }, 5*time.Second, time.Millisecond)
-	second.release()
-
-	pump.mu.Lock()
-	defer pump.mu.Unlock()
-	require.Equal(t, "ls", string(pump.residual))
 }
 
 // stallingSessionStream passes writes through until stall is set; stalled
 // writes block until release closes, then fail with failErr when set.
 type stallingSessionStream struct {
-	*sessionTestStream
+	*streamLog
 	stall   atomic.Bool
 	entered chan struct{}
 	release chan struct{}
 	failErr error
 }
 
-func (s *stallingSessionStream) SendClient(message protocol.ClientMessage) error {
+func (s *stallingSessionStream) send(message protocol.ClientMessage) error {
 	if s.stall.Load() {
 		select {
 		case s.entered <- struct{}{}:
@@ -337,7 +359,7 @@ func (s *stallingSessionStream) SendClient(message protocol.ClientMessage) error
 			return s.failErr
 		}
 	}
-	return s.sessionTestStream.SendClient(message)
+	return s.streamLog.recordSend(message)
 }
 
 // TestAttachmentWorkerStalledLink drives the real worker over a link that
@@ -356,7 +378,8 @@ func TestAttachmentWorkerStalledLink(t *testing.T) {
 				later := sessionTestOutput(2, "\x1b[Hlater")
 				later.Epoch = 2
 				h.stream.deliver(later)
-				require.Eventually(t, func() bool { return strings.Contains(h.term.written(), "later") }, 5*time.Second, time.Millisecond, "a stalled write blocked painting")
+				synctest.Wait()
+				require.True(t, strings.Contains(h.term.written(), "later"), "a stalled write blocked painting")
 				close(s.release)
 				require.Equal(t, []string{"a"}, h.awaitInputs(t, 1))
 				h.end(t)
@@ -374,11 +397,12 @@ func TestAttachmentWorkerStalledLink(t *testing.T) {
 				// nothing, so there is no write to wait for.
 				h.send("\x1b[200~abc")
 				h.send("def")
-				require.Eventually(t, func() bool {
+				synctest.Wait()
+				require.True(t, func() bool {
 					h.pump.mu.Lock()
 					defer h.pump.mu.Unlock()
 					return h.pump.pending == nil && h.pump.delivering == 0 && len(h.reader.chunks) == 0
-				}, 5*time.Second, time.Millisecond, "an unqueued read held the pump behind a stalled write")
+				}(), "an unqueued read held the pump behind a stalled write")
 				close(s.release)
 				h.end(t)
 			},
@@ -422,14 +446,37 @@ func TestAttachmentWorkerStalledLink(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			base := newSessionTestStream()
-			s := &stallingSessionStream{sessionTestStream: base, entered: make(chan struct{}, 1), release: make(chan struct{})}
-			h := startInputHarnessOn(t, nil, sessionTestRequest(true), nil, base, s)
-			require.Eventually(t, func() bool { return strings.Contains(h.term.written(), "ready") }, 5*time.Second, time.Millisecond)
-			// Let the initial Ack and focus report through, then stall.
-			require.Eventually(t, func() bool { return len(base.messages()) >= 2 }, 5*time.Second, time.Millisecond)
-			s.stall.Store(true)
-			tt.run(t, h, s)
+			synctest.Test(t, func(t *testing.T) {
+				base := newSessionStream(t)
+				s := newStallingSessionStream(t, base)
+				h := startInputHarnessOn(t, nil, sessionTestRequest(true), nil, base, s.conn)
+				synctest.Wait()
+				require.True(t, strings.Contains(h.term.written(), "ready"))
+				// Let the initial Ack and focus report through, then stall.
+				synctest.Wait()
+				require.True(t, len(base.messages()) >= 2)
+				s.stall.Store(true)
+				tt.run(t, h, s)
+			})
 		})
 	}
+}
+
+func newGatedSessionStream(t *testing.T, fail error) *gatedSessionStream {
+	base := newSessionStream(t)
+	s := &gatedSessionStream{streamLog: base, release: make(chan struct{}), fail: fail}
+	configured := configureSessionStream(t, base, func(m *portsmocks.MockBrokerLogicalConnection, _ *streamLog) {
+		m.EXPECT().SendClient(mock.Anything).RunAndReturn(s.send).Maybe()
+	})
+	base.conn = configured.conn
+	return s
+}
+
+func newStallingSessionStream(t *testing.T, base *streamLog) *stallingSessionStream {
+	s := &stallingSessionStream{streamLog: base, entered: make(chan struct{}, 1), release: make(chan struct{})}
+	configured := configureSessionStream(t, base, func(m *portsmocks.MockBrokerLogicalConnection, _ *streamLog) {
+		m.EXPECT().SendClient(mock.Anything).RunAndReturn(s.send).Maybe()
+	})
+	base.conn = configured.conn
+	return s
 }

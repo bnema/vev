@@ -2,6 +2,7 @@ package client
 
 import (
 	"testing"
+	"testing/synctest"
 
 	"github.com/bnema/vev/internal/protocol"
 )
@@ -39,6 +40,6 @@ func TestNavigationState(t *testing.T) {
 		}},
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, tt.run)
+		t.Run(tt.name, func(t *testing.T) { synctest.Test(t, tt.run) })
 	}
 }

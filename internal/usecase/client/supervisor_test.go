@@ -9,8 +9,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
@@ -23,23 +26,28 @@ import (
 // sleep, and Stop is recorded so a test can prove every retry timer was
 // retired.
 type supervisorTestClock struct {
+	port    *portsmocks.MockClock
+	owner   *testing.T
 	mu      sync.Mutex
 	now     time.Time
 	timers  []*supervisorTestTimer
 	created chan *supervisorTestTimer
 }
 
-func newSupervisorTestClock() *supervisorTestClock {
-	return &supervisorTestClock{now: time.Unix(1000, 0), created: make(chan *supervisorTestTimer, 32)}
+func newSupervisorTestClock(t *testing.T) *supervisorTestClock {
+	c := &supervisorTestClock{owner: t, now: time.Unix(1000, 0), created: make(chan *supervisorTestTimer, 32), port: portsmocks.NewMockClock(t)}
+	c.port.EXPECT().Now().RunAndReturn(c.nowValue).Maybe()
+	c.port.EXPECT().NewTimer(mock.Anything).RunAndReturn(c.newTimer).Maybe()
+	return c
 }
 
-func (c *supervisorTestClock) Now() time.Time {
+func (c *supervisorTestClock) nowValue() time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.now
 }
 
-func (c *supervisorTestClock) NewTimer(delay time.Duration) ports.Timer {
+func (c *supervisorTestClock) newTimer(delay time.Duration) ports.Timer {
 	timer := &supervisorTestTimer{ch: make(chan time.Time, 1), delay: delay}
 	c.mu.Lock()
 	c.timers = append(c.timers, timer)
@@ -48,15 +56,24 @@ func (c *supervisorTestClock) NewTimer(delay time.Duration) ports.Timer {
 	case c.created <- timer:
 	default:
 	}
-	return timer
+	// Every expectation is optional, so the timer is not registered for
+	// AssertExpectations: a worker goroutine may still be building it while the
+	// test cleanup runs, and the assertion would race the expectation setup.
+	m := &portsmocks.MockTimer{}
+	m.Mock.Test(c.owner)
+	m.EXPECT().C().Return((<-chan time.Time)(timer.ch)).Maybe()
+	m.EXPECT().Reset(mock.Anything).Return(false).Maybe()
+	m.EXPECT().Stop().RunAndReturn(timer.stop).Maybe()
+	return m
 }
 
 func (c *supervisorTestClock) awaitTimer(t *testing.T) *supervisorTestTimer {
 	t.Helper()
+	synctest.Wait()
 	select {
 	case timer := <-c.created:
 		return timer
-	case <-time.After(5 * time.Second):
+	default:
 		t.Fatal("supervisor did not schedule a retry timer")
 		return nil
 	}
@@ -98,11 +115,7 @@ type supervisorTestTimer struct {
 	stoppedFlag bool
 }
 
-func (t *supervisorTestTimer) C() <-chan time.Time { return t.ch }
-
-func (t *supervisorTestTimer) Reset(time.Duration) bool { return false }
-
-func (t *supervisorTestTimer) Stop() bool {
+func (t *supervisorTestTimer) stop() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.stoppedFlag {
@@ -130,6 +143,7 @@ func (t *supervisorTestTimer) fire() {
 // supervisorTestTerminal records raw-mode enters and restores. Its reader is
 // shared so tests can model input EOF and a live terminal.
 type supervisorTestTerminal struct {
+	port     *portsmocks.MockTerminal
 	in       io.Reader
 	enterErr error
 
@@ -137,13 +151,22 @@ type supervisorTestTerminal struct {
 	restores int
 }
 
-func newSupervisorTestTerminal(in io.Reader) *supervisorTestTerminal {
-	return &supervisorTestTerminal{in: in}
+func newSupervisorTestTerminal(t *testing.T, in io.Reader) *supervisorTestTerminal {
+	s := &supervisorTestTerminal{in: in}
+	s.port = portsmocks.NewMockTerminal(t)
+	s.port.EXPECT().EnableKittyKeyboard(mock.Anything).RunAndReturn(s.recordEnableKittyKeyboard).Maybe()
+	s.port.EXPECT().EnterRaw().RunAndReturn(s.recordEnterRaw).Maybe()
+	s.port.EXPECT().Geometry().RunAndReturn(s.recordGeometry).Maybe()
+	s.port.EXPECT().ResizeEvents().RunAndReturn(s.recordResizeEvents).Maybe()
+	s.port.EXPECT().In().RunAndReturn(s.recordIn).Maybe()
+	s.port.EXPECT().Out().RunAndReturn(s.recordOut).Maybe()
+	s.port.EXPECT().Flush().RunAndReturn(s.recordFlush).Maybe()
+	return s
 }
 
-func (t *supervisorTestTerminal) EnableKittyKeyboard(int) error { return nil }
+func (t *supervisorTestTerminal) recordEnableKittyKeyboard(int) error { return nil }
 
-func (t *supervisorTestTerminal) EnterRaw() (func() error, error) {
+func (t *supervisorTestTerminal) recordEnterRaw() (func() error, error) {
 	if t.enterErr != nil {
 		return nil, t.enterErr
 	}
@@ -155,17 +178,17 @@ func (t *supervisorTestTerminal) EnterRaw() (func() error, error) {
 	}, nil
 }
 
-func (t *supervisorTestTerminal) Geometry() (domain.Geometry, error) {
+func (t *supervisorTestTerminal) recordGeometry() (domain.Geometry, error) {
 	return domain.Geometry{}, nil
 }
 
-func (t *supervisorTestTerminal) ResizeEvents() <-chan domain.Geometry { return nil }
+func (t *supervisorTestTerminal) recordResizeEvents() <-chan domain.Geometry { return nil }
 
-func (t *supervisorTestTerminal) In() io.Reader { return t.in }
+func (t *supervisorTestTerminal) recordIn() io.Reader { return t.in }
 
-func (t *supervisorTestTerminal) Out() io.Writer { return io.Discard }
+func (t *supervisorTestTerminal) recordOut() io.Writer { return io.Discard }
 
-func (t *supervisorTestTerminal) Flush() error { return nil }
+func (t *supervisorTestTerminal) recordFlush() error { return nil }
 
 func (t *supervisorTestTerminal) restoreCount() int {
 	t.mu.Lock()
@@ -176,6 +199,7 @@ func (t *supervisorTestTerminal) restoreCount() int {
 // supervisorTestConnector scripts connection attempts and records concurrency,
 // so a test can prove attempts never overlap.
 type supervisorTestConnector struct {
+	port    *portsmocks.MockBrokerConnector
 	connect func(ctx context.Context, call int) (ports.BrokerNavigator, error)
 
 	mu          sync.Mutex
@@ -185,11 +209,14 @@ type supervisorTestConnector struct {
 	started     chan int
 }
 
-func newSupervisorTestConnector(connect func(ctx context.Context, call int) (ports.BrokerNavigator, error)) *supervisorTestConnector {
-	return &supervisorTestConnector{connect: connect, started: make(chan int, 32)}
+func newSupervisorTestConnector(t *testing.T, connect func(ctx context.Context, call int) (ports.BrokerNavigator, error)) *supervisorTestConnector {
+	c := &supervisorTestConnector{connect: connect, started: make(chan int, 32)}
+	c.port = portsmocks.NewMockBrokerConnector(t)
+	c.port.EXPECT().Connect(mock.Anything).RunAndReturn(c.recordConnect).Maybe()
+	return c
 }
 
-func (c *supervisorTestConnector) Connect(ctx context.Context) (ports.BrokerNavigator, error) {
+func (c *supervisorTestConnector) recordConnect(ctx context.Context) (ports.BrokerNavigator, error) {
 	c.mu.Lock()
 	c.calls++
 	call := c.calls
@@ -233,10 +260,11 @@ func (c *supervisorTestConnector) inFlightCount() int {
 
 func (c *supervisorTestConnector) awaitStart(t *testing.T) int {
 	t.Helper()
+	synctest.Wait()
 	select {
 	case call := <-c.started:
 		return call
-	case <-time.After(5 * time.Second):
+	default:
 		t.Fatal("supervisor did not start a connection attempt")
 		return 0
 	}
@@ -249,13 +277,14 @@ func (c *supervisorTestConnector) awaitStart(t *testing.T) int {
 // on wake. A slow or parked subscriber therefore can never block the
 // publisher or busy-spin.
 type supervisorTestHub struct {
+	owner    *testing.T
 	mu       sync.Mutex
 	snapshot ports.BrokerSnapshot
 	subs     map[chan struct{}]struct{}
 }
 
-func newSupervisorTestHub() *supervisorTestHub {
-	return &supervisorTestHub{subs: make(map[chan struct{}]struct{})}
+func newSupervisorTestHub(t *testing.T) *supervisorTestHub {
+	return &supervisorTestHub{owner: t, subs: make(map[chan struct{}]struct{})}
 }
 
 func (h *supervisorTestHub) publish(snapshot ports.BrokerSnapshot) {
@@ -281,27 +310,30 @@ func (h *supervisorTestHub) subscribe(closeFn func()) ports.BrokerSubscription {
 	h.mu.Lock()
 	h.subs[changed] = struct{}{}
 	h.mu.Unlock()
-	return supervisorTestSubscription{changed: changed, closeFn: func() {
+	return newTestSubscription(h.owner, changed, func() {
 		h.mu.Lock()
 		delete(h.subs, changed)
 		h.mu.Unlock()
 		if closeFn != nil {
 			closeFn()
 		}
-	}}
+	})
 }
 
-type supervisorTestSubscription struct {
-	changed chan struct{}
-	closeFn func()
-}
-
-func (s supervisorTestSubscription) Changed() <-chan struct{} { return s.changed }
-
-func (s supervisorTestSubscription) Close() {
-	if s.closeFn != nil {
-		s.closeFn()
-	}
+// newTestSubscription builds a ports.BrokerSubscription mock over a channel. Its
+// expectations are all optional, so it is deliberately not registered for
+// AssertExpectations: the supervisor may still be creating it on a lingering
+// goroutine while the test cleanup runs.
+func newTestSubscription(t *testing.T, changed chan struct{}, closeFn func()) *portsmocks.MockBrokerSubscription {
+	m := &portsmocks.MockBrokerSubscription{}
+	m.Mock.Test(t)
+	m.EXPECT().Changed().Return((<-chan struct{})(changed)).Maybe()
+	m.EXPECT().Close().Run(func() {
+		if closeFn != nil {
+			closeFn()
+		}
+	}).Maybe()
+	return m
 }
 
 // supervisorTestService is one scripted BrokerService. Close is observable so a
@@ -309,8 +341,9 @@ func (s supervisorTestSubscription) Close() {
 // so a test can order a parent cancellation strictly before a settle decision that
 // runs after the connection is released.
 type supervisorTestService struct {
-	id  ports.BrokerConnectionID
-	hub *supervisorTestHub
+	port *portsmocks.MockBrokerNavigator
+	id   ports.BrokerConnectionID
+	hub  *supervisorTestHub
 
 	mu       sync.Mutex
 	err      error
@@ -335,38 +368,54 @@ type supervisorTestService struct {
 	reconciles []string
 }
 
-func newSupervisorTestService(id ports.BrokerConnectionID) *supervisorTestService {
-	return &supervisorTestService{
+func newSupervisorTestService(t *testing.T, id ports.BrokerConnectionID, opts ...func(*portsmocks.MockBrokerNavigator)) *supervisorTestService {
+	s := &supervisorTestService{
 		id:        id,
-		hub:       newSupervisorTestHub(),
+		hub:       newSupervisorTestHub(t),
 		done:      make(chan struct{}),
 		closed:    make(chan struct{}),
 		subClosed: make(chan struct{}, 1),
 	}
+	s.port = portsmocks.NewMockBrokerNavigator(t)
+	for _, opt := range opts {
+		opt(s.port)
+	}
+	s.port.EXPECT().ConnectionID().RunAndReturn(s.recordConnectionID).Maybe()
+	s.port.EXPECT().NextStreamID().RunAndReturn(s.recordNextStreamID).Maybe()
+	s.port.EXPECT().Done().RunAndReturn(s.recordDone).Maybe()
+	s.port.EXPECT().Err().RunAndReturn(s.recordErr).Maybe()
+	s.port.EXPECT().Snapshot().RunAndReturn(s.recordSnapshot).Maybe()
+	s.port.EXPECT().Subscribe().RunAndReturn(s.recordSubscribe).Maybe()
+	s.port.EXPECT().SubscribePreview(mock.Anything).RunAndReturn(s.recordSubscribePreview).Maybe()
+	s.port.EXPECT().OpenStream(mock.Anything, mock.Anything).RunAndReturn(s.recordOpenStream).Maybe()
+	s.port.EXPECT().RequestReconcile(mock.Anything).Run(s.recordRequestReconcile).Maybe()
+	s.port.EXPECT().Close().RunAndReturn(s.recordClose).Maybe()
+	return s
+
 }
 
-func (s *supervisorTestService) ConnectionID() ports.BrokerConnectionID { return s.id }
+func (s *supervisorTestService) recordConnectionID() ports.BrokerConnectionID { return s.id }
 
 // NextStreamID is the connection's only stream allocator, exactly like the
 // production service: the tested supervisor reads every identity here.
-func (s *supervisorTestService) NextStreamID() (ports.BrokerStreamID, error) {
+func (s *supervisorTestService) recordNextStreamID() (ports.BrokerStreamID, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.nextStream++
 	return s.nextStream, nil
 }
 
-func (s *supervisorTestService) Done() <-chan struct{} { return s.done }
+func (s *supervisorTestService) recordDone() <-chan struct{} { return s.done }
 
-func (s *supervisorTestService) Err() error {
+func (s *supervisorTestService) recordErr() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.err
 }
 
-func (s *supervisorTestService) Snapshot() ports.BrokerSnapshot { return s.hub.current() }
+func (s *supervisorTestService) recordSnapshot() ports.BrokerSnapshot { return s.hub.current() }
 
-func (s *supervisorTestService) Subscribe() (ports.BrokerSubscription, error) {
+func (s *supervisorTestService) recordSubscribe() (ports.BrokerSubscription, error) {
 	return s.hub.subscribe(func() {
 		select {
 		case s.subClosed <- struct{}{}:
@@ -375,11 +424,11 @@ func (s *supervisorTestService) Subscribe() (ports.BrokerSubscription, error) {
 	}), nil
 }
 
-func (s *supervisorTestService) SubscribePreview(ports.BrokerPreviewRequest) (ports.BrokerPreviewSubscription, error) {
+func (s *supervisorTestService) recordSubscribePreview(ports.BrokerPreviewRequest) (ports.BrokerPreviewSubscription, error) {
 	return nil, errors.New("supervisor test service does not support preview")
 }
 
-func (s *supervisorTestService) OpenStream(ctx context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+func (s *supervisorTestService) recordOpenStream(ctx context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 	s.mu.Lock()
 	s.openCalls = append(s.openCalls, request)
 	open := s.openStream
@@ -404,7 +453,7 @@ func (s *supervisorTestService) openedRequests() []ports.BrokerOpenStreamRequest
 	return append([]ports.BrokerOpenStreamRequest(nil), s.openCalls...)
 }
 
-func (s *supervisorTestService) RequestReconcile(endpoint string) {
+func (s *supervisorTestService) recordRequestReconcile(endpoint string) {
 	s.mu.Lock()
 	s.reconciles = append(s.reconciles, endpoint)
 	s.mu.Unlock()
@@ -417,7 +466,7 @@ func (s *supervisorTestService) reconcileHints() []string {
 	return append([]string(nil), s.reconciles...)
 }
 
-func (s *supervisorTestService) Close() error {
+func (s *supervisorTestService) recordClose() error {
 	s.closeOnce.Do(func() {
 		if s.closeGate != nil {
 			select {
@@ -595,7 +644,9 @@ func TestSupervisorReducerTransitions(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.want, reduceSupervisor(tt.state, tt.event))
+			synctest.Test(t, func(t *testing.T) {
+				require.Equal(t, tt.want, reduceSupervisor(tt.state, tt.event))
+			})
 		})
 	}
 }
@@ -636,370 +687,394 @@ func TestSupervisorBackoffCadence(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.want, supervisorBackoffDelay(tt.attempt, tt.jitter))
+			synctest.Test(t, func(t *testing.T) {
+				require.Equal(t, tt.want, supervisorBackoffDelay(tt.attempt, tt.jitter))
+			})
 		})
 	}
 }
 
 func TestSupervisorPickerWithoutBroker(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 
-	clock := newSupervisorTestClock()
-	reader := newSupervisorTestReader()
-	t.Cleanup(reader.unblock)
-	terminal := newSupervisorTestTerminal(reader)
-	connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) {
-		return nil, ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: "broker down"}
+		clock := newSupervisorTestClock(t)
+		reader := newSupervisorTestReader()
+		t.Cleanup(reader.unblock)
+		terminal := newSupervisorTestTerminal(t, reader)
+		connector := newSupervisorTestConnector(t, func(context.Context, int) (ports.BrokerNavigator, error) {
+			return nil, ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: "broker down"}
+		})
+
+		var (
+			renderMu sync.Mutex
+			renders  []State
+		)
+		sup := mustSupervisor(t, SupervisorConfig{
+			Connector: connector.port,
+			Terminal:  terminal.port,
+			Clock:     clock.port,
+			Jitter:    func() float64 { return 0 },
+			Render: func(state State) {
+				renderMu.Lock()
+				renders = append(renders, state)
+				renderMu.Unlock()
+			},
+		})
+
+		runErr := make(chan error, 1)
+		go func() { runErr <- sup.Run(ctx) }()
+
+		first := clock.awaitTimer(t)
+		require.Equal(t, 50*time.Millisecond, first.delay, "the first retry is the equal-jitter half of 100ms")
+		require.Equal(t, 1, connector.awaitStart(t))
+		require.Equal(t, State{Presentation: PresentPicker, Connectivity: ConnectivityRetryWait, Attempt: 1, Generation: 1, Err: ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: "broker down"}}, sup.State())
+
+		first.fire()
+		second := clock.awaitTimer(t)
+		require.Equal(t, 100*time.Millisecond, second.delay, "the second retry doubles the cap")
+		require.Equal(t, 2, connector.awaitStart(t))
+		require.Equal(t, PresentPicker, sup.State().Presentation, "the picker stays up while disconnected")
+		require.Equal(t, ConnectivityRetryWait, sup.State().Connectivity)
+		require.Equal(t, uint64(2), sup.State().Generation)
+
+		cancel()
+		require.ErrorIs(t, <-runErr, context.Canceled)
+		require.Equal(t, 1, terminal.restoreCount())
+		require.Equal(t, 1, connector.maxConcurrent())
+
+		renderMu.Lock()
+		defer renderMu.Unlock()
+		require.NotEmpty(t, renders)
+		require.Equal(t, PresentTerminating, renders[len(renders)-1].Presentation)
+		for _, state := range renders[:len(renders)-1] {
+			require.Equal(t, PresentPicker, state.Presentation, "P5.1a never leaves the picker")
+		}
 	})
-
-	var (
-		renderMu sync.Mutex
-		renders  []State
-	)
-	sup := mustSupervisor(t, SupervisorConfig{
-		Connector: connector,
-		Terminal:  terminal,
-		Clock:     clock,
-		Jitter:    func() float64 { return 0 },
-		Render: func(state State) {
-			renderMu.Lock()
-			renders = append(renders, state)
-			renderMu.Unlock()
-		},
-	})
-
-	runErr := make(chan error, 1)
-	go func() { runErr <- sup.Run(ctx) }()
-
-	first := clock.awaitTimer(t)
-	require.Equal(t, 50*time.Millisecond, first.delay, "the first retry is the equal-jitter half of 100ms")
-	require.Equal(t, 1, connector.awaitStart(t))
-	require.Equal(t, State{Presentation: PresentPicker, Connectivity: ConnectivityRetryWait, Attempt: 1, Generation: 1, Err: ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: "broker down"}}, sup.State())
-
-	first.fire()
-	second := clock.awaitTimer(t)
-	require.Equal(t, 100*time.Millisecond, second.delay, "the second retry doubles the cap")
-	require.Equal(t, 2, connector.awaitStart(t))
-	require.Equal(t, PresentPicker, sup.State().Presentation, "the picker stays up while disconnected")
-	require.Equal(t, ConnectivityRetryWait, sup.State().Connectivity)
-	require.Equal(t, uint64(2), sup.State().Generation)
-
-	cancel()
-	require.ErrorIs(t, <-runErr, context.Canceled)
-	require.Equal(t, 1, terminal.restoreCount())
-	require.Equal(t, 1, connector.maxConcurrent())
-
-	renderMu.Lock()
-	defer renderMu.Unlock()
-	require.NotEmpty(t, renders)
-	require.Equal(t, PresentTerminating, renders[len(renders)-1].Presentation)
-	for _, state := range renders[:len(renders)-1] {
-		require.Equal(t, PresentPicker, state.Presentation, "P5.1a never leaves the picker")
-	}
 }
 
 func TestSupervisorPickerPublicationRequestsRepaint(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 
-	clock := newSupervisorTestClock()
-	reader := newSupervisorTestReader()
-	t.Cleanup(reader.unblock)
-	service := newSupervisorTestService(ports.BrokerConnectionID{1})
-	service.publish(1, 1)
-	renders := make(chan State, 16)
+		clock := newSupervisorTestClock(t)
+		reader := newSupervisorTestReader()
+		t.Cleanup(reader.unblock)
+		service := newSupervisorTestService(t, ports.BrokerConnectionID{1})
+		service.publish(1, 1)
+		renders := make(chan State, 16)
 
-	sup := mustSupervisor(t, SupervisorConfig{
-		Connector: newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) {
-			return service, nil
-		}),
-		Terminal: newSupervisorTestTerminal(reader),
-		Clock:    clock,
-		Picker:   newPickerController(clock, pickerTestFreshness, terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor}),
-		Render: func(state State) {
-			renders <- state
-		},
-	})
+		sup := mustSupervisor(t, SupervisorConfig{
+			Connector: newSupervisorTestConnector(t, func(context.Context, int) (ports.BrokerNavigator, error) {
+				return service.port, nil
+			}).port,
+			Terminal: newSupervisorTestTerminal(t, reader).port,
+			Clock:    clock.port,
+			Picker:   newPickerController(clock.port, pickerTestFreshness, terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor}),
+			Render: func(state State) {
+				renders <- state
+			},
+		})
 
-	runErr := make(chan error, 1)
-	go func() { runErr <- sup.Run(ctx) }()
-	require.Eventually(t, func() bool { return sup.State().Connectivity == ConnectivityReady }, 5*time.Second, time.Millisecond)
-	for {
-		select {
-		case <-renders:
-		default:
-			goto drained
+		runErr := make(chan error, 1)
+		go func() { runErr <- sup.Run(ctx) }()
+		synctest.Wait()
+		require.True(t, sup.State().Connectivity == ConnectivityReady)
+		for {
+			select {
+			case <-renders:
+			default:
+				goto drained
+			}
 		}
-	}
 
-drained:
-	service.publish(1, 2)
-	select {
-	case state := <-renders:
-		require.Equal(t, PresentPicker, state.Presentation)
-		require.Equal(t, ConnectivityReady, state.Connectivity)
-	case <-time.After(5 * time.Second):
-		t.Fatal("picker publication did not request a repaint")
-	}
+	drained:
+		service.publish(1, 2)
+		select {
+		case state := <-renders:
+			require.Equal(t, PresentPicker, state.Presentation)
+			require.Equal(t, ConnectivityReady, state.Connectivity)
+		case <-time.After(5 * time.Second):
+			t.Fatal("picker publication did not request a repaint")
+		}
 
-	cancel()
-	require.ErrorIs(t, <-runErr, context.Canceled)
+		cancel()
+		require.ErrorIs(t, <-runErr, context.Canceled)
+	})
 }
 
 func TestSupervisorBrokerLossReconnectsWithFreshGeneration(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 
-	clock := newSupervisorTestClock()
-	reader := newSupervisorTestReader()
-	t.Cleanup(reader.unblock)
-	terminal := newSupervisorTestTerminal(reader)
+		clock := newSupervisorTestClock(t)
+		reader := newSupervisorTestReader()
+		t.Cleanup(reader.unblock)
+		terminal := newSupervisorTestTerminal(t, reader)
 
-	first := newSupervisorTestService(ports.BrokerConnectionID{1})
-	first.publish(1, 1)
-	second := newSupervisorTestService(ports.BrokerConnectionID{2})
+		first := newSupervisorTestService(t, ports.BrokerConnectionID{1})
+		first.publish(1, 1)
+		second := newSupervisorTestService(t, ports.BrokerConnectionID{2})
 
-	connector := newSupervisorTestConnector(func(_ context.Context, call int) (ports.BrokerNavigator, error) {
-		switch call {
-		case 1:
-			return first, nil
+		connector := newSupervisorTestConnector(t, func(_ context.Context, call int) (ports.BrokerNavigator, error) {
+			switch call {
+			case 1:
+				return first.port, nil
+			default:
+				return second.port, nil
+			}
+		})
+
+		sup := mustSupervisor(t, SupervisorConfig{
+			Connector: connector.port,
+			Terminal:  terminal.port,
+			Clock:     clock.port,
+			Jitter:    func() float64 { return 0 },
+		})
+
+		runErr := make(chan error, 1)
+		go func() { runErr <- sup.Run(ctx) }()
+
+		require.Equal(t, 1, connector.awaitStart(t))
+		synctest.Wait()
+		require.True(t, sup.State().Connectivity == ConnectivityReady)
+		require.Equal(t, uint64(1), sup.State().Generation)
+		require.Equal(t, uint64(0), sup.State().Attempt)
+
+		// The idle broker connection is lost: the supervisor retires it and waits
+		// the first cadence before reconnecting.
+		first.lose(ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: "idle loss"})
+		synctest.Wait()
+		require.True(t, sup.State().Connectivity == ConnectivityRetryWait)
+		require.Equal(t, uint64(1), sup.State().Attempt)
+		select {
+		case <-first.closedCh():
 		default:
-			return second, nil
+			t.Fatal("the lost connection was not retired")
+		}
+		select {
+		case <-first.subClosed:
+		default:
+			t.Fatal("the lost subscription was not retired")
+		}
+
+		retry := clock.awaitTimer(t)
+		require.Equal(t, 50*time.Millisecond, retry.delay)
+		retry.fire()
+		require.Equal(t, 2, connector.awaitStart(t))
+
+		// Wait until the replacement is waiting for its first publication.
+		synctest.Wait()
+		require.True(t, sup.State().Connectivity == ConnectivityConnectingBroker && sup.State().Generation == 2)
+
+		// A publication on the retired connection must never make the replacement
+		// Ready; only the replacement's own fresh epoch does.
+		first.publish(1, 2)
+		synctest.Wait()
+		require.False(t, sup.State().Connectivity == ConnectivityReady)
+
+		second.publish(2, 1)
+		synctest.Wait()
+		require.True(t, sup.State().Connectivity == ConnectivityReady)
+		require.Equal(t, uint64(2), sup.State().Generation)
+		require.Equal(t, uint64(0), sup.State().Attempt, "readiness resets the cadence")
+
+		cancel()
+		require.ErrorIs(t, <-runErr, context.Canceled)
+		require.Equal(t, 1, terminal.restoreCount())
+		select {
+		case <-second.closedCh():
+		default:
+			t.Fatal("the active connection was not retired on shutdown")
 		}
 	})
-
-	sup := mustSupervisor(t, SupervisorConfig{
-		Connector: connector,
-		Terminal:  terminal,
-		Clock:     clock,
-		Jitter:    func() float64 { return 0 },
-	})
-
-	runErr := make(chan error, 1)
-	go func() { runErr <- sup.Run(ctx) }()
-
-	require.Equal(t, 1, connector.awaitStart(t))
-	require.Eventually(t, func() bool { return sup.State().Connectivity == ConnectivityReady }, 5*time.Second, time.Millisecond)
-	require.Equal(t, uint64(1), sup.State().Generation)
-	require.Equal(t, uint64(0), sup.State().Attempt)
-
-	// The idle broker connection is lost: the supervisor retires it and waits
-	// the first cadence before reconnecting.
-	first.lose(ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: "idle loss"})
-	require.Eventually(t, func() bool { return sup.State().Connectivity == ConnectivityRetryWait }, 5*time.Second, time.Millisecond)
-	require.Equal(t, uint64(1), sup.State().Attempt)
-	select {
-	case <-first.closedCh():
-	default:
-		t.Fatal("the lost connection was not retired")
-	}
-	select {
-	case <-first.subClosed:
-	default:
-		t.Fatal("the lost subscription was not retired")
-	}
-
-	retry := clock.awaitTimer(t)
-	require.Equal(t, 50*time.Millisecond, retry.delay)
-	retry.fire()
-	require.Equal(t, 2, connector.awaitStart(t))
-
-	// Wait until the replacement is waiting for its first publication.
-	require.Eventually(t, func() bool {
-		return sup.State().Connectivity == ConnectivityConnectingBroker && sup.State().Generation == 2
-	}, 5*time.Second, time.Millisecond)
-
-	// A publication on the retired connection must never make the replacement
-	// Ready; only the replacement's own fresh epoch does.
-	first.publish(1, 2)
-	require.Never(t, func() bool { return sup.State().Connectivity == ConnectivityReady }, 50*time.Millisecond, 5*time.Millisecond)
-
-	second.publish(2, 1)
-	require.Eventually(t, func() bool { return sup.State().Connectivity == ConnectivityReady }, 5*time.Second, time.Millisecond)
-	require.Equal(t, uint64(2), sup.State().Generation)
-	require.Equal(t, uint64(0), sup.State().Attempt, "readiness resets the cadence")
-
-	cancel()
-	require.ErrorIs(t, <-runErr, context.Canceled)
-	require.Equal(t, 1, terminal.restoreCount())
-	select {
-	case <-second.closedCh():
-	default:
-		t.Fatal("the active connection was not retired on shutdown")
-	}
 }
 
 func TestSupervisorCancellationClosesLateConnection(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
 
-	clock := newSupervisorTestClock()
-	reader := newSupervisorTestReader()
-	t.Cleanup(reader.unblock)
-	terminal := newSupervisorTestTerminal(reader)
+		clock := newSupervisorTestClock(t)
+		reader := newSupervisorTestReader()
+		t.Cleanup(reader.unblock)
+		terminal := newSupervisorTestTerminal(t, reader)
 
-	release := make(chan struct{})
-	late := newSupervisorTestService(ports.BrokerConnectionID{9})
-	late.publish(1, 1)
-	connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) {
-		<-release
-		return late, nil
+		release := make(chan struct{})
+		late := newSupervisorTestService(t, ports.BrokerConnectionID{9})
+		late.publish(1, 1)
+		connector := newSupervisorTestConnector(t, func(context.Context, int) (ports.BrokerNavigator, error) {
+			<-release
+			return late.port, nil
+		})
+
+		sup := mustSupervisor(t, SupervisorConfig{
+			Connector: connector.port,
+			Terminal:  terminal.port,
+			Clock:     clock.port,
+			Jitter:    func() float64 { return 0 },
+		})
+
+		runErr := make(chan error, 1)
+		go func() { runErr <- sup.Run(ctx) }()
+		require.Equal(t, 1, connector.awaitStart(t))
+
+		// Cancel while the connector ignores cancellation, then let it return a
+		// live service: the supervisor must close the late superseded success.
+		cancel()
+		close(release)
+
+		require.ErrorIs(t, <-runErr, context.Canceled)
+		select {
+		case <-late.closedCh():
+		default:
+			t.Fatal("a late superseded success must be closed")
+		}
+		require.Equal(t, 1, terminal.restoreCount())
+		require.Zero(t, connector.inFlightCount())
 	})
-
-	sup := mustSupervisor(t, SupervisorConfig{
-		Connector: connector,
-		Terminal:  terminal,
-		Clock:     clock,
-		Jitter:    func() float64 { return 0 },
-	})
-
-	runErr := make(chan error, 1)
-	go func() { runErr <- sup.Run(ctx) }()
-	require.Equal(t, 1, connector.awaitStart(t))
-
-	// Cancel while the connector ignores cancellation, then let it return a
-	// live service: the supervisor must close the late superseded success.
-	cancel()
-	close(release)
-
-	require.ErrorIs(t, <-runErr, context.Canceled)
-	select {
-	case <-late.closedCh():
-	default:
-		t.Fatal("a late superseded success must be closed")
-	}
-	require.Equal(t, 1, terminal.restoreCount())
-	require.Zero(t, connector.inFlightCount())
 }
 
 func TestSupervisorIncompatibleStopsReconnecting(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 
-	clock := newSupervisorTestClock()
-	reader := newSupervisorTestReader()
-	t.Cleanup(reader.unblock)
-	terminal := newSupervisorTestTerminal(reader)
+		clock := newSupervisorTestClock(t)
+		reader := newSupervisorTestReader()
+		t.Cleanup(reader.unblock)
+		terminal := newSupervisorTestTerminal(t, reader)
 
-	incompatible := ports.BrokerError{Code: ports.BrokerErrorIncompatible, Text: "protocol"}
-	connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) {
-		return nil, incompatible
+		incompatible := ports.BrokerError{Code: ports.BrokerErrorIncompatible, Text: "protocol"}
+		connector := newSupervisorTestConnector(t, func(context.Context, int) (ports.BrokerNavigator, error) {
+			return nil, incompatible
+		})
+		notified := make(chan error, 4)
+		sup := mustSupervisor(t, SupervisorConfig{
+			Connector: connector.port,
+			Terminal:  terminal.port,
+			Clock:     clock.port,
+			Jitter:    func() float64 { return 0 },
+			Notify:    func(_ State, err error) { notified <- err },
+		})
+
+		runErr := make(chan error, 1)
+		go func() { runErr <- sup.Run(ctx) }()
+
+		select {
+		case err := <-notified:
+			var typed ports.BrokerError
+			require.ErrorAs(t, err, &typed)
+			require.Equal(t, ports.BrokerErrorIncompatible, typed.Code)
+		case <-time.After(5 * time.Second):
+			t.Fatal("the incompatible failure was not surfaced")
+		}
+
+		require.Equal(t, State{Presentation: PresentPicker, Connectivity: ConnectivityDisconnected, Generation: 1, Err: incompatible}, sup.State())
+		synctest.Wait()
+		require.False(t, connector.callCount() > 1)
+		require.Zero(t, clock.timerCount(), "a non-retryable failure schedules no retry timer")
+
+		cancel()
+		require.ErrorIs(t, <-runErr, context.Canceled)
+		require.Equal(t, 1, terminal.restoreCount())
 	})
-	notified := make(chan error, 4)
-	sup := mustSupervisor(t, SupervisorConfig{
-		Connector: connector,
-		Terminal:  terminal,
-		Clock:     clock,
-		Jitter:    func() float64 { return 0 },
-		Notify:    func(_ State, err error) { notified <- err },
-	})
-
-	runErr := make(chan error, 1)
-	go func() { runErr <- sup.Run(ctx) }()
-
-	select {
-	case err := <-notified:
-		var typed ports.BrokerError
-		require.ErrorAs(t, err, &typed)
-		require.Equal(t, ports.BrokerErrorIncompatible, typed.Code)
-	case <-time.After(5 * time.Second):
-		t.Fatal("the incompatible failure was not surfaced")
-	}
-
-	require.Equal(t, State{Presentation: PresentPicker, Connectivity: ConnectivityDisconnected, Generation: 1, Err: incompatible}, sup.State())
-	require.Never(t, func() bool { return connector.callCount() > 1 }, 50*time.Millisecond, 5*time.Millisecond)
-	require.Zero(t, clock.timerCount(), "a non-retryable failure schedules no retry timer")
-
-	cancel()
-	require.ErrorIs(t, <-runErr, context.Canceled)
-	require.Equal(t, 1, terminal.restoreCount())
 }
 
 func TestSupervisorTerminalEOFRestoresRawOnce(t *testing.T) {
-	clock := newSupervisorTestClock()
-	terminal := newSupervisorTestTerminal(strings.NewReader(""))
-	connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) {
-		return nil, ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: "down"}
-	})
+	synctest.Test(t, func(t *testing.T) {
+		clock := newSupervisorTestClock(t)
+		terminal := newSupervisorTestTerminal(t, strings.NewReader(""))
+		connector := newSupervisorTestConnector(t, func(context.Context, int) (ports.BrokerNavigator, error) {
+			return nil, ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: "down"}
+		})
 
-	sup := mustSupervisor(t, SupervisorConfig{
-		Connector: connector,
-		Terminal:  terminal,
-		Clock:     clock,
-		Jitter:    func() float64 { return 0 },
-	})
+		sup := mustSupervisor(t, SupervisorConfig{
+			Connector: connector.port,
+			Terminal:  terminal.port,
+			Clock:     clock.port,
+			Jitter:    func() float64 { return 0 },
+		})
 
-	require.NoError(t, sup.Run(context.Background()), "a clean terminal EOF is an orderly exit")
-	require.Equal(t, 1, terminal.restoreCount())
-	require.Equal(t, PresentTerminating, sup.State().Presentation)
+		require.NoError(t, sup.Run(context.Background()), "a clean terminal EOF is an orderly exit")
+		require.Equal(t, 1, terminal.restoreCount())
+		require.Equal(t, PresentTerminating, sup.State().Presentation)
+	})
 }
 
 func TestSupervisorRawModePrecedesBroker(t *testing.T) {
-	clock := newSupervisorTestClock()
-	reader := newSupervisorTestReader()
-	t.Cleanup(reader.unblock)
-	terminal := newSupervisorTestTerminal(reader)
+	synctest.Test(t, func(t *testing.T) {
+		clock := newSupervisorTestClock(t)
+		reader := newSupervisorTestReader()
+		t.Cleanup(reader.unblock)
+		terminal := newSupervisorTestTerminal(t, reader)
 
-	enteredAfterRaw := make(chan bool, 1)
-	connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) {
-		enteredAfterRaw <- terminal.restoreCount() == 0
-		return nil, ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: "down"}
+		enteredAfterRaw := make(chan bool, 1)
+		connector := newSupervisorTestConnector(t, func(context.Context, int) (ports.BrokerNavigator, error) {
+			enteredAfterRaw <- terminal.restoreCount() == 0
+			return nil, ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: "down"}
+		})
+
+		sup := mustSupervisor(t, SupervisorConfig{
+			Connector: connector.port,
+			Terminal:  terminal.port,
+			Clock:     clock.port,
+			Jitter:    func() float64 { return 0 },
+		})
+
+		ctx, cancel := context.WithCancel(context.Background())
+		runErr := make(chan error, 1)
+		go func() { runErr <- sup.Run(ctx) }()
+		require.Equal(t, 1, connector.awaitStart(t))
+		require.True(t, <-enteredAfterRaw, "raw mode must be entered before the first broker connection")
+		cancel()
+		<-runErr
 	})
-
-	sup := mustSupervisor(t, SupervisorConfig{
-		Connector: connector,
-		Terminal:  terminal,
-		Clock:     clock,
-		Jitter:    func() float64 { return 0 },
-	})
-
-	ctx, cancel := context.WithCancel(context.Background())
-	runErr := make(chan error, 1)
-	go func() { runErr <- sup.Run(ctx) }()
-	require.Equal(t, 1, connector.awaitStart(t))
-	require.True(t, <-enteredAfterRaw, "raw mode must be entered before the first broker connection")
-	cancel()
-	<-runErr
 }
 
 func TestSupervisorSingleAttemptAndTimer(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
 
-	clock := newSupervisorTestClock()
-	reader := newSupervisorTestReader()
-	t.Cleanup(reader.unblock)
-	terminal := newSupervisorTestTerminal(reader)
-	connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) {
-		return nil, ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: "down"}
+		clock := newSupervisorTestClock(t)
+		reader := newSupervisorTestReader()
+		t.Cleanup(reader.unblock)
+		terminal := newSupervisorTestTerminal(t, reader)
+		connector := newSupervisorTestConnector(t, func(context.Context, int) (ports.BrokerNavigator, error) {
+			return nil, ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: "down"}
+		})
+
+		sup := mustSupervisor(t, SupervisorConfig{
+			Connector: connector.port,
+			Terminal:  terminal.port,
+			Clock:     clock.port,
+			Jitter:    func() float64 { return 0 },
+		})
+
+		runErr := make(chan error, 1)
+		go func() { runErr <- sup.Run(ctx) }()
+
+		first := clock.awaitTimer(t)
+		first.fire()
+		second := clock.awaitTimer(t)
+		require.Equal(t, 100*time.Millisecond, second.delay)
+		second.fire()
+		clock.awaitTimer(t)
+
+		require.Equal(t, 1, connector.maxConcurrent(), "attempts never overlap")
+		require.Equal(t, 3, connector.callCount())
+		require.Equal(t, 1, clock.liveTimers(), "exactly one retry timer is live")
+		require.Zero(t, connector.inFlightCount(), "the connector call has returned before the next wait")
+
+		cancel()
+		require.ErrorIs(t, <-runErr, context.Canceled)
+		synctest.Wait()
+		require.True(t, clock.allStopped(), "every retry timer is retired")
+		require.Equal(t, terminal.restoreCount(), 1)
+		require.Zero(t, connector.inFlightCount())
 	})
-
-	sup := mustSupervisor(t, SupervisorConfig{
-		Connector: connector,
-		Terminal:  terminal,
-		Clock:     clock,
-		Jitter:    func() float64 { return 0 },
-	})
-
-	runErr := make(chan error, 1)
-	go func() { runErr <- sup.Run(ctx) }()
-
-	first := clock.awaitTimer(t)
-	first.fire()
-	second := clock.awaitTimer(t)
-	require.Equal(t, 100*time.Millisecond, second.delay)
-	second.fire()
-	clock.awaitTimer(t)
-
-	require.Equal(t, 1, connector.maxConcurrent(), "attempts never overlap")
-	require.Equal(t, 3, connector.callCount())
-	require.Equal(t, 1, clock.liveTimers(), "exactly one retry timer is live")
-	require.Zero(t, connector.inFlightCount(), "the connector call has returned before the next wait")
-
-	cancel()
-	require.ErrorIs(t, <-runErr, context.Canceled)
-	require.Eventually(t, clock.allStopped, time.Second, time.Millisecond, "every retry timer is retired")
-	require.Equal(t, terminal.restoreCount(), 1)
-	require.Zero(t, connector.inFlightCount())
 }
 
 // supervisorCancellationRaceRounds is how many times each cancellation race is
@@ -1032,7 +1107,7 @@ func TestSupervisorCancellationRacingSettlementIsTerminal(t *testing.T) {
 		{
 			name: "ready connection",
 			attempt: func() (*supervisorTestService, error) {
-				service := newSupervisorTestService(ports.BrokerConnectionID{3})
+				service := newSupervisorTestService(t, ports.BrokerConnectionID{3})
 				service.publish(1, 1)
 				return service, nil
 			},
@@ -1042,77 +1117,82 @@ func TestSupervisorCancellationRacingSettlementIsTerminal(t *testing.T) {
 
 	for _, tc := range attempts {
 		t.Run("attempt "+tc.name, func(t *testing.T) {
-			// One carrier thread for the round: yielding after the attempt is
-			// released then runs that goroutine to its settlement before this one
-			// resumes, so the outcome is delivered while the parent is still live
-			// and the run's select takes the settled attempt rather than ctx.Done.
-			defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
-			for round := 0; round < supervisorCancellationRaceRounds; round++ {
-				release := make(chan struct{})
-				var raced *supervisorTestService
-				race := startCancellationRace(t, func(context.Context, int) (ports.BrokerNavigator, error) {
-					<-release
-					service, err := tc.attempt()
-					raced = service
-					if service == nil {
-						return nil, err
-					}
-					return service, err
-				})
-				require.Equal(t, 1, race.connector.awaitStart(t), "round %d", round)
+			synctest.Test(t, func(t *testing.T) {
+				// One carrier thread for the round: yielding after the attempt is
+				// released then runs that goroutine to its settlement before this one
+				// resumes, so the outcome is delivered while the parent is still live
+				// and the run's select takes the settled attempt rather than ctx.Done.
+				defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
+				for round := 0; round < supervisorCancellationRaceRounds; round++ {
+					release := make(chan struct{})
+					var raced *supervisorTestService
+					race := startCancellationRace(t, func(context.Context, int) (ports.BrokerNavigator, error) {
+						<-release
+						service, err := tc.attempt()
+						raced = service
+						if service == nil {
+							return nil, err
+						}
+						return service.port, err
+					})
+					require.Equal(t, 1, race.connector.awaitStart(t), "round %d", round)
 
-				// Take the state lock the run decides adoption under, release the
-				// attempt, let it settle, and cancel the parent while still holding
-				// the lock: the decision is ordered strictly after the cancellation
-				// by construction.
-				race.supervisor.mu.Lock()
-				close(release)
-				runtime.Gosched()
-				race.cancel()
-				race.supervisor.mu.Unlock()
+					// Take the state lock the run decides adoption under, release the
+					// attempt, let it settle, and cancel the parent while still holding
+					// the lock: the decision is ordered strictly after the cancellation
+					// by construction.
+					race.supervisor.mu.Lock()
+					close(release)
+					runtime.Gosched()
+					race.cancel()
+					race.supervisor.mu.Unlock()
 
-				race.assertSettledAsCancelled(t, round, false)
-				if raced != nil {
-					select {
-					case <-raced.closedCh():
-					default:
-						t.Fatalf("round %d: an attempt that raced cancellation must be retired, not adopted", round)
+					race.assertSettledAsCancelled(t, round, false)
+					if raced != nil {
+						select {
+						case <-raced.closedCh():
+						default:
+							t.Fatalf("round %d: an attempt that raced cancellation must be retired, not adopted", round)
+						}
 					}
 				}
-			}
+			})
 		})
 	}
 
 	t.Run("established loss", func(t *testing.T) {
-		for round := 0; round < supervisorCancellationRaceRounds; round++ {
-			losing := newSupervisorTestService(ports.BrokerConnectionID{4})
-			losing.publish(1, 1)
-			losing.holdClose()
-			race := startCancellationRace(t, func(context.Context, int) (ports.BrokerNavigator, error) {
-				return losing, nil
-			})
-			require.Equal(t, 1, race.connector.awaitStart(t), "round %d", round)
-			require.Eventually(t, func() bool { return race.supervisor.State().Connectivity == ConnectivityReady }, 5*time.Second, time.Millisecond, "round %d", round)
+		synctest.Test(t, func(t *testing.T) {
+			for round := 0; round < supervisorCancellationRaceRounds; round++ {
+				losing := newSupervisorTestService(t, ports.BrokerConnectionID{4})
+				losing.publish(1, 1)
+				losing.holdClose()
+				race := startCancellationRace(t, func(context.Context, int) (ports.BrokerNavigator, error) {
+					return losing.port, nil
+				})
+				require.Equal(t, 1, race.connector.awaitStart(t), "round %d", round)
+				synctest.Wait()
+				require.True(t, race.supervisor.State().Connectivity == ConnectivityReady, "round %d", round)
 
-			// The loss wakes the run while the parent is still live, and its
-			// connection release then parks the run before the settle decision, so
-			// the cancellation below is ordered strictly before that decision.
-			losing.lose(ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: "raced loss"})
-			select {
-			case <-losing.closingCh():
-			case <-time.After(5 * time.Second):
-				t.Fatalf("round %d: the run never released the lost connection", round)
-			}
-			race.cancel()
-			losing.releaseClose()
+				// The loss wakes the run while the parent is still live, and its
+				// connection release then parks the run before the settle decision, so
+				// the cancellation below is ordered strictly before that decision.
+				losing.lose(ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: "raced loss"})
+				select {
+				case <-losing.closingCh():
+				case <-time.After(5 * time.Second):
+					t.Fatalf("round %d: the run never released the lost connection", round)
+				}
+				race.cancel()
+				losing.releaseClose()
 
-			race.assertSettledAsCancelled(t, round, true)
-			select {
-			case <-losing.closedCh():
-			case <-time.After(5 * time.Second):
-				t.Fatalf("round %d: the lost connection must be retired", round)
+				race.assertSettledAsCancelled(t, round, true)
+				select {
+				case <-losing.closedCh():
+				case <-time.After(5 * time.Second):
+					t.Fatalf("round %d: the lost connection must be retired", round)
+				}
 			}
-		}
+		})
 	})
 }
 
@@ -1141,16 +1221,16 @@ func startCancellationRace(t *testing.T, connect func(ctx context.Context, call 
 
 	race := &cancellationRace{
 		cancel:    cancel,
-		clock:     newSupervisorTestClock(),
-		terminal:  newSupervisorTestTerminal(reader),
+		clock:     newSupervisorTestClock(t),
+		terminal:  newSupervisorTestTerminal(t, reader),
 		recorder:  &cancellationRaceRecorder{},
-		connector: newSupervisorTestConnector(connect),
+		connector: newSupervisorTestConnector(t, connect),
 		runErr:    make(chan error, 1),
 	}
 	race.supervisor = mustSupervisor(t, SupervisorConfig{
-		Connector: race.connector,
-		Terminal:  race.terminal,
-		Clock:     race.clock,
+		Connector: race.connector.port,
+		Terminal:  race.terminal.port,
+		Clock:     race.clock.port,
 		Jitter:    func() float64 { return 0 },
 		Render:    race.recorder.render,
 		Notify:    race.recorder.notify,
@@ -1212,25 +1292,6 @@ func (r *cancellationRaceRecorder) recorded() ([]State, []error) {
 	return append([]State(nil), r.renders...), append([]error(nil), r.notified...)
 }
 
-// supervisorNilSub is a typed-nil subscription: it satisfies the interface but
-// is nil underneath, so only the reflection guard keeps the supervisor from
-// dereferencing it.
-type supervisorNilSub struct{}
-
-func (*supervisorNilSub) Changed() <-chan struct{} { return nil }
-func (*supervisorNilSub) Close()                   {}
-
-// supervisorNilSubService overrides Subscribe so a test can exercise the
-// supervisor's nil-subscription guard without a live subscription.
-type supervisorNilSubService struct {
-	*supervisorTestService
-	sub ports.BrokerSubscription
-}
-
-func (s *supervisorNilSubService) Subscribe() (ports.BrokerSubscription, error) {
-	return s.sub, nil
-}
-
 // TestSupervisorDefensiveGenerationFenceRejectsSupersededAttempt pins the
 // defensive generation fence directly: a settled attempt whose generation is not
 // the current one is retired and discarded, while the current generation is
@@ -1238,143 +1299,151 @@ func (s *supervisorNilSubService) Subscribe() (ports.BrokerSubscription, error) 
 // superseded completion can reach adoptAttempt in the production driver today;
 // pinning the fence here keeps a future concurrent driver from dropping it.
 func TestSupervisorDefensiveGenerationFenceRejectsSupersededAttempt(t *testing.T) {
-	clock := newSupervisorTestClock()
-	terminal := newSupervisorTestTerminal(newSupervisorTestReader())
-	sup := mustSupervisor(t, SupervisorConfig{
-		Connector: newSupervisorTestConnector(nil),
-		Terminal:  terminal,
-		Clock:     clock,
-		Jitter:    func() float64 { return 0 },
+	synctest.Test(t, func(t *testing.T) {
+		clock := newSupervisorTestClock(t)
+		terminal := newSupervisorTestTerminal(t, newSupervisorTestReader())
+		sup := mustSupervisor(t, SupervisorConfig{
+			Connector: newSupervisorTestConnector(t, nil).port,
+			Terminal:  terminal.port,
+			Clock:     clock.port,
+			Jitter:    func() float64 { return 0 },
+		})
+
+		// Claim a generation exactly as Run does before it launches the connector.
+		sup.transition(supervisorEvent{kind: supervisorBeginAttempt})
+		current := sup.State().Generation
+		require.Equal(t, uint64(1), current)
+
+		service := newSupervisorTestService(t, ports.BrokerConnectionID{1})
+		subClosed := make(chan struct{})
+		stale := supervisorAttempt{
+			generation: current - 1,
+			service:    service.port,
+			sub:        newTestSubscription(t, nil, func() { close(subClosed) }),
+		}
+		adopted, cause := sup.adoptAttempt(context.Background(), stale)
+		require.False(t, adopted, "a superseded generation must not be adopted")
+		require.NoError(t, cause, "a superseded generation is not a cancellation")
+		// Run retires every attempt it does not adopt.
+		stale.retire()
+		select {
+		case <-service.closedCh():
+		default:
+			t.Fatal("a superseded service must be closed")
+		}
+		select {
+		case <-subClosed:
+		default:
+			t.Fatal("a superseded subscription must be closed")
+		}
+
+		// The current generation is adopted, so its live service is left untouched.
+		live := newSupervisorTestService(t, ports.BrokerConnectionID{2})
+		adopted, cause = sup.adoptAttempt(context.Background(), supervisorAttempt{generation: current, service: live.port})
+		require.True(t, adopted, "the current generation must be adopted")
+		require.NoError(t, cause)
+		select {
+		case <-live.closedCh():
+			t.Fatal("the current attempt must be adopted, not retired")
+		default:
+		}
 	})
-
-	// Claim a generation exactly as Run does before it launches the connector.
-	sup.transition(supervisorEvent{kind: supervisorBeginAttempt})
-	current := sup.State().Generation
-	require.Equal(t, uint64(1), current)
-
-	service := newSupervisorTestService(ports.BrokerConnectionID{1})
-	subClosed := make(chan struct{})
-	stale := supervisorAttempt{
-		generation: current - 1,
-		service:    service,
-		sub:        supervisorTestSubscription{closeFn: func() { close(subClosed) }},
-	}
-	adopted, cause := sup.adoptAttempt(context.Background(), stale)
-	require.False(t, adopted, "a superseded generation must not be adopted")
-	require.NoError(t, cause, "a superseded generation is not a cancellation")
-	// Run retires every attempt it does not adopt.
-	stale.retire()
-	select {
-	case <-service.closedCh():
-	default:
-		t.Fatal("a superseded service must be closed")
-	}
-	select {
-	case <-subClosed:
-	default:
-		t.Fatal("a superseded subscription must be closed")
-	}
-
-	// The current generation is adopted, so its live service is left untouched.
-	live := newSupervisorTestService(ports.BrokerConnectionID{2})
-	adopted, cause = sup.adoptAttempt(context.Background(), supervisorAttempt{generation: current, service: live})
-	require.True(t, adopted, "the current generation must be adopted")
-	require.NoError(t, cause)
-	select {
-	case <-live.closedCh():
-		t.Fatal("the current attempt must be adopted, not retired")
-	default:
-	}
 }
 
 // TestSupervisorNormalizesUntypedConnectFailure proves an untyped connect
 // failure becomes a typed unavailable failure that preserves its cause, and that
 // the same typed value reaches the notifier.
 func TestSupervisorNormalizesUntypedConnectFailure(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 
-	clock := newSupervisorTestClock()
-	reader := newSupervisorTestReader()
-	t.Cleanup(reader.unblock)
-	terminal := newSupervisorTestTerminal(reader)
+		clock := newSupervisorTestClock(t)
+		reader := newSupervisorTestReader()
+		t.Cleanup(reader.unblock)
+		terminal := newSupervisorTestTerminal(t, reader)
 
-	cause := errors.New("dial: connection refused")
-	connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) {
-		return nil, cause
+		cause := errors.New("dial: connection refused")
+		connector := newSupervisorTestConnector(t, func(context.Context, int) (ports.BrokerNavigator, error) {
+			return nil, cause
+		})
+		notified := make(chan error, 4)
+		sup := mustSupervisor(t, SupervisorConfig{
+			Connector: connector.port,
+			Terminal:  terminal.port,
+			Clock:     clock.port,
+			Jitter:    func() float64 { return 0 },
+			Notify:    func(_ State, err error) { notified <- err },
+		})
+
+		runErr := make(chan error, 1)
+		go func() { runErr <- sup.Run(ctx) }()
+		clock.awaitTimer(t)
+
+		var typed ports.BrokerError
+		require.ErrorAs(t, sup.State().Err, &typed)
+		require.Equal(t, ports.BrokerErrorUnavailable, typed.Code)
+		require.ErrorIs(t, typed.Cause, cause, "the untyped cause is preserved")
+
+		select {
+		case err := <-notified:
+			var surfaced ports.BrokerError
+			require.ErrorAs(t, err, &surfaced)
+			require.Equal(t, ports.BrokerErrorUnavailable, surfaced.Code)
+			require.ErrorIs(t, surfaced.Cause, cause)
+		case <-time.After(5 * time.Second):
+			t.Fatal("the normalized failure was not surfaced")
+		}
+
+		cancel()
+		require.ErrorIs(t, <-runErr, context.Canceled)
+		require.Equal(t, 1, terminal.restoreCount())
 	})
-	notified := make(chan error, 4)
-	sup := mustSupervisor(t, SupervisorConfig{
-		Connector: connector,
-		Terminal:  terminal,
-		Clock:     clock,
-		Jitter:    func() float64 { return 0 },
-		Notify:    func(_ State, err error) { notified <- err },
-	})
-
-	runErr := make(chan error, 1)
-	go func() { runErr <- sup.Run(ctx) }()
-	clock.awaitTimer(t)
-
-	var typed ports.BrokerError
-	require.ErrorAs(t, sup.State().Err, &typed)
-	require.Equal(t, ports.BrokerErrorUnavailable, typed.Code)
-	require.ErrorIs(t, typed.Cause, cause, "the untyped cause is preserved")
-
-	select {
-	case err := <-notified:
-		var surfaced ports.BrokerError
-		require.ErrorAs(t, err, &surfaced)
-		require.Equal(t, ports.BrokerErrorUnavailable, surfaced.Code)
-		require.ErrorIs(t, surfaced.Cause, cause)
-	case <-time.After(5 * time.Second):
-		t.Fatal("the normalized failure was not surfaced")
-	}
-
-	cancel()
-	require.ErrorIs(t, <-runErr, context.Canceled)
-	require.Equal(t, 1, terminal.restoreCount())
 }
 
 // TestSupervisorNormalizesUntypedLoss proves an untyped established-connection
 // loss is normalized to a typed unavailable failure that preserves its cause.
 func TestSupervisorNormalizesUntypedLoss(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 
-	clock := newSupervisorTestClock()
-	reader := newSupervisorTestReader()
-	t.Cleanup(reader.unblock)
-	terminal := newSupervisorTestTerminal(reader)
+		clock := newSupervisorTestClock(t)
+		reader := newSupervisorTestReader()
+		t.Cleanup(reader.unblock)
+		terminal := newSupervisorTestTerminal(t, reader)
 
-	service := newSupervisorTestService(ports.BrokerConnectionID{1})
-	service.publish(1, 1)
-	connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) {
-		return service, nil
+		service := newSupervisorTestService(t, ports.BrokerConnectionID{1})
+		service.publish(1, 1)
+		connector := newSupervisorTestConnector(t, func(context.Context, int) (ports.BrokerNavigator, error) {
+			return service.port, nil
+		})
+		sup := mustSupervisor(t, SupervisorConfig{
+			Connector: connector.port,
+			Terminal:  terminal.port,
+			Clock:     clock.port,
+			Jitter:    func() float64 { return 0 },
+		})
+
+		runErr := make(chan error, 1)
+		go func() { runErr <- sup.Run(ctx) }()
+		require.Equal(t, 1, connector.awaitStart(t))
+		synctest.Wait()
+		require.True(t, sup.State().Connectivity == ConnectivityReady)
+
+		cause := errors.New("carriage reset")
+		service.lose(cause)
+		synctest.Wait()
+		require.True(t, sup.State().Connectivity == ConnectivityRetryWait)
+
+		var typed ports.BrokerError
+		require.ErrorAs(t, sup.State().Err, &typed)
+		require.Equal(t, ports.BrokerErrorUnavailable, typed.Code)
+		require.ErrorIs(t, typed.Cause, cause, "the untyped loss cause is preserved")
+
+		cancel()
+		require.ErrorIs(t, <-runErr, context.Canceled)
 	})
-	sup := mustSupervisor(t, SupervisorConfig{
-		Connector: connector,
-		Terminal:  terminal,
-		Clock:     clock,
-		Jitter:    func() float64 { return 0 },
-	})
-
-	runErr := make(chan error, 1)
-	go func() { runErr <- sup.Run(ctx) }()
-	require.Equal(t, 1, connector.awaitStart(t))
-	require.Eventually(t, func() bool { return sup.State().Connectivity == ConnectivityReady }, 5*time.Second, time.Millisecond)
-
-	cause := errors.New("carriage reset")
-	service.lose(cause)
-	require.Eventually(t, func() bool { return sup.State().Connectivity == ConnectivityRetryWait }, 5*time.Second, time.Millisecond)
-
-	var typed ports.BrokerError
-	require.ErrorAs(t, sup.State().Err, &typed)
-	require.Equal(t, ports.BrokerErrorUnavailable, typed.Code)
-	require.ErrorIs(t, typed.Cause, cause, "the untyped loss cause is preserved")
-
-	cancel()
-	require.ErrorIs(t, <-runErr, context.Canceled)
 }
 
 // TestSupervisorNilSubscriptionIsTypedUnavailable proves a service that reports
@@ -1386,46 +1455,48 @@ func TestSupervisorNilSubscriptionIsTypedUnavailable(t *testing.T) {
 		sub  ports.BrokerSubscription
 	}{
 		{"nil interface", nil},
-		{"typed nil", (*supervisorNilSub)(nil)},
+		{"typed nil", (*portsmocks.MockBrokerSubscription)(nil)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
 
-			clock := newSupervisorTestClock()
-			reader := newSupervisorTestReader()
-			t.Cleanup(reader.unblock)
-			terminal := newSupervisorTestTerminal(reader)
+				clock := newSupervisorTestClock(t)
+				reader := newSupervisorTestReader()
+				t.Cleanup(reader.unblock)
+				terminal := newSupervisorTestTerminal(t, reader)
 
-			base := newSupervisorTestService(ports.BrokerConnectionID{7})
-			svc := &supervisorNilSubService{supervisorTestService: base, sub: tc.sub}
-			connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) {
-				return svc, nil
+				base := newSupervisorTestService(t, ports.BrokerConnectionID{7}, func(m *portsmocks.MockBrokerNavigator) { m.EXPECT().Subscribe().Return(tc.sub, nil).Maybe() })
+				svc := base.port
+				connector := newSupervisorTestConnector(t, func(context.Context, int) (ports.BrokerNavigator, error) {
+					return svc, nil
+				})
+				sup := mustSupervisor(t, SupervisorConfig{
+					Connector: connector.port,
+					Terminal:  terminal.port,
+					Clock:     clock.port,
+					Jitter:    func() float64 { return 0 },
+				})
+
+				runErr := make(chan error, 1)
+				go func() { runErr <- sup.Run(ctx) }()
+				clock.awaitTimer(t)
+
+				var typed ports.BrokerError
+				require.ErrorAs(t, sup.State().Err, &typed)
+				require.Equal(t, ports.BrokerErrorUnavailable, typed.Code)
+				select {
+				case <-base.closedCh():
+				default:
+					t.Fatal("a service that returned no subscription must be closed")
+				}
+
+				cancel()
+				require.ErrorIs(t, <-runErr, context.Canceled)
+				require.Equal(t, 1, terminal.restoreCount())
 			})
-			sup := mustSupervisor(t, SupervisorConfig{
-				Connector: connector,
-				Terminal:  terminal,
-				Clock:     clock,
-				Jitter:    func() float64 { return 0 },
-			})
-
-			runErr := make(chan error, 1)
-			go func() { runErr <- sup.Run(ctx) }()
-			clock.awaitTimer(t)
-
-			var typed ports.BrokerError
-			require.ErrorAs(t, sup.State().Err, &typed)
-			require.Equal(t, ports.BrokerErrorUnavailable, typed.Code)
-			select {
-			case <-base.closedCh():
-			default:
-				t.Fatal("a service that returned no subscription must be closed")
-			}
-
-			cancel()
-			require.ErrorIs(t, <-runErr, context.Canceled)
-			require.Equal(t, 1, terminal.restoreCount())
 		})
 	}
 }
@@ -1435,40 +1506,42 @@ func TestSupervisorNilSubscriptionIsTypedUnavailable(t *testing.T) {
 // channel that is never replaced or closed on publish, and a publication is a
 // non-blocking offer so a parked subscriber can never busy-spin the publisher.
 func TestSupervisorTestHubModelsSubscriptionContract(t *testing.T) {
-	hub := newSupervisorTestHub()
-	first := hub.subscribe(nil)
-	second := hub.subscribe(nil)
-	require.NotEqual(t, first.Changed(), second.Changed(), "each subscriber owns its own channel")
+	synctest.Test(t, func(t *testing.T) {
+		hub := newSupervisorTestHub(t)
+		first := hub.subscribe(nil)
+		second := hub.subscribe(nil)
+		require.NotEqual(t, first.Changed(), second.Changed(), "each subscriber owns its own channel")
 
-	hub.publish(ports.BrokerSnapshot{Epoch: 1, Revision: 1})
-	for name, sub := range map[string]ports.BrokerSubscription{"first": first, "second": second} {
-		select {
-		case <-sub.Changed():
-		default:
-			t.Fatalf("subscriber %s must receive the publication", name)
+		hub.publish(ports.BrokerSnapshot{Epoch: 1, Revision: 1})
+		for name, sub := range map[string]ports.BrokerSubscription{"first": first, "second": second} {
+			select {
+			case <-sub.Changed():
+			default:
+				t.Fatalf("subscriber %s must receive the publication", name)
+			}
 		}
-	}
 
-	// A second publication while a wake is still buffered is a non-blocking
-	// drop, and the channel identity is never replaced.
-	channel := first.Changed()
-	hub.publish(ports.BrokerSnapshot{Epoch: 1, Revision: 2})
-	hub.publish(ports.BrokerSnapshot{Epoch: 1, Revision: 3})
-	require.Equal(t, channel, first.Changed())
-	select {
-	case <-first.Changed():
-	default:
-		t.Fatal("a publication after the drained wake must offer a new wake")
-	}
+		// A second publication while a wake is still buffered is a non-blocking
+		// drop, and the channel identity is never replaced.
+		channel := first.Changed()
+		hub.publish(ports.BrokerSnapshot{Epoch: 1, Revision: 2})
+		hub.publish(ports.BrokerSnapshot{Epoch: 1, Revision: 3})
+		require.Equal(t, channel, first.Changed())
+		select {
+		case <-first.Changed():
+		default:
+			t.Fatal("a publication after the drained wake must offer a new wake")
+		}
 
-	first.Close()
-	hub.publish(ports.BrokerSnapshot{Epoch: 1, Revision: 4})
-	select {
-	case <-first.Changed():
-		t.Fatal("a closed subscription must not receive further wakes")
-	default:
-	}
-	require.Equal(t, ports.BrokerRevision(4), hub.current().Revision)
+		first.Close()
+		hub.publish(ports.BrokerSnapshot{Epoch: 1, Revision: 4})
+		select {
+		case <-first.Changed():
+			t.Fatal("a closed subscription must not receive further wakes")
+		default:
+		}
+		require.Equal(t, ports.BrokerRevision(4), hub.current().Revision)
+	})
 }
 
 // Raw-mode Ctrl-C is input, not SIGINT. It must work before a broker exists,
@@ -1476,46 +1549,48 @@ func TestSupervisorTestHubModelsSubscriptionContract(t *testing.T) {
 func TestSupervisorPickerCloseWhileOffline(t *testing.T) {
 	for _, phase := range []string{"connecting", "retry", "nonretryable"} {
 		t.Run(phase, func(t *testing.T) {
-			reader := newPickerChunkReader()
-			defer reader.close()
-			terminal := newSupervisorTestTerminal(reader)
-			clock := newSupervisorTestClock()
-			reached := make(chan struct{}, 1)
-			connector := newSupervisorTestConnector(func(ctx context.Context, _ int) (ports.BrokerNavigator, error) {
-				if phase == "connecting" {
-					reached <- struct{}{}
-					<-ctx.Done()
-					return nil, ctx.Err()
+			synctest.Test(t, func(t *testing.T) {
+				reader := newPickerChunkReader()
+				defer reader.close()
+				terminal := newSupervisorTestTerminal(t, reader)
+				clock := newSupervisorTestClock(t)
+				reached := make(chan struct{}, 1)
+				connector := newSupervisorTestConnector(t, func(ctx context.Context, _ int) (ports.BrokerNavigator, error) {
+					if phase == "connecting" {
+						reached <- struct{}{}
+						<-ctx.Done()
+						return nil, ctx.Err()
+					}
+					code := ports.BrokerErrorUnavailable
+					if phase == "nonretryable" {
+						code = ports.BrokerErrorIncompatible
+					}
+					return nil, ports.BrokerError{Code: code, Text: "test refusal"}
+				})
+				s := mustSupervisor(t, SupervisorConfig{
+					Connector: connector.port, Terminal: terminal.port, Clock: clock.port,
+					Picker: NewPicker(clock.port, 0, terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor}),
+					Notify: func(State, error) { reached <- struct{}{} },
+				})
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				result := make(chan error, 1)
+				go func() { result <- s.Run(ctx) }()
+				select {
+				case <-reached:
+				case <-time.After(5 * time.Second):
+					t.Fatal("did not reach test phase")
 				}
-				code := ports.BrokerErrorUnavailable
-				if phase == "nonretryable" {
-					code = ports.BrokerErrorIncompatible
+				reader.push([]byte{3})
+				select {
+				case err := <-result:
+					require.NoError(t, err)
+				case <-time.After(5 * time.Second):
+					t.Fatal("Ctrl-C did not exit with stdin still open")
 				}
-				return nil, ports.BrokerError{Code: code, Text: "test refusal"}
+				require.Equal(t, 1, terminal.restoreCount())
+				require.True(t, clock.allStopped())
 			})
-			s := mustSupervisor(t, SupervisorConfig{
-				Connector: connector, Terminal: terminal, Clock: clock,
-				Picker: NewPicker(clock, 0, terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor}),
-				Notify: func(State, error) { reached <- struct{}{} },
-			})
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			result := make(chan error, 1)
-			go func() { result <- s.Run(ctx) }()
-			select {
-			case <-reached:
-			case <-time.After(5 * time.Second):
-				t.Fatal("did not reach test phase")
-			}
-			reader.push([]byte{3})
-			select {
-			case err := <-result:
-				require.NoError(t, err)
-			case <-time.After(5 * time.Second):
-				t.Fatal("Ctrl-C did not exit with stdin still open")
-			}
-			require.Equal(t, 1, terminal.restoreCount())
-			require.True(t, clock.allStopped())
 		})
 	}
 }

@@ -2,6 +2,7 @@ package client
 
 import (
 	"testing"
+	"testing/synctest"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
@@ -29,23 +30,25 @@ func TestOutputApplyStateTransitions(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.state.initialized {
-				tt.state.context = testOutputView(1)
-			}
-			if tt.output.New != 0 {
-				context := testOutputView(2)
-				tt.output.Context = &context
-				tt.want.context = context
-			} else {
-				tt.want.context = tt.state.context
-			}
-			got, accepted := tt.state.next(tt.output)
-			if accepted != tt.accepted {
-				t.Fatalf("accepted = %v, want %v", accepted, tt.accepted)
-			}
-			if accepted && got != tt.want {
-				t.Fatalf("state = %+v, want %+v", got, tt.want)
-			}
+			synctest.Test(t, func(t *testing.T) {
+				if tt.state.initialized {
+					tt.state.context = testOutputView(1)
+				}
+				if tt.output.New != 0 {
+					context := testOutputView(2)
+					tt.output.Context = &context
+					tt.want.context = context
+				} else {
+					tt.want.context = tt.state.context
+				}
+				got, accepted := tt.state.next(tt.output)
+				if accepted != tt.accepted {
+					t.Fatalf("accepted = %v, want %v", accepted, tt.accepted)
+				}
+				if accepted && got != tt.want {
+					t.Fatalf("state = %+v, want %+v", got, tt.want)
+				}
+			})
 		})
 	}
 }

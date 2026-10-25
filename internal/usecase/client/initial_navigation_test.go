@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -140,12 +141,14 @@ func TestInitialNavigationValidationClosedUnion(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := tt.navigation.Validate()
-			if tt.wantErr {
-				require.Error(t, err)
-				return
-			}
-			require.NoError(t, err)
+			synctest.Test(t, func(t *testing.T) {
+				err := tt.navigation.Validate()
+				if tt.wantErr {
+					require.Error(t, err)
+					return
+				}
+				require.NoError(t, err)
+			})
 		})
 	}
 }
@@ -295,23 +298,25 @@ func TestInitialNavigationResolveVariants(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			request, err := tt.navigation.Resolve(tt.snapshot.Clone())
-			if tt.wantErr != 0 {
-				require.Error(t, err)
-				require.True(t, pickerCatalogueErrorIs(err, tt.wantErr), "want %v, got %v", tt.wantErr, err)
-				return
-			}
-			require.NoError(t, err)
-			require.Equal(t, ports.BrokerStreamAttachment, request.Purpose)
-			require.Equal(t, tt.wantLocal, request.Local)
-			require.Equal(t, tt.wantAdmission, request.Admission)
-			require.Equal(t, tt.wantName, request.Name)
-			require.Equal(t, tt.wantTarget, request.Target)
-			require.Equal(t, ports.BrokerEpoch(tt.snapshot.Epoch), request.Epoch)
-			require.Equal(t, ports.BrokerDaemonStartIfNeeded, request.StartMode)
-			// The gabarit never owns the live connection identity.
-			require.True(t, request.Connection.IsZero())
-			require.Zero(t, request.Stream)
+			synctest.Test(t, func(t *testing.T) {
+				request, err := tt.navigation.Resolve(tt.snapshot.Clone())
+				if tt.wantErr != 0 {
+					require.Error(t, err)
+					require.True(t, pickerCatalogueErrorIs(err, tt.wantErr), "want %v, got %v", tt.wantErr, err)
+					return
+				}
+				require.NoError(t, err)
+				require.Equal(t, ports.BrokerStreamAttachment, request.Purpose)
+				require.Equal(t, tt.wantLocal, request.Local)
+				require.Equal(t, tt.wantAdmission, request.Admission)
+				require.Equal(t, tt.wantName, request.Name)
+				require.Equal(t, tt.wantTarget, request.Target)
+				require.Equal(t, ports.BrokerEpoch(tt.snapshot.Epoch), request.Epoch)
+				require.Equal(t, ports.BrokerDaemonStartIfNeeded, request.StartMode)
+				// The gabarit never owns the live connection identity.
+				require.True(t, request.Connection.IsZero())
+				require.Zero(t, request.Stream)
+			})
 		})
 	}
 }
@@ -319,10 +324,12 @@ func TestInitialNavigationResolveVariants(t *testing.T) {
 // TestInitialNavigationPickerResolveIsRefused pins that resolving the picker
 // directly is refused rather than returning a nil-but-usable request.
 func TestInitialNavigationPickerResolveIsRefused(t *testing.T) {
-	request, err := InitialNavigation{}.Resolve(localDaemonSnapshot(3, 1))
-	require.Error(t, err)
-	require.True(t, pickerCatalogueErrorIs(err, pickerCatalogueNoSelection))
-	require.Equal(t, ports.BrokerOpenStreamRequest{}, request)
+	synctest.Test(t, func(t *testing.T) {
+		request, err := InitialNavigation{}.Resolve(localDaemonSnapshot(3, 1))
+		require.Error(t, err)
+		require.True(t, pickerCatalogueErrorIs(err, pickerCatalogueNoSelection))
+		require.Equal(t, ports.BrokerOpenStreamRequest{}, request)
+	})
 }
 
 // TestInitialNavigationResolverIsConsultedAtMostOnce pins the one-shot
@@ -330,82 +337,82 @@ func TestInitialNavigationPickerResolveIsRefused(t *testing.T) {
 // defensive copy of the first committed publication, and a reconnect never
 // replays the navigation.
 func TestInitialNavigationResolverIsConsultedAtMostOnce(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	clock := newSupervisorTestClock()
-	reader := newAttachTestReader()
-	terminal := &attachTestTerminal{in: reader}
-	picker := newAttachTestPicker()
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		clock := newSupervisorTestClock(t)
+		reader := newAttachTestReader(t)
+		terminal := newAttachTerminal(t, reader, false)
+		pickerMock, _ := newAttachTestPicker(t)
 
-	first := newSupervisorTestService(ports.BrokerConnectionID{1})
-	first.publishSnapshot(localDaemonSnapshot(7, 1))
-	second := newSupervisorTestService(ports.BrokerConnectionID{2})
-	stream := newSessionTestStream()
-	first.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-		return stream, nil
-	})
-	connector := newSupervisorTestConnector(func(_ context.Context, call int) (ports.BrokerNavigator, error) {
-		if call == 1 {
-			return first, nil
-		}
-		return second, nil
-	})
-
-	var calls atomic.Int64
-	var resolvedEpoch atomic.Uint64
-	var mutatedOnce atomic.Bool
-	cfg := SupervisorConfig{
-		Connector: connector,
-		Terminal:  terminal,
-		Clock:     clock,
-		Jitter:    func() float64 { return 0 },
-		Picker:    picker,
-		ResolveInitialNavigation: func(snapshot ports.BrokerSnapshot) (InitialNavigation, error) {
-			calls.Add(1)
-			resolvedEpoch.Store(uint64(snapshot.Epoch))
-			if !mutatedOnce.Swap(true) {
-				// A defensive copy: mutating the argument must not affect the
-				// supervisor's committed authority.
-				snapshot.Epoch = 0
-				snapshot.Daemons = nil
+		first := newSupervisorTestService(t, ports.BrokerConnectionID{1})
+		first.publishSnapshot(localDaemonSnapshot(7, 1))
+		second := newSupervisorTestService(t, ports.BrokerConnectionID{2})
+		stream := newSessionStream(t)
+		first.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+			return stream.conn, nil
+		})
+		connector := newSupervisorTestConnector(t, func(_ context.Context, call int) (ports.BrokerNavigator, error) {
+			if call == 1 {
+				return first.port, nil
 			}
-			return InitialNavigation{Kind: InitialNavigationCreateEphemeral, Destination: ports.BrokerEndpointFence{Local: true}}, nil
-		},
-	}
-	sup := mustSupervisor(t, cfg)
-	done := make(chan error, 1)
-	go func() { done <- sup.Run(ctx) }()
+			return second.port, nil
+		})
 
-	require.Eventually(t, func() bool { return len(first.openedRequests()) == 1 }, 5*time.Second, time.Millisecond)
-	require.Equal(t, int64(1), calls.Load(), "the resolver runs exactly once")
-	// The resolver may not mutate the supervisor's authority: the epoch it saw
-	// stays the committed one.
-	require.Equal(t, ports.BrokerEpoch(7), ports.BrokerEpoch(resolvedEpoch.Load()))
-	require.Equal(t, ports.BrokerEpoch(7), first.Snapshot().Epoch)
-	require.Len(t, first.Snapshot().Daemons, 1)
-
-	stream.deliver(protocol.ErrorMsg{Code: protocol.ErrInternal, Text: "creation failed"})
-	require.Eventually(t, func() bool { return sup.State().Presentation == PresentPicker }, 5*time.Second, time.Millisecond)
-
-	first.lose(ports.BrokerError{Code: ports.BrokerErrorUnavailable})
-	require.Eventually(t, func() bool { return sup.State().Connectivity == ConnectivityRetryWait }, 5*time.Second, time.Millisecond)
-	for connector.callCount() < 2 {
-		clock.mu.Lock()
-		var timer *supervisorTestTimer
-		if len(clock.timers) != 0 {
-			timer = clock.timers[len(clock.timers)-1]
+		var calls atomic.Int64
+		var resolvedEpoch atomic.Uint64
+		var mutatedOnce atomic.Bool
+		cfg := SupervisorConfig{
+			Connector: connector.port,
+			Terminal:  terminal.port,
+			Clock:     clock.port,
+			Jitter:    func() float64 { return 0 },
+			Picker:    pickerMock,
+			ResolveInitialNavigation: func(snapshot ports.BrokerSnapshot) (InitialNavigation, error) {
+				calls.Add(1)
+				resolvedEpoch.Store(uint64(snapshot.Epoch))
+				if !mutatedOnce.Swap(true) {
+					// A defensive copy: mutating the argument must not affect the
+					// supervisor's committed authority.
+					snapshot.Epoch = 0
+					snapshot.Daemons = nil
+				}
+				return InitialNavigation{Kind: InitialNavigationCreateEphemeral, Destination: ports.BrokerEndpointFence{Local: true}}, nil
+			},
 		}
-		clock.mu.Unlock()
-		if timer != nil {
-			timer.fire()
-		}
-	}
-	second.publishSnapshot(localDaemonSnapshot(8, 1))
-	require.Eventually(t, func() bool { return sup.State().Connectivity == ConnectivityReady }, 5*time.Second, time.Millisecond)
-	require.Empty(t, second.openedRequests(), "a reconnect never replays the one-shot navigation")
-	require.Equal(t, int64(1), calls.Load(), "the resolver is never re-run on the replacement generation")
-	cancel()
-	require.ErrorIs(t, <-done, context.Canceled)
+		sup := mustSupervisor(t, cfg)
+		done := make(chan error, 1)
+		go func() { done <- sup.Run(ctx) }()
+
+		synctest.Wait()
+		require.True(t, len(first.openedRequests()) == 1)
+		require.Equal(t, int64(1), calls.Load(), "the resolver runs exactly once")
+		// The resolver may not mutate the supervisor's authority: the epoch it saw
+		// stays the committed one.
+		require.Equal(t, ports.BrokerEpoch(7), ports.BrokerEpoch(resolvedEpoch.Load()))
+		require.Equal(t, ports.BrokerEpoch(7), first.port.Snapshot().Epoch)
+		require.Len(t, first.port.Snapshot().Daemons, 1)
+
+		stream.deliver(protocol.ErrorMsg{Code: protocol.ErrInternal, Text: "creation failed"})
+		synctest.Wait()
+		require.True(t, sup.State().Presentation == PresentPicker)
+
+		first.lose(ports.BrokerError{Code: ports.BrokerErrorUnavailable})
+		synctest.Wait()
+		require.True(t, sup.State().Connectivity == ConnectivityRetryWait)
+		timers := clock.snapshotTimers()
+		require.NotEmpty(t, timers, "the retry wait must have armed a timer")
+		timers[len(timers)-1].fire()
+		synctest.Wait()
+		require.GreaterOrEqual(t, connector.callCount(), 2, "the retry timer must start a second connection attempt")
+		second.publishSnapshot(localDaemonSnapshot(8, 1))
+		synctest.Wait()
+		require.True(t, sup.State().Connectivity == ConnectivityReady)
+		require.Empty(t, second.openedRequests(), "a reconnect never replays the one-shot navigation")
+		require.Equal(t, int64(1), calls.Load(), "the resolver is never re-run on the replacement generation")
+		cancel()
+		require.ErrorIs(t, <-done, context.Canceled)
+	})
 }
 
 // TestInitialNavigationPickerIntentOpensNothing pins that a composition that
@@ -421,11 +428,13 @@ func TestInitialNavigationPickerIntentOpensNothing(t *testing.T) {
 		{name: "explicit picker", configure: func(cfg *SupervisorConfig) { cfg.InitialNavigation = InitialNavigation{} }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			picker := newAttachTestPicker()
-			harness := startAttachHarnessConfig(t, picker, tc.configure)
-			require.Equal(t, PresentPicker, harness.sup.State().Presentation)
-			require.Empty(t, harness.service.openedRequests(), "a picker intent opens no stream")
-			require.Zero(t, picker.resolveCount())
+			synctest.Test(t, func(t *testing.T) {
+				pickerMock, picker := newAttachTestPicker(t)
+				harness := startAttachHarnessConfig(t, pickerMock, tc.configure)
+				require.Equal(t, PresentPicker, harness.sup.State().Presentation)
+				require.Empty(t, harness.service.openedRequests(), "a picker intent opens no stream")
+				require.Zero(t, picker.resolveCount())
+			})
 		})
 	}
 }
@@ -434,71 +443,75 @@ func TestInitialNavigationPickerIntentOpensNothing(t *testing.T) {
 // configuration carrying both an intent and a resolver, or an invalid intent,
 // is refused at construction instead of at the first connection.
 func TestNewSupervisorRefusesContradictoryInitialConfiguration(t *testing.T) {
-	clock := newSupervisorTestClock()
-	reader := newSupervisorTestReader()
-	t.Cleanup(reader.unblock)
-	terminal := newSupervisorTestTerminal(reader)
-	connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) {
-		return nil, ports.BrokerError{Code: ports.BrokerErrorUnavailable}
+	synctest.Test(t, func(t *testing.T) {
+		clock := newSupervisorTestClock(t)
+		reader := newSupervisorTestReader()
+		t.Cleanup(reader.unblock)
+		terminal := newSupervisorTestTerminal(t, reader)
+		connector := newSupervisorTestConnector(t, func(context.Context, int) (ports.BrokerNavigator, error) {
+			return nil, ports.BrokerError{Code: ports.BrokerErrorUnavailable}
+		})
+
+		base := func() SupervisorConfig {
+			return SupervisorConfig{Connector: connector.port, Terminal: terminal.port, Clock: clock.port, Jitter: func() float64 { return 0 }, SessionEnvironment: SessionEnvironment{Provenance: SessionEnvironmentLocalCLI}}
+		}
+
+		both := base()
+		both.InitialNavigation = InitialNavigation{Kind: InitialNavigationCreateEphemeral, Destination: ports.BrokerEndpointFence{Local: true}}
+		both.ResolveInitialNavigation = func(ports.BrokerSnapshot) (InitialNavigation, error) { return InitialNavigation{}, nil }
+		_, err := NewSupervisor(both)
+		require.Error(t, err, "an intent and a resolver are mutually exclusive")
+
+		invalid := base()
+		invalid.InitialNavigation = InitialNavigation{Kind: InitialNavigationAttachExact, Destination: ports.BrokerEndpointFence{Local: true}}
+		_, err = NewSupervisor(invalid)
+		require.Error(t, err, "an exact attach without an epoch is refused at construction")
+
+		valid := base()
+		valid.InitialNavigation = InitialNavigation{Kind: InitialNavigationCreateEphemeral, Destination: ports.BrokerEndpointFence{Local: true}}
+		_, err = NewSupervisor(valid)
+		require.NoError(t, err)
 	})
-
-	base := func() SupervisorConfig {
-		return SupervisorConfig{Connector: connector, Terminal: terminal, Clock: clock, Jitter: func() float64 { return 0 }, SessionEnvironment: SessionEnvironment{Provenance: SessionEnvironmentLocalCLI}}
-	}
-
-	both := base()
-	both.InitialNavigation = InitialNavigation{Kind: InitialNavigationCreateEphemeral, Destination: ports.BrokerEndpointFence{Local: true}}
-	both.ResolveInitialNavigation = func(ports.BrokerSnapshot) (InitialNavigation, error) { return InitialNavigation{}, nil }
-	_, err := NewSupervisor(both)
-	require.Error(t, err, "an intent and a resolver are mutually exclusive")
-
-	invalid := base()
-	invalid.InitialNavigation = InitialNavigation{Kind: InitialNavigationAttachExact, Destination: ports.BrokerEndpointFence{Local: true}}
-	_, err = NewSupervisor(invalid)
-	require.Error(t, err, "an exact attach without an epoch is refused at construction")
-
-	valid := base()
-	valid.InitialNavigation = InitialNavigation{Kind: InitialNavigationCreateEphemeral, Destination: ports.BrokerEndpointFence{Local: true}}
-	_, err = NewSupervisor(valid)
-	require.NoError(t, err)
 }
 
 // TestInitialNavigationResolverFailureIsSelectionUnavailable pins that a
 // resolver that refuses localises to the selection-unavailable notice and never
 // dials a destination or replays.
 func TestInitialNavigationResolverFailureIsSelectionUnavailable(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	clock := newSupervisorTestClock()
-	reader := newAttachTestReader()
-	terminal := &attachTestTerminal{in: reader}
-	picker := newAttachTestPicker()
-	service := newSupervisorTestService(ports.BrokerConnectionID{1})
-	service.publishSnapshot(localDaemonSnapshot(3, 1))
-	opened := false
-	service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-		opened = true
-		return newSessionTestStream(), nil
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		clock := newSupervisorTestClock(t)
+		reader := newAttachTestReader(t)
+		terminal := newAttachTerminal(t, reader, false)
+		pickerMock, _ := newAttachTestPicker(t)
+		service := newSupervisorTestService(t, ports.BrokerConnectionID{1})
+		service.publishSnapshot(localDaemonSnapshot(3, 1))
+		opened := false
+		service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+			opened = true
+			return newSessionStream(t).conn, nil
+		})
+		notices := make(chan LifecycleNotice, 4)
+		var calls atomic.Int64
+		resolverErr := errors.New("no such target")
+		sup := mustSupervisor(t, SupervisorConfig{
+			Connector: newSupervisorTestConnector(t, func(context.Context, int) (ports.BrokerNavigator, error) { return service.port, nil }).port,
+			Terminal:  terminal.port, Clock: clock.port, Jitter: func() float64 { return 0 }, Picker: pickerMock,
+			NotifyLifecycle: func(notice LifecycleNotice) { notices <- notice },
+			ResolveInitialNavigation: func(ports.BrokerSnapshot) (InitialNavigation, error) {
+				calls.Add(1)
+				return InitialNavigation{}, resolverErr
+			},
+		})
+		done := make(chan error, 1)
+		go func() { done <- sup.Run(ctx) }()
+		require.Equal(t, LifecycleNoticeSelectionUnavailable, (<-notices).Kind)
+		require.False(t, opened, "a refused resolver never dials a destination")
+		require.Equal(t, int64(1), calls.Load())
+		cancel()
+		require.ErrorIs(t, <-done, context.Canceled)
 	})
-	notices := make(chan LifecycleNotice, 4)
-	var calls atomic.Int64
-	resolverErr := errors.New("no such target")
-	sup := mustSupervisor(t, SupervisorConfig{
-		Connector: newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) { return service, nil }),
-		Terminal:  terminal, Clock: clock, Jitter: func() float64 { return 0 }, Picker: picker,
-		NotifyLifecycle: func(notice LifecycleNotice) { notices <- notice },
-		ResolveInitialNavigation: func(ports.BrokerSnapshot) (InitialNavigation, error) {
-			calls.Add(1)
-			return InitialNavigation{}, resolverErr
-		},
-	})
-	done := make(chan error, 1)
-	go func() { done <- sup.Run(ctx) }()
-	require.Equal(t, LifecycleNoticeSelectionUnavailable, (<-notices).Kind)
-	require.False(t, opened, "a refused resolver never dials a destination")
-	require.Equal(t, int64(1), calls.Load())
-	cancel()
-	require.ErrorIs(t, <-done, context.Canceled)
 }
 
 // TestInitialNavigationWaitsForTargetObservation pins that a resolver whose
@@ -522,87 +535,94 @@ func TestInitialNavigationWaitsForTargetObservation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			clock := newSupervisorTestClock()
-			reader := newAttachTestReader()
-			terminal := &attachTestTerminal{in: reader}
-			picker := newAttachTestPicker()
-			service := newSupervisorTestService(ports.BrokerConnectionID{1})
-			service.publishSnapshot(localDaemonSnapshot(3, 1))
-			var opened atomic.Int64
-			service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-				opened.Add(1)
-				return newSessionTestStream(), nil
-			})
-			notices := make(chan LifecycleNotice, 4)
-			var calls atomic.Int64
-			sup := mustSupervisor(t, SupervisorConfig{
-				Connector: newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) { return service, nil }),
-				Terminal:  terminal, Clock: clock, Jitter: func() float64 { return 0 }, Picker: picker,
-				NotifyLifecycle: func(notice LifecycleNotice) { notices <- notice },
-				ResolveInitialNavigation: func(snapshot ports.BrokerSnapshot) (InitialNavigation, error) {
-					calls.Add(1)
-					if tt.observedAt == 0 || snapshot.Revision < tt.observedAt {
-						pending := InitialNavigationNotObserved{Endpoint: "user@host"}
-						if tt.fallback {
-							pending.Fallback = InitialNavigation{Kind: InitialNavigationCreateEphemeral, Destination: ports.BrokerEndpointFence{Local: true}}
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				clock := newSupervisorTestClock(t)
+				reader := newAttachTestReader(t)
+				terminal := newAttachTerminal(t, reader, false)
+				pickerMock, _ := newAttachTestPicker(t)
+				service := newSupervisorTestService(t, ports.BrokerConnectionID{1})
+				service.publishSnapshot(localDaemonSnapshot(3, 1))
+				var opened atomic.Int64
+				service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+					opened.Add(1)
+					return newSessionStream(t).conn, nil
+				})
+				notices := make(chan LifecycleNotice, 4)
+				var calls atomic.Int64
+				sup := mustSupervisor(t, SupervisorConfig{
+					Connector: newSupervisorTestConnector(t, func(context.Context, int) (ports.BrokerNavigator, error) { return service.port, nil }).port,
+					Terminal:  terminal.port, Clock: clock.port, Jitter: func() float64 { return 0 }, Picker: pickerMock,
+					NotifyLifecycle: func(notice LifecycleNotice) { notices <- notice },
+					ResolveInitialNavigation: func(snapshot ports.BrokerSnapshot) (InitialNavigation, error) {
+						calls.Add(1)
+						if tt.observedAt == 0 || snapshot.Revision < tt.observedAt {
+							pending := InitialNavigationNotObserved{Endpoint: "user@host"}
+							if tt.fallback {
+								pending.Fallback = InitialNavigation{Kind: InitialNavigationCreateEphemeral, Destination: ports.BrokerEndpointFence{Local: true}}
+							}
+							return InitialNavigation{}, pending
 						}
-						return InitialNavigation{}, pending
+						// The target exists only in the later publication: the stream
+						// request must resolve against the snapshot that decided.
+						return InitialNavigation{Kind: InitialNavigationAttachExact, Epoch: snapshot.Epoch, Destination: ports.BrokerEndpointFence{Local: true}, Target: late}, nil
+					},
+				})
+				done := make(chan error, 1)
+				go func() { done <- sup.Run(ctx) }()
+
+				synctest.Wait()
+				require.True(t, calls.Load() == 1)
+				var budget *supervisorTestTimer
+				synctest.Wait()
+				require.True(t, func() bool {
+					clock.mu.Lock()
+					defer clock.mu.Unlock()
+					for _, timer := range clock.timers {
+						if timer.delay == initialNavigationObservationBudget {
+							budget = timer
+							return true
+						}
 					}
-					// The target exists only in the later publication: the stream
-					// request must resolve against the snapshot that decided.
-					return InitialNavigation{Kind: InitialNavigationAttachExact, Epoch: snapshot.Epoch, Destination: ports.BrokerEndpointFence{Local: true}, Target: late}, nil
-				},
+					return false
+				}(), "the wait is bounded by the observation budget")
+				require.Zero(t, opened.Load(), "an unobserved target never dials")
+				service.mu.Lock()
+				reconciles := append([]string(nil), service.reconciles...)
+				service.mu.Unlock()
+				require.Equal(t, []string{"user@host"}, reconciles, "the wait asks the broker for one fresh observation")
+
+				if tt.fallback {
+					budget.fire()
+					synctest.Wait()
+					require.True(t, opened.Load() == 1)
+					require.Equal(t, protocol.ExactSessionTarget{}, service.openedRequests()[0].Target, "the fallback creation opens, not an exact attach")
+					require.Equal(t, int64(1), calls.Load())
+				} else if tt.wantOpen {
+					service.publishSnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 2, Daemons: []ports.BrokerDaemonObservation{
+						pickerTestLocalObservation(time.Unix(1000, 0), pickerTestSession("late", 5, catalogue_Up)),
+					}})
+					synctest.Wait()
+					require.True(t, opened.Load() == 1)
+					require.Equal(t, late, service.openedRequests()[0].Target)
+					require.Equal(t, int64(2), calls.Load(), "the armed intent resolves once per publication")
+				} else {
+					budget.fire()
+					select {
+					case notice := <-notices:
+						require.Equal(t, LifecycleNoticeSelectionUnavailable, notice.Kind)
+					case <-time.After(5 * time.Second):
+						t.Fatal("the budget never refused the unobserved target")
+					}
+					require.Zero(t, opened.Load())
+					service.publishSnapshot(localDaemonSnapshot(3, 2))
+					synctest.Wait()
+					require.False(t, calls.Load() > 1, "a refused intent is never re-armed")
+				}
+				cancel()
+				require.ErrorIs(t, <-done, context.Canceled)
 			})
-			done := make(chan error, 1)
-			go func() { done <- sup.Run(ctx) }()
-
-			require.Eventually(t, func() bool { return calls.Load() == 1 }, 5*time.Second, time.Millisecond)
-			var budget *supervisorTestTimer
-			require.Eventually(t, func() bool {
-				clock.mu.Lock()
-				defer clock.mu.Unlock()
-				for _, timer := range clock.timers {
-					if timer.delay == initialNavigationObservationBudget {
-						budget = timer
-						return true
-					}
-				}
-				return false
-			}, 5*time.Second, time.Millisecond, "the wait is bounded by the observation budget")
-			require.Zero(t, opened.Load(), "an unobserved target never dials")
-			service.mu.Lock()
-			reconciles := append([]string(nil), service.reconciles...)
-			service.mu.Unlock()
-			require.Equal(t, []string{"user@host"}, reconciles, "the wait asks the broker for one fresh observation")
-
-			if tt.fallback {
-				budget.fire()
-				require.Eventually(t, func() bool { return opened.Load() == 1 }, 5*time.Second, time.Millisecond)
-				require.Equal(t, protocol.ExactSessionTarget{}, service.openedRequests()[0].Target, "the fallback creation opens, not an exact attach")
-				require.Equal(t, int64(1), calls.Load())
-			} else if tt.wantOpen {
-				service.publishSnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 2, Daemons: []ports.BrokerDaemonObservation{
-					pickerTestLocalObservation(time.Unix(1000, 0), pickerTestSession("late", 5, catalogue_Up)),
-				}})
-				require.Eventually(t, func() bool { return opened.Load() == 1 }, 5*time.Second, time.Millisecond)
-				require.Equal(t, late, service.openedRequests()[0].Target)
-				require.Equal(t, int64(2), calls.Load(), "the armed intent resolves once per publication")
-			} else {
-				budget.fire()
-				select {
-				case notice := <-notices:
-					require.Equal(t, LifecycleNoticeSelectionUnavailable, notice.Kind)
-				case <-time.After(5 * time.Second):
-					t.Fatal("the budget never refused the unobserved target")
-				}
-				require.Zero(t, opened.Load())
-				service.publishSnapshot(localDaemonSnapshot(3, 2))
-				require.Never(t, func() bool { return calls.Load() > 1 }, 100*time.Millisecond, 5*time.Millisecond, "a refused intent is never re-armed")
-			}
-			cancel()
-			require.ErrorIs(t, <-done, context.Canceled)
 		})
 	}
 }
@@ -613,41 +633,45 @@ func TestInitialNavigationWaitsForTargetObservation(t *testing.T) {
 // initial attachment ends, the supervisor returns to the picker and opens
 // nothing the user did not see.
 func TestInitialNavigationDropsDecisionsTakenWhileHidden(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	clock := newSupervisorTestClock()
-	reader := newAttachTestReader()
-	terminal := &attachTestTerminal{in: reader}
-	picker := newAttachTestPicker()
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		clock := newSupervisorTestClock(t)
+		reader := newAttachTestReader(t)
+		terminal := newAttachTerminal(t, reader, false)
+		pickerMock, picker := newAttachTestPicker(t)
 
-	service := newSupervisorTestService(ports.BrokerConnectionID{1})
-	stream := newSessionTestStream()
-	service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-		return stream, nil
+		service := newSupervisorTestService(t, ports.BrokerConnectionID{1})
+		stream := newSessionStream(t)
+		service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+			return stream.conn, nil
+		})
+		connector := newSupervisorTestConnector(t, func(context.Context, int) (ports.BrokerNavigator, error) { return service.port, nil })
+		// A keystroke typed during the cold start: the hidden picker recorded a
+		// commit before the broker published anything.
+		picker.recordOp(pickerOp{commit: true}, "row", ports.BrokerOpenStreamRequest{})
+
+		sup := mustSupervisor(t, SupervisorConfig{
+			Connector: connector.port, Terminal: terminal.port, Clock: clock.port,
+			Jitter: func() float64 { return 0 }, Picker: pickerMock,
+			InitialNavigation: InitialNavigation{Kind: InitialNavigationCreateEphemeral, Destination: ports.BrokerEndpointFence{Local: true}},
+		})
+		done := make(chan error, 1)
+		go func() { done <- sup.Run(ctx) }()
+
+		synctest.Wait()
+		require.True(t, sup.State().Presentation == PresentConnecting, "a pending navigation presents Connecting, not the picker")
+		service.publishSnapshot(localDaemonSnapshot(7, 1))
+		synctest.Wait()
+		require.True(t, len(service.openedRequests()) == 1)
+
+		stream.deliver(protocol.ErrorMsg{Code: protocol.ErrInternal, Text: "creation failed"})
+		synctest.Wait()
+		require.True(t, sup.State().Presentation == PresentPicker)
+		synctest.Wait()
+		require.False(t, len(service.openedRequests()) > 1, "a decision taken while hidden must not open a second stream")
+		require.Zero(t, picker.resolveCount(), "the hidden commit was never resolved")
+		cancel()
+		require.ErrorIs(t, <-done, context.Canceled)
 	})
-	connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) { return service, nil })
-	// A keystroke typed during the cold start: the hidden picker recorded a
-	// commit before the broker published anything.
-	picker.recordOp(pickerOp{commit: true}, "row", ports.BrokerOpenStreamRequest{})
-
-	sup := mustSupervisor(t, SupervisorConfig{
-		Connector: connector, Terminal: terminal, Clock: clock,
-		Jitter: func() float64 { return 0 }, Picker: picker,
-		InitialNavigation: InitialNavigation{Kind: InitialNavigationCreateEphemeral, Destination: ports.BrokerEndpointFence{Local: true}},
-	})
-	done := make(chan error, 1)
-	go func() { done <- sup.Run(ctx) }()
-
-	require.Eventually(t, func() bool { return sup.State().Presentation == PresentConnecting }, 5*time.Second, time.Millisecond,
-		"a pending navigation presents Connecting, not the picker")
-	service.publishSnapshot(localDaemonSnapshot(7, 1))
-	require.Eventually(t, func() bool { return len(service.openedRequests()) == 1 }, 5*time.Second, time.Millisecond)
-
-	stream.deliver(protocol.ErrorMsg{Code: protocol.ErrInternal, Text: "creation failed"})
-	require.Eventually(t, func() bool { return sup.State().Presentation == PresentPicker }, 5*time.Second, time.Millisecond)
-	require.Never(t, func() bool { return len(service.openedRequests()) > 1 }, 200*time.Millisecond, 5*time.Millisecond,
-		"a decision taken while hidden must not open a second stream")
-	require.Zero(t, picker.resolveCount(), "the hidden commit was never resolved")
-	cancel()
-	require.ErrorIs(t, <-done, context.Canceled)
 }

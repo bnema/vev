@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/bnema/vev/internal/adapters/uiterm"
@@ -33,14 +34,16 @@ func TestUIPublishPresentationUnattachedShape(t *testing.T) {
 	ui, _ := newPresentationTestUI(t)
 	for _, status := range []ports.UIPresentationStatus{ports.UIStatusPicker, ports.UIStatusConnecting} {
 		t.Run(string(status), func(t *testing.T) {
-			require.NoError(t, ui.PublishPresentation(status))
-			snapshot, err := ui.Capture(ui.Handle())
-			require.NoError(t, err)
-			require.Equal(t, ports.UIContext{AttachmentHandle: ui.Handle(), Status: status}, snapshot.Context)
-			ui.mu.Lock()
-			generation := ui.generation
-			ui.mu.Unlock()
-			require.Zero(t, generation, "an unattached publication never allocates an action generation")
+			synctest.Test(t, func(t *testing.T) {
+				require.NoError(t, ui.PublishPresentation(status))
+				snapshot, err := ui.Capture(ui.Handle())
+				require.NoError(t, err)
+				require.Equal(t, ports.UIContext{AttachmentHandle: ui.Handle(), Status: status}, snapshot.Context)
+				ui.mu.Lock()
+				generation := ui.generation
+				ui.mu.Unlock()
+				require.Zero(t, generation, "an unattached publication never allocates an action generation")
+			})
 		})
 	}
 
@@ -56,16 +59,18 @@ func TestUIActionsRefusedOutsideAttached(t *testing.T) {
 	ui, _ := newPresentationTestUI(t)
 	for _, status := range []ports.UIPresentationStatus{ports.UIStatusPicker, ports.UIStatusConnecting} {
 		t.Run(string(status), func(t *testing.T) {
-			require.NoError(t, ui.PublishPresentation(status))
-			for _, request := range []ports.UIActionRequest{
-				{Attachment: ui.Handle(), Generation: 1, Keys: []string{"Escape"}},
-				{Attachment: ui.Handle(), Generation: 1, Text: "hello"},
-			} {
-				_, err := ui.Action(t.Context(), request)
-				var uiErr *ports.UIError
-				require.ErrorAs(t, err, &uiErr)
-				require.Equal(t, ports.UIErrUnavailable, uiErr.Code)
-			}
+			synctest.Test(t, func(t *testing.T) {
+				require.NoError(t, ui.PublishPresentation(status))
+				for _, request := range []ports.UIActionRequest{
+					{Attachment: ui.Handle(), Generation: 1, Keys: []string{"Escape"}},
+					{Attachment: ui.Handle(), Generation: 1, Text: "hello"},
+				} {
+					_, err := ui.Action(t.Context(), request)
+					var uiErr *ports.UIError
+					require.ErrorAs(t, err, &uiErr)
+					require.Equal(t, ports.UIErrUnavailable, uiErr.Code)
+				}
+			})
 		})
 	}
 }
@@ -74,31 +79,33 @@ func TestUIActionsRefusedOutsideAttached(t *testing.T) {
 // available in all three presentations: an unattached presentation is a state a
 // caller may observe and wait for, and a wait may name it as its predicate.
 func TestUICaptureAndWaitWorkInEveryPresentation(t *testing.T) {
-	ui, _ := newPresentationTestUI(t)
-	picker := ports.UIStatusPicker
-	require.NoError(t, ui.PublishPresentation(picker))
-	require.NotEmpty(t, presentationCapture(t, ui).Context.AttachmentHandle)
-	matched, err := ui.Wait(t.Context(), ports.UIWaitRequest{Attachment: ui.Handle(), Expect: ports.UIExpect{Status: &picker}})
-	require.NoError(t, err)
-	require.Equal(t, picker, matched.Context.Status)
+	synctest.Test(t, func(t *testing.T) {
+		ui, _ := newPresentationTestUI(t)
+		picker := ports.UIStatusPicker
+		require.NoError(t, ui.PublishPresentation(picker))
+		require.NotEmpty(t, presentationCapture(t, ui).Context.AttachmentHandle)
+		matched, err := ui.Wait(t.Context(), ports.UIWaitRequest{Attachment: ui.Handle(), Expect: ports.UIExpect{Status: &picker}})
+		require.NoError(t, err)
+		require.Equal(t, picker, matched.Context.Status)
 
-	connecting := ports.UIStatusConnecting
-	require.NoError(t, ui.PublishPresentation(connecting))
-	require.NotEmpty(t, presentationCapture(t, ui).Context.AttachmentHandle)
-	matched, err = ui.Wait(t.Context(), ports.UIWaitRequest{Attachment: ui.Handle(), Expect: ports.UIExpect{Status: &connecting}})
-	require.NoError(t, err)
-	require.Equal(t, connecting, matched.Context.Status)
-	require.Zero(t, matched.Context.Generation)
+		connecting := ports.UIStatusConnecting
+		require.NoError(t, ui.PublishPresentation(connecting))
+		require.NotEmpty(t, presentationCapture(t, ui).Context.AttachmentHandle)
+		matched, err = ui.Wait(t.Context(), ports.UIWaitRequest{Attachment: ui.Handle(), Expect: ports.UIExpect{Status: &connecting}})
+		require.NoError(t, err)
+		require.Equal(t, connecting, matched.Context.Status)
+		require.Zero(t, matched.Context.Generation)
 
-	attached := ports.UIStatusAttached
-	require.NoError(t, ui.state.(ports.UIOutputTransaction).PublishContext(ports.UIContext{
-		AttachmentHandle: ui.Handle(), Generation: 7, Status: attached, OutputEpoch: 1, OutputState: 1, ViewPublication: 1,
-	}))
-	require.NotEmpty(t, presentationCapture(t, ui).Context.AttachmentHandle)
-	matched, err = ui.Wait(t.Context(), ports.UIWaitRequest{Attachment: ui.Handle(), Expect: ports.UIExpect{Status: &attached}})
-	require.NoError(t, err)
-	require.Equal(t, attached, matched.Context.Status)
-	require.Equal(t, uint64(7), matched.Context.Generation)
+		attached := ports.UIStatusAttached
+		require.NoError(t, ui.state.(ports.UIOutputTransaction).PublishContext(ports.UIContext{
+			AttachmentHandle: ui.Handle(), Generation: 7, Status: attached, OutputEpoch: 1, OutputState: 1, ViewPublication: 1,
+		}))
+		require.NotEmpty(t, presentationCapture(t, ui).Context.AttachmentHandle)
+		matched, err = ui.Wait(t.Context(), ports.UIWaitRequest{Attachment: ui.Handle(), Expect: ports.UIExpect{Status: &attached}})
+		require.NoError(t, err)
+		require.Equal(t, attached, matched.Context.Status)
+		require.Equal(t, uint64(7), matched.Context.Generation)
+	})
 }
 
 func presentationCapture(t *testing.T, ui *UI) ports.UISnapshot {
@@ -112,38 +119,41 @@ func presentationCapture(t *testing.T, ui *UI) ports.UISnapshot {
 // woken by a presentation-only publication, not merely by daemon frames: the UI
 // observation signal covers committed contexts.
 func TestUIWaitWakesOnPresentationOnlyPublication(t *testing.T) {
-	ui, _ := newPresentationTestUI(t)
-	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan struct{})
-	go func() { defer close(done); ui.Observe(ctx) }()
-	t.Cleanup(func() {
-		cancel()
+	synctest.Test(t, func(t *testing.T) {
+		ui, _ := newPresentationTestUI(t)
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan struct{})
+		go func() { defer close(done); ui.Observe(ctx) }()
+		t.Cleanup(func() {
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Error("the observation worker did not stop")
+			}
+		})
+
+		connecting := ports.UIStatusConnecting
+		result := make(chan ports.UIWaitResult, 1)
+		go func() {
+			matched, err := ui.Wait(t.Context(), ports.UIWaitRequest{Attachment: ui.Handle(), Expect: ports.UIExpect{Status: &connecting}})
+			if err == nil {
+				result <- matched
+			}
+		}()
+		synctest.Wait()
+		require.True(t, func() bool {
+			ui.mu.Lock()
+			waits := ui.waits
+			ui.mu.Unlock()
+			return waits == 1
+		}(), "the wait was never admitted")
+		require.NoError(t, ui.PublishPresentation(connecting))
 		select {
-		case <-done:
+		case matched := <-result:
+			require.Equal(t, connecting, matched.Context.Status)
 		case <-time.After(time.Second):
-			t.Error("the observation worker did not stop")
+			t.Fatal("a presentation-only publication did not wake the wait")
 		}
 	})
-
-	connecting := ports.UIStatusConnecting
-	result := make(chan ports.UIWaitResult, 1)
-	go func() {
-		matched, err := ui.Wait(t.Context(), ports.UIWaitRequest{Attachment: ui.Handle(), Expect: ports.UIExpect{Status: &connecting}})
-		if err == nil {
-			result <- matched
-		}
-	}()
-	require.Eventually(t, func() bool {
-		ui.mu.Lock()
-		waits := ui.waits
-		ui.mu.Unlock()
-		return waits == 1
-	}, time.Second, time.Millisecond, "the wait was never admitted")
-	require.NoError(t, ui.PublishPresentation(connecting))
-	select {
-	case matched := <-result:
-		require.Equal(t, connecting, matched.Context.Status)
-	case <-time.After(time.Second):
-		t.Fatal("a presentation-only publication did not wake the wait")
-	}
 }

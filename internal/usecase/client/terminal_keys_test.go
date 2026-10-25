@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -28,13 +29,15 @@ func TestTerminalKeysNormalizeOnlyOnceEnabled(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			keys := newTerminalKeys()
-			if tt.enabled {
-				keys.enable()
-			}
-			require.Equal(t, tt.want, string(keys.normalize([]byte(tt.in), tt.focus)))
-			held, _ := keys.ctrl.Watch()
-			require.Equal(t, tt.wantHeld, held)
+			synctest.Test(t, func(t *testing.T) {
+				keys := newTerminalKeys()
+				if tt.enabled {
+					keys.enable()
+				}
+				require.Equal(t, tt.want, string(keys.normalize([]byte(tt.in), tt.focus)))
+				held, _ := keys.ctrl.Watch()
+				require.Equal(t, tt.wantHeld, held)
+			})
 		})
 	}
 }
@@ -56,37 +59,39 @@ func TestCtrlReporterReportsHoldsAfterDelayAndReleasesAtOnce(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			state := newTerminalCtrlState()
-			clock := newSupervisorTestClock()
-			r := newCtrlReporter(state, clock)
-			var timer *supervisorTestTimer
-			for i, s := range tt.steps {
-				var message protocol.ModifierState
-				var ok bool
-				if s.fire {
-					if r.timerC() == nil {
-						require.Nil(t, s.want, "step %d: no timer to fire", i)
-						continue
+			synctest.Test(t, func(t *testing.T) {
+				state := newTerminalCtrlState()
+				clock := newSupervisorTestClock(t)
+				r := newCtrlReporter(state, clock.port)
+				var timer *supervisorTestTimer
+				for i, s := range tt.steps {
+					var message protocol.ModifierState
+					var ok bool
+					if s.fire {
+						if r.timerC() == nil {
+							require.Nil(t, s.want, "step %d: no timer to fire", i)
+							continue
+						}
+						timer.ch <- time.Time{}
+						<-r.timerC()
+						message, ok = r.due()
+					} else {
+						state.set(s.held)
+						<-r.changed
+						message, ok = r.next()
+						if s.held {
+							timer = clock.awaitTimer(t)
+							require.Equal(t, ctrlHoldDelay, timer.delay)
+						}
 					}
-					timer.ch <- time.Time{}
-					<-r.timerC()
-					message, ok = r.due()
-				} else {
-					state.set(s.held)
-					<-r.changed
-					message, ok = r.next()
-					if s.held {
-						timer = clock.awaitTimer(t)
-						require.Equal(t, ctrlHoldDelay, timer.delay)
+					require.Equal(t, s.want != nil, ok, "step %d", i)
+					if s.want != nil {
+						require.Equal(t, *s.want, message, "step %d", i)
 					}
 				}
-				require.Equal(t, s.want != nil, ok, "step %d", i)
-				if s.want != nil {
-					require.Equal(t, *s.want, message, "step %d", i)
-				}
-			}
-			r.stop()
-			require.True(t, clock.allStopped())
+				r.stop()
+				require.True(t, clock.allStopped())
+			})
 		})
 	}
 }
@@ -95,58 +100,63 @@ func TestCtrlReporterReportsHoldsAfterDelayAndReleasesAtOnce(t *testing.T) {
 // enabled, a held Ctrl reaches the daemon as ModifierState and its release
 // follows, while the dropped modifier events never reach the session as input.
 func TestAttachmentReportsHeldCtrl(t *testing.T) {
-	pr, pw := io.Pipe()
-	defer pw.Close()
-	pump := newTerminalInputPump(pr)
-	pump.keys.enable()
-	pump.start()
-	defer pump.stop()
-	stream := newSessionTestStream()
-	host := newWorkerTestHost(newWorkerTestTerminal(), pump, nil)
-	cfg := sessionTestWorkerConfig(sessionTestRequest(true))
-	clock := newSupervisorTestClock()
-	cfg.Clock = clock
-	worker, err := newSessionAttachmentWorker(cfg)
-	require.NoError(t, err)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() { _, _ = host.Run(ctx, AttachmentToken{Generation: 4, Attempt: 1}, worker, stream) }()
+	synctest.Test(t, func(t *testing.T) {
+		pr, pw := io.Pipe()
+		defer pw.Close()
+		pump := newTerminalInputPump(pr)
+		pump.keys.enable()
+		pump.start()
+		defer pump.stop()
+		stream := newSessionStream(t)
+		host := newWorkerTestHost(t, newWorkerTestTerminal(t), pump, nil)
+		cfg := sessionTestWorkerConfig(sessionTestRequest(true))
+		clock := newSupervisorTestClock(t)
+		cfg.Clock = clock.port
+		worker, err := newSessionAttachmentWorker(cfg)
+		require.NoError(t, err)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go func() { _, _ = host.Run(ctx, AttachmentToken{Generation: 4, Attempt: 1}, worker, stream.conn) }()
 
-	awaitHello(t, stream)
-	stream.deliver(protocol.Welcome{SessionName: "alpha"})
-	stream.deliver(sessionTestOutput(1, "\x1b[Hready"))
+		awaitHello(t, stream)
+		stream.deliver(protocol.Welcome{SessionName: "alpha"})
+		stream.deliver(sessionTestOutput(1, "\x1b[Hready"))
 
-	sent := func(want protocol.ModifierState) func() bool {
-		return func() bool {
-			for _, message := range stream.messages() {
-				if message == want {
-					return true
+		sent := func(want protocol.ModifierState) func() bool {
+			return func() bool {
+				for _, message := range stream.messages() {
+					if message == want {
+						return true
+					}
 				}
+				return false
 			}
-			return false
 		}
-	}
-	_, err = pw.Write([]byte("\x1b[57442;5u"))
-	require.NoError(t, err)
-	var timer *supervisorTestTimer
-	require.Eventually(t, func() bool {
-		select {
-		case created := <-clock.created:
-			if created.delay == ctrlHoldDelay {
-				timer = created
+		_, err = pw.Write([]byte("\x1b[57442;5u"))
+		require.NoError(t, err)
+		var timer *supervisorTestTimer
+		synctest.Wait()
+		require.True(t, func() bool {
+			select {
+			case created := <-clock.created:
+				if created.delay == ctrlHoldDelay {
+					timer = created
+				}
+			default:
 			}
-		default:
-		}
-		return timer != nil
-	}, 5*time.Second, time.Millisecond, "a Ctrl press arms the hold delay")
-	timer.ch <- time.Time{}
-	require.Eventually(t, sent(protocol.ModifierState{Ctrl: true}), 5*time.Second, time.Millisecond)
+			return timer != nil
+		}(), "a Ctrl press arms the hold delay")
+		timer.ch <- time.Time{}
+		synctest.Wait()
+		require.True(t, sent(protocol.ModifierState{Ctrl: true})())
 
-	_, err = pw.Write([]byte("\x1b[57442;1:3u"))
-	require.NoError(t, err)
-	require.Eventually(t, sent(protocol.ModifierState{}), 5*time.Second, time.Millisecond)
-	for _, message := range stream.messages() {
-		_, isInput := message.(protocol.Input)
-		require.False(t, isInput, "modifier events are never session input")
-	}
+		_, err = pw.Write([]byte("\x1b[57442;1:3u"))
+		require.NoError(t, err)
+		synctest.Wait()
+		require.True(t, sent(protocol.ModifierState{})())
+		for _, message := range stream.messages() {
+			_, isInput := message.(protocol.Input)
+			require.False(t, isInput, "modifier events are never session input")
+		}
+	})
 }

@@ -4,6 +4,7 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"testing/synctest"
 
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -33,24 +34,26 @@ func TestClipboardInterceptCtrlV(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			reader := portsmocks.NewMockClipboardReader(t)
-			if tt.hasImage {
-				reader.EXPECT().ReadImage(mock.Anything).Return("image/png", []byte{1}, nil).Times(tt.wantImages)
-			} else if tt.reads {
-				reader.EXPECT().ReadImage(mock.Anything).Return("", nil, ports.ErrNoClipboardImage).Once()
-			}
-			var next []string
-			images := 0
-			c := &clipboardIntercept{
-				coalescer: newPasteCoalescer(nil, func([]byte) {}),
-				reader:    reader,
-				log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
-				sendImage: func(string, []byte) { images++ },
-				next:      func(b []byte) { next = append(next, string(b)) },
-			}
-			c.Scan([]byte(tt.in))
-			require.Equal(t, tt.wantNext, next)
-			require.Equal(t, tt.wantImages, images)
+			synctest.Test(t, func(t *testing.T) {
+				reader := portsmocks.NewMockClipboardReader(t)
+				if tt.hasImage {
+					reader.EXPECT().ReadImage(mock.Anything).Return("image/png", []byte{1}, nil).Times(tt.wantImages)
+				} else if tt.reads {
+					reader.EXPECT().ReadImage(mock.Anything).Return("", nil, ports.ErrNoClipboardImage).Once()
+				}
+				var next []string
+				images := 0
+				c := &clipboardIntercept{
+					coalescer: newPasteCoalescer(nil, func([]byte) {}),
+					reader:    reader,
+					log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+					sendImage: func(string, []byte) { images++ },
+					next:      func(b []byte) { next = append(next, string(b)) },
+				}
+				c.Scan([]byte(tt.in))
+				require.Equal(t, tt.wantNext, next)
+				require.Equal(t, tt.wantImages, images)
+			})
 		})
 	}
 }

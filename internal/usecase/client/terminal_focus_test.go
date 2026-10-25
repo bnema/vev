@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -34,58 +35,62 @@ func TestStripTerminalFocusReports(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			state := newTerminalFocusState()
-			state.set(tt.start)
-			_, changed := state.Watch()
+			synctest.Test(t, func(t *testing.T) {
+				state := newTerminalFocusState()
+				state.set(tt.start)
+				_, changed := state.Watch()
 
-			got := stripTerminalFocusReports(state, []byte(tt.input))
+				got := stripTerminalFocusReports(state, []byte(tt.input))
 
-			require.Equal(t, tt.want, string(got))
-			want := tt.wantFocus
-			if want == domain.TerminalFocusUnknown {
-				want = tt.start
-			}
-			require.Equal(t, want, state.Focus())
-			select {
-			case <-changed:
-				require.True(t, tt.changed, "no change was expected")
-			default:
-				require.False(t, tt.changed, "a change was expected")
-			}
+				require.Equal(t, tt.want, string(got))
+				want := tt.wantFocus
+				if want == domain.TerminalFocusUnknown {
+					want = tt.start
+				}
+				require.Equal(t, want, state.Focus())
+				select {
+				case <-changed:
+					require.True(t, tt.changed, "no change was expected")
+				default:
+					require.False(t, tt.changed, "a change was expected")
+				}
+			})
 		})
 	}
 }
 
 func TestFocusReporterSendsKnownChangesOnce(t *testing.T) {
-	state := newTerminalFocusState()
-	reporter := &focusReporter{state: state}
+	synctest.Test(t, func(t *testing.T) {
+		state := newTerminalFocusState()
+		reporter := &focusReporter{state: state}
 
-	_, ok := reporter.next()
-	require.False(t, ok, "unknown focus is never sent")
+		_, ok := reporter.next()
+		require.False(t, ok, "unknown focus is never sent")
 
-	steps := []struct {
-		focus  domain.TerminalFocus
-		want   protocol.TerminalFocus
-		wantOK bool
-	}{
-		{focus: domain.TerminalFocusFocused, want: protocol.TerminalFocus{Focus: domain.TerminalFocusFocused}, wantOK: true},
-		{focus: domain.TerminalFocusUnfocused, want: protocol.TerminalFocus{Focus: domain.TerminalFocusUnfocused}, wantOK: true},
-		{focus: domain.TerminalFocusUnfocused},
-	}
-	for _, step := range steps {
-		wake := reporter.changed
-		state.set(step.focus)
-		if step.wantOK {
-			select {
-			case <-wake:
-			default:
-				t.Fatalf("a change to %s must wake the reporter", step.focus)
-			}
+		steps := []struct {
+			focus  domain.TerminalFocus
+			want   protocol.TerminalFocus
+			wantOK bool
+		}{
+			{focus: domain.TerminalFocusFocused, want: protocol.TerminalFocus{Focus: domain.TerminalFocusFocused}, wantOK: true},
+			{focus: domain.TerminalFocusUnfocused, want: protocol.TerminalFocus{Focus: domain.TerminalFocusUnfocused}, wantOK: true},
+			{focus: domain.TerminalFocusUnfocused},
 		}
-		got, ok := reporter.next()
-		require.Equal(t, step.wantOK, ok)
-		require.Equal(t, step.want, got)
-	}
+		for _, step := range steps {
+			wake := reporter.changed
+			state.set(step.focus)
+			if step.wantOK {
+				select {
+				case <-wake:
+				default:
+					t.Fatalf("a change to %s must wake the reporter", step.focus)
+				}
+			}
+			got, ok := reporter.next()
+			require.Equal(t, step.wantOK, ok)
+			require.Equal(t, step.want, got)
+		}
+	})
 }
 
 // TestTerminalInputPumpStripsFocusReports proves focus reports never reach an
@@ -93,76 +98,83 @@ func TestFocusReporterSendsKnownChangesOnce(t *testing.T) {
 // the terminal reported is readable on the foreground, and later keys arrive
 // intact.
 func TestTerminalInputPumpStripsFocusReports(t *testing.T) {
-	pr, pw := io.Pipe()
-	pump := newTerminalInputPump(pr)
-	pump.start()
-	defer pump.stop()
-	defer pw.Close()
-	host := newWorkerTestHost(newWorkerTestTerminal(), pump, nil)
+	synctest.Test(t, func(t *testing.T) {
+		pr, pw := io.Pipe()
+		pump := newTerminalInputPump(pr)
+		pump.start()
+		defer pump.stop()
+		defer pw.Close()
+		host := newWorkerTestHost(t, newWorkerTestTerminal(t), pump, nil)
 
-	observed := make(chan []byte, 1)
-	focus := make(chan domain.TerminalFocus, 1)
-	worker := &fakeWorker{run: func(ctx context.Context, fg AttachmentForeground) AttachmentEvent {
-		event, ok := fg.Input(ctx)
-		if !ok {
-			return AttachmentEvent{Kind: AttachmentEventFailed, Err: errors.New("no input")}
-		}
-		fg.AckInput()
-		observed <- append([]byte(nil), event.Data...)
-		focus <- attachmentTerminalFocus(fg).Focus()
-		return AttachmentEvent{Kind: AttachmentEventEnded}
-	}}
+		observed := make(chan []byte, 1)
+		focus := make(chan domain.TerminalFocus, 1)
+		worker := newTestWorker(t, func(ctx context.Context, fg AttachmentForeground) AttachmentEvent {
+			event, ok := fg.Input(ctx)
+			if !ok {
+				return AttachmentEvent{Kind: AttachmentEventFailed, Err: errors.New("no input")}
+			}
+			fg.AckInput()
+			observed <- append([]byte(nil), event.Data...)
+			focus <- attachmentTerminalFocus(fg).Focus()
+			return AttachmentEvent{Kind: AttachmentEventEnded}
+		})
 
-	go func() {
-		_, _ = pw.Write([]byte("\x1b[O"))
-		_, _ = pw.Write([]byte("\x1b[Iab"))
-	}()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_, adopted := host.Run(ctx, AttachmentToken{Generation: 1, Attempt: 1}, worker, newWorkerTestStream())
-	require.True(t, adopted)
+		go func() {
+			_, _ = pw.Write([]byte("\x1b[O"))
+			_, _ = pw.Write([]byte("\x1b[Iab"))
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_, adopted := host.Run(ctx, AttachmentToken{Generation: 1, Attempt: 1}, worker, newSessionStream(t).conn)
+		require.True(t, adopted)
 
-	require.Equal(t, []byte("ab"), <-observed, "the focus-only read is never delivered")
-	require.Equal(t, domain.TerminalFocusFocused, <-focus)
+		require.Equal(t, []byte("ab"), <-observed, "the focus-only read is never delivered")
+		require.Equal(t, domain.TerminalFocusFocused, <-focus)
+	})
 }
 
 func TestNilTerminalFocusStateIsUnknown(t *testing.T) {
-	var state *TerminalFocusState
-	focus, changed := state.Watch()
-	require.Equal(t, domain.TerminalFocusUnknown, focus)
-	require.Nil(t, changed)
-	require.Equal(t, domain.TerminalFocusUnknown, state.Focus())
+	synctest.Test(t, func(t *testing.T) {
+		var state *TerminalFocusState
+		focus, changed := state.Watch()
+		require.Equal(t, domain.TerminalFocusUnknown, focus)
+		require.Nil(t, changed)
+		require.Equal(t, domain.TerminalFocusUnknown, state.Focus())
+	})
 }
 
 // TestAttachmentDeclaresFocusInHelloThenReportsChanges proves the daemon
 // learns a terminal's focus before its first paint: Hello carries the focus
 // already known, and each later change follows as TerminalFocus.
 func TestAttachmentDeclaresFocusInHelloThenReportsChanges(t *testing.T) {
-	pump := newTerminalInputPump(blockingReader{})
-	pump.focus.set(domain.TerminalFocusUnfocused)
-	stream := newSessionTestStream()
-	host := newWorkerTestHost(newWorkerTestTerminal(), pump, nil)
-	worker, err := newSessionAttachmentWorker(sessionTestWorkerConfig(sessionTestRequest(true)))
-	require.NoError(t, err)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() { _, _ = host.Run(ctx, AttachmentToken{Generation: 4, Attempt: 1}, worker, stream) }()
+	synctest.Test(t, func(t *testing.T) {
+		pump := newTerminalInputPump(blockingReader{})
+		pump.focus.set(domain.TerminalFocusUnfocused)
+		stream := newSessionStream(t)
+		host := newWorkerTestHost(t, newWorkerTestTerminal(t), pump, nil)
+		worker, err := newSessionAttachmentWorker(sessionTestWorkerConfig(sessionTestRequest(true)))
+		require.NoError(t, err)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go func() { _, _ = host.Run(ctx, AttachmentToken{Generation: 4, Attempt: 1}, worker, stream.conn) }()
 
-	hello := awaitHello(t, stream)
-	require.Equal(t, domain.TerminalFocusUnfocused, hello.TerminalFocus)
-	require.NoError(t, protocol.ValidateHello(hello))
+		hello := awaitHello(t, stream)
+		require.Equal(t, domain.TerminalFocusUnfocused, hello.TerminalFocus)
+		require.NoError(t, protocol.ValidateHello(hello))
 
-	stream.deliver(protocol.Welcome{SessionName: "alpha"})
-	stream.deliver(sessionTestOutput(1, "\x1b[Hready"))
-	pump.focus.set(domain.TerminalFocusFocused)
-	require.Eventually(t, func() bool {
-		for _, message := range stream.messages() {
-			if message == (protocol.TerminalFocus{Focus: domain.TerminalFocusFocused}) {
-				return true
+		stream.deliver(protocol.Welcome{SessionName: "alpha"})
+		stream.deliver(sessionTestOutput(1, "\x1b[Hready"))
+		pump.focus.set(domain.TerminalFocusFocused)
+		synctest.Wait()
+		require.True(t, func() bool {
+			for _, message := range stream.messages() {
+				if message == (protocol.TerminalFocus{Focus: domain.TerminalFocusFocused}) {
+					return true
+				}
 			}
-		}
-		return false
-	}, 5*time.Second, time.Millisecond, "a focus change after attach is reported")
+			return false
+		}(), "a focus change after attach is reported")
+	})
 }
 
 // blockingReader is a terminal that never sends input.

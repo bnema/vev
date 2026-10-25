@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -31,7 +32,7 @@ func routeTestCatalogue(revision ports.BrokerRevision, remoteBell bool) ports.Br
 }
 
 // sentRouteSnapshots returns every route snapshot the attachment published.
-func sentRouteSnapshots(stream *sessionTestStream) []protocol.RecentRouteSnapshot {
+func sentRouteSnapshots(stream *streamLog) []protocol.RecentRouteSnapshot {
 	var out []protocol.RecentRouteSnapshot
 	for _, message := range stream.messages() {
 		if snapshot, ok := message.(protocol.RecentRouteSnapshot); ok {
@@ -41,10 +42,11 @@ func sentRouteSnapshots(stream *sessionTestStream) []protocol.RecentRouteSnapsho
 	return out
 }
 
-func awaitRouteSnapshot(t *testing.T, stream *sessionTestStream, what string, match func(protocol.RecentRouteSnapshot) bool) protocol.RecentRouteSnapshot {
+func awaitRouteSnapshot(t *testing.T, stream *streamLog, what string, match func(protocol.RecentRouteSnapshot) bool) protocol.RecentRouteSnapshot {
 	t.Helper()
 	var found protocol.RecentRouteSnapshot
-	require.Eventually(t, func() bool {
+	synctest.Wait()
+	require.True(t, func() bool {
 		for _, snapshot := range sentRouteSnapshots(stream) {
 			if match(snapshot) {
 				found = snapshot
@@ -52,7 +54,7 @@ func awaitRouteSnapshot(t *testing.T, stream *sessionTestStream, what string, ma
 			}
 		}
 		return false
-	}, 5*time.Second, time.Millisecond, "client never published %s", what)
+	}(), "client never published %s", what)
 	return found
 }
 
@@ -70,35 +72,37 @@ func routeEntryNamed(snapshot protocol.RecentRouteSnapshot, name string) (protoc
 // publication, and a broker publication while attached republishes it with
 // the other daemon's bell.
 func TestSupervisorPublishesRoutesWhileAttached(t *testing.T) {
-	picker := newAttachTestPicker()
-	harness := startAttachHarness(t, picker)
-	harness.service.publishSnapshot(routeTestCatalogue(2, false))
-	stream := attachLiveSession(t, harness, picker)
+	synctest.Test(t, func(t *testing.T) {
+		pickerMock, picker := newAttachTestPicker(t)
+		harness := startAttachHarness(t, pickerMock)
+		harness.service.publishSnapshot(routeTestCatalogue(2, false))
+		stream := attachLiveSession(t, harness, picker)
 
-	first := awaitRouteSnapshot(t, stream, "the first route snapshot", func(s protocol.RecentRouteSnapshot) bool {
-		_, ok := routeEntryNamed(s, "rem")
-		return ok
+		first := awaitRouteSnapshot(t, stream, "the first route snapshot", func(s protocol.RecentRouteSnapshot) bool {
+			_, ok := routeEntryNamed(s, "rem")
+			return ok
+		})
+		require.NoError(t, first.Validate())
+		require.Equal(t, "alpha", first.ActiveEntry.Name, "the attached lifecycle is metadata only")
+		_, listed := routeEntryNamed(first, "alpha")
+		require.False(t, listed)
+		remote, _ := routeEntryNamed(first, "rem")
+		require.False(t, remote.Attention)
+		require.Equal(t, protocol.RouteKindRemote, remote.Kind)
+
+		harness.service.publishSnapshot(routeTestCatalogue(3, true))
+		rung := awaitRouteSnapshot(t, stream, "the remote bell", func(s protocol.RecentRouteSnapshot) bool {
+			entry, ok := routeEntryNamed(s, "rem")
+			return ok && entry.Attention
+		})
+		require.Greater(t, rung.Generation, first.Generation)
+		require.Equal(t, first.Active, rung.Active, "the attachment keeps its reference")
+
+		harness.service.publishSnapshot(routeTestCatalogue(4, true))
+		synctest.Wait()
+		require.False(t, len(sentRouteSnapshots(stream)) > 2, "an unchanged catalogue publishes nothing")
+		require.Len(t, harness.service.openedRequests(), 1)
 	})
-	require.NoError(t, first.Validate())
-	require.Equal(t, "alpha", first.ActiveEntry.Name, "the attached lifecycle is metadata only")
-	_, listed := routeEntryNamed(first, "alpha")
-	require.False(t, listed)
-	remote, _ := routeEntryNamed(first, "rem")
-	require.False(t, remote.Attention)
-	require.Equal(t, protocol.RouteKindRemote, remote.Kind)
-
-	harness.service.publishSnapshot(routeTestCatalogue(3, true))
-	rung := awaitRouteSnapshot(t, stream, "the remote bell", func(s protocol.RecentRouteSnapshot) bool {
-		entry, ok := routeEntryNamed(s, "rem")
-		return ok && entry.Attention
-	})
-	require.Greater(t, rung.Generation, first.Generation)
-	require.Equal(t, first.Active, rung.Active, "the attachment keeps its reference")
-
-	harness.service.publishSnapshot(routeTestCatalogue(4, true))
-	require.Never(t, func() bool { return len(sentRouteSnapshots(stream)) > 2 }, 50*time.Millisecond, time.Millisecond,
-		"an unchanged catalogue publishes nothing")
-	require.Len(t, harness.service.openedRequests(), 1)
 }
 
 // TestSupervisorSettlesDaemonNavigation pins C5 and the E3 palette commits:
@@ -114,7 +118,7 @@ func TestSupervisorSettlesDaemonNavigation(t *testing.T) {
 		// refuseInPlace answers the in-place switch with a daemon refusal.
 		refuseInPlace bool
 		wantOpen      func(*testing.T, ports.BrokerOpenStreamRequest)
-		wantReply     func(*testing.T, *sessionTestStream)
+		wantReply     func(*testing.T, *streamLog)
 	}{
 		{
 			name: "recent route to another daemon swaps",
@@ -135,7 +139,7 @@ func TestSupervisorSettlesDaemonNavigation(t *testing.T) {
 				entry, _ := routeEntryNamed(s, "beta")
 				return protocol.RouteNavigationAction{SnapshotGeneration: s.Generation, Key: entry.Key, Generation: entry.Generation}
 			},
-			wantReply: func(t *testing.T, stream *sessionTestStream) {
+			wantReply: func(t *testing.T, stream *streamLog) {
 				request := awaitSent(t, stream, "SamePeerSwitchRequest", isSent[protocol.SamePeerSwitchRequest]).(protocol.SamePeerSwitchRequest)
 				require.Equal(t, beta, request.Target)
 			},
@@ -157,7 +161,7 @@ func TestSupervisorSettlesDaemonNavigation(t *testing.T) {
 			request: func(s protocol.RecentRouteSnapshot) protocol.ServerMessage {
 				return protocol.RouteNavigationAction{SnapshotGeneration: s.Generation, Key: 999, Generation: 1}
 			},
-			wantReply: func(t *testing.T, stream *sessionTestStream) {
+			wantReply: func(t *testing.T, stream *streamLog) {
 				failure := awaitSent(t, stream, "RouteNavigationFailure", isSent[protocol.RouteNavigationFailure]).(protocol.RouteNavigationFailure)
 				require.Equal(t, protocol.RouteNavigationFailure{Key: 999, Generation: 1, Code: protocol.RouteFailureStaleSelection}, failure)
 			},
@@ -179,7 +183,7 @@ func TestSupervisorSettlesDaemonNavigation(t *testing.T) {
 			request: func(s protocol.RecentRouteSnapshot) protocol.ServerMessage {
 				return protocol.RouteCreateSessionAction{RequestID: 4, SnapshotGeneration: s.Generation, Key: 999, Generation: 1, SessionName: "fresh"}
 			},
-			wantReply: func(t *testing.T, stream *sessionTestStream) {
+			wantReply: func(t *testing.T, stream *streamLog) {
 				failure := awaitSent(t, stream, "SessionCreationFailure", isSent[protocol.SessionCreationFailure]).(protocol.SessionCreationFailure)
 				require.Equal(t, protocol.SessionCreationFailure{RequestID: 4, Code: protocol.RouteFailureStaleSelection}, failure)
 			},
@@ -190,7 +194,7 @@ func TestSupervisorSettlesDaemonNavigation(t *testing.T) {
 				target := beta
 				return protocol.AttachTarget{Session: "beta", Intent: protocol.IntentAttach, ExactTarget: &target, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned, SamePeer: true}
 			},
-			wantReply: func(t *testing.T, stream *sessionTestStream) {
+			wantReply: func(t *testing.T, stream *streamLog) {
 				request := awaitSent(t, stream, "SamePeerSwitchRequest", isSent[protocol.SamePeerSwitchRequest]).(protocol.SamePeerSwitchRequest)
 				require.Equal(t, beta, request.Target)
 				require.NotZero(t, request.RequestID)
@@ -212,54 +216,57 @@ func TestSupervisorSettlesDaemonNavigation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			picker := newAttachTestPicker()
-			harness := startAttachHarness(t, picker)
-			harness.service.publishSnapshot(routeTestCatalogue(2, false))
-			stream := attachLiveSession(t, harness, picker)
-			snapshot := awaitRouteSnapshot(t, stream, "the route snapshot", func(s protocol.RecentRouteSnapshot) bool {
-				_, ok := routeEntryNamed(s, "rem")
-				return ok && len(s.Hosts) == 1
-			})
+			synctest.Test(t, func(t *testing.T) {
+				pickerMock, picker := newAttachTestPicker(t)
+				harness := startAttachHarness(t, pickerMock)
+				harness.service.publishSnapshot(routeTestCatalogue(2, false))
+				stream := attachLiveSession(t, harness, picker)
+				snapshot := awaitRouteSnapshot(t, stream, "the route snapshot", func(s protocol.RecentRouteSnapshot) bool {
+					_, ok := routeEntryNamed(s, "rem")
+					return ok && len(s.Hosts) == 1
+				})
 
-			var mu sync.Mutex
-			var second *sessionTestStream
-			harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-				mu.Lock()
-				defer mu.Unlock()
-				second = newSessionTestStream()
-				return second, nil
-			})
-			stream.deliver(tt.request(snapshot))
-			if tt.refuseInPlace {
-				request := awaitSent(t, stream, "SamePeerSwitchRequest", isSent[protocol.SamePeerSwitchRequest]).(protocol.SamePeerSwitchRequest)
-				stream.deliver(protocol.SamePeerSwitchFailure{RequestID: request.RequestID, Code: protocol.SamePeerSwitchStaleTarget})
-			}
-			if tt.detached {
-				// The daemon ends the source right after a close-and-dial
-				// handoff; the supervisor still adopts the handoff.
-				stream.deliver(protocol.Detached{Reason: protocol.ReasonDetach})
-			}
-
-			if tt.wantOpen != nil {
-				require.Eventually(t, func() bool { return len(harness.service.openedRequests()) == 2 }, 5*time.Second, time.Millisecond, "the navigation never opened a stream")
-				opened := harness.service.openedRequests()
-				tt.wantOpen(t, opened[1])
-				awaitStreamHello(t, &mu, &second)
-				if tt.detached {
+				var mu sync.Mutex
+				var second *streamLog
+				harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 					mu.Lock()
-					hello := second.messages()[0].(protocol.Hello)
-					mu.Unlock()
-					require.Equal(t, domain.TabStableID("t_x"), hello.PreferredTabID)
-				} else {
-					awaitSent(t, stream, "Detach", isSent[protocol.Detach])
+					defer mu.Unlock()
+					second = newSessionStream(t)
+					return second.conn, nil
+				})
+				stream.deliver(tt.request(snapshot))
+				if tt.refuseInPlace {
+					request := awaitSent(t, stream, "SamePeerSwitchRequest", isSent[protocol.SamePeerSwitchRequest]).(protocol.SamePeerSwitchRequest)
+					stream.deliver(protocol.SamePeerSwitchFailure{RequestID: request.RequestID, Code: protocol.SamePeerSwitchStaleTarget})
 				}
-				return
-			}
-			tt.wantReply(t, stream)
-			// The supervisor chose before the worker sent the reply above, so
-			// no reconnect can still be pending.
-			require.Len(t, harness.service.openedRequests(), 1, "a refusal or an in-place switch never reconnects")
-			require.Zero(t, countSent[protocol.Detach](stream))
+				if tt.detached {
+					// The daemon ends the source right after a close-and-dial
+					// handoff; the supervisor still adopts the handoff.
+					stream.deliver(protocol.Detached{Reason: protocol.ReasonDetach})
+				}
+
+				if tt.wantOpen != nil {
+					synctest.Wait()
+					require.True(t, len(harness.service.openedRequests()) == 2, "the navigation never opened a stream")
+					opened := harness.service.openedRequests()
+					tt.wantOpen(t, opened[1])
+					awaitStreamHello(t, &mu, &second)
+					if tt.detached {
+						mu.Lock()
+						hello := second.messages()[0].(protocol.Hello)
+						mu.Unlock()
+						require.Equal(t, domain.TabStableID("t_x"), hello.PreferredTabID)
+					} else {
+						awaitSent(t, stream, "Detach", isSent[protocol.Detach])
+					}
+					return
+				}
+				tt.wantReply(t, stream)
+				// The supervisor chose before the worker sent the reply above, so
+				// no reconnect can still be pending.
+				require.Len(t, harness.service.openedRequests(), 1, "a refusal or an in-place switch never reconnects")
+				require.Zero(t, countSent[protocol.Detach](stream))
+			})
 		})
 	}
 }
@@ -268,30 +275,32 @@ func TestSupervisorSettlesDaemonNavigation(t *testing.T) {
 // remote attachment offers the local daemon as a creation host and never
 // itself.
 func TestSupervisorRouteSnapshotExcludesServingHost(t *testing.T) {
-	picker := newAttachTestPicker()
-	harness := startAttachHarness(t, picker)
-	remote := routeTestRemoteHost(catalogue.RemoteCatalogSession{LifecycleID: domain.SessionLifecycleID{1}, Name: "alpha", State: catalogue.RemoteCatalogSessionUp})
-	remote.Registration = sessionTestRequest(false).Registration
-	remote.Endpoint = sessionTestRequest(false).Endpoint
-	remote.DisplayOrigin = "example"
-	snapshot := routeTestSnapshot(routeTestLocal(routeTestLive("loc", 4, 1)), remote)
-	snapshot.Revision = 2
-	harness.service.publishSnapshot(snapshot)
+	synctest.Test(t, func(t *testing.T) {
+		pickerMock, picker := newAttachTestPicker(t)
+		harness := startAttachHarness(t, pickerMock)
+		remote := routeTestRemoteHost(catalogue.RemoteCatalogSession{LifecycleID: domain.SessionLifecycleID{1}, Name: "alpha", State: catalogue.RemoteCatalogSessionUp})
+		remote.Registration = sessionTestRequest(false).Registration
+		remote.Endpoint = sessionTestRequest(false).Endpoint
+		remote.DisplayOrigin = "example"
+		snapshot := routeTestSnapshot(routeTestLocal(routeTestLive("loc", 4, 1)), remote)
+		snapshot.Revision = 2
+		harness.service.publishSnapshot(snapshot)
 
-	stream := newSessionTestStream()
-	harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-		return stream, nil
+		stream := newSessionStream(t)
+		harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+			return stream.conn, nil
+		})
+		picker.commit(sessionTestRequest(false))
+		awaitStreamHello(t, &sync.Mutex{}, &stream)
+		deliverReadyStream(t, stream)
+		awaitAttachedState(t, harness.sup)
+
+		published := awaitRouteSnapshot(t, stream, "the route snapshot", func(s protocol.RecentRouteSnapshot) bool { return len(s.Hosts) > 0 })
+		require.Equal(t, []protocol.RouteHost{{Key: published.Hosts[0].Key, Generation: 1, Label: "local", Kind: protocol.RouteKindLocal}}, published.Hosts)
+		require.Equal(t, protocol.RouteKindRemote, published.ActiveEntry.Kind)
+		require.Equal(t, "example", published.ActiveEntry.HostLabel)
+		require.True(t, published.Home.IsZero(), "only a local attachment is home")
 	})
-	picker.commit(sessionTestRequest(false))
-	awaitStreamHello(t, &sync.Mutex{}, &stream)
-	deliverReadyStream(t, stream)
-	awaitAttachedState(t, harness.sup)
-
-	published := awaitRouteSnapshot(t, stream, "the route snapshot", func(s protocol.RecentRouteSnapshot) bool { return len(s.Hosts) > 0 })
-	require.Equal(t, []protocol.RouteHost{{Key: published.Hosts[0].Key, Generation: 1, Label: "local", Kind: protocol.RouteKindLocal}}, published.Hosts)
-	require.Equal(t, protocol.RouteKindRemote, published.ActiveEntry.Kind)
-	require.Equal(t, "example", published.ActiveEntry.HostLabel)
-	require.True(t, published.Home.IsZero(), "only a local attachment is home")
 }
 
 // TestSupervisorSamePeerSwitchSettlesUIAction pins the driver action that
@@ -304,7 +313,7 @@ func TestSupervisorSamePeerSwitchSettlesUIAction(t *testing.T) {
 	tests := []struct {
 		name string
 		// settle delivers the daemon's answer to the confirmed switch.
-		settle func(*sessionTestStream, protocol.SamePeerSwitchRequest)
+		settle func(*streamLog, protocol.SamePeerSwitchRequest)
 		// sourceReceipt delivers a daemon receipt on the source boundary; the
 		// daemon may also lose the source fence and never answer it.
 		sourceReceipt bool
@@ -312,7 +321,7 @@ func TestSupervisorSamePeerSwitchSettlesUIAction(t *testing.T) {
 	}{
 		{
 			name: "destination output completes the action without a daemon receipt",
-			settle: func(stream *sessionTestStream, _ protocol.SamePeerSwitchRequest) {
+			settle: func(stream *streamLog, _ protocol.SamePeerSwitchRequest) {
 				destination := sessionTestOutput(4, "\x1b[Hbeta")
 				destination.Epoch = 2
 				destination.Context.Route.Target = beta
@@ -322,7 +331,7 @@ func TestSupervisorSamePeerSwitchSettlesUIAction(t *testing.T) {
 		{
 			name:          "a source-boundary receipt waits for the destination output",
 			sourceReceipt: true,
-			settle: func(stream *sessionTestStream, _ protocol.SamePeerSwitchRequest) {
+			settle: func(stream *streamLog, _ protocol.SamePeerSwitchRequest) {
 				destination := sessionTestOutput(4, "\x1b[Hbeta")
 				destination.Epoch = 2
 				destination.Context.Route.Target = beta
@@ -332,7 +341,7 @@ func TestSupervisorSamePeerSwitchSettlesUIAction(t *testing.T) {
 		{
 			name:          "a refused switch fails the action",
 			sourceReceipt: true,
-			settle: func(stream *sessionTestStream, request protocol.SamePeerSwitchRequest) {
+			settle: func(stream *streamLog, request protocol.SamePeerSwitchRequest) {
 				stream.deliver(protocol.SamePeerSwitchFailure{RequestID: request.RequestID, Code: protocol.SamePeerSwitchStaleTarget})
 			},
 			wantErr: ports.UIErrNavigationFailed,
@@ -340,84 +349,89 @@ func TestSupervisorSamePeerSwitchSettlesUIAction(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			picker := newAttachTestPicker()
-			var ui *UI
-			harness := startAttachHarnessConfig(t, picker, func(cfg *SupervisorConfig) {
-				ui = NewUI(cfg.Terminal.(ports.UIState), cfg.Clock)
-				cfg.UI = ui
-			})
-			stream := attachLiveSession(t, harness, picker)
-			attached := sessionTestOutput(2, "\x1b[Hattached")
-			attached.Full, attached.Base, attached.New = false, 1, 2
-			stream.deliver(attached)
-			var snapshot ports.UISnapshot
-			require.Eventually(t, func() bool {
-				var err error
-				snapshot, err = ui.Capture(ui.Handle())
-				return err == nil && snapshot.Context.Status == ports.UIStatusAttached && snapshot.Context.ViewPublication == 2
-			}, 5*time.Second, time.Millisecond)
+			synctest.Test(t, func(t *testing.T) {
+				pickerMock, picker := newAttachTestPicker(t)
+				var ui *UI
+				harness := startAttachHarnessConfig(t, pickerMock, func(cfg *SupervisorConfig) {
+					ui = NewUI(cfg.Terminal.(ports.UIState), cfg.Clock)
+					cfg.UI = ui
+				})
+				stream := attachLiveSession(t, harness, picker)
+				attached := sessionTestOutput(2, "\x1b[Hattached")
+				attached.Full, attached.Base, attached.New = false, 1, 2
+				stream.deliver(attached)
+				var snapshot ports.UISnapshot
+				synctest.Wait()
+				require.True(t, func() bool {
+					var err error
+					snapshot, err = ui.Capture(ui.Handle())
+					return err == nil && snapshot.Context.Status == ports.UIStatusAttached && snapshot.Context.ViewPublication == 2
+				}())
 
-			type actionOutcome struct {
-				result ports.UIActionResult
-				err    error
-			}
-			done := make(chan actionOutcome, 1)
-			go func() {
-				result, err := ui.Action(t.Context(), ports.UIActionRequest{Attachment: ui.Handle(), Generation: snapshot.Context.Generation, Keys: []string{"Enter"}})
-				done <- actionOutcome{result: result, err: err}
-			}()
-			var actionID uint64
-			require.Eventually(t, func() bool {
-				for _, message := range stream.messages() {
-					if fence, ok := message.(protocol.UIFence); ok && fence.ActionID != 0 {
-						actionID = fence.ActionID
-						return true
-					}
+				type actionOutcome struct {
+					result ports.UIActionResult
+					err    error
 				}
-				return false
-			}, 5*time.Second, time.Millisecond, "the action never reached the daemon")
+				done := make(chan actionOutcome, 1)
+				go func() {
+					result, err := ui.Action(t.Context(), ports.UIActionRequest{Attachment: ui.Handle(), Generation: snapshot.Context.Generation, Keys: []string{"Enter"}})
+					done <- actionOutcome{result: result, err: err}
+				}()
+				var actionID uint64
+				synctest.Wait()
+				require.True(t, func() bool {
+					for _, message := range stream.messages() {
+						if fence, ok := message.(protocol.UIFence); ok && fence.ActionID != 0 {
+							actionID = fence.ActionID
+							return true
+						}
+					}
+					return false
+				}(), "the action never reached the daemon")
 
-			target := beta
-			stream.deliver(protocol.AttachTarget{Session: "beta", Intent: protocol.IntentAttach, ExactTarget: &target, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned, SamePeer: true, CauseActionID: actionID})
-			request := awaitSent(t, stream, "SamePeerSwitchRequest", isSent[protocol.SamePeerSwitchRequest]).(protocol.SamePeerSwitchRequest)
+				target := beta
+				stream.deliver(protocol.AttachTarget{Session: "beta", Intent: protocol.IntentAttach, ExactTarget: &target, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned, SamePeer: true, CauseActionID: actionID})
+				request := awaitSent(t, stream, "SamePeerSwitchRequest", isSent[protocol.SamePeerSwitchRequest]).(protocol.SamePeerSwitchRequest)
 
-			// A source publication and a receipt on the source boundary arrive
-			// before the destination: neither may settle the navigating action.
-			source := sessionTestOutput(3, "\x1b[Hsource")
-			source.Full, source.Base, source.New = false, 2, 3
-			stream.deliver(source)
-			if tt.sourceReceipt {
-				stream.deliver(protocol.UIReceipt{ActionID: actionID, Epoch: 1, State: 3, ViewPublication: 3, Outcome: protocol.UIReceiptProcessed})
-			}
-			require.Eventually(t, func() bool {
-				ui.mu.Lock()
-				defer ui.mu.Unlock()
-				return ui.boundary.Context.ViewPublication == 3
-			}, 5*time.Second, time.Millisecond, "the source publication was never committed")
-			select {
-			case outcome := <-done:
-				t.Fatalf("the action settled before the destination: %+v %v", outcome.result, outcome.err)
-			default:
-			}
+				// A source publication and a receipt on the source boundary arrive
+				// before the destination: neither may settle the navigating action.
+				source := sessionTestOutput(3, "\x1b[Hsource")
+				source.Full, source.Base, source.New = false, 2, 3
+				stream.deliver(source)
+				if tt.sourceReceipt {
+					stream.deliver(protocol.UIReceipt{ActionID: actionID, Epoch: 1, State: 3, ViewPublication: 3, Outcome: protocol.UIReceiptProcessed})
+				}
+				synctest.Wait()
+				require.True(t, func() bool {
+					ui.mu.Lock()
+					defer ui.mu.Unlock()
+					return ui.boundary.Context.ViewPublication == 3
+				}(), "the source publication was never committed")
+				select {
+				case outcome := <-done:
+					t.Fatalf("the action settled before the destination: %+v %v", outcome.result, outcome.err)
+				default:
+				}
 
-			tt.settle(stream, request)
-			var outcome actionOutcome
-			select {
-			case outcome = <-done:
-			case <-time.After(5 * time.Second):
-				t.Fatal("the same-peer switch never settled the UI action")
-			}
-			if tt.wantErr != "" {
-				var uiErr *ports.UIError
-				require.ErrorAs(t, outcome.err, &uiErr)
-				require.Equal(t, tt.wantErr, uiErr.Code)
-				require.Equal(t, actionID, uiErr.ActionID)
-				return
-			}
-			require.NoError(t, outcome.err)
-			require.Equal(t, ports.UIActionProcessed, outcome.result.Status)
-			require.Equal(t, beta, outcome.result.Context.Route.Target)
-			require.Equal(t, snapshot.Context.Generation, outcome.result.Context.Generation, "an in-place switch keeps the actionable generation")
+				tt.settle(stream, request)
+				var outcome actionOutcome
+				select {
+				case outcome = <-done:
+				case <-time.After(5 * time.Second):
+					t.Fatal("the same-peer switch never settled the UI action")
+				}
+				if tt.wantErr != "" {
+					var uiErr *ports.UIError
+					require.ErrorAs(t, outcome.err, &uiErr)
+					require.Equal(t, tt.wantErr, uiErr.Code)
+					require.Equal(t, actionID, uiErr.ActionID)
+					return
+				}
+				require.NoError(t, outcome.err)
+				require.Equal(t, ports.UIActionProcessed, outcome.result.Status)
+				require.Equal(t, beta, outcome.result.Context.Route.Target)
+				require.Equal(t, snapshot.Context.Generation, outcome.result.Context.Generation, "an in-place switch keeps the actionable generation")
+			})
 		})
 	}
 }
