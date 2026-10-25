@@ -6,32 +6,53 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 )
 
 // echoTestClock is a settable clock whose timers fire only when the test says.
+// It embeds a generated MockClock backed by the recorded state.
 type echoTestClock struct {
+	*portsmocks.MockClock
 	mu     sync.Mutex
 	now    time.Time
 	timers chan echoTestTimer
 }
 
+// echoManualTimer wraps a generated MockTimer with a test-fired channel.
+type echoManualTimer struct {
+	*portsmocks.MockTimer
+	ch chan time.Time
+}
+
+func (t *echoManualTimer) fire() { t.ch <- time.Time{} }
+
 type echoTestTimer struct {
-	timer *manualAttentionTimer
+	timer *echoManualTimer
 	delay time.Duration
 }
 
-func newEchoTestClock() *echoTestClock {
-	return &echoTestClock{now: time.Unix(100, 0), timers: make(chan echoTestTimer, 16)}
-}
-
-func (c *echoTestClock) Now() time.Time {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.now
+func newEchoTestClock(tb testing.TB) *echoTestClock {
+	tb.Helper()
+	c := &echoTestClock{MockClock: portsmocks.NewMockClock(tb), now: time.Unix(100, 0), timers: make(chan echoTestTimer, 16)}
+	c.EXPECT().Now().RunAndReturn(func() time.Time {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return c.now
+	}).Maybe()
+	c.EXPECT().NewTimer(mock.Anything).RunAndReturn(func(d time.Duration) ports.Timer {
+		timer := &echoManualTimer{MockTimer: &portsmocks.MockTimer{}, ch: make(chan time.Time, 1)}
+		timer.EXPECT().C().Return((<-chan time.Time)(timer.ch)).Maybe()
+		timer.EXPECT().Reset(mock.Anything).Return(true).Maybe()
+		timer.EXPECT().Stop().Return(true).Maybe()
+		c.timers <- echoTestTimer{timer: timer, delay: d}
+		return timer
+	}).Maybe()
+	return c
 }
 
 func (c *echoTestClock) advance(d time.Duration) {
@@ -40,25 +61,20 @@ func (c *echoTestClock) advance(d time.Duration) {
 	c.mu.Unlock()
 }
 
-func (c *echoTestClock) NewTimer(d time.Duration) ports.Timer {
-	t := &manualAttentionTimer{ch: make(chan time.Time, 1)}
-	c.timers <- echoTestTimer{timer: t, delay: d}
-	return t
-}
-
-// nextTimer returns the next echo timer, skipping the send-bound timers the
-// ack-only output path creates.
-func (c *echoTestClock) nextTimer(t *testing.T) (*manualAttentionTimer, time.Duration) {
+// nextTimer returns the next echo timer once the bubble is quiescent, skipping
+// the send-bound timers the ack-only output path creates. It must run inside a
+// synctest bubble.
+func (c *echoTestClock) nextTimer(t *testing.T) (*echoManualTimer, time.Duration) {
 	t.Helper()
-	deadline := time.After(time.Second)
+	synctest.Wait()
 	for {
 		select {
 		case next := <-c.timers:
 			if next.delay <= echoAckDelay {
 				return next.timer, next.delay
 			}
-		case <-deadline:
-			t.Fatal("timed out waiting for echo timer")
+		default:
+			t.Fatal("no echo timer was armed")
 			return nil, 0
 		}
 	}
@@ -66,7 +82,7 @@ func (c *echoTestClock) nextTimer(t *testing.T) (*manualAttentionTimer, time.Dur
 
 func TestEchoAckWaitsForEchoTimeoutAndSendsAckOnlyOutput(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		clock := newEchoTestClock()
+		clock := newEchoTestClock(t)
 		d, sess, ac, sends := newManualSessionWithPTYsClock(t, clock, newQuietPTY(t))
 		stopOverlayTimersAtCleanup(t, ac)
 
@@ -100,7 +116,7 @@ func TestEchoAckWaitsForEchoTimeoutAndSendsAckOnlyOutput(t *testing.T) {
 
 func TestEchoAckIgnoresUnsequencedAndStaleInput(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		clock := newEchoTestClock()
+		clock := newEchoTestClock(t)
 		d, _, ac, _ := newManualSessionWithPTYsClock(t, clock, newQuietPTY(t))
 		stopOverlayTimersAtCleanup(t, ac)
 		ac.echoAck.Store(5)
@@ -114,7 +130,7 @@ func TestEchoAckIgnoresUnsequencedAndStaleInput(t *testing.T) {
 
 func TestResetEchoAckDropsPendingInput(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		clock := newEchoTestClock()
+		clock := newEchoTestClock(t)
 		d, _, ac, sends := newManualSessionWithPTYsClock(t, clock, newQuietPTY(t))
 		stopOverlayTimersAtCleanup(t, ac)
 
@@ -131,7 +147,7 @@ func TestResetEchoAckDropsPendingInput(t *testing.T) {
 
 func TestEchoAckWaitsWhileOutputWindowIsFull(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		clock := newEchoTestClock()
+		clock := newEchoTestClock(t)
 		d, _, ac, sends := newManualSessionWithPTYsClock(t, clock, newQuietPTY(t))
 		stopOverlayTimersAtCleanup(t, ac)
 		ac.output.maxOutstandingAtomic.Store(1)
