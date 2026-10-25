@@ -44,6 +44,8 @@ func TestSessionCorePreservesLocalIdentityAndPromotedMutex(t *testing.T) {
 	sess.mu.Unlock()
 }
 
+// Not a synctest bubble: a goroutine blocked on sync.Mutex is not durably
+// blocked, so the bubble clock could never settle the negative check below.
 func TestSessionSnapshotViewUsesPromotedMutexForLocalTabAndRoleState(t *testing.T) {
 	sess := &session{
 		sessionCore: sessionCore{id: domain.SessionID("local"), name: "work"},
@@ -69,7 +71,11 @@ func TestSessionSnapshotViewUsesPromotedMutexForLocalTabAndRoleState(t *testing.
 		<-allowCall
 		snapshotted <- sess.snapshotView(viewOptions{})
 	}()
-	awaitTestCompletion(t, preCall, "snapshot goroutine did not reach the pre-call barrier")
+	select {
+	case <-preCall:
+	case <-time.After(testWaitTimeout):
+		t.Fatal("snapshot goroutine did not reach the pre-call barrier")
+	}
 	close(allowCall)
 
 	// Give the released call a bounded opportunity to acquire the mutex; it
@@ -84,7 +90,12 @@ func TestSessionSnapshotViewUsesPromotedMutexForLocalTabAndRoleState(t *testing.
 	require.Equal(t, true, sess.attachmentRegisteredLocked(ac))
 	sess.core().mu.Unlock()
 
-	view := awaitTestValue(t, snapshotted, "snapshotView did not complete after sessionCore.mu was released")
+	var view sessionView
+	select {
+	case view = <-snapshotted:
+	case <-time.After(testWaitTimeout):
+		t.Fatal("snapshotView did not complete after sessionCore.mu was released")
+	}
 	require.True(t, view.attached)
 	require.Equal(t, 2, view.tabCount)
 	require.Equal(t, 0, view.defaultTab)
