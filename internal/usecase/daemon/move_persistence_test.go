@@ -26,24 +26,32 @@ type movePersistenceCatalogue struct {
 	dirtyBeforeUpdate  bool
 }
 
-func (c *movePersistenceCatalogue) Records() ([]domain.CatalogueRecord, error) { return nil, nil }
-func (c *movePersistenceCatalogue) Record(name string) (domain.CatalogueRecord, bool, error) {
+// mock serves the recorder through a generated catalogue mock.
+func (c *movePersistenceCatalogue) mock(t testing.TB) *portsmocks.MockCatalogue {
+	catalogue, _ := newRecoveryCatalogueMock(t, nil, func(m *portsmocks.MockCatalogue, _ *recoveryCatalogueState) {
+		m.EXPECT().Record(mock.Anything).RunAndReturn(c.record).Maybe()
+		m.EXPECT().Delete(mock.Anything).RunAndReturn(c.remove).Maybe()
+		m.EXPECT().UpdateMetadata(mock.Anything).RunAndReturn(c.updateMetadata).Maybe()
+	})
+	return catalogue
+}
+
+func (c *movePersistenceCatalogue) record(name string) (domain.CatalogueRecord, bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	record, ok := c.records[name]
 	return record, ok, nil
 }
-func (c *movePersistenceCatalogue) Create(domain.CatalogueRecord) error          { return nil }
-func (c *movePersistenceCatalogue) Replace(string, domain.CatalogueRecord) error { return nil }
-func (c *movePersistenceCatalogue) Rename(string, domain.CatalogueRecord) error  { return nil }
-func (c *movePersistenceCatalogue) Delete(name string) error {
+
+func (c *movePersistenceCatalogue) remove(name string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.records, name)
 	c.events = append(c.events, "delete:"+name)
 	return nil
 }
-func (c *movePersistenceCatalogue) UpdateMetadata(update domain.CatalogueMetadataUpdate) error {
+
+func (c *movePersistenceCatalogue) updateMetadata(update domain.CatalogueMetadataUpdate) error {
 	sourceDirty := true
 	if c.requireSourceDirty {
 		c.source.snapshotMu.Lock()
@@ -62,8 +70,6 @@ func (c *movePersistenceCatalogue) UpdateMetadata(update domain.CatalogueMetadat
 	c.events = append(c.events, "metadata:"+update.Name)
 	return nil
 }
-func (c *movePersistenceCatalogue) Sync() error  { return nil }
-func (c *movePersistenceCatalogue) Close() error { return nil }
 
 // movePersistenceRepository records the lock state observed by Publish and
 // DeleteIncarnation. It is a plain recorder; mock(t) wires it into a generated
@@ -220,9 +226,10 @@ func TestMoveTabPersistenceMatrix(t *testing.T) {
 			}
 			repository := &movePersistenceRepository{}
 			repositoryMock := repository.mock(t)
-			WithCatalogue(catalogue, nil)(d)
+			catalogueMock := catalogue.mock(t)
+			WithCatalogue(catalogueMock, nil)(d)
 			WithSnapshotRepository(repositoryMock)(d)
-			WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, repositoryMock, nil))(d)
+			WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogueMock, repositoryMock, nil))(d)
 
 			require.NoError(t, d.moveTab(moveTabRequest{
 				Source: moveSessionLocator{ID: source.id, Incarnation: source.incarnation}, SourceTabID: domain.TabStableID(moved.stableID),

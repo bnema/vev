@@ -351,7 +351,21 @@ type moveTabPurgeCatalogue struct {
 	events  []string
 }
 
-func (c *moveTabPurgeCatalogue) Records() ([]domain.CatalogueRecord, error) {
+// mock serves the recorder through a generated catalogue mock.
+func (c *moveTabPurgeCatalogue) mock(t testing.TB) *portsmocks.MockCatalogue {
+	catalogue, _ := newRecoveryCatalogueMock(t, nil, func(m *portsmocks.MockCatalogue, _ *recoveryCatalogueState) {
+		m.EXPECT().Records().RunAndReturn(c.list).Maybe()
+		m.EXPECT().Record(mock.Anything).RunAndReturn(c.record).Maybe()
+		m.EXPECT().Create(mock.Anything).Return(errors.New("move tab purge catalogue: Create is unsupported")).Maybe()
+		m.EXPECT().Replace(mock.Anything, mock.Anything).Return(errors.New("move tab purge catalogue: Replace is unsupported")).Maybe()
+		m.EXPECT().Rename(mock.Anything, mock.Anything).Return(errors.New("move tab purge catalogue: Rename is unsupported")).Maybe()
+		m.EXPECT().Delete(mock.Anything).RunAndReturn(c.remove).Maybe()
+		m.EXPECT().UpdateMetadata(mock.Anything).RunAndReturn(c.updateMetadata).Maybe()
+	})
+	return catalogue
+}
+
+func (c *moveTabPurgeCatalogue) list() ([]domain.CatalogueRecord, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	records := make([]domain.CatalogueRecord, 0, len(c.records))
@@ -361,26 +375,14 @@ func (c *moveTabPurgeCatalogue) Records() ([]domain.CatalogueRecord, error) {
 	return records, nil
 }
 
-func (c *moveTabPurgeCatalogue) Record(name string) (domain.CatalogueRecord, bool, error) {
+func (c *moveTabPurgeCatalogue) record(name string) (domain.CatalogueRecord, bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	record, ok := c.records[name]
 	return record, ok, nil
 }
 
-func (c *moveTabPurgeCatalogue) Create(domain.CatalogueRecord) error {
-	return errors.New("move tab purge catalogue: Create is unsupported")
-}
-
-func (c *moveTabPurgeCatalogue) Replace(string, domain.CatalogueRecord) error {
-	return errors.New("move tab purge catalogue: Replace is unsupported")
-}
-
-func (c *moveTabPurgeCatalogue) Rename(string, domain.CatalogueRecord) error {
-	return errors.New("move tab purge catalogue: Rename is unsupported")
-}
-
-func (c *moveTabPurgeCatalogue) Delete(name string) error {
+func (c *moveTabPurgeCatalogue) remove(name string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.records, name)
@@ -388,15 +390,12 @@ func (c *moveTabPurgeCatalogue) Delete(name string) error {
 	return nil
 }
 
-func (c *moveTabPurgeCatalogue) UpdateMetadata(update domain.CatalogueMetadataUpdate) error {
+func (c *moveTabPurgeCatalogue) updateMetadata(update domain.CatalogueMetadataUpdate) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.events = append(c.events, "metadata:"+update.Name)
 	return nil
 }
-
-func (c *moveTabPurgeCatalogue) Sync() error  { return nil }
-func (c *moveTabPurgeCatalogue) Close() error { return nil }
 
 // moveTabPurgeRepository records the lock state observed by DeleteIncarnation.
 // It is a plain recorder; mock(t) wires it into a generated snapshot repository.
@@ -495,10 +494,11 @@ func TestMoveTabFinalNamedSourcePurgesAfterDestinationAdmissionAndFailureDoesNot
 			d: d, source: source, destination: destination, moved: moved, pane: moved.focusedPane(), client: client,
 			catalogue: catalogue, err: failure,
 		}
-		WithCatalogue(catalogue, nil)(d)
+		catalogueMock := catalogue.mock(t)
+		WithCatalogue(catalogueMock, nil)(d)
 		repositoryMock := repository.mock(t)
 		WithSnapshotRepository(repositoryMock)(d)
-		WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, repositoryMock, nil))(d)
+		WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogueMock, repositoryMock, nil))(d)
 
 		require.NoError(t, d.moveTab(moveTabRequest{
 			Source: moveSessionLocator{ID: source.id, Incarnation: source.incarnation}, SourceTabID: domain.TabStableID(moved.stableID),
