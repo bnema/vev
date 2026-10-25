@@ -3,6 +3,7 @@ package daemon
 import (
 	"fmt"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -67,27 +68,30 @@ func awaitDaemonMoveClosing(t *testing.T, d *Daemon) {
 }
 
 func TestMoveLifecycleReservationMakesTeardownWait(t *testing.T) {
-	d := newTestDaemon(t, nil, newStubClock(t))
-	sess := &session{sessionCore: sessionCore{id: "source"}}
+	synctest.Test(t, func(t *testing.T) {
+		d := newTestDaemon(t, nil, newStubClock(t))
+		sess := &session{sessionCore: sessionCore{id: "source"}}
 
-	reservation, err := d.reserveMoveLifecycles(sess, sess)
-	require.NoError(t, err)
-	awaitMoveTeardownState(t, sess, 1, 0)
+		reservation, err := d.reserveMoveLifecycles(sess, sess)
+		require.NoError(t, err)
+		awaitMoveTeardownState(t, sess, 1, 0)
 
-	teardown := make(chan bool, 1)
-	go func() { teardown <- sess.beginTeardown(nil) }()
-	awaitMoveTeardownState(t, sess, 1, 1)
-	select {
-	case <-teardown:
-		t.Fatal("teardown claimed ownership while the move lifecycle was reserved")
-	default:
-	}
+		teardown := make(chan bool, 1)
+		go func() { teardown <- sess.beginTeardown(nil) }()
+		awaitMoveTeardownState(t, sess, 1, 1)
+		select {
+		case <-teardown:
+			t.Fatal("teardown claimed ownership while the move lifecycle was reserved")
+		default:
+		}
 
-	reservation.Release()
-	require.True(t, awaitTestValue(t, teardown, "teardown did not wake after move release"))
-	sess.finishTeardown()
+		reservation.Release()
+		require.True(t, requireReceived(t, teardown, "teardown did not wake after move release"))
+		sess.finishTeardown()
+	})
 }
 
+// Not a synctest bubble: goroutines blocked on sync.Mutex are not durably blocked.
 func TestMoveLifecycleReservationsUseStableSessionOrder(t *testing.T) {
 	d := newTestDaemon(t, nil, newStubClock(t))
 	first := &session{sessionCore: sessionCore{id: "a"}}
@@ -112,15 +116,15 @@ func TestMoveLifecycleReservationsUseStableSessionOrder(t *testing.T) {
 	}
 	awaitDaemonMoveActive(t, d, 2)
 	for range 2 {
-		awaitTestCompletion(t, beforeTeardownLocks, "move did not reach ordered teardown-lock admission")
+		receiveBounded(t, beforeTeardownLocks, "move did not reach ordered teardown-lock admission")
 	}
 	require.True(t, second.teardownMu.TryLock(), "opposite move locked b before the shared lowest-ID session")
 	second.teardownMu.Unlock()
 	first.teardownMu.Unlock()
 
 	for range 2 {
-		require.NoError(t, awaitTestValue(t, errs, "opposite move reservation did not finish"))
-		reservation := awaitTestValue(t, results, "opposite move reservation token missing")
+		require.NoError(t, receiveBounded(t, errs, "opposite move reservation did not finish"))
+		reservation := receiveBounded(t, results, "opposite move reservation token missing")
 		require.NotNil(t, reservation)
 		reservation.Release()
 	}
@@ -130,22 +134,24 @@ func TestMoveLifecycleReservationsUseStableSessionOrder(t *testing.T) {
 func TestMoveLifecycleReservationRejectsTeardownWithoutLeakingCounts(t *testing.T) {
 	for _, teardownSession := range []string{"source", "destination"} {
 		t.Run(teardownSession, func(t *testing.T) {
-			d := newTestDaemon(t, nil, newStubClock(t))
-			source := &session{sessionCore: sessionCore{id: "source"}}
-			destination := &session{sessionCore: sessionCore{id: "destination"}}
-			tearingDown := source
-			if teardownSession == "destination" {
-				tearingDown = destination
-			}
-			require.True(t, tearingDown.beginTeardown(nil))
+			synctest.Test(t, func(t *testing.T) {
+				d := newTestDaemon(t, nil, newStubClock(t))
+				source := &session{sessionCore: sessionCore{id: "source"}}
+				destination := &session{sessionCore: sessionCore{id: "destination"}}
+				tearingDown := source
+				if teardownSession == "destination" {
+					tearingDown = destination
+				}
+				require.True(t, tearingDown.beginTeardown(nil))
 
-			reservation, err := d.reserveMoveLifecycles(source, destination)
-			require.ErrorIs(t, err, errMoveLifecycleUnavailable)
-			require.Nil(t, reservation)
-			awaitMoveTeardownState(t, source, 0, 0)
-			awaitMoveTeardownState(t, destination, 0, 0)
-			awaitDaemonMoveActive(t, d, 0)
-			tearingDown.finishTeardown()
+				reservation, err := d.reserveMoveLifecycles(source, destination)
+				require.ErrorIs(t, err, errMoveLifecycleUnavailable)
+				require.Nil(t, reservation)
+				awaitMoveTeardownState(t, source, 0, 0)
+				awaitMoveTeardownState(t, destination, 0, 0)
+				awaitDaemonMoveActive(t, d, 0)
+				tearingDown.finishTeardown()
+			})
 		})
 	}
 }
@@ -156,124 +162,134 @@ func TestMoveLifecycleReservationRejectsTeardownWithoutLeakingCounts(t *testing.
 // permanent shutdown verdict, and that the rejection leaks no move or purge
 // admission counts.
 func TestMoveLifecycleReservationRejectedByPurgeAdmissionIsRetryable(t *testing.T) {
-	d := newTestDaemon(t, nil, newStubClock(t))
-	source := &session{sessionCore: sessionCore{id: "source"}}
-	destination := &session{sessionCore: sessionCore{id: "destination"}}
+	synctest.Test(t, func(t *testing.T) {
+		d := newTestDaemon(t, nil, newStubClock(t))
+		source := &session{sessionCore: sessionCore{id: "source"}}
+		destination := &session{sessionCore: sessionCore{id: "destination"}}
 
-	beginTestPurgeAdmission(t, d)
-	reservation, err := d.reserveMoveLifecycles(source, destination)
-	require.ErrorIs(t, err, errPurgeAdmissionClosed)
-	require.NotErrorIs(t, err, errMoveLifecycleUnavailable)
-	require.Nil(t, reservation)
-	awaitDaemonMoveActive(t, d, 0)
-	d.endPurgeAdmission()
-	requirePurgeAdmissionBalanced(t, d)
+		beginTestPurgeAdmission(t, d)
+		reservation, err := d.reserveMoveLifecycles(source, destination)
+		require.ErrorIs(t, err, errPurgeAdmissionClosed)
+		require.NotErrorIs(t, err, errMoveLifecycleUnavailable)
+		require.Nil(t, reservation)
+		awaitDaemonMoveActive(t, d, 0)
+		d.endPurgeAdmission()
+		requirePurgeAdmissionBalanced(t, d)
+	})
 }
 
 func TestMoveLifecycleReservationDeduplicatesAndReleasesExactlyOnce(t *testing.T) {
-	d := newTestDaemon(t, nil, newStubClock(t))
-	sess := &session{sessionCore: sessionCore{id: "same"}}
-	reservation, err := d.reserveMoveLifecycles(sess, sess)
-	require.NoError(t, err)
-	awaitMoveTeardownState(t, sess, 1, 0)
+	synctest.Test(t, func(t *testing.T) {
+		d := newTestDaemon(t, nil, newStubClock(t))
+		sess := &session{sessionCore: sessionCore{id: "same"}}
+		reservation, err := d.reserveMoveLifecycles(sess, sess)
+		require.NoError(t, err)
+		awaitMoveTeardownState(t, sess, 1, 0)
 
-	const releasers = 8
-	released := make(chan struct{}, releasers)
-	for range releasers {
-		go func() {
-			reservation.Release()
-			released <- struct{}{}
-		}()
-	}
-	for range releasers {
-		awaitTestCompletion(t, released, "concurrent reservation release did not return")
-	}
-	awaitMoveTeardownState(t, sess, 0, 0)
-	awaitDaemonMoveActive(t, d, 0)
+		const releasers = 8
+		released := make(chan struct{}, releasers)
+		for range releasers {
+			go func() {
+				reservation.Release()
+				released <- struct{}{}
+			}()
+		}
+		for range releasers {
+			requireReceived(t, released, "concurrent reservation release did not return")
+		}
+		awaitMoveTeardownState(t, sess, 0, 0)
+		awaitDaemonMoveActive(t, d, 0)
+	})
 }
 
 func TestMoveLifecycleReservationWaitCanBeCancelledWithoutChangingCounts(t *testing.T) {
-	d := newTestDaemon(t, nil, newStubClock(t))
-	sess := &session{sessionCore: sessionCore{id: "source"}}
-	reservation, err := d.reserveMoveLifecycles(sess, sess)
-	require.NoError(t, err)
-	deadline := &snapshotShutdownDeadline{done: make(chan struct{})}
+	synctest.Test(t, func(t *testing.T) {
+		d := newTestDaemon(t, nil, newStubClock(t))
+		sess := &session{sessionCore: sessionCore{id: "source"}}
+		reservation, err := d.reserveMoveLifecycles(sess, sess)
+		require.NoError(t, err)
+		deadline := &snapshotShutdownDeadline{done: make(chan struct{})}
 
-	teardown := make(chan bool, 1)
-	go func() { teardown <- sess.beginTeardown(deadline) }()
-	awaitMoveTeardownState(t, sess, 1, 1)
-	close(deadline.done)
-	require.False(t, awaitTestValue(t, teardown, "cancelled teardown waiter did not return"))
-	awaitMoveTeardownState(t, sess, 1, 0)
-	awaitDaemonMoveActive(t, d, 1)
+		teardown := make(chan bool, 1)
+		go func() { teardown <- sess.beginTeardown(deadline) }()
+		awaitMoveTeardownState(t, sess, 1, 1)
+		close(deadline.done)
+		require.False(t, requireReceived(t, teardown, "cancelled teardown waiter did not return"))
+		awaitMoveTeardownState(t, sess, 1, 0)
+		awaitDaemonMoveActive(t, d, 1)
 
-	reservation.Release()
-	awaitMoveTeardownState(t, sess, 0, 0)
-	awaitDaemonMoveActive(t, d, 0)
+		reservation.Release()
+		awaitMoveTeardownState(t, sess, 0, 0)
+		awaitDaemonMoveActive(t, d, 0)
+	})
 }
 
 func TestMoveLifecycleReservationWakesAllTeardownWaiters(t *testing.T) {
-	d := newTestDaemon(t, nil, newStubClock(t))
-	sess := &session{sessionCore: sessionCore{id: "source"}}
-	reservation, err := d.reserveMoveLifecycles(sess, sess)
-	require.NoError(t, err)
+	synctest.Test(t, func(t *testing.T) {
+		d := newTestDaemon(t, nil, newStubClock(t))
+		sess := &session{sessionCore: sessionCore{id: "source"}}
+		reservation, err := d.reserveMoveLifecycles(sess, sess)
+		require.NoError(t, err)
 
-	claimed := make(chan struct{}, 2)
-	finish := make(chan struct{}, 2)
-	done := make(chan struct{}, 2)
-	for range 2 {
-		go func() {
-			if sess.beginTeardown(nil) {
-				claimed <- struct{}{}
-				<-finish
-				sess.finishTeardown()
-			}
-			done <- struct{}{}
-		}()
-	}
-	awaitMoveTeardownState(t, sess, 1, 2)
-	reservation.Release()
-	for range 2 {
-		awaitTestCompletion(t, claimed, "teardown waiter did not claim ownership")
-		finish <- struct{}{}
-	}
-	for range 2 {
-		awaitTestCompletion(t, done, "teardown waiter did not complete")
-	}
-	awaitMoveTeardownState(t, sess, 0, 0)
+		claimed := make(chan struct{}, 2)
+		finish := make(chan struct{}, 2)
+		done := make(chan struct{}, 2)
+		for range 2 {
+			go func() {
+				if sess.beginTeardown(nil) {
+					claimed <- struct{}{}
+					<-finish
+					sess.finishTeardown()
+				}
+				done <- struct{}{}
+			}()
+		}
+		awaitMoveTeardownState(t, sess, 1, 2)
+		reservation.Release()
+		for range 2 {
+			requireReceived(t, claimed, "teardown waiter did not claim ownership")
+			finish <- struct{}{}
+		}
+		for range 2 {
+			requireReceived(t, done, "teardown waiter did not complete")
+		}
+		awaitMoveTeardownState(t, sess, 0, 0)
+	})
 }
 
 func TestDaemonShutdownDrainsMoveBeforePaneLifetimeCancellation(t *testing.T) {
-	d := newTestDaemon(t, nil, newStubClock(t))
-	source := &session{sessionCore: sessionCore{id: "source"}}
-	destination := &session{sessionCore: sessionCore{id: "destination"}}
-	reservation, err := d.reserveMoveLifecycles(source, destination)
-	require.NoError(t, err)
-	paneLifetime := d.paneProcessCtx
-	require.NotNil(t, paneLifetime)
+	synctest.Test(t, func(t *testing.T) {
+		d := newTestDaemon(t, nil, newStubClock(t))
+		source := &session{sessionCore: sessionCore{id: "source"}}
+		destination := &session{sessionCore: sessionCore{id: "destination"}}
+		reservation, err := d.reserveMoveLifecycles(source, destination)
+		require.NoError(t, err)
+		paneLifetime := d.paneProcessCtx
+		require.NotNil(t, paneLifetime)
 
-	shutdown := make(chan bool, 1)
-	go func() { shutdown <- d.shutdownAll(protocol.ReasonServerShutdown) }()
-	awaitDaemonMoveClosing(t, d)
-	select {
-	case <-paneLifetime.Done():
-		t.Fatal("shutdown cancelled transferable pane lifetime before the move released")
-	default:
-	}
-	select {
-	case <-shutdown:
-		t.Fatal("shutdown completed while a move lifecycle remained reserved")
-	default:
-	}
+		shutdown := make(chan bool, 1)
+		go func() { shutdown <- d.shutdownAll(protocol.ReasonServerShutdown) }()
+		awaitDaemonMoveClosing(t, d)
+		select {
+		case <-paneLifetime.Done():
+			t.Fatal("shutdown cancelled transferable pane lifetime before the move released")
+		default:
+		}
+		select {
+		case <-shutdown:
+			t.Fatal("shutdown completed while a move lifecycle remained reserved")
+		default:
+		}
 
-	reservation.Release()
-	awaitTestCompletion(t, paneLifetime.Done(), "shutdown did not cancel pane lifetime after move drain")
-	require.False(t, awaitTestValue(t, shutdown, "shutdown did not continue after move drain"))
+		reservation.Release()
+		requireReceived(t, paneLifetime.Done(), "shutdown did not cancel pane lifetime after move drain")
+		require.False(t, requireReceived(t, shutdown, "shutdown did not continue after move drain"))
 
-	reservation, err = d.reserveMoveLifecycles(source, destination)
-	require.ErrorIs(t, err, errMoveLifecycleUnavailable)
-	require.Nil(t, reservation)
-	awaitDaemonMoveActive(t, d, 0)
+		reservation, err = d.reserveMoveLifecycles(source, destination)
+		require.ErrorIs(t, err, errMoveLifecycleUnavailable)
+		require.Nil(t, reservation)
+		awaitDaemonMoveActive(t, d, 0)
+	})
 }
 
 // TestShutdownReservesPreservationBeforeCancellingPaneProcesses guards the
@@ -294,34 +310,36 @@ func TestShutdownReservesPreservationBeforeCancellingPaneProcesses(t *testing.T)
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d := newTestDaemon(t, nil, newStubClock(t))
-			sessions := make([]*session, 0, len(tt.sessions))
-			d.mu.Lock()
-			for i, name := range tt.sessions {
-				sess := &session{sessionCore: sessionCore{id: domain.SessionID(fmt.Sprintf("sess-%d", i)), name: name}}
-				require.True(t, d.registerSessionLocked(sess))
-				sessions = append(sessions, sess)
-			}
-			d.mu.Unlock()
-
-			var reservedAtCancel []bool
-			cancel := d.paneProcessCancel
-			d.paneProcessCancel = func() {
-				for _, sess := range sessions {
-					sess.teardownMu.Lock()
-					reservedAtCancel = append(reservedAtCancel, sess.shutdownTeardownRequested)
-					sess.teardownMu.Unlock()
+			synctest.Test(t, func(t *testing.T) {
+				d := newTestDaemon(t, nil, newStubClock(t))
+				sessions := make([]*session, 0, len(tt.sessions))
+				d.mu.Lock()
+				for i, name := range tt.sessions {
+					sess := &session{sessionCore: sessionCore{id: domain.SessionID(fmt.Sprintf("sess-%d", i)), name: name}}
+					require.True(t, d.registerSessionLocked(sess))
+					sessions = append(sessions, sess)
 				}
-				cancel()
-			}
+				d.mu.Unlock()
 
-			d.shutdownAll(protocol.ReasonServerShutdown)
+				var reservedAtCancel []bool
+				cancel := d.paneProcessCancel
+				d.paneProcessCancel = func() {
+					for _, sess := range sessions {
+						sess.teardownMu.Lock()
+						reservedAtCancel = append(reservedAtCancel, sess.shutdownTeardownRequested)
+						sess.teardownMu.Unlock()
+					}
+					cancel()
+				}
 
-			require.Error(t, d.paneProcessCtx.Err(), "shutdown must cancel pane processes")
-			require.NotEmpty(t, reservedAtCancel, "pane process cancellation was not observed")
-			for i, reserved := range reservedAtCancel {
-				require.True(t, reserved, "session %q was not reserved for preservation before its PTY was cancelled", tt.sessions[i%len(tt.sessions)])
-			}
+				d.shutdownAll(protocol.ReasonServerShutdown)
+
+				require.Error(t, d.paneProcessCtx.Err(), "shutdown must cancel pane processes")
+				require.NotEmpty(t, reservedAtCancel, "pane process cancellation was not observed")
+				for i, reserved := range reservedAtCancel {
+					require.True(t, reserved, "session %q was not reserved for preservation before its PTY was cancelled", tt.sessions[i%len(tt.sessions)])
+				}
+			})
 		})
 	}
 }
