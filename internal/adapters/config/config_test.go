@@ -836,6 +836,7 @@ func TestParsePreservesBindingFileOrder(t *testing.T) {
 	}
 }
 
+// real I/O: reads and writes real files in temp directories.
 func TestLoadMissingFileReturnsDefaults(t *testing.T) {
 	t.Parallel()
 
@@ -911,6 +912,7 @@ func nextChange(t *testing.T, changes <-chan watchChange) watchChange {
 	}
 }
 
+// real I/O: reads and writes real files in temp directories.
 func TestWatchReloadsOnChange(t *testing.T) {
 	t.Parallel()
 
@@ -994,6 +996,7 @@ func TestWatchReloadsOnChange(t *testing.T) {
 }
 
 // A load error is reported once until a good load, then again.
+// real I/O: reads and writes real files in temp directories.
 func TestWatchReportsLoadErrorOnce(t *testing.T) {
 	t.Parallel()
 
