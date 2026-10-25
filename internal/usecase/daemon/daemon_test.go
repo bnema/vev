@@ -157,7 +157,10 @@ func newBlockingPTYWithFailingWrite(t *testing.T, writeErr error) (*portsmocks.M
 // newQuietPTY provides an independently closable PTY for background prewarms.
 func newQuietPTY(t testing.TB) *portsmocks.MockPTY {
 	t.Helper()
-	p := portsmocks.NewMockPTY(t)
+	// Open may run during cleanup. Publish the cleanup assertion only after
+	// every optional expectation is configured.
+	p := &portsmocks.MockPTY{}
+	p.Test(t)
 	done := make(chan struct{})
 	var once sync.Once
 	p.EXPECT().Read(mock.Anything).RunAndReturn(func([]byte) (int, error) { <-done; return 0, io.EOF }).Maybe()
@@ -166,6 +169,7 @@ func newQuietPTY(t testing.TB) *portsmocks.MockPTY {
 	p.EXPECT().Resize(mock.Anything).Return(nil).Maybe()
 	p.EXPECT().Pid().Return(0).Maybe()
 	p.EXPECT().ForegroundPgid().Return(0, nil).Maybe()
+	t.Cleanup(func() { p.AssertExpectations(t) })
 	return p
 }
 

@@ -131,7 +131,9 @@ func recordActionRuns(runner *mockdaemonActionRunner, err error) *[]daemonAction
 }
 
 func TestHandleCommandTimesOutWithRequestGeneration(t *testing.T) {
-	factory := &controlPTYFactory{t: t, entered: make(chan struct{}), release: make(chan struct{})}
+	gate := &ptyOpenGate{entered: make(chan struct{}), release: make(chan struct{})}
+	factory, closeFactory := newControlPTYFactory(t, gate)
+	t.Cleanup(closeFactory)
 	clock := &signalClock{timers: make(chan *signalTimer, 1)}
 	d := newTestDaemon(t, factory, clock)
 	addControlSession(t, d, "work", "t_work", "p_work")
@@ -144,7 +146,7 @@ func TestHandleCommandTimesOutWithRequestGeneration(t *testing.T) {
 	go func() {
 		done <- d.handleCommandFrame(tr, frame)
 	}()
-	<-factory.entered
+	<-gate.entered
 	timer := <-clock.timers
 	require.Equal(t, CommandRequestTimeout, timer.duration)
 	timer.ch <- time.Time{}
@@ -153,7 +155,7 @@ func TestHandleCommandTimesOutWithRequestGeneration(t *testing.T) {
 	require.Equal(t, uint16(0), result.Code)
 	require.Equal(t, ErrCommandRequestTimeout.Error(), result.Text)
 	require.NoError(t, <-done)
-	close(factory.release)
+	close(gate.release)
 }
 
 func TestHandleCommandResponseSendTimeoutClosesTransport(t *testing.T) {
@@ -298,9 +300,9 @@ func TestHandleCommandStableIDsResolveSessionWithoutSelectingTab(t *testing.T) {
 }
 
 func TestHandleCommandStableIDsDoNotRedirectSplitFromCurrentFocus(t *testing.T) {
-	factory := &controlPTYFactory{t: t}
+	factory, closeFactory := newControlPTYFactory(t, nil)
 	d := newTestDaemon(t, factory, newStubClock(t))
-	t.Cleanup(func() { factory.close(); d.sessWg.Wait() })
+	t.Cleanup(func() { closeFactory(); d.sessWg.Wait() })
 	sess := addControlSession(t, d, "work", "t_active", "p_active")
 	active := sess.tabs[0]
 	originFocus := active.tree.Focus
@@ -337,9 +339,9 @@ func TestHandleCommandStableIDsDoNotRedirectSplitFromCurrentFocus(t *testing.T) 
 }
 
 func TestHandleCommandSelfTargetsNonActiveTabAndPane(t *testing.T) {
-	factory := &controlPTYFactory{t: t}
+	factory, closeFactory := newControlPTYFactory(t, nil)
 	d := newTestDaemon(t, factory, newStubClock(t))
-	t.Cleanup(func() { factory.close(); d.sessWg.Wait() })
+	t.Cleanup(func() { closeFactory(); d.sessWg.Wait() })
 	sess := addControlSession(t, d, "work", "t_active", "p_active")
 	active := sess.tabs[0]
 	invoking := newTabWithStableID("t_invoking", "p_invoking", newQuietPTY(t), domain.Size{Cols: 80, Rows: 22})
@@ -414,9 +416,9 @@ func TestResizeControlOneShotsTargetDetachedSessions(t *testing.T) {
 		t.Run(target.name, func(t *testing.T) {
 			for _, slug := range []string{"grow-pane-width", "shrink-pane-width", "grow-pane-height", "shrink-pane-height", "equalize-panes"} {
 				t.Run(slug, func(t *testing.T) {
-					factory := &controlPTYFactory{t: t}
+					factory, closeFactory := newControlPTYFactory(t, nil)
 					d := newTestDaemon(t, factory, newStubClock(t))
-					t.Cleanup(func() { factory.close(); d.sessWg.Wait() })
+					t.Cleanup(func() { closeFactory(); d.sessWg.Wait() })
 					sess := addControlSession(t, d, "work", "t_work", "p_work")
 					require.True(t, sendCommand(t, d, protocol.CommandRequest{Slug: "split-right", TargetSession: "work"}).Outcome == protocol.CommandSucceeded)
 					require.True(t, sendCommand(t, d, protocol.CommandRequest{Slug: "split-down", TargetSession: "work"}).Outcome == protocol.CommandSucceeded)
@@ -449,9 +451,9 @@ func TestResizeControlOneShotsTargetDetachedSessions(t *testing.T) {
 }
 
 func TestResizeControlNonSelfVEVLocatorUsesActiveTarget(t *testing.T) {
-	factory := &controlPTYFactory{t: t}
+	factory, closeFactory := newControlPTYFactory(t, nil)
 	d := newTestDaemon(t, factory, newStubClock(t))
-	t.Cleanup(func() { factory.close(); d.sessWg.Wait() })
+	t.Cleanup(func() { closeFactory(); d.sessWg.Wait() })
 	sess := addControlSession(t, d, "work", "t_active", "p_active")
 	require.True(t, sendCommand(t, d, protocol.CommandRequest{Slug: "split-right", TargetSession: "work"}).Outcome == protocol.CommandSucceeded)
 	active := sess.tabs[0]
@@ -481,9 +483,9 @@ func TestResizeControlNonSelfVEVLocatorUsesActiveTarget(t *testing.T) {
 }
 
 func TestResizeControlTooSmallUsesStableFailure(t *testing.T) {
-	factory := &controlPTYFactory{t: t}
+	factory, closeFactory := newControlPTYFactory(t, nil)
 	d := newTestDaemon(t, factory, newStubClock(t))
-	t.Cleanup(func() { factory.close(); d.sessWg.Wait() })
+	t.Cleanup(func() { closeFactory(); d.sessWg.Wait() })
 	sess := addControlSession(t, d, "work", "t_work", "p_work")
 	require.True(t, sendCommand(t, d, protocol.CommandRequest{Slug: "split-right", TargetSession: "work"}).Outcome == protocol.CommandSucceeded)
 	tb := testAttachmentTab(sess)
@@ -548,7 +550,9 @@ func TestCloseCommandsReportMutationOutcome(t *testing.T) {
 	})
 
 	t.Run("failed final pane close fails and retains session", func(t *testing.T) {
-		d := newTestDaemon(t, &controlPTYFactory{t: t}, newStubClock(t))
+		factory, closeFactory := newControlPTYFactory(t, nil)
+		t.Cleanup(closeFactory)
+		d := newTestDaemon(t, factory, newStubClock(t))
 		d.snapsEnabled = true
 		d.persistEnabled = true
 		d.snapshotRepository = portsmocks.NewMockSnapshotRepository(t)
@@ -618,9 +622,9 @@ func TestHandleCommandHeadlessMutations(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			factory := &controlPTYFactory{t: t}
+			factory, closeFactory := newControlPTYFactory(t, nil)
 			d := newTestDaemon(t, factory, newStubClock(t))
-			t.Cleanup(func() { factory.close(); d.sessWg.Wait() })
+			t.Cleanup(func() { closeFactory(); d.sessWg.Wait() })
 			sess := addControlSession(t, d, "work", "t_work", "p_work")
 
 			result := sendCommand(t, d, protocol.CommandRequest{Slug: tt.slug, Args: tt.args, TargetSession: "work"})
@@ -632,9 +636,9 @@ func TestHandleCommandHeadlessMutations(t *testing.T) {
 }
 
 func TestHandleCommandNewSessionInheritsHeadlessIdentityAndViewport(t *testing.T) {
-	factory := &controlPTYFactory{t: t}
+	factory, closeFactory := newControlPTYFactory(t, nil)
 	d := newTestDaemon(t, factory, newStubClock(t))
-	t.Cleanup(func() { factory.close(); d.sessWg.Wait() })
+	t.Cleanup(func() { closeFactory(); d.sessWg.Wait() })
 	source := addControlSession(t, d, "work", "t_work", "p_work")
 	source.mu.Lock()
 	source.cwd = "/tmp/work"
@@ -666,9 +670,9 @@ func TestHandleCommandNewSessionInheritsHeadlessIdentityAndViewport(t *testing.T
 }
 
 func TestHandleCommandNewSessionPreservesSourceGeometry(t *testing.T) {
-	factory := &controlPTYFactory{t: t}
+	factory, closeFactory := newControlPTYFactory(t, nil)
 	d := newTestDaemon(t, factory, newStubClock(t))
-	t.Cleanup(func() { factory.close(); d.sessWg.Wait() })
+	t.Cleanup(func() { closeFactory(); d.sessWg.Wait() })
 	source := addControlSession(t, d, "work", "t_work", "p_work")
 	client := &attachedClient{}
 	client.setGeometry(domain.Geometry{
@@ -911,9 +915,11 @@ func TestRemoteCatalogRejectsTooManyTabs(t *testing.T) {
 }
 
 func TestHandleCommandSerializesSelfTargetOnNonActiveTab(t *testing.T) {
-	factory := &controlPTYFactory{t: t, entered: make(chan struct{}), release: make(chan struct{})}
+	gate := &ptyOpenGate{entered: make(chan struct{}), release: make(chan struct{})}
+	factory, closeFactory := newControlPTYFactory(t, gate)
+	t.Cleanup(closeFactory)
 	d := newTestDaemon(t, factory, newStubClock(t))
-	t.Cleanup(func() { factory.close(); d.sessWg.Wait() })
+	t.Cleanup(func() { closeFactory(); d.sessWg.Wait() })
 	sess := addControlSession(t, d, "work", "t_active", "p_active")
 	target := newTabWithStableID("t_invoking", "p_invoking", newQuietPTY(t), domain.Size{Cols: 80, Rows: 22})
 	target.ctx, target.cancel = context.WithCancel(d.serveCtx)
@@ -936,7 +942,7 @@ func TestHandleCommandSerializesSelfTargetOnNonActiveTab(t *testing.T) {
 		close(firstDone)
 	}()
 	select {
-	case <-factory.entered:
+	case <-gate.entered:
 	case <-time.After(2 * time.Second):
 		t.Fatal("first command did not enter its blocked action")
 	}
@@ -958,7 +964,7 @@ func TestHandleCommandSerializesSelfTargetOnNonActiveTab(t *testing.T) {
 		t.Fatal("second command bypassed serialization")
 	case <-time.After(100 * time.Millisecond):
 	}
-	close(factory.release)
+	close(gate.release)
 	<-firstDone
 	<-secondDone
 	require.True(t, awaitCommandResult(t, firstSends).Outcome == protocol.CommandSucceeded)
@@ -1409,50 +1415,52 @@ func awaitCommandResult(t *testing.T, sends chan wire.Envelope) protocol.Command
 	return decodeServerMessage(t, reply).(protocol.CommandResult)
 }
 
-type controlPTYFactory struct {
-	t       testing.TB
-	mu      sync.Mutex
-	ptys    []*portsmocks.MockPTY
-	closed  bool
+// ptyOpenGate coordinates the first Open without implementing a port.
+type ptyOpenGate struct {
 	entered chan struct{}
 	release chan struct{}
-	once    sync.Once
 }
 
-func (f *controlPTYFactory) Open(_ context.Context, _ string, _ []string, _ []string, _ string, _ domain.Geometry) (appports.PTY, error) {
-	f.once.Do(func() {
-		if f.entered != nil {
-			close(f.entered)
-			<-f.release
+func newControlPTYFactory(t testing.TB, gate *ptyOpenGate) (*portsmocks.MockPTYFactory, func()) {
+	t.Helper()
+	var mu sync.Mutex
+	var once sync.Once
+	var ptys []*portsmocks.MockPTY
+	closed := false
+	factory := portsmocks.NewMockPTYFactory(t)
+	factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(func(context.Context, string, []string, []string, string, domain.Geometry) (appports.PTY, error) {
+		once.Do(func() {
+			if gate != nil {
+				close(gate.entered)
+				<-gate.release
+			}
+		})
+		pty := newQuietPTY(t)
+		mu.Lock()
+		defer mu.Unlock()
+		if closed {
+			_ = pty.Close()
+		} else {
+			ptys = append(ptys, pty)
 		}
-	})
-	pty := newQuietPTY(f.t)
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.closed {
-		// A background prewarm can open after cleanup closed the factory;
-		// hand it a closed PTY so its reader exits instead of hanging.
-		_ = pty.Close()
 		return pty, nil
-	}
-	f.ptys = append(f.ptys, pty)
-	return pty, nil
-}
-
-func (f *controlPTYFactory) close() {
-	if f.release != nil {
-		select {
-		case <-f.release:
-		default:
-			close(f.release)
+	}).Maybe()
+	closeAll := func() {
+		if gate != nil {
+			select {
+			case <-gate.release:
+			default:
+				close(gate.release)
+			}
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		closed = true
+		for _, pty := range ptys {
+			_ = pty.Close()
 		}
 	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.closed = true
-	for _, pty := range f.ptys {
-		_ = pty.Close()
-	}
+	return factory, closeAll
 }
 
 type blockingControlSendTransport struct {

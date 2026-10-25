@@ -374,9 +374,9 @@ func TestEnvironmentSeedCarriesProvisionalState(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			factory := &controlPTYFactory{t: t}
+			factory, closeFactory := newControlPTYFactory(t, nil)
 			d := newTestDaemon(t, factory, newStubClock(t))
-			t.Cleanup(func() { factory.close(); d.sessWg.Wait() })
+			t.Cleanup(func() { closeFactory(); d.sessWg.Wait() })
 			source := addControlSession(t, d, "work", "t_work", "p_work")
 			source.mu.Lock()
 			source.env = []string{"PATH=/source"}
