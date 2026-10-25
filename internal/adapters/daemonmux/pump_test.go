@@ -10,15 +10,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
 )
 
-// errFakeCarrierClosed is the synthetic carrier error a fakeCarrier returns
+// errFakeCarrierClosed is the synthetic carrier error a carrierFixture returns
 // once Close released its blocked I/O. It mirrors the adapter prompt-close
 // contract: Close unblocks an in-flight Send or Receive.
-var errFakeCarrierClosed = errors.New("fakeCarrier: closed")
+var errFakeCarrierClosed = errors.New("carrierFixture: closed")
 
 // fakeFrame is one inbound carrier event: a complete envelope payload, or the
 // error the next Receive must report.
@@ -27,11 +28,12 @@ type fakeFrame struct {
 	err     error
 }
 
-// fakeCarrier is the deterministic FramedCarrier the pump tests drive. Inbound
+// carrierFixture is the deterministic FramedCarrier the pump tests drive. Inbound
 // frames are delivered in order through a buffered channel; outbound frames are
 // recorded in the order the writer sent them. Close closes a channel that every
 // blocked Receive and Send observes, so it unblocks both callers exactly once.
-type fakeCarrier struct {
+type carrierFixture struct {
+	mock  *MockFramedCarrier
 	mu    sync.Mutex
 	calls int
 	// hold, when non-nil, makes Send wait for its release before recording.
@@ -46,128 +48,122 @@ type fakeCarrier struct {
 	closed  chan struct{}
 }
 
-func newFakeCarrier() *fakeCarrier {
-	return &fakeCarrier{
-		inbound: make(chan fakeFrame, 1024),
-		sent:    make(chan []byte, 1024),
-		closed:  make(chan struct{}),
-	}
-}
-
-func (c *fakeCarrier) Receive(ctx context.Context) ([]byte, error) {
-	select {
-	case frame := <-c.inbound:
-		if frame.err != nil {
-			return nil, frame.err
-		}
-		return frame.payload, nil
-	case <-c.closed:
-		return nil, errFakeCarrierClosed
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-}
-
-func (c *fakeCarrier) Send(ctx context.Context, payload []byte) error {
-	c.entered.Add(1)
-	c.mu.Lock()
-	hold := c.hold
-	c.mu.Unlock()
-	if hold != nil {
+func newCarrierFixture(t *testing.T) *carrierFixture {
+	c := &carrierFixture{mock: NewMockFramedCarrier(t), inbound: make(chan fakeFrame, 1024), sent: make(chan []byte, 1024), closed: make(chan struct{})}
+	c.mock.EXPECT().Receive(mock.Anything).RunAndReturn(func(ctx context.Context) ([]byte, error) {
 		select {
-		case <-hold:
+		case frame := <-c.inbound:
+			if frame.err != nil {
+				return nil, frame.err
+			}
+			return frame.payload, nil
+		case <-c.closed:
+			return nil, errFakeCarrierClosed
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}).Maybe()
+	c.mock.EXPECT().Send(mock.Anything, mock.Anything).RunAndReturn(func(ctx context.Context, payload []byte) error {
+		c.entered.Add(1)
+		c.mu.Lock()
+		hold := c.hold
+		c.mu.Unlock()
+		if hold != nil {
+			select {
+			case <-hold:
+			case <-c.closed:
+				return errFakeCarrierClosed
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		select {
+		case c.sent <- append([]byte(nil), payload...):
+			return nil
 		case <-c.closed:
 			return errFakeCarrierClosed
 		case <-ctx.Done():
 			return ctx.Err()
 		}
-	}
-	select {
-	case c.sent <- append([]byte(nil), payload...):
-		return nil
-	case <-c.closed:
-		return errFakeCarrierClosed
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-func (c *fakeCarrier) Close() error {
-	c.closeOnce.Do(func() {
+	}).Maybe()
+	c.mock.EXPECT().Close().RunAndReturn(func() error {
+		c.closeOnce.Do(func() {
+			c.mu.Lock()
+			c.calls++
+			c.mu.Unlock()
+			close(c.closed)
+		})
 		c.mu.Lock()
-		c.calls++
-		c.mu.Unlock()
-		close(c.closed)
-	})
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.closeErr
+		defer c.mu.Unlock()
+		return c.closeErr
+	}).Maybe()
+	return c
 }
 
-func (c *fakeCarrier) closeCalls() int {
+func (c *carrierFixture) closeCalls() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.calls
 }
 
 // setHold makes the next Send wait until release is called.
-func (c *fakeCarrier) setHold(hold chan struct{}) {
+func (c *carrierFixture) setHold(hold chan struct{}) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.hold = hold
 }
 
 // release unblocks a held Send exactly once.
-func (c *fakeCarrier) release(hold chan struct{}) {
+func (c *carrierFixture) release(hold chan struct{}) {
 	c.holdOnce.Do(func() { close(hold) })
 }
 
 // enteredSends reports how many Send calls the writer has started.
-func (c *fakeCarrier) enteredSends() int64 { return c.entered.Load() }
+func (c *carrierFixture) enteredSends() int64 { return c.entered.Load() }
 
 // deliver queues one inbound frame for the next Receive, in order.
-func (c *fakeCarrier) deliver(t *testing.T, frame fakeFrame) {
+func (c *carrierFixture) deliver(t *testing.T, frame fakeFrame) {
 	t.Helper()
 	select {
 	case c.inbound <- frame:
 	case <-time.After(5 * time.Second):
-		t.Fatal("fakeCarrier: inbound delivery timed out")
+		t.Fatal("carrierFixture: inbound delivery timed out")
 	}
 }
 
 // nextSent returns the next outbound frame the writer recorded, in order.
-func (c *fakeCarrier) nextSent(t *testing.T) []byte {
+func (c *carrierFixture) nextSent(t *testing.T) []byte {
 	t.Helper()
 	select {
 	case payload := <-c.sent:
 		return payload
 	case <-time.After(5 * time.Second):
-		t.Fatal("fakeCarrier: expected an outbound frame")
+		t.Fatal("carrierFixture: expected an outbound frame")
 		return nil
 	}
 }
 
 // requireNoSent fails when the writer recorded an outbound frame within d.
-func (c *fakeCarrier) requireNoSent(t *testing.T, d time.Duration) {
+func (c *carrierFixture) requireNoSent(t *testing.T, d time.Duration) {
 	t.Helper()
 	select {
 	case payload := <-c.sent:
-		t.Fatalf("fakeCarrier: unexpected outbound frame %q", payload)
+		t.Fatalf("carrierFixture: unexpected outbound frame %q", payload)
 	case <-time.After(d):
 	}
 }
 
-// newTestPump builds a pump over a fresh fakeCarrier under the default
+// newTestPump builds a pump over a fresh carrierFixture under the default
 // ceilings and closes it when the test ends.
-func newTestPump(t *testing.T, inbound EnvelopeDirection) (*Pump, *fakeCarrier) {
+func newTestPump(t *testing.T, inbound EnvelopeDirection) (*Pump, *carrierFixture) {
 	t.Helper()
 	return newTestPumpWithCeilings(t, inbound, DefaultMuxCeilings())
 }
 
-func newTestPumpWithCeilings(t *testing.T, inbound EnvelopeDirection, ceilings MuxCeilings) (*Pump, *fakeCarrier) {
+func newTestPumpWithCeilings(t *testing.T, inbound EnvelopeDirection, ceilings MuxCeilings) (*Pump, *carrierFixture) {
 	t.Helper()
-	carrier := newFakeCarrier()
-	pump, err := NewPump(carrier, inbound, ceilings)
+	carrier := newCarrierFixture(t)
+	pump, err := NewPump(carrier.mock, inbound, ceilings)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = pump.Close() })
 	return pump, carrier
@@ -181,12 +177,12 @@ func openFor(id PhysicalStreamID) Open {
 	return open
 }
 
-func deliverClientFrame(t *testing.T, carrier *fakeCarrier, message ClientMessage) {
+func deliverClientFrame(t *testing.T, carrier *carrierFixture, message ClientMessage) {
 	t.Helper()
 	carrier.deliver(t, fakeFrame{payload: mustEncodeClient(t, message)})
 }
 
-func deliverServerFrame(t *testing.T, carrier *fakeCarrier, message ServerMessage) {
+func deliverServerFrame(t *testing.T, carrier *carrierFixture, message ServerMessage) {
 	t.Helper()
 	carrier.deliver(t, fakeFrame{payload: mustEncodeServer(t, message)})
 }
@@ -272,13 +268,13 @@ func TestNewPumpValidation(t *testing.T) {
 	})
 	t.Run("unknown inbound direction", func(t *testing.T) {
 		for _, direction := range []EnvelopeDirection{0, EnvelopeDirection(200)} {
-			pump, err := NewPump(newFakeCarrier(), direction, DefaultMuxCeilings())
+			pump, err := NewPump(newCarrierFixture(t).mock, direction, DefaultMuxCeilings())
 			require.ErrorIs(t, err, ErrPumpConfig)
 			require.Nil(t, pump)
 		}
 	})
 	t.Run("invalid ceilings", func(t *testing.T) {
-		pump, err := NewPump(newFakeCarrier(), DirectionClient, MuxCeilings{})
+		pump, err := NewPump(newCarrierFixture(t).mock, DirectionClient, MuxCeilings{})
 		require.ErrorIs(t, err, ErrInvalidCeilings)
 		require.Nil(t, pump)
 	})
@@ -975,14 +971,14 @@ func TestPumpSendDataBackpressure(t *testing.T) {
 func TestPumpSendDataCancel(t *testing.T) {
 	cases := []struct {
 		name   string
-		settle func(*testing.T, *Pump, *fakeCarrier, chan struct{})
+		settle func(*testing.T, *Pump, *carrierFixture, chan struct{})
 		want   error
 	}{
-		{"cancel", func(_ *testing.T, _ *Pump, _ *fakeCarrier, cancel chan struct{}) { close(cancel) }, ErrLogicalClosed},
-		{"peer reset", func(t *testing.T, _ *Pump, carrier *fakeCarrier, _ chan struct{}) {
+		{"cancel", func(_ *testing.T, _ *Pump, _ *carrierFixture, cancel chan struct{}) { close(cancel) }, ErrLogicalClosed},
+		{"peer reset", func(t *testing.T, _ *Pump, carrier *carrierFixture, _ chan struct{}) {
 			deliverClientFrame(t, carrier, Reset{Physical: 1})
 		}, errStreamSettled},
-		{"peer close with unread data", func(t *testing.T, pump *Pump, carrier *fakeCarrier, _ chan struct{}) {
+		{"peer close with unread data", func(t *testing.T, pump *Pump, carrier *carrierFixture, _ chan struct{}) {
 			deliverClientFrame(t, carrier, Data{Physical: 1, Data: []byte("unread")})
 			deliverClientFrame(t, carrier, Close{Physical: 1})
 			requireEngineEventually(t, pump, func(e *StreamEngine) bool {
@@ -990,10 +986,10 @@ func TestPumpSendDataCancel(t *testing.T) {
 				return ok && status.State == StreamClosing
 			})
 		}, errStreamSettled},
-		{"physical failure", func(t *testing.T, _ *Pump, carrier *fakeCarrier, _ chan struct{}) {
+		{"physical failure", func(t *testing.T, _ *Pump, carrier *carrierFixture, _ chan struct{}) {
 			carrier.deliver(t, fakeFrame{err: errors.New("carriage lost")})
 		}, ErrPhysicalClosed},
-		{"credit beyond window resets the stream", func(t *testing.T, pump *Pump, carrier *fakeCarrier, _ chan struct{}) {
+		{"credit beyond window resets the stream", func(t *testing.T, pump *Pump, carrier *carrierFixture, _ chan struct{}) {
 			deliverClientFrame(t, carrier, WindowUpdate{Physical: 1, Credit: pump.Ceilings().StreamWindow()})
 		}, errStreamSettled},
 	}

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/adapters/ipc"
@@ -18,15 +19,16 @@ import (
 	"github.com/bnema/vev/internal/protocol/wire"
 )
 
-// errFakeRawClosed is the synthetic raw-carriage error a fakeRawTransport
+// errFakeRawClosed is the synthetic raw-carriage error a rawTransportState
 // returns once Close released its blocked I/O, mirroring the adapter
 // prompt-close contract.
-var errFakeRawClosed = errors.New("fakeRawTransport: closed")
+var errFakeRawClosed = errors.New("rawTransportState: closed")
 
-// fakeRawTransport is one end of a scripted raw framed carriage. RecvBounded
+// rawTransportState is one end of a scripted raw framed carriage. RecvBounded
 // records every caller limit and refuses a body above it exactly like a real
 // streamframe framer, so a bridge test observes the bound the bridge applied.
-type fakeRawTransport struct {
+type rawTransportState struct {
+	mock      *MockRawFramedTransport
 	mu        sync.Mutex
 	limits    []uint64
 	sends     [][]byte
@@ -40,63 +42,58 @@ type fakeRawTransport struct {
 	sendHold chan struct{}
 }
 
-func newFakeRawTransport() *fakeRawTransport {
-	return &fakeRawTransport{
-		inbound:  make(chan []byte, 8),
-		closedCh: make(chan struct{}),
-	}
-}
-
-func (f *fakeRawTransport) Send(envelope wire.Envelope) error {
-	f.mu.Lock()
-	hold := f.sendHold
-	f.mu.Unlock()
-	if hold != nil {
+func newRawTransport(t *testing.T) *rawTransportState {
+	f := &rawTransportState{mock: NewMockRawFramedTransport(t), inbound: make(chan []byte, 8), closedCh: make(chan struct{})}
+	f.mock.EXPECT().Send(mock.Anything).RunAndReturn(func(envelope wire.Envelope) error {
+		f.mu.Lock()
+		hold := f.sendHold
+		f.mu.Unlock()
+		if hold != nil {
+			select {
+			case <-hold:
+			case <-f.closedCh:
+				return errFakeRawClosed
+			}
+		}
 		select {
-		case <-hold:
 		case <-f.closedCh:
 			return errFakeRawClosed
+		default:
 		}
-	}
-	select {
-	case <-f.closedCh:
-		return errFakeRawClosed
-	default:
-	}
-	f.mu.Lock()
-	f.sends = append(f.sends, append([]byte(nil), envelope.Payload...))
-	f.mu.Unlock()
-	return nil
-}
-
-func (f *fakeRawTransport) RecvBounded(limit uint64) (wire.Envelope, error) {
-	f.mu.Lock()
-	f.limits = append(f.limits, limit)
-	f.mu.Unlock()
-	select {
-	case payload := <-f.inbound:
-		if uint64(len(payload)) > limit {
-			return wire.Envelope{}, streamframe.ErrTooLarge
+		f.mu.Lock()
+		f.sends = append(f.sends, append([]byte(nil), envelope.Payload...))
+		f.mu.Unlock()
+		return nil
+	}).Maybe()
+	f.mock.EXPECT().RecvBounded(mock.Anything).RunAndReturn(func(limit uint64) (wire.Envelope, error) {
+		f.mu.Lock()
+		f.limits = append(f.limits, limit)
+		f.mu.Unlock()
+		select {
+		case payload := <-f.inbound:
+			if uint64(len(payload)) > limit {
+				return wire.Envelope{}, streamframe.ErrTooLarge
+			}
+			return wire.Envelope{Payload: payload}, nil
+		case <-f.closedCh:
+			return wire.Envelope{}, errFakeRawClosed
 		}
-		return wire.Envelope{Payload: payload}, nil
-	case <-f.closedCh:
-		return wire.Envelope{}, errFakeRawClosed
-	}
+	}).Maybe()
+	f.mock.EXPECT().Close().RunAndReturn(func() error {
+		f.closes.Add(1)
+		f.closeOnce.Do(func() { close(f.closedCh) })
+		return f.closeErr
+	}).Maybe()
+	return f
 }
 
-func (f *fakeRawTransport) Close() error {
-	f.closes.Add(1)
-	f.closeOnce.Do(func() { close(f.closedCh) })
-	return f.closeErr
-}
-
-func (f *fakeRawTransport) recordedLimits() []uint64 {
+func (f *rawTransportState) recordedLimits() []uint64 {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]uint64(nil), f.limits...)
 }
 
-func (f *fakeRawTransport) recordedSends() [][]byte {
+func (f *rawTransportState) recordedSends() [][]byte {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([][]byte(nil), f.sends...)
@@ -114,8 +111,8 @@ func carrierTestCeilings() MuxCeilings {
 // every receive to wire.PreambleLimit before Negotiate and to the negotiated
 // envelope ceiling afterwards, refusing an oversized frame at each phase.
 func TestFramedCarrierBridgeBoundsPreambleThenNegotiated(t *testing.T) {
-	raw := newFakeRawTransport()
-	bridge, err := NewPreambleCarrier(raw)
+	raw := newRawTransport(t)
+	bridge, err := NewPreambleCarrier(raw.mock)
 	require.NoError(t, err)
 	require.True(t, bridge.Preamble())
 	require.Equal(t, uint64(wire.PreambleLimit), bridge.ReceiveLimit())
@@ -149,8 +146,8 @@ func TestFramedCarrierBridgeBoundsPreambleThenNegotiated(t *testing.T) {
 // transition is explicit: an invalid advertisement is refused, a second
 // negotiation is refused, and negotiation after Close is refused.
 func TestFramedCarrierBridgeNegotiateIsExplicitAndOneWay(t *testing.T) {
-	raw := newFakeRawTransport()
-	bridge, err := NewPreambleCarrier(raw)
+	raw := newRawTransport(t)
+	bridge, err := NewPreambleCarrier(raw.mock)
 	require.NoError(t, err)
 
 	require.ErrorIs(t, bridge.Negotiate(MuxCeilings{}), ErrInvalidCeilings)
@@ -173,8 +170,8 @@ func TestNewPreambleCarrierRefusesNil(t *testing.T) {
 // write result: it does not return while the write is held, records the payload
 // byte for byte, and propagates the raw error.
 func TestFramedCarrierBridgeSendIsSynchronousAndExact(t *testing.T) {
-	raw := newFakeRawTransport()
-	bridge, err := NewPreambleCarrier(raw)
+	raw := newRawTransport(t)
+	bridge, err := NewPreambleCarrier(raw.mock)
 	require.NoError(t, err)
 	defer func() { _ = bridge.Close() }()
 
@@ -205,8 +202,8 @@ func TestFramedCarrierBridgeSendIsSynchronousAndExact(t *testing.T) {
 // receive closes the raw carriage to release the blocked call, returns the
 // context error, and leaves no goroutine behind.
 func TestFramedCarrierBridgeReceiveContextCancelReleasesRead(t *testing.T) {
-	raw := newFakeRawTransport()
-	bridge, err := NewPreambleCarrier(raw)
+	raw := newRawTransport(t)
+	bridge, err := NewPreambleCarrier(raw.mock)
 	require.NoError(t, err)
 
 	before := runtime.NumGoroutine()
@@ -234,8 +231,8 @@ func TestFramedCarrierBridgeReceiveContextCancelReleasesRead(t *testing.T) {
 // proves Close unblocks a blocked receive, is idempotent across concurrent
 // callers, closes the raw carriage exactly once, and joins its workers.
 func TestFramedCarrierBridgeCloseInterruptsBlockedReceiveAndIsConcurrentSafe(t *testing.T) {
-	raw := newFakeRawTransport()
-	bridge, err := NewPreambleCarrier(raw)
+	raw := newRawTransport(t)
+	bridge, err := NewPreambleCarrier(raw.mock)
 	require.NoError(t, err)
 
 	before := runtime.NumGoroutine()

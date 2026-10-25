@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/adapters/sessionwire"
@@ -26,48 +27,36 @@ var errMemCarrierClosed = errors.New("memCarrier: closed")
 // memCarrier is one end of a paired, in-memory FramedCarrier link. Two
 // endpoints share a closed channel and exchange complete envelopes over two
 // buffered channels, so one pump's reader is the other pump's writer.
-type memCarrier struct {
-	out  chan []byte
-	in   chan []byte
-	done chan struct{}
-	once *sync.Once
-}
-
-func newMemCarrierPair(buffer int) (*memCarrier, *memCarrier) {
-	aToB := make(chan []byte, buffer)
-	bToA := make(chan []byte, buffer)
+func newMemCarrierPair(t *testing.T, buffer int) (*MockFramedCarrier, *MockFramedCarrier) {
+	aToB, bToA := make(chan []byte, buffer), make(chan []byte, buffer)
 	done := make(chan struct{})
-	once := &sync.Once{}
-	a := &memCarrier{out: aToB, in: bToA, done: done, once: once}
-	b := &memCarrier{out: bToA, in: aToB, done: done, once: once}
-	return a, b
-}
-
-func (m *memCarrier) Send(ctx context.Context, payload []byte) error {
-	select {
-	case m.out <- append([]byte(nil), payload...):
-		return nil
-	case <-m.done:
-		return errMemCarrierClosed
-	case <-ctx.Done():
-		return ctx.Err()
+	var once sync.Once
+	endpoint := func(out, in chan []byte) *MockFramedCarrier {
+		c := NewMockFramedCarrier(t)
+		c.EXPECT().Send(mock.Anything, mock.Anything).RunAndReturn(func(ctx context.Context, payload []byte) error {
+			select {
+			case out <- append([]byte(nil), payload...):
+				return nil
+			case <-done:
+				return errMemCarrierClosed
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}).Maybe()
+		c.EXPECT().Receive(mock.Anything).RunAndReturn(func(ctx context.Context) ([]byte, error) {
+			select {
+			case payload := <-in:
+				return payload, nil
+			case <-done:
+				return nil, errMemCarrierClosed
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}).Maybe()
+		c.EXPECT().Close().RunAndReturn(func() error { once.Do(func() { close(done) }); return nil }).Maybe()
+		return c
 	}
-}
-
-func (m *memCarrier) Receive(ctx context.Context) ([]byte, error) {
-	select {
-	case payload := <-m.in:
-		return payload, nil
-	case <-m.done:
-		return nil, errMemCarrierClosed
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-}
-
-func (m *memCarrier) Close() error {
-	m.once.Do(func() { close(m.done) })
-	return nil
+	return endpoint(aToB, bToA), endpoint(bToA, aToB)
 }
 
 // newPairedPumps builds a broker-side pump (decodes server frames, emits client
@@ -88,7 +77,7 @@ func newPairedPumps(t *testing.T, ceilings MuxCeilings) (*Pump, *Pump) {
 // closed at test end.
 func newPairedPumpsUnstarted(t *testing.T, ceilings MuxCeilings) (*Pump, *Pump, func()) {
 	t.Helper()
-	brokerCarrier, daemonCarrier := newMemCarrierPair(4096)
+	brokerCarrier, daemonCarrier := newMemCarrierPair(t, 4096)
 	broker, err := NewPump(brokerCarrier, DirectionServer, ceilings)
 	require.NoError(t, err)
 	daemon, err := NewPump(daemonCarrier, DirectionClient, ceilings)
