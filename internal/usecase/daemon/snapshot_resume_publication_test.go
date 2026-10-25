@@ -7,11 +7,14 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"testing/synctest"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 )
 
@@ -23,7 +26,20 @@ type snapshotLifecycleRepository struct {
 	errors      []error
 }
 
-func (r *snapshotLifecycleRepository) Publish(ctx context.Context, publication ports.SnapshotPublication) error {
+// mock serves the in-memory repository through a generated mock.
+func (r *snapshotLifecycleRepository) mock(t testing.TB) *portsmocks.MockSnapshotRepository {
+	t.Helper()
+	return newSnapshotRepositoryMock(t, func(m *portsmocks.MockSnapshotRepository) {
+		m.EXPECT().Publish(mock.Anything, mock.Anything).RunAndReturn(r.publishAttempt).Maybe()
+		m.EXPECT().LoadCheckpoint(mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(r.loadCheckpoint).Maybe()
+		m.EXPECT().ReconcileCheckpoint(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(r.reconcileCheckpoint).Maybe()
+		m.EXPECT().DeleteIncarnation(mock.Anything, mock.Anything).RunAndReturn(r.deleteIncarnation).Maybe()
+		m.EXPECT().SnapshotIncarnations(mock.Anything).RunAndReturn(r.snapshotIncarnations).Maybe()
+		m.EXPECT().CollectIncarnationGarbage(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(r.collectIncarnationGarbage).Maybe()
+	})
+}
+
+func (r *snapshotLifecycleRepository) publishAttempt(ctx context.Context, publication ports.SnapshotPublication) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -80,7 +96,7 @@ func (r *snapshotLifecycleRepository) publish(ctx context.Context, publication p
 	return nil
 }
 
-func (r *snapshotLifecycleRepository) LoadCheckpoint(ctx context.Context, id domain.IncarnationID, name string, ref ports.CheckpointRef) (ports.SnapshotGeneration, error) {
+func (r *snapshotLifecycleRepository) loadCheckpoint(ctx context.Context, id domain.IncarnationID, name string, ref ports.CheckpointRef) (ports.SnapshotGeneration, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -93,7 +109,7 @@ func (r *snapshotLifecycleRepository) LoadCheckpoint(ctx context.Context, id dom
 	return generation, nil
 }
 
-func (r *snapshotLifecycleRepository) ReconcileCheckpoint(ctx context.Context, id domain.IncarnationID, ref ports.CheckpointRef) error {
+func (r *snapshotLifecycleRepository) reconcileCheckpoint(ctx context.Context, id domain.IncarnationID, ref ports.CheckpointRef) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -106,7 +122,7 @@ func (r *snapshotLifecycleRepository) ReconcileCheckpoint(ctx context.Context, i
 	return nil
 }
 
-func (r *snapshotLifecycleRepository) DeleteIncarnation(ctx context.Context, id domain.IncarnationID) error {
+func (r *snapshotLifecycleRepository) deleteIncarnation(ctx context.Context, id domain.IncarnationID) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -117,11 +133,11 @@ func (r *snapshotLifecycleRepository) DeleteIncarnation(ctx context.Context, id 
 	return nil
 }
 
-func (r *snapshotLifecycleRepository) SnapshotIncarnations(ctx context.Context) ([]domain.IncarnationID, error) {
+func (r *snapshotLifecycleRepository) snapshotIncarnations(ctx context.Context) ([]domain.IncarnationID, error) {
 	return nil, ctx.Err()
 }
 
-func (r *snapshotLifecycleRepository) CollectIncarnationGarbage(ctx context.Context, _ domain.IncarnationID, _ *domain.CheckpointRef) error {
+func (r *snapshotLifecycleRepository) collectIncarnationGarbage(ctx context.Context, _ domain.IncarnationID, _ *domain.CheckpointRef) error {
 	return ctx.Err()
 }
 
@@ -147,73 +163,75 @@ func cloneCheckpointRef(ref *domain.CheckpointRef) *domain.CheckpointRef {
 }
 
 func TestStoppedNamedSessionResumePublishesNextCheckpointInSameDaemon(t *testing.T) {
-	keeperPTY, releaseKeeper := newBlockingPTY(t)
-	firstPTY, releaseFirst := newBlockingPTY(t)
-	resumedPTY, releaseResumed := newBlockingPTY(t)
-	repository := newSnapshotLifecycleRepository(t)
-	d := newTestDaemon(t, newFactorySeq(t, keeperPTY, firstPTY, resumedPTY), newStubClock(t))
-	WithSnapshotRepository(repository)(d)
-	store, _ := newMockStore(t)
-	WithStore(t, store)(d)
-	startSnapshotEncodeWorker(t, d)
-	t.Cleanup(func() {
-		d.snapsEnabled = false
-		releaseKeeper()
-		releaseFirst()
-		releaseResumed()
-		d.sessWg.Wait()
+	synctest.Test(t, func(t *testing.T) {
+		keeperPTY, releaseKeeper := newBlockingPTY(t)
+		firstPTY, releaseFirst := newBlockingPTY(t)
+		resumedPTY, releaseResumed := newBlockingPTY(t)
+		repository := newSnapshotLifecycleRepository(t)
+		d := newTestDaemon(t, newFactorySeq(t, keeperPTY, firstPTY, resumedPTY), newStubClock(t))
+		WithSnapshotRepository(repository.mock(t))(d)
+		store, _ := newMockStore(t)
+		WithStore(t, store)(d)
+		startSnapshotEncodeWorker(t, d)
+		t.Cleanup(func() {
+			d.snapsEnabled = false
+			releaseKeeper()
+			releaseFirst()
+			releaseResumed()
+			d.sessWg.Wait()
+		})
+
+		_, _, err := d.route(snapshotLifecycleHello(protocol.IntentEphemeral, ""), newQuietConnection(t))
+		require.NoError(t, err, "keeper session setup failed")
+		sess, _, err := d.route(snapshotLifecycleHello(protocol.IntentNew, "work"), newQuietConnection(t))
+		require.NoError(t, err)
+
+		testAttachmentTab(sess).focusedPane().screen.Write([]byte("first checkpoint"))
+		markSnapshotDirty(sess)
+		require.True(t, d.scheduleSnapshot(sess))
+		requireSnapshotClean(t, sess)
+		firstRecord := snapshotLifecycleRecord(t, d, sess.name)
+		require.NotNil(t, firstRecord.Committed)
+		require.Equal(t, uint64(1), firstRecord.Committed.Generation)
+
+		require.NoError(t, d.killSession(sess, protocol.ReasonSessionKilled, false))
+		d.mu.Lock()
+		stopped, retained := d.inactive[sess.name]
+		d.mu.Unlock()
+		require.True(t, retained, "non-purged named session must remain stopped")
+		require.False(t, stopped.purging)
+		closedRecord := snapshotLifecycleRecord(t, d, sess.name)
+		require.NotNil(t, closedRecord.Committed)
+		require.Equal(t, firstRecord.Committed.Generation+1, closedRecord.Committed.Generation,
+			"terminal checkpoint must be authoritative before same-daemon resume")
+
+		resumed, _, err := d.route(snapshotLifecycleHello(protocol.IntentAttach, sess.name), newQuietConnection(t))
+		require.NoError(t, err)
+		require.NotSame(t, sess, resumed, "stopped-session attach must create a new live runtime")
+		require.Equal(t, sess.incarnation, resumed.incarnation, "resume must retain durable incarnation authority")
+
+		testAttachmentTab(resumed).focusedPane().screen.Write([]byte("checkpoint after resume"))
+		markSnapshotDirty(resumed)
+		require.True(t, d.scheduleSnapshot(resumed))
+		requireSnapshotIdle(t, resumed)
+
+		resumedRecord := snapshotLifecycleRecord(t, d, resumed.name)
+		require.NotNil(t, resumedRecord.Committed)
+		attempts, publicationErrors := repository.results()
+		require.Len(t, attempts, 3, "the resumed checkpoint must reach the repository after the initial and terminal checkpoints")
+		require.NoError(t, publicationErrors[2])
+		require.False(t, resumed.snapDirty.Load(), "the published resumed checkpoint must clear dirty state")
+		d.snapshots.noticeMu.Lock()
+		failure := d.snapshots.activeFailureSignature
+		d.snapshots.noticeMu.Unlock()
+		require.Empty(t, failure, "successful resumed publication must not retain a failure signature")
+		require.Equal(t, closedRecord.Committed.Generation+1, resumedRecord.Committed.Generation,
+			"same-daemon resume must publish exactly committed generation+1")
+		generation, err := repository.loadCheckpoint(context.Background(), resumed.incarnation, resumed.name, *resumedRecord.Committed)
+		require.NoError(t, err)
+		require.Equal(t, closedRecord.Committed, generation.ParentCheckpoint,
+			"same-daemon resume must use the committed terminal checkpoint as parent")
 	})
-
-	_, _, err := d.route(snapshotLifecycleHello(protocol.IntentEphemeral, ""), newQuietConnection(t))
-	require.NoError(t, err, "keeper session setup failed")
-	sess, _, err := d.route(snapshotLifecycleHello(protocol.IntentNew, "work"), newQuietConnection(t))
-	require.NoError(t, err)
-
-	testAttachmentTab(sess).focusedPane().screen.Write([]byte("first checkpoint"))
-	markSnapshotDirty(sess)
-	require.True(t, d.scheduleSnapshot(sess))
-	awaitSnapshotClean(t, sess)
-	firstRecord := snapshotLifecycleRecord(t, d, sess.name)
-	require.NotNil(t, firstRecord.Committed)
-	require.Equal(t, uint64(1), firstRecord.Committed.Generation)
-
-	require.NoError(t, d.killSession(sess, protocol.ReasonSessionKilled, false))
-	d.mu.Lock()
-	stopped, retained := d.inactive[sess.name]
-	d.mu.Unlock()
-	require.True(t, retained, "non-purged named session must remain stopped")
-	require.False(t, stopped.purging)
-	closedRecord := snapshotLifecycleRecord(t, d, sess.name)
-	require.NotNil(t, closedRecord.Committed)
-	require.Equal(t, firstRecord.Committed.Generation+1, closedRecord.Committed.Generation,
-		"terminal checkpoint must be authoritative before same-daemon resume")
-
-	resumed, _, err := d.route(snapshotLifecycleHello(protocol.IntentAttach, sess.name), newQuietConnection(t))
-	require.NoError(t, err)
-	require.NotSame(t, sess, resumed, "stopped-session attach must create a new live runtime")
-	require.Equal(t, sess.incarnation, resumed.incarnation, "resume must retain durable incarnation authority")
-
-	testAttachmentTab(resumed).focusedPane().screen.Write([]byte("checkpoint after resume"))
-	markSnapshotDirty(resumed)
-	require.True(t, d.scheduleSnapshot(resumed))
-	awaitSnapshotIdle(t, resumed)
-
-	resumedRecord := snapshotLifecycleRecord(t, d, resumed.name)
-	require.NotNil(t, resumedRecord.Committed)
-	attempts, publicationErrors := repository.results()
-	require.Len(t, attempts, 3, "the resumed checkpoint must reach the repository after the initial and terminal checkpoints")
-	require.NoError(t, publicationErrors[2])
-	require.False(t, resumed.snapDirty.Load(), "the published resumed checkpoint must clear dirty state")
-	d.snapshots.noticeMu.Lock()
-	failure := d.snapshots.activeFailureSignature
-	d.snapshots.noticeMu.Unlock()
-	require.Empty(t, failure, "successful resumed publication must not retain a failure signature")
-	require.Equal(t, closedRecord.Committed.Generation+1, resumedRecord.Committed.Generation,
-		"same-daemon resume must publish exactly committed generation+1")
-	generation, err := repository.LoadCheckpoint(context.Background(), resumed.incarnation, resumed.name, *resumedRecord.Committed)
-	require.NoError(t, err)
-	require.Equal(t, closedRecord.Committed, generation.ParentCheckpoint,
-		"same-daemon resume must use the committed terminal checkpoint as parent")
 }
 
 func snapshotLifecycleHello(intent uint8, name string) protocol.Hello {
