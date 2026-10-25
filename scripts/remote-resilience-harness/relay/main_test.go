@@ -212,6 +212,8 @@ func TestRelayRejectsInvalidControl(t *testing.T) {
 
 // pollUntil observes kernel socket readiness and UDP proxy counters, which have no
 // notification API. Keep the real-I/O polling exception bounded and centralized.
+//
+//testpolicy:realtime kernel socket readiness and UDP counters have no notification API
 func pollUntil(t *testing.T, ready func() bool) {
 	t.Helper()
 	ticker := time.NewTicker(time.Millisecond)

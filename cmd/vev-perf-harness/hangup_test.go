@@ -261,6 +261,8 @@ func waitForProcessGroupGone(pgid int, timeout time.Duration) error {
 
 // pollUntil is only for kernel process-group disappearance: descendants are not
 // owned waitable children and kill(0) has no portable notification source.
+//
+//testpolicy:realtime kernel process-group disappearance has no notification source
 func pollUntil(timeout time.Duration, ready func() (bool, error)) error {
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
