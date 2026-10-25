@@ -297,16 +297,28 @@ func (s *subscriptionState) notify() {
 	}
 }
 
-// newPreviewSubscriptionMock builds one server-side preview subscription whose
-// Changed channel a test could drive explicitly; it never publishes by default.
-func newPreviewSubscriptionMock(t *testing.T) *portsmocks.MockBrokerPreviewSubscription {
+// previewState is the plain state behind one server-side preview subscription:
+// closed is closed by the first Close, so a test can wait for the server to
+// retire it instead of polling.
+type previewState struct {
+	changed chan struct{}
+	closed  chan struct{}
+	once    sync.Once
+}
+
+// newPreviewSubscriptionMock builds one server-side preview subscription. It
+// never publishes by default; a test may drive its Changed channel explicitly.
+func newPreviewSubscriptionMock(t *testing.T, opts ...func(*portsmocks.MockBrokerPreviewSubscription, *previewState)) (*portsmocks.MockBrokerPreviewSubscription, *previewState) {
 	t.Helper()
-	changed := make(chan struct{}, 1)
+	state := &previewState{changed: make(chan struct{}, 1), closed: make(chan struct{})}
 	m := portsmocks.NewMockBrokerPreviewSubscription(t)
-	m.EXPECT().Changed().RunAndReturn(func() <-chan struct{} { return changed }).Maybe()
+	for _, opt := range opts {
+		opt(m, state)
+	}
+	m.EXPECT().Changed().RunAndReturn(func() <-chan struct{} { return state.changed }).Maybe()
 	m.EXPECT().Latest().RunAndReturn(func() ports.BrokerPreviewPublication { return ports.BrokerPreviewPublication{} }).Maybe()
-	m.EXPECT().Close().Return().Maybe()
-	return m
+	m.EXPECT().Close().Run(func() { state.once.Do(func() { close(state.closed) }) }).Maybe()
+	return m, state
 }
 
 // logicalState is the plain state behind one admitted core logical connection:
@@ -467,6 +479,9 @@ type coreState struct {
 	removeRemoved bool
 
 	nextStream ports.BrokerStreamID
+
+	// previews announces each preview subscription the core handed out, in order.
+	previews chan *previewState
 }
 
 // passiveCore is the admitted core mock plus the optional passive-reader
@@ -487,11 +502,12 @@ func (c passiveCore) SubscribePassive() (ports.BrokerSubscription, error) {
 func newCoreMock(t *testing.T, id ports.BrokerConnectionID, hub *snapshotHub, opts ...func(*portsmocks.MockBrokerCoreService, *coreState)) (ports.BrokerCoreService, *coreState) {
 	t.Helper()
 	c := &coreState{
-		t:       t,
-		id:      id,
-		hub:     hub,
-		streams: make(map[ports.BrokerStreamID]*logicalState),
-		done:    make(chan struct{}),
+		t:        t,
+		id:       id,
+		hub:      hub,
+		streams:  make(map[ports.BrokerStreamID]*logicalState),
+		done:     make(chan struct{}),
+		previews: make(chan *previewState, 16),
 	}
 	m := portsmocks.NewMockBrokerCoreService(t)
 	for _, opt := range opts {
@@ -511,7 +527,9 @@ func newCoreMock(t *testing.T, id ports.BrokerConnectionID, hub *snapshotHub, op
 		return c.recordSubscribe(false), nil
 	}).Maybe()
 	m.EXPECT().SubscribePreview(mock.Anything).RunAndReturn(func(ports.BrokerPreviewRequest) (ports.BrokerPreviewSubscription, error) {
-		return newPreviewSubscriptionMock(t), nil
+		m, state := newPreviewSubscriptionMock(t)
+		c.previews <- state
+		return m, nil
 	}).Maybe()
 	m.EXPECT().OpenEnvelopeStream(mock.Anything, mock.Anything).RunAndReturn(c.openStream).Maybe()
 	m.EXPECT().CloseStream(mock.Anything, mock.Anything).RunAndReturn(c.closeStream).Maybe()
