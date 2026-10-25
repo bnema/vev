@@ -3,10 +3,11 @@ package daemon
 import (
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	snapcodec "github.com/bnema/vev/internal/snapshotcodec"
-	"github.com/stretchr/testify/require"
 )
 
 func TestRefreshSessionEnvironment(t *testing.T) {
@@ -355,7 +356,7 @@ func TestFailedAttachTransitionLeavesSessionEnvironment(t *testing.T) {
 		Origin: ports.SessionOriginLocal, Policy: admissionTestPolicy(ports.SessionOriginLocal),
 		Purpose: ports.BrokerStreamAttachment, Admission: ports.BrokerAdmissionExact, Target: target, Env: env,
 	}
-	_, _, err := d.route(hello, &admittedTransport{ServerConnection: newQuietConnection(t), admission: admission, present: true})
+	_, _, err := d.route(hello, newAdmittedConnection(t, admission))
 	require.Error(t, err)
 
 	sess.mu.Lock()

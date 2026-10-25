@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/mock"
 
 	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
 	wiremocks "github.com/bnema/vev/internal/protocol/wire/mocks"
@@ -19,7 +21,34 @@ type mockTestingT interface {
 	Cleanup(func())
 }
 
+// mockServerConnection is the single sanctioned typed-to-wire bridge for
+// ports.ServerConnection in daemon tests. It delegates every call to the
+// generated wiremocks.MockTransport (through the test* codec helpers) and holds
+// no behavior of its own: blocking, failure, gating and recording are
+// registered as RunAndReturn closures on the embedded mock, usually through
+// newTrackedConnection. No other test type may implement ports.ServerConnection.
 type mockServerConnection struct{ *wiremocks.MockTransport }
+
+// admittedConnection and deadlineConnection are the only decorators over the
+// bridge. The daemon asserts the optional ports.SessionAdmissionProvider and
+// ports.HandshakeDeadlineProvider seams structurally on the connection, so a
+// test has to expose the method; each decorator forwards it to a generated
+// provider mock and adds no behavior.
+type admittedConnection struct {
+	*mockServerConnection
+	provider *portsmocks.MockSessionAdmissionProvider
+}
+
+func (c *admittedConnection) SessionAdmission() (ports.SessionAdmission, bool) {
+	return c.provider.SessionAdmission()
+}
+
+type deadlineConnection struct {
+	*mockServerConnection
+	provider *portsmocks.MockHandshakeDeadlineProvider
+}
+
+func (c *deadlineConnection) HandshakeDeadline() time.Time { return c.provider.HandshakeDeadline() }
 
 func newMockServerConnection(t mockTestingT) *mockServerConnection {
 	return &mockServerConnection{MockTransport: wiremocks.NewMockTransport(t)}
@@ -429,24 +458,6 @@ func (t *teardownBlockingTransport) Capabilities() protocol.ConnectionCapabiliti
 func (t *teardownBlockingTransport) LinkState() ports.LinkState         { return testLinkState(t) }
 func (t *teardownBlockingTransport) LinkEvents() <-chan ports.LinkEvent { return testLinkEvents(t) }
 
-func (t *handshakeBlockingTransport) ReceiveClient() (protocol.ClientMessage, error) {
-	return testReceiveClient(t)
-}
-func (t *handshakeBlockingTransport) SendServer(m protocol.ServerMessage) error {
-	return testSendServer(t, m)
-}
-func (t *handshakeBlockingTransport) SendServerAsync(m protocol.ServerMessage) error {
-	return testSendServerAsync(t, m)
-}
-func (t *handshakeBlockingTransport) SendServerSynchronous(m protocol.ServerMessage) error {
-	return testSendServerSynchronous(t, m)
-}
-func (t *handshakeBlockingTransport) Capabilities() protocol.ConnectionCapabilities {
-	return testServerCapabilities(t)
-}
-func (t *handshakeBlockingTransport) LinkState() ports.LinkState         { return testLinkState(t) }
-func (t *handshakeBlockingTransport) LinkEvents() <-chan ports.LinkEvent { return testLinkEvents(t) }
-
 func (t *lateGraphicsCleanupTransport) ReceiveClient() (protocol.ClientMessage, error) {
 	return testReceiveClient(t)
 }
@@ -744,14 +755,6 @@ func (t *teardownBlockingTransport) SendOutputAsync(o protocol.Output) error {
 	return testSendOutputAsync(t, o)
 }
 func (t *teardownBlockingTransport) SendOutputSynchronous(o protocol.Output) error {
-	return testSendOutputSynchronous(t, o)
-}
-
-func (t *handshakeBlockingTransport) SendOutput(o protocol.Output) error { return testSendOutput(t, o) }
-func (t *handshakeBlockingTransport) SendOutputAsync(o protocol.Output) error {
-	return testSendOutputAsync(t, o)
-}
-func (t *handshakeBlockingTransport) SendOutputSynchronous(o protocol.Output) error {
 	return testSendOutputSynchronous(t, o)
 }
 

@@ -8,40 +8,35 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
-// acceptedDeadlineConn is a typed daemon connection that yields one scripted
-// first message, then blocks on its embedded transport, while exposing the
-// optional accepted absolute handshake deadline seam. Ordinary test transports
-// keep the fresh-budget behavior because they do not implement the seam.
-type acceptedDeadlineConn struct {
-	*handshakeBlockingTransport
-	deadline time.Time
-	first    protocol.ClientMessage
-}
-
-func (c *acceptedDeadlineConn) ReceiveClient() (protocol.ClientMessage, error) {
-	if c.first != nil {
-		message := c.first
-		c.first = nil
-		return message, nil
+// newAcceptedDeadlineConnection returns a handshake-blocking connection that
+// also exposes the optional accepted absolute handshake deadline seam through a
+// generated provider mock. A non-nil first becomes the scripted first client
+// message. Ordinary connections keep the fresh-budget behavior because they do
+// not implement the seam.
+func newAcceptedDeadlineConnection(t testing.TB, blockWelcome bool, deadline time.Time, first protocol.ClientMessage) (*deadlineConnection, *handshakeLog) {
+	t.Helper()
+	var scripted []wire.Envelope
+	if first != nil {
+		scripted = append(scripted, mustClientEnvelope(first))
 	}
-	return c.handshakeBlockingTransport.ReceiveClient()
+	base, h := newHandshakeBlockingConnection(t, blockWelcome, scripted...)
+	provider := portsmocks.NewMockHandshakeDeadlineProvider(t)
+	provider.EXPECT().HandshakeDeadline().Return(deadline).Maybe()
+	return &deadlineConnection{mockServerConnection: base, provider: provider}, h
 }
-
-func (c *acceptedDeadlineConn) HandshakeDeadline() time.Time { return c.deadline }
 
 func TestAcceptedHandshakeDeadlineSeamResolution(t *testing.T) {
-	plain := newHandshakeBlockingTransport(false)
+	plain, _ := newHandshakeBlockingConnection(t, false)
 	require.True(t, acceptedHandshakeDeadline(plain).IsZero(),
 		"a connection without the optional seam must keep the fresh 15s budget")
 
 	fixed := time.Unix(1_700_000_000, 0)
-	seamed := &acceptedDeadlineConn{
-		handshakeBlockingTransport: newHandshakeBlockingTransport(false),
-		deadline:                   fixed,
-	}
+	seamed, _ := newAcceptedDeadlineConnection(t, false, fixed, nil)
 	require.Equal(t, fixed, acceptedHandshakeDeadline(seamed))
 }
 
@@ -99,17 +94,13 @@ func TestAcceptedHandshakeDeadlineSpansFirstFrameThroughWelcome(t *testing.T) {
 	clock, clockTimers := newSignalClock(t, 4)
 	d := newTestDaemon(t, newFactory(t, pty), clock)
 
-	conn := &acceptedDeadlineConn{
-		handshakeBlockingTransport: newHandshakeBlockingTransport(true),
-		deadline:                   time.Time{}.Add(9 * time.Second),
-		first: protocol.Hello{
-			Version: protocol.Version,
-			Intent:  protocol.IntentNew,
-			Name:    "accepted-deadline",
-			Size:    domain.Size{Cols: 80, Rows: 24},
-			TermEnv: "xterm-256color",
-		},
-	}
+	conn, connH := newAcceptedDeadlineConnection(t, true, time.Time{}.Add(9*time.Second), protocol.Hello{
+		Version: protocol.Version,
+		Intent:  protocol.IntentNew,
+		Name:    "accepted-deadline",
+		Size:    domain.Size{Cols: 80, Rows: 24},
+		TermEnv: "xterm-256color",
+	})
 	done := make(chan struct{})
 	go func() {
 		d.handleConn(conn)
@@ -119,10 +110,10 @@ func TestAcceptedHandshakeDeadlineSpansFirstFrameThroughWelcome(t *testing.T) {
 	timer := <-clockTimers
 	require.Equal(t, 9*time.Second, timer.duration,
 		"handleConn must adopt the accepted deadline rather than start 15s")
-	<-conn.welcome
+	<-connH.welcome
 	timer.ch <- time.Time{}
 	awaitTestCompletion(t, done, "accepted handshake did not stop after its budget elapsed")
-	requireClosedHandshakeTransport(t, conn.handshakeBlockingTransport)
+	requireClosedHandshakeTransport(t, connH)
 	d.mu.Lock()
 	require.Empty(t, d.sessions, "a budget-expired newly-created handshake must not leave an empty session")
 	require.Empty(t, d.resume.parked)
@@ -136,10 +127,7 @@ func TestExpiredAcceptedHandshakeDeadlineClosesConn(t *testing.T) {
 	clock, clockTimers := newSignalClock(t, 1)
 	d := newTestDaemon(t, nil, clock)
 
-	conn := &acceptedDeadlineConn{
-		handshakeBlockingTransport: newHandshakeBlockingTransport(false),
-		deadline:                   time.Time{}.Add(-time.Second),
-	}
+	conn, connH := newAcceptedDeadlineConnection(t, false, time.Time{}.Add(-time.Second), nil)
 	done := make(chan struct{})
 	go func() {
 		d.handleConn(conn)
@@ -147,7 +135,7 @@ func TestExpiredAcceptedHandshakeDeadlineClosesConn(t *testing.T) {
 	}()
 
 	awaitTestCompletion(t, done, "an expired accepted deadline did not fail promptly")
-	requireClosedHandshakeTransport(t, conn.handshakeBlockingTransport)
+	requireClosedHandshakeTransport(t, connH)
 	select {
 	case timer := <-clockTimers:
 		t.Fatalf("an expired accepted deadline started a fresh %s budget", timer.duration)
@@ -165,10 +153,7 @@ func TestHandleHelloAdoptsExpiredAcceptedDeadline(t *testing.T) {
 	clock, clockTimers := newSignalClock(t, 1)
 	d := newTestDaemon(t, nil, clock)
 
-	conn := &acceptedDeadlineConn{
-		handshakeBlockingTransport: newHandshakeBlockingTransport(false),
-		deadline:                   time.Time{}.Add(-time.Second),
-	}
+	conn, connH := newAcceptedDeadlineConnection(t, false, time.Time{}.Add(-time.Second), nil)
 	done := make(chan struct{})
 	go func() {
 		d.handleHello(conn, protocol.Hello{
@@ -182,7 +167,7 @@ func TestHandleHelloAdoptsExpiredAcceptedDeadline(t *testing.T) {
 	}()
 
 	awaitTestCompletion(t, done, "handleHello did not fail on an expired accepted deadline")
-	requireClosedHandshakeTransport(t, conn.handshakeBlockingTransport)
+	requireClosedHandshakeTransport(t, connH)
 	select {
 	case timer := <-clockTimers:
 		t.Fatalf("handleHello started a fresh %s budget for an expired accepted deadline", timer.duration)

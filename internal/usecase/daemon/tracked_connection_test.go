@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"io"
 	"sync"
 	"testing"
 
@@ -98,4 +99,49 @@ func newQuietConnection(t testing.TB) *mockServerConnection {
 	t.Helper()
 	conn, _ := newTrackedConnection(t)
 	return conn
+}
+
+// handshakeLog extends connLog with the signal that a Welcome send started.
+type handshakeLog struct {
+	*connLog
+	welcome chan struct{}
+}
+
+// newHandshakeBlockingConnection returns a tracked connection whose Recv blocks
+// until Close. When blockWelcome is set, the Welcome send signals
+// handshakeLog.welcome and blocks until Close, then fails. Only the first
+// message of a handshake may be scripted through first (nil for none): Recv
+// yields it once before blocking.
+func newHandshakeBlockingConnection(t testing.TB, blockWelcome bool, first ...wire.Envelope) (*mockServerConnection, *handshakeLog) {
+	t.Helper()
+	h := &handshakeLog{welcome: make(chan struct{})}
+	var once sync.Once
+	var mu sync.Mutex
+	pending := append([]wire.Envelope(nil), first...)
+	conn, log := newTrackedConnection(t, func(c *mockServerConnection, log *connLog) {
+		h.connLog = log
+		c.EXPECT().Send(mock.Anything).RunAndReturn(func(f wire.Envelope) error {
+			if blockWelcome && envelopeMessageName(nil, f.Payload) == "Welcome" {
+				once.Do(func() { close(h.welcome) })
+				<-log.Done()
+				return io.ErrClosedPipe
+			}
+			log.record(f)
+			return nil
+		}).Maybe()
+		c.EXPECT().Recv().RunAndReturn(func() (wire.Envelope, error) {
+			mu.Lock()
+			if len(pending) > 0 {
+				f := pending[0]
+				pending = pending[1:]
+				mu.Unlock()
+				return f, nil
+			}
+			mu.Unlock()
+			<-log.Done()
+			return wire.Envelope{}, io.ErrClosedPipe
+		}).Maybe()
+	})
+	h.connLog = log
+	return conn, h
 }
