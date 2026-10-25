@@ -63,7 +63,7 @@ func requireEvent(t *testing.T, entries []map[string]any, name string) map[strin
 func TestRecoveryObservability(t *testing.T) {
 	var logBuffer bytes.Buffer
 	log := slog.New(slog.NewJSONHandler(&logBuffer, nil))
-	owner := fakeLifecycleOwnership{release: func() error { return nil }}
+	owner := newOwnershipMock(t, func() error { return nil })
 	deps := lifecycleStartupDeps{
 		ensurePrivate: func(string) error { return nil },
 		acquire: func(context.Context, string, time.Duration) (lifecycleOwnership, error) {
@@ -96,14 +96,14 @@ func TestRecoveryObservability(t *testing.T) {
 	require.NotContains(t, eventNames(entries), "interrupted_transaction_recovery_complete")
 }
 
-// A session-scoped conflict no longer aborts startup, so the daemon comes up
-// looking healthy. Startup must therefore name the fenced session in the log,
-// persist a notice for it, and never report the recovery as clean.
-type fakeLifecycleOwnership struct {
-	release func() error
+// newOwnershipMock returns a generated lifecycleOwnership mock whose Release
+// runs release. It also satisfies brokerStatusLock, which has the same method.
+func newOwnershipMock(t testing.TB, release func() error) *mocklifecycleOwnership {
+	t.Helper()
+	owner := newMocklifecycleOwnership(t)
+	owner.EXPECT().Release().RunAndReturn(release).Maybe()
+	return owner
 }
-
-func (o fakeLifecycleOwnership) Release() error { return o.release() }
 
 // real I/O: real flock lifecycle locks.
 func TestCatalogueFailureDoesNotListen(t *testing.T) {
@@ -174,10 +174,10 @@ func TestLifecycleOwnershipAcceptsOwnerOnlyVariantLock(t *testing.T) {
 func TestLifecycleOwnershipPrecedesDaemonStartup(t *testing.T) {
 	t.Run("ownership prefix is exact", func(t *testing.T) {
 		var events []string
-		owner := fakeLifecycleOwnership{release: func() error {
+		owner := newOwnershipMock(t, func() error {
 			events = append(events, "unlock")
 			return nil
-		}}
+		})
 		deps := lifecycleStartupDeps{
 			ensurePrivate: func(path string) error {
 				if path == "runtime" {
@@ -309,7 +309,7 @@ func TestLifecycleOwnershipPrecedesDaemonStartup(t *testing.T) {
 		deps := lifecycleStartupDeps{
 			ensurePrivate: func(string) error { return nil },
 			acquire: func(context.Context, string, time.Duration) (lifecycleOwnership, error) {
-				return fakeLifecycleOwnership{release: func() error { return releaseErr }}, nil
+				return newOwnershipMock(t, func() error { return releaseErr }), nil
 			},
 		}
 

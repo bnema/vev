@@ -49,6 +49,13 @@ packages:
     interfaces:
       RawFramedTransport:
       FramedCarrier:
+  github.com/bnema/vev/internal/app:
+    config:
+      dir: internal/app
+      filename: lifecycle_ownership_mock_test.go
+      pkgname: app
+    interfaces:
+      lifecycleOwnership:
   github.com/bnema/vev/internal/usecase/broker:
     config:
       dir: internal/usecase/broker

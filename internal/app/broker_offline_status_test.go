@@ -56,12 +56,21 @@ func productionStatusRequest(layout brokerconfig.Layout, timeout time.Duration) 
 	}
 }
 
-// fakeStatusLock records releases for one held election.
-type fakeStatusLock struct{ releases atomic.Int32 }
+// statusLock records releases for one held election. lock is the generated
+// mock handed to the code under test; releases counts its Release calls.
+type statusLock struct {
+	lock     *mocklifecycleOwnership
+	releases atomic.Int32
+}
 
-func (l *fakeStatusLock) Release() error {
-	l.releases.Add(1)
-	return nil
+func newStatusLock(t testing.TB) *statusLock {
+	t.Helper()
+	l := &statusLock{}
+	l.lock = newOwnershipMock(t, func() error {
+		l.releases.Add(1)
+		return nil
+	})
+	return l
 }
 
 // readyReport is the report returned when a scripted probe succeeds.
@@ -86,9 +95,9 @@ func testStatusDeps(t *testing.T) (brokerStatusDeps, *statusRecorder) {
 		},
 		acquireElection: func(string) (brokerStatusLock, error) {
 			rec.elections.Add(1)
-			lock := &fakeStatusLock{}
+			lock := newStatusLock(t)
 			rec.locks = append(rec.locks, lock)
-			return lock, nil
+			return lock.lock, nil
 		},
 		lifetimeOwner: func(string) (bool, error) { return false, nil },
 		spawn: func(context.Context, string, time.Duration, bool) error {
@@ -108,7 +117,7 @@ type statusRecorder struct {
 	probes    atomic.Int32
 	spawns    atomic.Int32
 	elections atomic.Int32
-	locks     []*fakeStatusLock
+	locks     []*statusLock
 }
 
 // setProbe installs one scripted probe that sees its 1-based attempt number.
@@ -252,9 +261,9 @@ func TestBrokerStatusEnsureRecoversAfterSpawnerDeath(t *testing.T) {
 			// The previous elected spawner is still alive (or mid-startup).
 			return nil, lifecycle.ErrBusy
 		}
-		lock := &fakeStatusLock{}
+		lock := newStatusLock(t)
 		rec.locks = append(rec.locks, lock)
-		return lock, nil
+		return lock.lock, nil
 	}
 	report, err := ensureBrokerReady(context.Background(), productionStatusRequest(layout, time.Second), deps)
 	require.NoError(t, err)
