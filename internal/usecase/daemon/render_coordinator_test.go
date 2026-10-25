@@ -243,6 +243,7 @@ func captureResizeCallbackDone(t *testing.T, rc *renderCoordinator) <-chan struc
 
 func awaitHandshakeTimer(t *testing.T, clk *coordinatorMockClock) *coordinatorMockTimer {
 	t.Helper()
+	waitIfInBubble()
 	select {
 	case tm := <-clk.handshakeTimers:
 		return tm
@@ -254,6 +255,7 @@ func awaitHandshakeTimer(t *testing.T, clk *coordinatorMockClock) *coordinatorMo
 
 func awaitCoordinatorScheduledTimer(t *testing.T, clk *coordinatorMockClock) *coordinatorMockTimer {
 	t.Helper()
+	waitIfInBubble()
 	select {
 	case tm := <-clk.timers:
 		return tm

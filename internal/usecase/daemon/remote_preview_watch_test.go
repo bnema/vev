@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	renderer "github.com/bnema/vev-vt"
@@ -56,14 +57,9 @@ func newPreviewClockHarness(t *testing.T) *previewClockHarness {
 
 func (h *previewClockHarness) awaitTimer(t *testing.T, want time.Duration) *previewTimer {
 	t.Helper()
-	select {
-	case pt := <-h.pending:
-		require.Equal(t, want, pt.duration)
-		return pt
-	case <-time.After(2 * time.Second):
-		t.Fatalf("timed out waiting for a %s watch timer", want)
-		return nil
-	}
+	pt := requireReceived(t, h.pending, fmt.Sprintf("no %s watch timer was armed", want))
+	require.Equal(t, want, pt.duration)
+	return pt
 }
 
 // --- fake connection: ReceiveClient must block until the test simulates
@@ -128,31 +124,22 @@ func (h *previewConnHarness) closeClient(err error) {
 
 func (h *previewConnHarness) nextFrame(t *testing.T) protocol.RemotePreview {
 	t.Helper()
-	select {
-	case f := <-h.frames:
-		return f
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for a preview frame")
-		return protocol.RemotePreview{}
-	}
+	return requireReceived(t, h.frames, "no preview frame was sent")
 }
 
 func (h *previewConnHarness) requireNoFrame(t *testing.T) {
 	t.Helper()
+	synctest.Wait()
 	select {
 	case f := <-h.frames:
 		t.Fatalf("unexpected preview frame sent: %+v", f)
-	case <-time.After(75 * time.Millisecond):
+	default:
 	}
 }
 
 func (h *previewConnHarness) awaitClosed(t *testing.T) {
 	t.Helper()
-	select {
-	case <-h.closed:
-	case <-time.After(2 * time.Second):
-		t.Fatal("transport was not closed")
-	}
+	requireReceived(t, h.closed, "transport was not closed")
 }
 
 // --- daemon/session fixture -------------------------------------------------
@@ -261,11 +248,12 @@ func (h *previewWatchHarness) start(watch protocol.RemotePreviewWatch) {
 	}()
 }
 
-func (h *previewWatchHarness) awaitDone(timeout time.Duration) {
+func (h *previewWatchHarness) awaitDone(time.Duration) {
 	h.t.Helper()
+	synctest.Wait()
 	select {
 	case <-h.done:
-	case <-time.After(timeout):
+	default:
 		h.t.Fatal("serveRemotePreviewWatch did not return")
 	}
 }
@@ -280,136 +268,150 @@ func (h *previewWatchHarness) stop() {
 // --- tests -------------------------------------------------------------------
 
 func TestServeRemotePreviewWatchSendsFirstFrameImmediately(t *testing.T) {
-	h := newPreviewWatchHarness(t, "tab-0")
-	writePreviewContent(t, h.tabs[0].focusedPane(), "\x1b[H\x1b[2Jv1")
-	h.start(buildPreviewWatch(h.sess, "tab-0", 32*time.Millisecond))
+	synctest.Test(t, func(t *testing.T) {
+		h := newPreviewWatchHarness(t, "tab-0")
+		writePreviewContent(t, h.tabs[0].focusedPane(), "\x1b[H\x1b[2Jv1")
+		h.start(buildPreviewWatch(h.sess, "tab-0", 32*time.Millisecond))
 
-	frame := h.conn.nextFrame(t)
-	require.Equal(t, protocol.RemotePreviewOK, frame.Status)
-	require.Contains(t, previewFrameText(frame), "v1")
+		frame := h.conn.nextFrame(t)
+		require.Equal(t, protocol.RemotePreviewOK, frame.Status)
+		require.Contains(t, previewFrameText(frame), "v1")
 
-	h.stop()
+		h.stop()
+	})
 }
 
 func TestServeRemotePreviewWatchCoalescesBurstToOneFramePerInterval(t *testing.T) {
-	h := newPreviewWatchHarness(t, "tab-0")
-	pane := h.tabs[0].focusedPane()
-	writePreviewContent(t, pane, "\x1b[H\x1b[2Jv1")
-	interval := 32 * time.Millisecond
-	h.start(buildPreviewWatch(h.sess, "tab-0", interval))
-	first := h.conn.nextFrame(t)
-	require.Contains(t, previewFrameText(first), "v1")
+	synctest.Test(t, func(t *testing.T) {
+		h := newPreviewWatchHarness(t, "tab-0")
+		pane := h.tabs[0].focusedPane()
+		writePreviewContent(t, pane, "\x1b[H\x1b[2Jv1")
+		interval := 32 * time.Millisecond
+		h.start(buildPreviewWatch(h.sess, "tab-0", interval))
+		first := h.conn.nextFrame(t)
+		require.Contains(t, previewFrameText(first), "v1")
 
-	// A burst of writes inside one MinInterval window: only the state at the
-	// next poll boundary should ever reach the client.
-	writePreviewContent(t, pane, "\x1b[H\x1b[2Jv2")
-	writePreviewContent(t, pane, "\x1b[H\x1b[2Jv3")
-	writePreviewContent(t, pane, "\x1b[H\x1b[2Jv4")
+		// A burst of writes inside one MinInterval window: only the state at the
+		// next poll boundary should ever reach the client.
+		writePreviewContent(t, pane, "\x1b[H\x1b[2Jv2")
+		writePreviewContent(t, pane, "\x1b[H\x1b[2Jv3")
+		writePreviewContent(t, pane, "\x1b[H\x1b[2Jv4")
 
-	h.clk.awaitTimer(t, interval).fire()
-	h.clk.awaitTimer(t, remotePreviewRevalidate).fire()
+		h.clk.awaitTimer(t, interval).fire()
+		h.clk.awaitTimer(t, remotePreviewRevalidate).fire()
 
-	second := h.conn.nextFrame(t)
-	require.Contains(t, previewFrameText(second), "v4")
-	h.conn.requireNoFrame(t)
+		second := h.conn.nextFrame(t)
+		require.Contains(t, previewFrameText(second), "v4")
+		h.conn.requireNoFrame(t)
 
-	h.stop()
+		h.stop()
+	})
 }
 
 func TestServeRemotePreviewWatchSkipsResendWhenUnchanged(t *testing.T) {
-	h := newPreviewWatchHarness(t, "tab-0")
-	pane := h.tabs[0].focusedPane()
-	writePreviewContent(t, pane, "\x1b[H\x1b[2Jsame")
-	interval := 32 * time.Millisecond
-	h.start(buildPreviewWatch(h.sess, "tab-0", interval))
-	h.conn.nextFrame(t)
+	synctest.Test(t, func(t *testing.T) {
+		h := newPreviewWatchHarness(t, "tab-0")
+		pane := h.tabs[0].focusedPane()
+		writePreviewContent(t, pane, "\x1b[H\x1b[2Jsame")
+		interval := 32 * time.Millisecond
+		h.start(buildPreviewWatch(h.sess, "tab-0", interval))
+		h.conn.nextFrame(t)
 
-	h.clk.awaitTimer(t, interval).fire()
-	h.clk.awaitTimer(t, remotePreviewRevalidate).fire()
-	// The next interval timer is armed only after the loop re-captured and
-	// compared this pass, so seeing it proves the unchanged content was
-	// already skipped rather than merely not-yet-checked.
-	h.clk.awaitTimer(t, interval)
-	h.conn.requireNoFrame(t)
+		h.clk.awaitTimer(t, interval).fire()
+		h.clk.awaitTimer(t, remotePreviewRevalidate).fire()
+		// The next interval timer is armed only after the loop re-captured and
+		// compared this pass, so seeing it proves the unchanged content was
+		// already skipped rather than merely not-yet-checked.
+		h.clk.awaitTimer(t, interval)
+		h.conn.requireNoFrame(t)
 
-	h.stop()
+		h.stop()
+	})
 }
 
 func TestServeRemotePreviewWatchIgnoresBackgroundTabOutput(t *testing.T) {
-	h := newPreviewWatchHarness(t, "tab-0", "tab-1")
-	watched := h.tabs[0].focusedPane()
-	background := h.tabs[1].focusedPane()
-	writePreviewContent(t, watched, "\x1b[H\x1b[2Jwatched")
-	interval := 32 * time.Millisecond
-	h.start(buildPreviewWatch(h.sess, "tab-0", interval))
-	first := h.conn.nextFrame(t)
-	require.Contains(t, previewFrameText(first), "watched")
+	synctest.Test(t, func(t *testing.T) {
+		h := newPreviewWatchHarness(t, "tab-0", "tab-1")
+		watched := h.tabs[0].focusedPane()
+		background := h.tabs[1].focusedPane()
+		writePreviewContent(t, watched, "\x1b[H\x1b[2Jwatched")
+		interval := 32 * time.Millisecond
+		h.start(buildPreviewWatch(h.sess, "tab-0", interval))
+		first := h.conn.nextFrame(t)
+		require.Contains(t, previewFrameText(first), "watched")
 
-	writePreviewContent(t, background, "\x1b[H\x1b[2Jbg-output")
-	h.clk.awaitTimer(t, interval).fire()
-	h.clk.awaitTimer(t, remotePreviewRevalidate).fire()
-	h.clk.awaitTimer(t, interval) // proves the pass already re-captured tab-0
-	h.conn.requireNoFrame(t)
+		writePreviewContent(t, background, "\x1b[H\x1b[2Jbg-output")
+		h.clk.awaitTimer(t, interval).fire()
+		h.clk.awaitTimer(t, remotePreviewRevalidate).fire()
+		h.clk.awaitTimer(t, interval) // proves the pass already re-captured tab-0
+		h.conn.requireNoFrame(t)
 
-	h.stop()
+		h.stop()
+	})
 }
 
 func TestServeRemotePreviewWatchCapturesSelectedTab(t *testing.T) {
-	h := newPreviewWatchHarness(t, "tab-0", "tab-1")
-	writePreviewContent(t, h.tabs[0].focusedPane(), "\x1b[H\x1b[2Jactive")
-	writePreviewContent(t, h.tabs[1].focusedPane(), "\x1b[H\x1b[2Jselected")
-	h.start(buildPreviewWatch(h.sess, "tab-1", 32*time.Millisecond))
+	synctest.Test(t, func(t *testing.T) {
+		h := newPreviewWatchHarness(t, "tab-0", "tab-1")
+		writePreviewContent(t, h.tabs[0].focusedPane(), "\x1b[H\x1b[2Jactive")
+		writePreviewContent(t, h.tabs[1].focusedPane(), "\x1b[H\x1b[2Jselected")
+		h.start(buildPreviewWatch(h.sess, "tab-1", 32*time.Millisecond))
 
-	frame := h.conn.nextFrame(t)
-	require.Equal(t, protocol.RemotePreviewOK, frame.Status)
-	require.Equal(t, domain.TabStableID("tab-1"), frame.TabID)
-	require.Contains(t, previewFrameText(frame), "selected")
-	require.NotContains(t, previewFrameText(frame), "active")
+		frame := h.conn.nextFrame(t)
+		require.Equal(t, protocol.RemotePreviewOK, frame.Status)
+		require.Equal(t, domain.TabStableID("tab-1"), frame.TabID)
+		require.Contains(t, previewFrameText(frame), "selected")
+		require.NotContains(t, previewFrameText(frame), "active")
 
-	h.stop()
+		h.stop()
+	})
 }
 
 func TestServeRemotePreviewWatchSendsNoSuchTargetOnceWhenSessionKilled(t *testing.T) {
-	h := newPreviewWatchHarness(t, "tab-0")
-	writePreviewContent(t, h.tabs[0].focusedPane(), "\x1b[H\x1b[2Jv1")
-	interval := 32 * time.Millisecond
-	h.start(buildPreviewWatch(h.sess, "tab-0", interval))
-	h.conn.nextFrame(t)
+	synctest.Test(t, func(t *testing.T) {
+		h := newPreviewWatchHarness(t, "tab-0")
+		writePreviewContent(t, h.tabs[0].focusedPane(), "\x1b[H\x1b[2Jv1")
+		interval := 32 * time.Millisecond
+		h.start(buildPreviewWatch(h.sess, "tab-0", interval))
+		h.conn.nextFrame(t)
 
-	rc := attachmentRenderCoordinator(h.sess)
-	require.NotNil(t, rc)
-	require.True(t, rc.hasPreviewSubscribers())
+		rc := attachmentRenderCoordinator(h.sess)
+		require.NotNil(t, rc)
+		require.True(t, rc.hasPreviewSubscribers())
 
-	// Simulate a kill through the same exact-identity lookup
-	// remotePreviewSession uses, without driving the full kill workflow.
-	h.d.mu.Lock()
-	delete(h.d.sessions, h.sess.id)
-	h.d.mu.Unlock()
+		// Simulate a kill through the same exact-identity lookup
+		// remotePreviewSession uses, without driving the full kill workflow.
+		h.d.mu.Lock()
+		delete(h.d.sessions, h.sess.id)
+		h.d.mu.Unlock()
 
-	h.clk.awaitTimer(t, interval).fire()
-	h.clk.awaitTimer(t, remotePreviewRevalidate).fire()
+		h.clk.awaitTimer(t, interval).fire()
+		h.clk.awaitTimer(t, remotePreviewRevalidate).fire()
 
-	frame := h.conn.nextFrame(t)
-	require.Equal(t, protocol.RemotePreviewNoSuchTarget, frame.Status)
-	h.conn.requireNoFrame(t)
-	h.awaitDone(2 * time.Second)
-	require.False(t, rc.hasPreviewSubscribers())
+		frame := h.conn.nextFrame(t)
+		require.Equal(t, protocol.RemotePreviewNoSuchTarget, frame.Status)
+		h.conn.requireNoFrame(t)
+		h.awaitDone(2 * time.Second)
+		require.False(t, rc.hasPreviewSubscribers())
+	})
 }
 
 func TestServeRemotePreviewWatchEndsOnClientClose(t *testing.T) {
-	h := newPreviewWatchHarness(t, "tab-0")
-	writePreviewContent(t, h.tabs[0].focusedPane(), "\x1b[H\x1b[2Jv1")
-	h.start(buildPreviewWatch(h.sess, "tab-0", 32*time.Millisecond))
-	h.conn.nextFrame(t)
+	synctest.Test(t, func(t *testing.T) {
+		h := newPreviewWatchHarness(t, "tab-0")
+		writePreviewContent(t, h.tabs[0].focusedPane(), "\x1b[H\x1b[2Jv1")
+		h.start(buildPreviewWatch(h.sess, "tab-0", 32*time.Millisecond))
+		h.conn.nextFrame(t)
 
-	rc := attachmentRenderCoordinator(h.sess)
-	require.NotNil(t, rc)
-	require.True(t, rc.hasPreviewSubscribers())
+		rc := attachmentRenderCoordinator(h.sess)
+		require.NotNil(t, rc)
+		require.True(t, rc.hasPreviewSubscribers())
 
-	h.conn.closeClient(io.EOF)
-	h.awaitDone(2 * time.Second)
-	h.conn.requireNoFrame(t)
-	require.False(t, rc.hasPreviewSubscribers())
+		h.conn.closeClient(io.EOF)
+		h.awaitDone(2 * time.Second)
+		h.conn.requireNoFrame(t)
+		require.False(t, rc.hasPreviewSubscribers())
+	})
 }
 
 func TestServeRemotePreviewWatchRejectsInvalidWatch(t *testing.T) {
@@ -426,53 +428,59 @@ func TestServeRemotePreviewWatchRejectsInvalidWatch(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := newPreviewWatchHarness(t, "tab-0")
-			watch := buildPreviewWatch(h.sess, "tab-0", 32*time.Millisecond)
-			tt.mutate(&watch)
+			synctest.Test(t, func(t *testing.T) {
+				h := newPreviewWatchHarness(t, "tab-0")
+				watch := buildPreviewWatch(h.sess, "tab-0", 32*time.Millisecond)
+				tt.mutate(&watch)
 
-			h.start(watch)
-			frame := h.conn.nextFrame(t)
-			require.Equal(t, protocol.RemotePreviewMalformed, frame.Status)
-			h.conn.awaitClosed(t)
-			h.awaitDone(2 * time.Second)
+				h.start(watch)
+				frame := h.conn.nextFrame(t)
+				require.Equal(t, protocol.RemotePreviewMalformed, frame.Status)
+				h.conn.awaitClosed(t)
+				h.awaitDone(2 * time.Second)
+			})
 		})
 	}
 }
 
 func TestServeRemotePreviewWatchEndsOnHardContextCancel(t *testing.T) {
-	h := newPreviewWatchHarness(t, "tab-0")
-	writePreviewContent(t, h.tabs[0].focusedPane(), "\x1b[H\x1b[2Jv1")
-	h.start(buildPreviewWatch(h.sess, "tab-0", 32*time.Millisecond))
-	h.conn.nextFrame(t)
+	synctest.Test(t, func(t *testing.T) {
+		h := newPreviewWatchHarness(t, "tab-0")
+		writePreviewContent(t, h.tabs[0].focusedPane(), "\x1b[H\x1b[2Jv1")
+		h.start(buildPreviewWatch(h.sess, "tab-0", 32*time.Millisecond))
+		h.conn.nextFrame(t)
 
-	h.d.hardCancel()
-	h.awaitDone(2 * time.Second)
-	h.conn.requireNoFrame(t)
-	h.conn.awaitClosed(t)
+		h.d.hardCancel()
+		h.awaitDone(2 * time.Second)
+		h.conn.requireNoFrame(t)
+		h.conn.awaitClosed(t)
+	})
 }
 
 func TestCaptureRemotePreviewCapsStyles(t *testing.T) {
 	for _, n := range []int{1024, 1920} {
 		t.Run(fmt.Sprint(n), func(t *testing.T) {
-			h := newPreviewWatchHarness(t, "tab-1")
-			var b strings.Builder
-			b.WriteString("\x1b[H")
-			for i := 0; i < n; i++ {
-				fmt.Fprintf(&b, "\x1b[38;2;%d;%d;255mx", i%256, i/256)
-			}
-			writePreviewContent(t, h.tabs[0].focusedPane(), b.String())
-			request := buildPreviewWatch(h.sess, "tab-1", protocol.RemotePreviewWatchMinInterval).Request
-			request.Width = 80
-			request.Height = 24
-			got, err := h.d.captureRemotePreview(request)
-			require.NoError(t, err)
-			require.Equal(t, protocol.RemotePreviewOK, got.Status)
-			require.NoError(t, protocol.ValidateRemotePreview(got))
-			styles := map[renderer.Style]bool{}
-			for _, c := range got.Cells {
-				styles[c.Style] = true
-			}
-			require.LessOrEqual(t, len(styles), protocol.RemotePreviewMaxStyles)
+			synctest.Test(t, func(t *testing.T) {
+				h := newPreviewWatchHarness(t, "tab-1")
+				var b strings.Builder
+				b.WriteString("\x1b[H")
+				for i := 0; i < n; i++ {
+					fmt.Fprintf(&b, "\x1b[38;2;%d;%d;255mx", i%256, i/256)
+				}
+				writePreviewContent(t, h.tabs[0].focusedPane(), b.String())
+				request := buildPreviewWatch(h.sess, "tab-1", protocol.RemotePreviewWatchMinInterval).Request
+				request.Width = 80
+				request.Height = 24
+				got, err := h.d.captureRemotePreview(request)
+				require.NoError(t, err)
+				require.Equal(t, protocol.RemotePreviewOK, got.Status)
+				require.NoError(t, protocol.ValidateRemotePreview(got))
+				styles := map[renderer.Style]bool{}
+				for _, c := range got.Cells {
+					styles[c.Style] = true
+				}
+				require.LessOrEqual(t, len(styles), protocol.RemotePreviewMaxStyles)
+			})
 		})
 	}
 }
