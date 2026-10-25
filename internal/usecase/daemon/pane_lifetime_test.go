@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -132,63 +133,65 @@ func TestPaneOpenErrorsReleaseReturnedPTYWithoutPublication(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cause := errors.New("open failed")
-			pty := newFailedOpenPTY()
-			cancelCallbacks := atomic.Int32{}
-			cancelled := make(chan struct{})
-			openFactory := paneErrorFactory{
-				pty: pty,
-				err: cause,
-				onOpen: func(ctx context.Context) {
-					pty.ctx = ctx
-					context.AfterFunc(ctx, func() {
-						cancelCallbacks.Add(1)
-						close(cancelled)
-					})
-				},
-			}
-			d := newTestDaemon(t, &openFactory, newStubClock(t))
-
-			tabs, cleanup, err := tt.run(t, d)
-			require.ErrorIs(t, err, cause)
-			if tt.wantCode != 0 {
-				var userErr *domain.UserError
-				require.ErrorAs(t, err, &userErr)
-				require.Equal(t, tt.wantCode, userErr.Code)
-			}
-			select {
-			case <-cancelled:
-			case <-time.After(time.Second):
-				t.Fatal("failed pane Open process context was not cancelled")
-			}
-
-			for _, tb := range tabs {
-				if tb == nil {
-					continue
+			synctest.Test(t, func(t *testing.T) {
+				cause := errors.New("open failed")
+				pty := newFailedOpenPTY()
+				cancelCallbacks := atomic.Int32{}
+				cancelled := make(chan struct{})
+				openFactory := paneErrorFactory{
+					pty: pty,
+					err: cause,
+					onOpen: func(ctx context.Context) {
+						pty.ctx = ctx
+						context.AfterFunc(ctx, func() {
+							cancelCallbacks.Add(1)
+							close(cancelled)
+						})
+					},
 				}
-				tb.mu.Lock()
-				floating := tb.floating.pane
-				var floatingPTY ports.PTY
-				if floating != nil {
-					floating.mu.Lock()
-					floatingPTY = floating.pty
-					floating.mu.Unlock()
-				}
-				publishedFailedPTY := false
-				for _, published := range tb.panes {
-					publishedFailedPTY = publishedFailedPTY || published.pty == pty
-				}
-				tb.mu.Unlock()
-				require.NotEqual(t, pty, floatingPTY)
-				require.False(t, publishedFailedPTY, "failed Open must not publish a pane or owner")
-			}
-			require.Zero(t, pty.readerStarts.Load(), "failed Open must not start a reader")
-			require.Equal(t, int32(1), pty.closes.Load(), "failed Open PTY must close exactly once")
-			require.Equal(t, int32(1), cancelCallbacks.Load(), "failed Open context must cancel exactly once")
+				d := newTestDaemon(t, &openFactory, newStubClock(t))
 
-			cleanup()
-			require.Equal(t, int32(1), pty.closes.Load(), "later teardown must not close an unpublished PTY again")
-			require.Equal(t, int32(1), cancelCallbacks.Load(), "later teardown must not recancel an unpublished process")
+				tabs, cleanup, err := tt.run(t, d)
+				require.ErrorIs(t, err, cause)
+				if tt.wantCode != 0 {
+					var userErr *domain.UserError
+					require.ErrorAs(t, err, &userErr)
+					require.Equal(t, tt.wantCode, userErr.Code)
+				}
+				select {
+				case <-cancelled:
+				case <-time.After(time.Second):
+					t.Fatal("failed pane Open process context was not cancelled")
+				}
+
+				for _, tb := range tabs {
+					if tb == nil {
+						continue
+					}
+					tb.mu.Lock()
+					floating := tb.floating.pane
+					var floatingPTY ports.PTY
+					if floating != nil {
+						floating.mu.Lock()
+						floatingPTY = floating.pty
+						floating.mu.Unlock()
+					}
+					publishedFailedPTY := false
+					for _, published := range tb.panes {
+						publishedFailedPTY = publishedFailedPTY || published.pty == pty
+					}
+					tb.mu.Unlock()
+					require.NotEqual(t, pty, floatingPTY)
+					require.False(t, publishedFailedPTY, "failed Open must not publish a pane or owner")
+				}
+				require.Zero(t, pty.readerStarts.Load(), "failed Open must not start a reader")
+				require.Equal(t, int32(1), pty.closes.Load(), "failed Open PTY must close exactly once")
+				require.Equal(t, int32(1), cancelCallbacks.Load(), "failed Open context must cancel exactly once")
+
+				cleanup()
+				require.Equal(t, int32(1), pty.closes.Load(), "later teardown must not close an unpublished PTY again")
+				require.Equal(t, int32(1), cancelCallbacks.Load(), "later teardown must not recancel an unpublished process")
+			})
 		})
 	}
 }

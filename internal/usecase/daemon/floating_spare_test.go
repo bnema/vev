@@ -5,6 +5,7 @@ import (
 	"io"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	renderer "github.com/bnema/vev-vt"
@@ -120,61 +121,63 @@ func TestFloatingSpareIsSharedPerSession(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			factory := &spareFactory{}
-			d := newTestDaemon(t, factory, newStubClock(t))
-			d.ApplyConfig(domain.Config{Floating: cfg})
-			cwds := map[int]string{1: "/work", 2: tt.claimCwd}
-			WithProcessInspector(&processInspectorFake{cwd: func(pid int) (string, error) { return cwds[pid], nil }})(d)
-			d.dirOrHome = func(cwd string) string { return cwd }
+			synctest.Test(t, func(t *testing.T) {
+				factory := &spareFactory{}
+				d := newTestDaemon(t, factory, newStubClock(t))
+				d.ApplyConfig(domain.Config{Floating: cfg})
+				cwds := map[int]string{1: "/work", 2: tt.claimCwd}
+				WithProcessInspector(&processInspectorFake{cwd: func(pid int) (string, error) { return cwds[pid], nil }})(d)
+				d.dirOrHome = func(cwd string) string { return cwd }
 
-			first := newTab(&pidPTY{pid: 1}, domain.Size{Cols: 120, Rows: 40})
-			second := newTab(&pidPTY{pid: 2}, domain.Size{Cols: 60, Rows: 20})
-			for _, tb := range []*tab{first, second} {
-				tb.ctx, tb.cancel = context.WithCancel(t.Context())
-			}
-			sess := &session{sessionCore: sessionCore{name: "work"}, tabs: []*tab{first, second}, ctx: t.Context()}
+				first := newTab(&pidPTY{pid: 1}, domain.Size{Cols: 120, Rows: 40})
+				second := newTab(&pidPTY{pid: 2}, domain.Size{Cols: 60, Rows: 20})
+				for _, tb := range []*tab{first, second} {
+					tb.ctx, tb.cancel = context.WithCancel(t.Context())
+				}
+				sess := &session{sessionCore: sessionCore{name: "work"}, tabs: []*tab{first, second}, ctx: t.Context()}
 
-			// Activating both tabs starts exactly one session spare.
-			d.ensureFloatingWarm(sess, first)
-			d.ensureFloatingWarm(sess, second)
-			waitSpareReady(t, sess)
-			require.Len(t, factory.snapshot(), 1)
-			require.Equal(t, "/work", factory.snapshot()[0].cwd)
+				// Activating both tabs starts exactly one session spare.
+				d.ensureFloatingWarm(sess, first)
+				d.ensureFloatingWarm(sess, second)
+				waitSpareReady(t, sess)
+				require.Len(t, factory.snapshot(), 1)
+				require.Equal(t, "/work", factory.snapshot()[0].cwd)
 
-			// The second (smaller) tab opens its floating pane and claims the
-			// spare that the first tab started.
-			second.mu.Lock()
-			generation := second.beginFloatingWarmLocked(true)
-			second.mu.Unlock()
-			d.launchFloating(sess, second, cfg, generation, true)
-			claimed := waitFloatingVisible(t, second)
-			waitSpareReady(t, sess)
+				// The second (smaller) tab opens its floating pane and claims the
+				// spare that the first tab started.
+				second.mu.Lock()
+				generation := second.beginFloatingWarmLocked(true)
+				second.mu.Unlock()
+				d.launchFloating(sess, second, cfg, generation, true)
+				claimed := waitFloatingVisible(t, second)
+				waitSpareReady(t, sess)
 
-			want := calculateContentFloatingGeometry(domain.Size{Cols: 60, Rows: 20}, cfg)
-			claimed.mu.Lock()
-			require.Equal(t, want.ptyRect(), claimed.rect)
-			require.Equal(t, rectSize(want.ptyRect()), claimed.geometry.Size)
-			require.Equal(t, rectSize(want.ptyRect()).Cols, claimed.screen.Columns())
-			claimed.mu.Unlock()
+				want := calculateContentFloatingGeometry(domain.Size{Cols: 60, Rows: 20}, cfg)
+				claimed.mu.Lock()
+				require.Equal(t, want.ptyRect(), claimed.rect)
+				require.Equal(t, rectSize(want.ptyRect()), claimed.geometry.Size)
+				require.Equal(t, rectSize(want.ptyRect()).Cols, claimed.screen.Columns())
+				claimed.mu.Unlock()
 
-			opens := factory.snapshot()
-			if tt.wantReused {
-				require.Same(t, opens[0].pty, claimed.pty, "the claim must reuse the pre-started shell")
-				require.Equal(t, []domain.Geometry{claimed.geometry}, opens[0].pty.resizes, "the claim resizes the spare to the claiming tab")
-				require.Len(t, opens, 2, "one claimed shell plus one new spare")
-			} else {
-				require.True(t, opens[0].pty.isClosed(), "a spare from another cwd is discarded")
-				require.Equal(t, tt.claimCwd, opens[1].cwd)
-				require.Same(t, opens[1].pty, claimed.pty)
-				require.Len(t, opens, 3, "a fresh shell plus one new spare")
-			}
-			// Panes visible as floating plus exactly one idle spare.
-			require.Equal(t, 2, factory.liveShells())
+				opens := factory.snapshot()
+				if tt.wantReused {
+					require.Same(t, opens[0].pty, claimed.pty, "the claim must reuse the pre-started shell")
+					require.Equal(t, []domain.Geometry{claimed.geometry}, opens[0].pty.resizes, "the claim resizes the spare to the claiming tab")
+					require.Len(t, opens, 2, "one claimed shell plus one new spare")
+				} else {
+					require.True(t, opens[0].pty.isClosed(), "a spare from another cwd is discarded")
+					require.Equal(t, tt.claimCwd, opens[1].cwd)
+					require.Same(t, opens[1].pty, claimed.pty)
+					require.Len(t, opens, 3, "a fresh shell plus one new spare")
+				}
+				// Panes visible as floating plus exactly one idle spare.
+				require.Equal(t, 2, factory.liveShells())
 
-			sess.stopInMemoryLifecycle()
-			d.teardownFloating(second, nil)
-			d.sessWg.Wait()
-			require.Zero(t, factory.liveShells(), "teardown closes the spare")
+				sess.stopInMemoryLifecycle()
+				d.teardownFloating(second, nil)
+				d.sessWg.Wait()
+				require.Zero(t, factory.liveShells(), "teardown closes the spare")
+			})
 		})
 	}
 }
@@ -227,46 +230,50 @@ func TestFloatingSpareAnswersStartupQueriesBeforeClaim(t *testing.T) {
 		{name: "background color from the session theme", query: "\x1b]11;?\x07", want: "\x1b]11;rgb:"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			pty := &queryPTY{sparePTY: sparePTY{closed: make(chan struct{})}, query: tt.query, sent: make(chan struct{}), replied: make(chan []byte, 4)}
-			d := newTestDaemon(t, &queryFactory{pty: pty}, newStubClock(t))
-			d.ApplyConfig(domain.Config{Floating: domain.FloatingConfig{Width: 80, Height: 80}})
-			tb := newTab(&pidPTY{pid: 1}, domain.Size{Cols: 80, Rows: 24})
-			tb.ctx, tb.cancel = context.WithCancel(t.Context())
-			ac := &attachedClient{}
-			ac.setClientTheme(themeui.Theme{Known: true, HasFG: true, HasBG: true,
-				Foreground: renderer.RGB{R: 0xee, G: 0xee, B: 0xee}, Background: renderer.RGB{R: 0x11, G: 0x11, B: 0x11}})
-			sess := &session{sessionCore: sessionCore{name: "work", attachments: map[*attachedClient]struct{}{ac: {}}}, tabs: []*tab{tb}, ctx: t.Context()}
+			synctest.Test(t, func(t *testing.T) {
+				pty := &queryPTY{sparePTY: sparePTY{closed: make(chan struct{})}, query: tt.query, sent: make(chan struct{}), replied: make(chan []byte, 4)}
+				d := newTestDaemon(t, &queryFactory{pty: pty}, newStubClock(t))
+				d.ApplyConfig(domain.Config{Floating: domain.FloatingConfig{Width: 80, Height: 80}})
+				tb := newTab(&pidPTY{pid: 1}, domain.Size{Cols: 80, Rows: 24})
+				tb.ctx, tb.cancel = context.WithCancel(t.Context())
+				ac := &attachedClient{}
+				ac.setClientTheme(themeui.Theme{Known: true, HasFG: true, HasBG: true,
+					Foreground: renderer.RGB{R: 0xee, G: 0xee, B: 0xee}, Background: renderer.RGB{R: 0x11, G: 0x11, B: 0x11}})
+				sess := &session{sessionCore: sessionCore{name: "work", attachments: map[*attachedClient]struct{}{ac: {}}}, tabs: []*tab{tb}, ctx: t.Context()}
 
-			d.ensureFloatingWarm(sess, tb)
-			select {
-			case reply := <-pty.replied:
-				require.Contains(t, string(reply), tt.want, "the unclaimed spare must answer its shell's startup query")
-			case <-time.After(5 * time.Second):
-				t.Fatal("the unclaimed spare never answered its shell's startup query")
-			}
+				d.ensureFloatingWarm(sess, tb)
+				select {
+				case reply := <-pty.replied:
+					require.Contains(t, string(reply), tt.want, "the unclaimed spare must answer its shell's startup query")
+				case <-time.After(5 * time.Second):
+					t.Fatal("the unclaimed spare never answered its shell's startup query")
+				}
 
-			sess.stopInMemoryLifecycle()
-			d.sessWg.Wait()
+				sess.stopInMemoryLifecycle()
+				d.sessWg.Wait()
+			})
 		})
 	}
 }
 
 func TestFloatingSpareExitBeforeClaimDropsIt(t *testing.T) {
-	factory := &spareFactory{}
-	d := newTestDaemon(t, factory, newStubClock(t))
-	d.ApplyConfig(domain.Config{Floating: domain.FloatingConfig{Width: 80, Height: 80}})
-	tb := newTab(&pidPTY{pid: 1}, domain.Size{Cols: 80, Rows: 24})
-	tb.ctx, tb.cancel = context.WithCancel(t.Context())
-	sess := &session{sessionCore: sessionCore{name: "work"}, tabs: []*tab{tb}, ctx: t.Context()}
+	synctest.Test(t, func(t *testing.T) {
+		factory := &spareFactory{}
+		d := newTestDaemon(t, factory, newStubClock(t))
+		d.ApplyConfig(domain.Config{Floating: domain.FloatingConfig{Width: 80, Height: 80}})
+		tb := newTab(&pidPTY{pid: 1}, domain.Size{Cols: 80, Rows: 24})
+		tb.ctx, tb.cancel = context.WithCancel(t.Context())
+		sess := &session{sessionCore: sessionCore{name: "work"}, tabs: []*tab{tb}, ctx: t.Context()}
 
-	d.ensureFloatingWarm(sess, tb)
-	waitSpareReady(t, sess)
-	spare := sess.floatingSparePane()
-	require.NotNil(t, spare)
-	require.NoError(t, factory.snapshot()[0].pty.Close(), "the spare's shell exits")
-	require.Eventually(t, func() bool { return sess.floatingSparePane() == nil }, 5*time.Second, time.Millisecond,
-		"an exited unclaimed spare must be dropped so the next claim launches a fresh shell")
+		d.ensureFloatingWarm(sess, tb)
+		waitSpareReady(t, sess)
+		spare := sess.floatingSparePane()
+		require.NotNil(t, spare)
+		require.NoError(t, factory.snapshot()[0].pty.Close(), "the spare's shell exits")
+		require.Eventually(t, func() bool { return sess.floatingSparePane() == nil }, 5*time.Second, time.Millisecond,
+			"an exited unclaimed spare must be dropped so the next claim launches a fresh shell")
 
-	sess.stopInMemoryLifecycle()
-	d.sessWg.Wait()
+		sess.stopInMemoryLifecycle()
+		d.sessWg.Wait()
+	})
 }

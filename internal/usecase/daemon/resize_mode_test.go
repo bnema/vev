@@ -3,6 +3,7 @@ package daemon
 import (
 	"sync"
 	"testing"
+	"testing/synctest"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/domain/layout"
@@ -54,45 +55,47 @@ func TestControlEqualizeMapsResizeErrors(t *testing.T) {
 }
 
 func TestResizeControlHeadlessAndErrors(t *testing.T) {
-	factory, closeFactory := newControlPTYFactory(t, nil)
-	d := newTestDaemon(t, factory, newStubClock(t))
-	t.Cleanup(func() { closeFactory(); d.sessWg.Wait() })
-	sess := addControlSession(t, d, "work", "t_work", "p_work")
+	synctest.Test(t, func(t *testing.T) {
+		factory, closeFactory := newControlPTYFactory(t, nil)
+		d := newTestDaemon(t, factory, newStubClock(t))
+		t.Cleanup(func() { closeFactory(); d.sessWg.Wait() })
+		sess := addControlSession(t, d, "work", "t_work", "p_work")
 
-	tooEarly := sendCommand(t, d, protocol.CommandRequest{Slug: "grow-pane-width", TargetSession: "work"})
-	require.False(t, tooEarly.Outcome == protocol.CommandSucceeded)
-	require.Equal(t, protocol.ErrNoSuchTarget, tooEarly.Code)
-	require.Equal(t, "pane is not in a split", tooEarly.Text)
+		tooEarly := sendCommand(t, d, protocol.CommandRequest{Slug: "grow-pane-width", TargetSession: "work"})
+		require.False(t, tooEarly.Outcome == protocol.CommandSucceeded)
+		require.Equal(t, protocol.ErrNoSuchTarget, tooEarly.Code)
+		require.Equal(t, "pane is not in a split", tooEarly.Text)
 
-	require.True(t, sendCommand(t, d, protocol.CommandRequest{Slug: "split-right", TargetSession: "work"}).Outcome == protocol.CommandSucceeded)
-	tb := testAttachmentTab(sess)
-	tb.mu.Lock()
-	beforeFocus := tb.tree.Focus
-	beforeGeneration := tb.layoutGeneration
-	var target *pane
-	for id, candidate := range tb.panes {
-		if id != beforeFocus {
-			target = candidate
-			break
+		require.True(t, sendCommand(t, d, protocol.CommandRequest{Slug: "split-right", TargetSession: "work"}).Outcome == protocol.CommandSucceeded)
+		tb := testAttachmentTab(sess)
+		tb.mu.Lock()
+		beforeFocus := tb.tree.Focus
+		beforeGeneration := tb.layoutGeneration
+		var target *pane
+		for id, candidate := range tb.panes {
+			if id != beforeFocus {
+				target = candidate
+				break
+			}
 		}
-	}
-	tb.mu.Unlock()
-	require.NotNil(t, target)
+		tb.mu.Unlock()
+		require.NotNil(t, target)
 
-	require.NoError(t, (daemonActions{d: d}).Run(daemonActionRequest{
-		kind:   daemonActionResizePane,
-		target: daemonActionTarget{session: sess, tab: tb, pane: target},
-		axis:   layout.Width,
-		delta:  resizeStepCols,
-	}))
-	tb.mu.Lock()
-	require.Equal(t, beforeFocus, tb.tree.Focus, "exact pane targeting must not refocus the tab")
-	require.Equal(t, beforeGeneration+1, tb.layoutGeneration)
-	tb.mu.Unlock()
+		require.NoError(t, (daemonActions{d: d}).Run(daemonActionRequest{
+			kind:   daemonActionResizePane,
+			target: daemonActionTarget{session: sess, tab: tb, pane: target},
+			axis:   layout.Width,
+			delta:  resizeStepCols,
+		}))
+		tb.mu.Lock()
+		require.Equal(t, beforeFocus, tb.tree.Focus, "exact pane targeting must not refocus the tab")
+		require.Equal(t, beforeGeneration+1, tb.layoutGeneration)
+		tb.mu.Unlock()
 
-	equalized := sendCommand(t, d, protocol.CommandRequest{Slug: "equalize-panes", TargetSession: "work"})
-	require.True(t, equalized.Outcome == protocol.CommandSucceeded, equalized.Text)
-	require.Empty(t, equalized.Output)
+		equalized := sendCommand(t, d, protocol.CommandRequest{Slug: "equalize-panes", TargetSession: "work"})
+		require.True(t, equalized.Outcome == protocol.CommandSucceeded, equalized.Text)
+		require.Empty(t, equalized.Output)
+	})
 }
 
 func TestRouteOverlayDecodesHorizontalArrows(t *testing.T) {
@@ -112,19 +115,22 @@ func TestRouteOverlayDecodesHorizontalArrows(t *testing.T) {
 // parser prefixes are deliberately split across reads.
 
 func TestResizeModeRendersGuidanceWithoutHidingContentOrCursor(t *testing.T) {
-	d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
-	tb := testAttachmentTab(sess)
-	second := newPane("pane-2", nil, domain.Size{Cols: 39, Rows: 23})
-	tb.mu.Lock()
-	tb.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}, Focus: "pane-2"}
-	tb.panes[second.id] = second
-	tb.mu.Unlock()
-	second.screen.Write([]byte("live resize content"))
-	require.NoError(t, d.enterResizeMode(sess, ac))
-	data := string(mustOutputData(t, sends))
-	require.Contains(t, data, "resize: h/j/k/l or arrows")
-	require.Contains(t, data, "live resize content")
-	require.Contains(t, data, "\x1b[?25h", "resize leaves the focused pane cursor visible")
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
+		stopOverlayTimersAtCleanup(t, ac)
+		tb := testAttachmentTab(sess)
+		second := newPane("pane-2", nil, domain.Size{Cols: 39, Rows: 23})
+		tb.mu.Lock()
+		tb.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}, Focus: "pane-2"}
+		tb.panes[second.id] = second
+		tb.mu.Unlock()
+		second.screen.Write([]byte("live resize content"))
+		require.NoError(t, d.enterResizeMode(sess, ac))
+		data := string(mustOutputData(t, sends))
+		require.Contains(t, data, "resize: h/j/k/l or arrows")
+		require.Contains(t, data, "live resize content")
+		require.Contains(t, data, "\x1b[?25h", "resize leaves the focused pane cursor visible")
+	})
 }
 
 type resizeLockProbePTY struct {
@@ -151,32 +157,35 @@ func (p *resizeLockProbePTY) Resize(domain.Geometry) error {
 }
 
 func TestResizeModeReleasesTabAndOverlayLocksBeforePTY(t *testing.T) {
-	// Build a live tree directly so the probe is not concurrently owned by a
-	// pane reader; this isolates the lock boundary being asserted.
-	d, sess, ac, _ := newManualSessionWithPTYs(t, nil)
-	tb := testAttachmentTab(sess)
-	probe := &resizeLockProbePTY{entered: make(chan struct{}), release: make(chan struct{})}
-	second := newPane("pane-2", probe, domain.Size{Cols: 39, Rows: 23})
-	tb.mu.Lock()
-	tb.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}, Focus: "pane-2"}
-	tb.panes[second.id] = second
-	tb.mu.Unlock()
-	probe.check = func() {
-		if tb.mu.TryLock() {
-			tb.mu.Unlock()
-		} else {
-			t.Error("PTY callback must not inherit tab.mu")
+	synctest.Test(t, func(t *testing.T) {
+		// Build a live tree directly so the probe is not concurrently owned by a
+		// pane reader; this isolates the lock boundary being asserted.
+		d, sess, ac, _ := newManualSessionWithPTYs(t, nil)
+		stopOverlayTimersAtCleanup(t, ac)
+		tb := testAttachmentTab(sess)
+		probe := &resizeLockProbePTY{entered: make(chan struct{}), release: make(chan struct{})}
+		second := newPane("pane-2", probe, domain.Size{Cols: 39, Rows: 23})
+		tb.mu.Lock()
+		tb.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}, Focus: "pane-2"}
+		tb.panes[second.id] = second
+		tb.mu.Unlock()
+		probe.check = func() {
+			if tb.mu.TryLock() {
+				tb.mu.Unlock()
+			} else {
+				t.Error("PTY callback must not inherit tab.mu")
+			}
+			if ac.overlays.resizeMu.TryLock() {
+				ac.overlays.resizeMu.Unlock()
+			} else {
+				t.Error("PTY callback must not inherit resize overlay mutex")
+			}
 		}
-		if ac.overlays.resizeMu.TryLock() {
-			ac.overlays.resizeMu.Unlock()
-		} else {
-			t.Error("PTY callback must not inherit resize overlay mutex")
-		}
-	}
-	require.NoError(t, d.enterResizeMode(sess, ac))
-	done := make(chan struct{})
-	go func() { d.handleResizeInput(ac, []byte("l")); close(done) }()
-	<-probe.entered
-	close(probe.release)
-	<-done
+		require.NoError(t, d.enterResizeMode(sess, ac))
+		done := make(chan struct{})
+		go func() { d.handleResizeInput(ac, []byte("l")); close(done) }()
+		<-probe.entered
+		close(probe.release)
+		<-done
+	})
 }

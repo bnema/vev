@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -80,111 +81,117 @@ func TestAdmitPaletteInventoryPublication(t *testing.T) {
 // through opaque keys with bound cause, Selection before close-demand wire
 // order, and overlay teardown that preserves the frozen selection.
 func TestPaletteInventoryDemandAndSelectionFlow(t *testing.T) {
-	p, release := newBlockingPTY(t)
-	defer release()
-	d, current, ac, sends := newManualSessionWithPTYs(t, p)
-	ac.navigationCapabilities = protocol.NavigationCapabilityInventory
-	effect := beginRecentRoutePaletteEffect(t, d, current, ac)
-	// No automation action ID: ordinary keyboard input carries cause zero,
-	// which must still select.
+	synctest.Test(t, func(t *testing.T) {
+		p, release := newBlockingPTY(t)
+		defer release()
+		d, current, ac, sends := newManualSessionWithPTYs(t, p)
+		stopOverlayTimersAtCleanup(t, ac)
+		ac.navigationCapabilities = protocol.NavigationCapabilityInventory
+		effect := beginRecentRoutePaletteEffect(t, d, current, ac)
+		// No automation action ID: ordinary keyboard input carries cause zero,
+		// which must still select.
 
-	interaction := d.enterPalette(current, ac)
-	d.sendPaletteInventoryDemand(ac, effect, true, interaction)
-	demandFrame := awaitFrame(t, sends, "NavigationInventoryDemand")
-	demand := decodeServerMessage(t, demandFrame).(protocol.NavigationInventoryDemand)
-	require.True(t, demand.Open)
-	require.Equal(t, interaction, demand.InteractionGeneration)
+		interaction := d.enterPalette(current, ac)
+		d.sendPaletteInventoryDemand(ac, effect, true, interaction)
+		demandFrame := requireEnvelope(t, sends, "NavigationInventoryDemand")
+		demand := decodeServerMessage(t, demandFrame).(protocol.NavigationInventoryDemand)
+		require.True(t, demand.Open)
+		require.Equal(t, interaction, demand.InteractionGeneration)
 
-	published := protocol.NavigationInventoryPublication{
-		InteractionGeneration: interaction, PublicationGeneration: 1,
-		Groups: []protocol.NavigationInventorySourceGroup{{
-			SourceKey: "local", Status: protocol.NavigationInventorySourceOK,
-			Entries: []protocol.NavigationInventoryEntry{
-				{SourceKey: "local", EntryKey: "aaa/zzqimported", Name: "zzqimported", DisplayOrigin: "local", State: "up"},
-			},
-		}},
-	}
-	ac.overlays.paletteMu.Lock()
-	require.True(t, admitPaletteInventoryPublication(ac.overlays, published))
-	ac.overlays.paletteMu.Unlock()
-	d.refreshPalette(ac)
+		published := protocol.NavigationInventoryPublication{
+			InteractionGeneration: interaction, PublicationGeneration: 1,
+			Groups: []protocol.NavigationInventorySourceGroup{{
+				SourceKey: "local", Status: protocol.NavigationInventorySourceOK,
+				Entries: []protocol.NavigationInventoryEntry{
+					{SourceKey: "local", EntryKey: "aaa/zzqimported", Name: "zzqimported", DisplayOrigin: "local", State: "up"},
+				},
+			}},
+		}
+		ac.overlays.paletteMu.Lock()
+		require.True(t, admitPaletteInventoryPublication(ac.overlays, published))
+		ac.overlays.paletteMu.Unlock()
+		d.refreshPalette(ac)
 
-	d.handlePaletteInput(ac, []byte("zzqimported\r"), effect)
+		d.handlePaletteInput(ac, []byte("zzqimported\r"), effect)
 
-	selectionFrame := awaitFrame(t, sends, "NavigationInventorySelection")
-	selection := decodeServerMessage(t, selectionFrame).(protocol.NavigationInventorySelection)
-	require.Equal(t, uint64(0), selection.CauseActionID, "keyboard input carries no automation cause")
-	require.Equal(t, interaction, selection.InteractionGeneration)
-	require.Equal(t, uint64(1), selection.PublicationGeneration)
-	require.Equal(t, "local", selection.SourceKey)
-	require.Equal(t, "aaa/zzqimported", selection.EntryKey)
+		selectionFrame := requireEnvelope(t, sends, "NavigationInventorySelection")
+		selection := decodeServerMessage(t, selectionFrame).(protocol.NavigationInventorySelection)
+		require.Equal(t, uint64(0), selection.CauseActionID, "keyboard input carries no automation cause")
+		require.Equal(t, interaction, selection.InteractionGeneration)
+		require.Equal(t, uint64(1), selection.PublicationGeneration)
+		require.Equal(t, "local", selection.SourceKey)
+		require.Equal(t, "aaa/zzqimported", selection.EntryKey)
 
-	closeFrame := awaitFrame(t, sends, "NavigationInventoryDemand")
-	closeDemand, ok := decodeServerMessage(t, closeFrame).(protocol.NavigationInventoryDemand)
-	require.True(t, ok)
-	require.False(t, closeDemand.Open)
-	require.Equal(t, interaction, closeDemand.InteractionGeneration)
-	// Input handling sends controls synchronously; no second close may be queued.
-	for len(sends) > 0 {
-		frame := <-sends
-		require.NotEqual(t, "NavigationInventoryDemand", envelopeMessageName(t, frame.Payload), "selection emits exactly one close")
-	}
+		closeFrame := requireEnvelope(t, sends, "NavigationInventoryDemand")
+		closeDemand, ok := decodeServerMessage(t, closeFrame).(protocol.NavigationInventoryDemand)
+		require.True(t, ok)
+		require.False(t, closeDemand.Open)
+		require.Equal(t, interaction, closeDemand.InteractionGeneration)
+		// Input handling sends controls synchronously; no second close may be queued.
+		for len(sends) > 0 {
+			frame := <-sends
+			require.NotEqual(t, "NavigationInventoryDemand", envelopeMessageName(t, frame.Payload), "selection emits exactly one close")
+		}
 
-	require.False(t, ac.overlays.paletteActive(), "select closes the overlay")
-	ac.overlays.paletteMu.Lock()
-	frozen := ac.overlays.paletteInventorySelected
-	ac.overlays.paletteMu.Unlock()
-	require.NotNil(t, frozen, "the pending selection survives the close so a late failure correlates")
-	require.Equal(t, interaction, frozen.InteractionGeneration)
-	require.Equal(t, "aaa/zzqimported", frozen.EntryKey)
+		require.False(t, ac.overlays.paletteActive(), "select closes the overlay")
+		ac.overlays.paletteMu.Lock()
+		frozen := ac.overlays.paletteInventorySelected
+		ac.overlays.paletteMu.Unlock()
+		require.NotNil(t, frozen, "the pending selection survives the close so a late failure correlates")
+		require.Equal(t, interaction, frozen.InteractionGeneration)
+		require.Equal(t, "aaa/zzqimported", frozen.EntryKey)
+	})
 }
 
 // TestPaletteInventoryRemoteEnterNeverAttaches pins read-only remote
 // vision: Enter on a remote-origin row reports feedback, keeps the palette
 // open, and emits no Selection frame.
 func TestPaletteInventoryRemoteEnterNeverAttaches(t *testing.T) {
-	p, release := newBlockingPTY(t)
-	defer release()
-	d, current, ac, sends := newManualSessionWithPTYs(t, p)
-	ac.navigationCapabilities = protocol.NavigationCapabilityInventory
-	effect := beginRecentRoutePaletteEffect(t, d, current, ac)
-	effect.uiActionID = 123
+	synctest.Test(t, func(t *testing.T) {
+		p, release := newBlockingPTY(t)
+		defer release()
+		d, current, ac, sends := newManualSessionWithPTYs(t, p)
+		stopOverlayTimersAtCleanup(t, ac)
+		ac.navigationCapabilities = protocol.NavigationCapabilityInventory
+		effect := beginRecentRoutePaletteEffect(t, d, current, ac)
+		effect.uiActionID = 123
 
-	interaction := d.enterPalette(current, ac)
-	published := protocol.NavigationInventoryPublication{
-		InteractionGeneration: interaction, PublicationGeneration: 1,
-		Groups: []protocol.NavigationInventorySourceGroup{
-			{
-				SourceKey: "local", Status: protocol.NavigationInventorySourceOK,
-				Entries: []protocol.NavigationInventoryEntry{
-					{SourceKey: "local", EntryKey: "aaa/zzqlocal", Name: "zzqlocal", DisplayOrigin: "local", State: "up"},
+		interaction := d.enterPalette(current, ac)
+		published := protocol.NavigationInventoryPublication{
+			InteractionGeneration: interaction, PublicationGeneration: 1,
+			Groups: []protocol.NavigationInventorySourceGroup{
+				{
+					SourceKey: "local", Status: protocol.NavigationInventorySourceOK,
+					Entries: []protocol.NavigationInventoryEntry{
+						{SourceKey: "local", EntryKey: "aaa/zzqlocal", Name: "zzqlocal", DisplayOrigin: "local", State: "up"},
+					},
+				},
+				{
+					SourceKey: "arch", Status: protocol.NavigationInventorySourceOK,
+					Entries: []protocol.NavigationInventoryEntry{
+						{SourceKey: "arch", EntryKey: "aaa/zzqremote", Name: "zzqremote", DisplayOrigin: "arch", State: "down", Reason: "unreachable"},
+					},
 				},
 			},
-			{
-				SourceKey: "arch", Status: protocol.NavigationInventorySourceOK,
-				Entries: []protocol.NavigationInventoryEntry{
-					{SourceKey: "arch", EntryKey: "aaa/zzqremote", Name: "zzqremote", DisplayOrigin: "arch", State: "down", Reason: "unreachable"},
-				},
-			},
-		},
-	}
-	ac.overlays.paletteMu.Lock()
-	require.True(t, admitPaletteInventoryPublication(ac.overlays, published))
-	ac.overlays.paletteMu.Unlock()
-	d.refreshPalette(ac)
+		}
+		ac.overlays.paletteMu.Lock()
+		require.True(t, admitPaletteInventoryPublication(ac.overlays, published))
+		ac.overlays.paletteMu.Unlock()
+		d.refreshPalette(ac)
 
-	d.handlePaletteInput(ac, []byte("zzqremote\r"), effect)
+		d.handlePaletteInput(ac, []byte("zzqremote\r"), effect)
 
-	ac.overlays.paletteMu.Lock()
-	feedback := ac.overlays.paletteFeedback
-	ac.overlays.paletteMu.Unlock()
-	require.Equal(t, "remote sessions are visible but cannot be attached", feedback)
-	require.True(t, ac.overlays.paletteActive(), "refused remote selection keeps the palette open")
-	select {
-	case frame := <-sends:
-		require.NotEqual(t, "NavigationInventorySelection", envelopeMessageName(t, frame.Payload), "remote Enter must not emit a selection")
-	case <-time.After(200 * time.Millisecond):
-	}
+		ac.overlays.paletteMu.Lock()
+		feedback := ac.overlays.paletteFeedback
+		ac.overlays.paletteMu.Unlock()
+		require.Equal(t, "remote sessions are visible but cannot be attached", feedback)
+		require.True(t, ac.overlays.paletteActive(), "refused remote selection keeps the palette open")
+		select {
+		case frame := <-sends:
+			require.NotEqual(t, "NavigationInventorySelection", envelopeMessageName(t, frame.Payload), "remote Enter must not emit a selection")
+		case <-time.After(200 * time.Millisecond):
+		}
+	})
 }
 
 // TestPaletteInventoryFailureCorrelatesToPendingSelection pins durable
@@ -192,34 +199,37 @@ func TestPaletteInventoryRemoteEnterNeverAttaches(t *testing.T) {
 // notice even with the palette closed, shows contextual feedback while
 // the interaction is open, and drops when nothing matches.
 func TestPaletteInventoryFailureCorrelatesToPendingSelection(t *testing.T) {
-	p, release := newBlockingPTY(t)
-	defer release()
-	d, current, ac, _ := newManualSessionWithPTYs(t, p)
+	synctest.Test(t, func(t *testing.T) {
+		p, release := newBlockingPTY(t)
+		defer release()
+		d, current, ac, _ := newManualSessionWithPTYs(t, p)
+		stopOverlayTimersAtCleanup(t, ac)
 
-	interaction := d.enterPalette(current, ac)
-	selection := protocol.NavigationInventorySelection{
-		InteractionGeneration: interaction, PublicationGeneration: 1,
-		SourceKey: "local", EntryKey: "aaa/zzqimported",
-	}
-	ac.overlays.paletteMu.Lock()
-	freezePaletteInventorySelection(ac.overlays, selection)
-	ac.overlays.paletteMu.Unlock()
-	d.closeExecutedPalette(ac, nil, 1, "")
+		interaction := d.enterPalette(current, ac)
+		selection := protocol.NavigationInventorySelection{
+			InteractionGeneration: interaction, PublicationGeneration: 1,
+			SourceKey: "local", EntryKey: "aaa/zzqimported",
+		}
+		ac.overlays.paletteMu.Lock()
+		freezePaletteInventorySelection(ac.overlays, selection)
+		ac.overlays.paletteMu.Unlock()
+		d.closeExecutedPalette(ac, nil, 1, "")
 
-	matched := protocol.NavigationInventoryFailure{
-		InteractionGeneration: interaction, SourceKey: "local", EntryKey: "aaa/zzqimported",
-		Code: protocol.NavigationInventorySourceGone,
-	}
-	d.handleAttachmentClientMessage(captureAttachmentCapability(current, ac, ac.transport()), matched)
-	require.True(t, hasInventoryNotice(t, ac), "matched failure must record a durable notice")
+		matched := protocol.NavigationInventoryFailure{
+			InteractionGeneration: interaction, SourceKey: "local", EntryKey: "aaa/zzqimported",
+			Code: protocol.NavigationInventorySourceGone,
+		}
+		d.handleAttachmentClientMessage(captureAttachmentCapability(current, ac, ac.transport()), matched)
+		require.True(t, hasInventoryNotice(t, ac), "matched failure must record a durable notice")
 
-	stale := protocol.NavigationInventoryFailure{
-		InteractionGeneration: interaction + 1, SourceKey: "local", EntryKey: "aaa/zzqimported",
-		Code: protocol.NavigationInventorySourceGone,
-	}
-	before := countInventoryNotices(t, ac)
-	d.handleAttachmentClientMessage(captureAttachmentCapability(current, ac, ac.transport()), stale)
-	require.Equal(t, before, countInventoryNotices(t, ac), "unmatched failure must drop")
+		stale := protocol.NavigationInventoryFailure{
+			InteractionGeneration: interaction + 1, SourceKey: "local", EntryKey: "aaa/zzqimported",
+			Code: protocol.NavigationInventorySourceGone,
+		}
+		before := countInventoryNotices(t, ac)
+		d.handleAttachmentClientMessage(captureAttachmentCapability(current, ac, ac.transport()), stale)
+		require.Equal(t, before, countInventoryNotices(t, ac), "unmatched failure must drop")
+	})
 }
 
 func hasInventoryNotice(t *testing.T, ac *attachedClient) bool {
@@ -242,46 +252,52 @@ func countInventoryNotices(t *testing.T, ac *attachedClient) int {
 // TestPaletteInventoryEscapeSendsCloseDemand pins the plain-cancel path: a
 // bare Escape cancels the unselected interaction and still stops polling.
 func TestPaletteInventoryEscapeSendsCloseDemand(t *testing.T) {
-	p, release := newBlockingPTY(t)
-	defer release()
-	d, current, ac, sends := newManualSessionWithPTYs(t, p)
-	ac.navigationCapabilities = protocol.NavigationCapabilityInventory
-	effect := beginRecentRoutePaletteEffect(t, d, current, ac)
+	synctest.Test(t, func(t *testing.T) {
+		p, release := newBlockingPTY(t)
+		defer release()
+		d, current, ac, sends := newManualSessionWithPTYs(t, p)
+		stopOverlayTimersAtCleanup(t, ac)
+		ac.navigationCapabilities = protocol.NavigationCapabilityInventory
+		effect := beginRecentRoutePaletteEffect(t, d, current, ac)
 
-	interaction := d.enterPalette(current, ac)
-	d.sendPaletteInventoryDemand(ac, effect, true, interaction)
-	awaitFrame(t, sends, "NavigationInventoryDemand")
+		interaction := d.enterPalette(current, ac)
+		d.sendPaletteInventoryDemand(ac, effect, true, interaction)
+		requireEnvelope(t, sends, "NavigationInventoryDemand")
 
-	d.handlePaletteInput(ac, []byte{0x1b}, effect)
-	closeFrame := awaitFrame(t, sends, "NavigationInventoryDemand")
-	closeDemand, ok := decodeServerMessage(t, closeFrame).(protocol.NavigationInventoryDemand)
-	require.True(t, ok)
-	require.False(t, closeDemand.Open)
-	require.Equal(t, interaction, closeDemand.InteractionGeneration)
-	require.False(t, ac.overlays.paletteActive())
+		d.handlePaletteInput(ac, []byte{0x1b}, effect)
+		closeFrame := requireEnvelope(t, sends, "NavigationInventoryDemand")
+		closeDemand, ok := decodeServerMessage(t, closeFrame).(protocol.NavigationInventoryDemand)
+		require.True(t, ok)
+		require.False(t, closeDemand.Open)
+		require.Equal(t, interaction, closeDemand.InteractionGeneration)
+		require.False(t, ac.overlays.paletteActive())
+	})
 }
 
 // TestPaletteInventoryDemandRequiresCapability pins the serving-side gate:
 // without the advertised capability bit no demand crosses, even with an
 // admitted effect, and the overlay namespace still opens natively.
 func TestPaletteInventoryDemandRequiresCapability(t *testing.T) {
-	p, release := newBlockingPTY(t)
-	defer release()
-	d, current, ac, sends := newManualSessionWithPTYs(t, p)
-	effect := beginRecentRoutePaletteEffect(t, d, current, ac)
+	synctest.Test(t, func(t *testing.T) {
+		p, release := newBlockingPTY(t)
+		defer release()
+		d, current, ac, sends := newManualSessionWithPTYs(t, p)
+		stopOverlayTimersAtCleanup(t, ac)
+		effect := beginRecentRoutePaletteEffect(t, d, current, ac)
 
-	interaction := d.enterPalette(current, ac)
-	d.sendPaletteInventoryDemand(ac, effect, true, interaction)
-	deadline := time.After(time.Second)
-	for {
-		select {
-		case frame := <-sends:
-			if envelopeMessageName(t, frame.Payload) == "NavigationInventoryDemand" {
-				t.Fatalf("demand without capability must not send")
+		interaction := d.enterPalette(current, ac)
+		d.sendPaletteInventoryDemand(ac, effect, true, interaction)
+		deadline := time.After(time.Second)
+		for {
+			select {
+			case frame := <-sends:
+				if envelopeMessageName(t, frame.Payload) == "NavigationInventoryDemand" {
+					t.Fatalf("demand without capability must not send")
+				}
+			case <-deadline:
+				require.True(t, ac.overlays.paletteActive())
+				return
 			}
-		case <-deadline:
-			require.True(t, ac.overlays.paletteActive())
-			return
 		}
-	}
+	})
 }

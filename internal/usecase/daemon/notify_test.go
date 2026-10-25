@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -21,59 +22,67 @@ import (
 )
 
 func TestReportAttachmentErrorPreservesLocalOrNilScope(t *testing.T) {
-	d := newTestDaemon(t, nil, newStubClock(t))
-	local := &session{sessionCore: sessionCore{id: "local", name: "local"}}
-	d.reportAttachmentError(local, domain.UserWarn(domain.NoticeClipboard, "local failure", nil))
+	synctest.Test(t, func(t *testing.T) {
+		d := newTestDaemon(t, nil, newStubClock(t))
+		local := &session{sessionCore: sessionCore{id: "local", name: "local"}}
+		d.reportAttachmentError(local, domain.UserWarn(domain.NoticeClipboard, "local failure", nil))
 
-	history := d.notices.history()
-	require.Len(t, history, 1)
-	require.Equal(t, local.id, history[0].SessionID)
+		history := d.notices.history()
+		require.Len(t, history, 1)
+		require.Equal(t, local.id, history[0].SessionID)
+	})
 }
 
 func TestClientNoticeMapsFixedActionsAndDismissesOnlyConnectionToast(t *testing.T) {
-	d, sess, ac, _ := newNoticeFixture(t, &noticeClock{})
-	d.handleClientNotice(sess, ac, protocol.ClientNotice{Action: protocol.ClientNoticeClipboardFallback})
-	d.handleClientNotice(sess, ac, protocol.ClientNotice{Action: protocol.ClientNoticeClipboardTooLarge})
-	d.handleClientNotice(sess, ac, protocol.ClientNotice{Action: protocol.ClientNoticeLinkDegraded})
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, ac, _ := newNoticeFixture(t, &noticeClock{})
+		stopOverlayTimersAtCleanup(t, ac)
+		d.handleClientNotice(sess, ac, protocol.ClientNotice{Action: protocol.ClientNoticeClipboardFallback})
+		d.handleClientNotice(sess, ac, protocol.ClientNotice{Action: protocol.ClientNoticeClipboardTooLarge})
+		d.handleClientNotice(sess, ac, protocol.ClientNotice{Action: protocol.ClientNoticeLinkDegraded})
 
-	toasts, _ := visibleToasts(ac)
-	require.Len(t, toasts, 3)
-	require.Equal(t, []domain.Notification{
-		{Code: domain.NoticeConnection, Severity: domain.NoticeWarn, Message: "connection degraded", SessionID: sess.id, Count: 1},
-		{Code: domain.NoticeClipboardTooLarge, Severity: domain.NoticeWarn, Message: "image too large to paste", SessionID: sess.id, Count: 1},
-		{Code: domain.NoticeClipboard, Severity: domain.NoticeError, Message: "image paste failed; sent Ctrl+V", SessionID: sess.id, Count: 1},
-	}, stripNoticeTimes(toasts))
+		toasts, _ := visibleToasts(ac)
+		require.Len(t, toasts, 3)
+		require.Equal(t, []domain.Notification{
+			{Code: domain.NoticeConnection, Severity: domain.NoticeWarn, Message: "connection degraded", SessionID: sess.id, Count: 1},
+			{Code: domain.NoticeClipboardTooLarge, Severity: domain.NoticeWarn, Message: "image too large to paste", SessionID: sess.id, Count: 1},
+			{Code: domain.NoticeClipboard, Severity: domain.NoticeError, Message: "image paste failed; sent Ctrl+V", SessionID: sess.id, Count: 1},
+		}, stripNoticeTimes(toasts))
 
-	d.handleClientNotice(sess, ac, protocol.ClientNotice{Action: protocol.ClientNoticeLinkConnected})
-	toasts, _ = visibleToasts(ac)
-	require.Len(t, toasts, 2)
-	for _, toast := range toasts {
-		require.NotEqual(t, domain.NoticeConnection, toast.Code)
-	}
+		d.handleClientNotice(sess, ac, protocol.ClientNotice{Action: protocol.ClientNoticeLinkConnected})
+		toasts, _ = visibleToasts(ac)
+		require.Len(t, toasts, 2)
+		for _, toast := range toasts {
+			require.NotEqual(t, domain.NoticeConnection, toast.Code)
+		}
+	})
 }
 
 func TestMalformedClientNoticeIsIgnored(t *testing.T) {
-	d, sess, ac, _ := newNoticeFixture(t, &noticeClock{})
-	var logs bytes.Buffer
-	d.log = slog.New(slog.NewTextHandler(&logs, nil))
-	d.attachCoordinator(sess, nil, ac, true)
-	tr, ok := ac.tr.(*mockServerConnection)
-	require.True(t, ok, "attached client connection must use the test wrapper")
-	frames := []wire.Envelope{
-		{Payload: []byte{0xff}},
-		mustClientEnvelope(protocol.Detach{}),
-	}
-	tr.EXPECT().Recv().RunAndReturn(func() (wire.Envelope, error) {
-		frame := frames[0]
-		frames = frames[1:]
-		return frame, nil
-	}).Times(2)
-	d.runConnLoop(ac)
-	toasts, _ := visibleToasts(ac)
-	require.Empty(t, toasts)
-	require.Empty(t, d.notices.history())
-	require.Contains(t, logs.String(), "rejected client message")
-	require.Contains(t, logs.String(), "category=1")
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, ac, _ := newNoticeFixture(t, &noticeClock{})
+		stopOverlayTimersAtCleanup(t, ac)
+		var logs bytes.Buffer
+		d.log = slog.New(slog.NewTextHandler(&logs, nil))
+		d.attachCoordinator(sess, nil, ac, true)
+		tr, ok := ac.tr.(*mockServerConnection)
+		require.True(t, ok, "attached client connection must use the test wrapper")
+		frames := []wire.Envelope{
+			{Payload: []byte{0xff}},
+			mustClientEnvelope(protocol.Detach{}),
+		}
+		tr.EXPECT().Recv().RunAndReturn(func() (wire.Envelope, error) {
+			frame := frames[0]
+			frames = frames[1:]
+			return frame, nil
+		}).Times(2)
+		d.runConnLoop(ac)
+		toasts, _ := visibleToasts(ac)
+		require.Empty(t, toasts)
+		require.Empty(t, d.notices.history())
+		require.Contains(t, logs.String(), "rejected client message")
+		require.Contains(t, logs.String(), "category=1")
+	})
 }
 
 func stripNoticeTimes(notices []domain.Notification) []domain.Notification {
@@ -280,6 +289,7 @@ func newNoticeFixture(t *testing.T, clk ports.Clock) (*Daemon, *session, *attach
 	tr, sends := newCapturingTransport(t)
 	ac := &attachedClient{tr: tr, output: newOutputStateStream(), geometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}}
 	ac.initOverlays()
+	stopOverlayTimersAtCleanup(t, ac)
 	sctx, cancel := context.WithCancel(d.serveCtx)
 	wctx, wcancel := context.WithCancel(sctx)
 	tb := newTab(p, domain.Size{Cols: 80, Rows: 23})
@@ -353,55 +363,63 @@ func TestReportErrorUserErrorBecomesNotification(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
+			synctest.Test(t, func(t *testing.T) {
+				d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
+				stopOverlayTimersAtCleanup(t, ac)
 
-			d.reportError(sess, tc.err)
+				d.reportError(sess, tc.err)
 
-			hist := d.notices.history()
-			require.Len(t, hist, 1)
-			require.Equal(t, tc.err.Code, hist[0].Code)
-			require.Equal(t, tc.wantSev, hist[0].Severity)
-			require.Equal(t, tc.err.Msg, hist[0].Message)
-			require.Equal(t, sess.id, hist[0].SessionID)
-			require.Equal(t, 1, hist[0].Count)
-			// Details carry the cause chain; the message never does.
-			require.Contains(t, hist[0].Details, tc.err.Err.Error())
-			require.NotContains(t, hist[0].Message, tc.err.Err.Error())
+				hist := d.notices.history()
+				require.Len(t, hist, 1)
+				require.Equal(t, tc.err.Code, hist[0].Code)
+				require.Equal(t, tc.wantSev, hist[0].Severity)
+				require.Equal(t, tc.err.Msg, hist[0].Message)
+				require.Equal(t, sess.id, hist[0].SessionID)
+				require.Equal(t, 1, hist[0].Count)
+				// Details carry the cause chain; the message never does.
+				require.Contains(t, hist[0].Details, tc.err.Err.Error())
+				require.NotContains(t, hist[0].Message, tc.err.Err.Error())
 
-			toasts := awaitToastCount(t, ac, 1)
-			require.Equal(t, tc.err.Msg, toasts[0].Message)
-			require.Equal(t, tc.err.Code, toasts[0].Code)
+				toasts := awaitToastCount(t, ac, 1)
+				require.Equal(t, tc.err.Msg, toasts[0].Message)
+				require.Equal(t, tc.err.Code, toasts[0].Code)
+			})
 		})
 	}
 }
 
 func TestReportErrorDetailsJoinUnwrapChain(t *testing.T) {
-	d, sess, _, _ := newNoticeFixture(t, newNoticeClock())
-	root := errors.New("permission denied")
-	mid := fmt.Errorf("open /dev/pts/3: %w", root)
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, _, _ := newNoticeFixture(t, newNoticeClock())
+		root := errors.New("permission denied")
+		mid := fmt.Errorf("open /dev/pts/3: %w", root)
 
-	d.reportError(sess, domain.UserErr(domain.NoticePaneSpawn, "could not open pane", mid))
+		d.reportError(sess, domain.UserErr(domain.NoticePaneSpawn, "could not open pane", mid))
 
-	hist := d.notices.history()
-	require.Len(t, hist, 1)
-	require.Equal(t, mid.Error()+" ← "+root.Error(), hist[0].Details)
+		hist := d.notices.history()
+		require.Len(t, hist, 1)
+		require.Equal(t, mid.Error()+" ← "+root.Error(), hist[0].Details)
+	})
 }
 
 func TestReportErrorUnknownErrorBecomesInternal(t *testing.T) {
-	d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
-	raw := errors.New("something unclassified broke")
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
+		stopOverlayTimersAtCleanup(t, ac)
+		raw := errors.New("something unclassified broke")
 
-	d.reportError(sess, raw)
+		d.reportError(sess, raw)
 
-	hist := d.notices.history()
-	require.Len(t, hist, 1)
-	require.Equal(t, domain.NoticeInternal, hist[0].Code)
-	require.Equal(t, domain.NoticeError, hist[0].Severity)
-	require.Equal(t, "internal error", hist[0].Message)
-	require.Equal(t, raw.Error(), hist[0].Details)
+		hist := d.notices.history()
+		require.Len(t, hist, 1)
+		require.Equal(t, domain.NoticeInternal, hist[0].Code)
+		require.Equal(t, domain.NoticeError, hist[0].Severity)
+		require.Equal(t, "internal error", hist[0].Message)
+		require.Equal(t, raw.Error(), hist[0].Details)
 
-	toasts := awaitToastCount(t, ac, 1)
-	require.Equal(t, "internal error", toasts[0].Message)
+		toasts := awaitToastCount(t, ac, 1)
+		require.Equal(t, "internal error", toasts[0].Message)
+	})
 }
 
 func TestReportErrorBenignFiltered(t *testing.T) {
@@ -419,13 +437,16 @@ func TestReportErrorBenignFiltered(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
+			synctest.Test(t, func(t *testing.T) {
+				d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
+				stopOverlayTimersAtCleanup(t, ac)
 
-			d.reportError(sess, tc.err)
+				d.reportError(sess, tc.err)
 
-			require.Empty(t, d.notices.history())
-			toasts, _ := visibleToasts(ac)
-			require.Empty(t, toasts)
+				require.Empty(t, d.notices.history())
+				toasts, _ := visibleToasts(ac)
+				require.Empty(t, toasts)
+			})
 		})
 	}
 }
@@ -433,291 +454,323 @@ func TestReportErrorBenignFiltered(t *testing.T) {
 // TestReportErrorNonBenignIsNeverDropped guards the inverse of the filter: an
 // error that merely reads like a sentinel must still reach history.
 func TestReportErrorNonBenignIsNeverDropped(t *testing.T) {
-	d, sess, _, _ := newNoticeFixture(t, newNoticeClock())
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, _, _ := newNoticeFixture(t, newNoticeClock())
 
-	d.reportError(sess, errors.New("no pane in that direction"))
+		d.reportError(sess, errors.New("no pane in that direction"))
 
-	require.Len(t, d.notices.history(), 1, "a look-alike error must not be filtered by message text")
+		require.Len(t, d.notices.history(), 1, "a look-alike error must not be filtered by message text")
+	})
 }
 
 func TestNotifyRoutesToSessionClientOnly(t *testing.T) {
-	d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
+		stopOverlayTimersAtCleanup(t, ac)
 
-	other := &attachedClient{output: newOutputStateStream(), geometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}}
-	other.initOverlays()
-	sess2 := &session{sessionCore: sessionCore{id: "manual-2", name: "other", attachments: map[*attachedClient]struct{}{other: {}}}, ctx: sess.ctx, cancel: func() {}}
-	other.setSession(sess2)
-	d.mu.Lock()
-	d.sessions[sess2.id] = sess2
-	d.mu.Unlock()
+		other := &attachedClient{output: newOutputStateStream(), geometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}}
+		other.initOverlays()
+		stopOverlayTimersAtCleanup(t, other)
+		sess2 := &session{sessionCore: sessionCore{id: "manual-2", name: "other", attachments: map[*attachedClient]struct{}{other: {}}}, ctx: sess.ctx, cancel: func() {}}
+		other.setSession(sess2)
+		d.mu.Lock()
+		d.sessions[sess2.id] = sess2
+		d.mu.Unlock()
 
-	d.notify(sess, domain.NoticeInfo, domain.NoticeClipboard, "copied", nil)
+		d.notify(sess, domain.NoticeInfo, domain.NoticeClipboard, "copied", nil)
 
-	toasts := awaitToastCount(t, ac, 1)
-	require.Equal(t, sess.id, toasts[0].SessionID)
-	otherToasts, _ := visibleToasts(other)
-	require.Empty(t, otherToasts, "another session's client must be untouched by session-scoped notices")
+		toasts := awaitToastCount(t, ac, 1)
+		require.Equal(t, sess.id, toasts[0].SessionID)
+		otherToasts, _ := visibleToasts(other)
+		require.Empty(t, otherToasts, "another session's client must be untouched by session-scoped notices")
+	})
 }
 
 func TestNotifySessionScopedSerializesDetachThroughToastPublication(t *testing.T) {
-	d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
+		stopOverlayTimersAtCleanup(t, ac)
 
-	selected := make(chan bool, 1)
-	releasePublication := make(chan struct{})
-	d.notices.beforeSessionDelivery = func() {
-		unlocked := d.notices.routingMu.TryLock()
-		if unlocked {
-			d.notices.routingMu.Unlock()
+		selected := make(chan bool, 1)
+		releasePublication := make(chan struct{})
+		d.notices.beforeSessionDelivery = func() {
+			unlocked := d.notices.routingMu.TryLock()
+			if unlocked {
+				d.notices.routingMu.Unlock()
+			}
+			selected <- !unlocked
+			<-releasePublication
 		}
-		selected <- !unlocked
-		<-releasePublication
-	}
-	t.Cleanup(func() {
+		t.Cleanup(func() {
+			select {
+			case <-releasePublication:
+			default:
+				close(releasePublication)
+			}
+		})
+
+		notifyDone := make(chan struct{})
+		go func() {
+			d.notify(sess, domain.NoticeInfo, domain.NoticeUser, "hello", nil)
+			close(notifyDone)
+		}()
+		require.True(t, <-selected, "routingMu must remain held from attachment selection through toast publication")
+
+		detachStarted := make(chan struct{})
+		detachDone := make(chan bool, 1)
+		go func() {
+			close(detachStarted)
+			detachDone <- d.detachIfCurrent(sess, ac)
+		}()
+		<-detachStarted
 		select {
-		case <-releasePublication:
+		case <-detachDone:
+			t.Fatal("detach completed before the selected toast was durably published")
 		default:
-			close(releasePublication)
 		}
+
+		close(releasePublication)
+		<-notifyDone
+		require.True(t, <-detachDone)
+
+		toasts, _ := visibleToasts(ac)
+		require.Len(t, toasts, 1)
+		require.Equal(t, "hello", toasts[0].Message)
+		require.Empty(t, d.notices.drainPending(), "a toast published before detach must not also be queued")
 	})
-
-	notifyDone := make(chan struct{})
-	go func() {
-		d.notify(sess, domain.NoticeInfo, domain.NoticeUser, "hello", nil)
-		close(notifyDone)
-	}()
-	require.True(t, <-selected, "routingMu must remain held from attachment selection through toast publication")
-
-	detachStarted := make(chan struct{})
-	detachDone := make(chan bool, 1)
-	go func() {
-		close(detachStarted)
-		detachDone <- d.detachIfCurrent(sess, ac)
-	}()
-	<-detachStarted
-	select {
-	case <-detachDone:
-		t.Fatal("detach completed before the selected toast was durably published")
-	default:
-	}
-
-	close(releasePublication)
-	<-notifyDone
-	require.True(t, <-detachDone)
-
-	toasts, _ := visibleToasts(ac)
-	require.Len(t, toasts, 1)
-	require.Equal(t, "hello", toasts[0].Message)
-	require.Empty(t, d.notices.drainPending(), "a toast published before detach must not also be queued")
 }
 
 func TestNotifySessionScopedReleasesRoutingBeforeRepaint(t *testing.T) {
-	d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
+		stopOverlayTimersAtCleanup(t, ac)
 
-	repaintObserved := make(chan bool, 1)
-	ac.renderStages.capture = func() {
-		unlocked := d.notices.routingMu.TryLock()
-		if unlocked {
-			d.notices.routingMu.Unlock()
+		repaintObserved := make(chan bool, 1)
+		ac.renderStages.capture = func() {
+			unlocked := d.notices.routingMu.TryLock()
+			if unlocked {
+				d.notices.routingMu.Unlock()
+			}
+			repaintObserved <- unlocked
 		}
-		repaintObserved <- unlocked
-	}
 
-	d.notify(sess, domain.NoticeInfo, domain.NoticeUser, "hello", nil)
+		d.notify(sess, domain.NoticeInfo, domain.NoticeUser, "hello", nil)
 
-	require.True(t, <-repaintObserved, "notice repaint must run without routingMu held")
+		require.True(t, <-repaintObserved, "notice repaint must run without routingMu held")
+	})
 }
 
 func TestSessionScopedNoticeQueuedWhileDetached(t *testing.T) {
-	d, sessA, oldA, _ := newNoticeFixture(t, newNoticeClock())
-	sessA.mu.Lock()
-	clearAttachmentsForTestLocked(sessA)
-	sessA.mu.Unlock()
+	synctest.Test(t, func(t *testing.T) {
+		d, sessA, oldA, _ := newNoticeFixture(t, newNoticeClock())
+		sessA.mu.Lock()
+		clearAttachmentsForTestLocked(sessA)
+		sessA.mu.Unlock()
 
-	clientB := &attachedClient{output: newOutputStateStream(), geometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}}
-	clientB.initOverlays()
-	sessB := &session{sessionCore: sessionCore{id: "manual-2", name: "other"}, ctx: sessA.ctx, cancel: func() {}}
-	clientB.setSession(sessB)
-	d.mu.Lock()
-	d.sessions[sessB.id] = sessB
-	d.mu.Unlock()
+		clientB := &attachedClient{output: newOutputStateStream(), geometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}}
+		clientB.initOverlays()
+		stopOverlayTimersAtCleanup(t, clientB)
+		sessB := &session{sessionCore: sessionCore{id: "manual-2", name: "other"}, ctx: sessA.ctx, cancel: func() {}}
+		clientB.setSession(sessB)
+		d.mu.Lock()
+		d.sessions[sessB.id] = sessB
+		d.mu.Unlock()
 
-	d.notify(sessA, domain.NoticeInfo, domain.NoticeUser, "hello from a script", nil)
-	// Use the same code globally to prove pending coalescing includes scope.
-	d.NotifyGlobal(domain.NoticeWarn, domain.NoticeUser, "global announcement", nil)
+		d.notify(sessA, domain.NoticeInfo, domain.NoticeUser, "hello from a script", nil)
+		// Use the same code globally to prove pending coalescing includes scope.
+		d.NotifyGlobal(domain.NoticeWarn, domain.NoticeUser, "global announcement", nil)
 
-	history := d.notices.history()
-	require.Len(t, history, 2)
-	require.Equal(t, domain.NoticeUser, history[1].Code)
-	oldToasts, _ := visibleToasts(oldA)
-	require.Empty(t, oldToasts, "a detached session must not paint a toast")
+		history := d.notices.history()
+		require.Len(t, history, 2)
+		require.Equal(t, domain.NoticeUser, history[1].Code)
+		oldToasts, _ := visibleToasts(oldA)
+		require.Empty(t, oldToasts, "a detached session must not paint a toast")
 
-	sessB.mu.Lock()
-	sessB.registerAttachmentLocked(clientB)
-	sessB.mu.Unlock()
-	d.drainPendingForFirstPaint(sessB, clientB)
-	bToasts, _ := visibleToasts(clientB)
-	require.Len(t, bToasts, 1, "another session receives only the global notice")
-	require.Equal(t, domain.NoticeUser, bToasts[0].Code)
-	require.Empty(t, bToasts[0].SessionID)
-	require.Equal(t, "global announcement", bToasts[0].Message)
+		sessB.mu.Lock()
+		sessB.registerAttachmentLocked(clientB)
+		sessB.mu.Unlock()
+		d.drainPendingForFirstPaint(sessB, clientB)
+		bToasts, _ := visibleToasts(clientB)
+		require.Len(t, bToasts, 1, "another session receives only the global notice")
+		require.Equal(t, domain.NoticeUser, bToasts[0].Code)
+		require.Empty(t, bToasts[0].SessionID)
+		require.Equal(t, "global announcement", bToasts[0].Message)
 
-	sessA.mu.Lock()
-	sessA.registerAttachmentLocked(oldA)
-	sessA.mu.Unlock()
-	d.drainPendingForFirstPaint(sessA, oldA)
-	aToasts, _ := visibleToasts(oldA)
-	require.Len(t, aToasts, 1)
-	require.Equal(t, domain.NoticeUser, aToasts[0].Code)
-	require.Equal(t, sessA.id, aToasts[0].SessionID)
-	require.Equal(t, "hello from a script", aToasts[0].Message)
-	require.Equal(t, 1, aToasts[0].Count)
+		sessA.mu.Lock()
+		sessA.registerAttachmentLocked(oldA)
+		sessA.mu.Unlock()
+		d.drainPendingForFirstPaint(sessA, oldA)
+		aToasts, _ := visibleToasts(oldA)
+		require.Len(t, aToasts, 1)
+		require.Equal(t, domain.NoticeUser, aToasts[0].Code)
+		require.Equal(t, sessA.id, aToasts[0].SessionID)
+		require.Equal(t, "hello from a script", aToasts[0].Message)
+		require.Equal(t, 1, aToasts[0].Count)
 
-	secondA := &attachedClient{output: newOutputStateStream(), geometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}}
-	secondA.initOverlays()
-	secondA.setSession(sessA)
-	sessA.mu.Lock()
-	sessA.registerAttachmentLocked(secondA)
-	sessA.mu.Unlock()
-	d.drainPendingForFirstPaint(sessA, secondA)
-	secondToasts, _ := visibleToasts(secondA)
-	require.Empty(t, secondToasts, "a drained session notice must not be delivered twice")
+		secondA := &attachedClient{output: newOutputStateStream(), geometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}}
+		secondA.initOverlays()
+		stopOverlayTimersAtCleanup(t, secondA)
+		secondA.setSession(sessA)
+		sessA.mu.Lock()
+		sessA.registerAttachmentLocked(secondA)
+		sessA.mu.Unlock()
+		d.drainPendingForFirstPaint(sessA, secondA)
+		secondToasts, _ := visibleToasts(secondA)
+		require.Empty(t, secondToasts, "a drained session notice must not be delivered twice")
+	})
 }
 
 func TestNotifyGlobalFansOutToAttachedClients(t *testing.T) {
-	d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
+		stopOverlayTimersAtCleanup(t, ac)
 
-	second := &attachedClient{output: newOutputStateStream(), geometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}}
-	second.initOverlays()
-	sess2 := &session{sessionCore: sessionCore{id: "manual-2", name: "other", attachments: map[*attachedClient]struct{}{second: {}}}, ctx: sess.ctx, cancel: func() {}}
-	second.setSession(sess2)
-	d.mu.Lock()
-	d.sessions[sess2.id] = sess2
-	d.mu.Unlock()
+		second := &attachedClient{output: newOutputStateStream(), geometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}}
+		second.initOverlays()
+		stopOverlayTimersAtCleanup(t, second)
+		sess2 := &session{sessionCore: sessionCore{id: "manual-2", name: "other", attachments: map[*attachedClient]struct{}{second: {}}}, ctx: sess.ctx, cancel: func() {}}
+		second.setSession(sess2)
+		d.mu.Lock()
+		d.sessions[sess2.id] = sess2
+		d.mu.Unlock()
 
-	d.NotifyGlobal(domain.NoticeWarn, domain.NoticeConfigReload, "config reload failed", nil)
+		d.NotifyGlobal(domain.NoticeWarn, domain.NoticeConfigReload, "config reload failed", nil)
 
-	first := awaitToastCount(t, ac, 1)
-	require.Equal(t, domain.SessionID(""), first[0].SessionID, "global notices carry an empty session id")
-	secondToasts := awaitToastCount(t, second, 1)
-	require.Equal(t, domain.NoticeConfigReload, secondToasts[0].Code)
-	require.Empty(t, d.notices.drainPending(), "delivered globals must not also be queued")
+		first := awaitToastCount(t, ac, 1)
+		require.Equal(t, domain.SessionID(""), first[0].SessionID, "global notices carry an empty session id")
+		secondToasts := awaitToastCount(t, second, 1)
+		require.Equal(t, domain.NoticeConfigReload, secondToasts[0].Code)
+		require.Empty(t, d.notices.drainPending(), "delivered globals must not also be queued")
+	})
 }
 
 func TestNotifyGlobalDoesNotStrandNoticeWhenFirstPaintRacesQueue(t *testing.T) {
-	d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
-	sess.mu.Lock()
-	clearAttachmentsForTestLocked(sess)
-	sess.mu.Unlock()
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
+		stopOverlayTimersAtCleanup(t, ac)
+		sess.mu.Lock()
+		clearAttachmentsForTestLocked(sess)
+		sess.mu.Unlock()
 
-	routeObserved := make(chan struct{})
-	releaseRoute := make(chan struct{})
-	d.notices.beforeQueueGlobal = func() {
-		close(routeObserved)
-		<-releaseRoute
-	}
-	globalDone := make(chan struct{})
-	go func() {
-		d.NotifyGlobal(domain.NoticeError, domain.NoticeSnapshotWrite, "snapshot write failed", nil)
-		close(globalDone)
-	}()
-	<-routeObserved // global routing has observed the detached session
+		routeObserved := make(chan struct{})
+		releaseRoute := make(chan struct{})
+		d.notices.beforeQueueGlobal = func() {
+			close(routeObserved)
+			<-releaseRoute
+		}
+		globalDone := make(chan struct{})
+		go func() {
+			d.NotifyGlobal(domain.NoticeError, domain.NoticeSnapshotWrite, "snapshot write failed", nil)
+			close(globalDone)
+		}()
+		<-routeObserved // global routing has observed the detached session
 
-	// Publish the attachment and start firstPaint while global routing still
-	// owns its gate. firstPaint must wait for the queue, then drain it.
-	sess.mu.Lock()
-	sess.registerAttachmentLocked(ac)
-	sess.mu.Unlock()
-	paintDone := make(chan struct{})
-	go func() {
-		d.firstPaint(sess, ac)
-		close(paintDone)
-	}()
+		// Publish the attachment and start firstPaint while global routing still
+		// owns its gate. firstPaint must wait for the queue, then drain it.
+		sess.mu.Lock()
+		sess.registerAttachmentLocked(ac)
+		sess.mu.Unlock()
+		paintDone := make(chan struct{})
+		go func() {
+			d.firstPaint(sess, ac)
+			close(paintDone)
+		}()
 
-	close(releaseRoute)
-	<-globalDone
-	<-paintDone
-	toasts, _ := visibleToasts(ac)
-	require.Len(t, toasts, 1)
-	require.Equal(t, domain.NoticeSnapshotWrite, toasts[0].Code)
-	require.Empty(t, d.notices.drainPending())
+		close(releaseRoute)
+		<-globalDone
+		<-paintDone
+		toasts, _ := visibleToasts(ac)
+		require.Len(t, toasts, 1)
+		require.Equal(t, domain.NoticeSnapshotWrite, toasts[0].Code)
+		require.Empty(t, d.notices.drainPending())
+	})
 }
 
 func TestNotifyGlobalSerializesDetachWithDelivery(t *testing.T) {
-	d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
+		stopOverlayTimersAtCleanup(t, ac)
 
-	routeObserved := make(chan struct{})
-	releaseRoute := make(chan struct{})
-	d.notices.beforeGlobalDelivery = func() {
-		close(routeObserved)
-		<-releaseRoute
-	}
-	globalDone := make(chan struct{})
-	go func() {
-		d.NotifyGlobal(domain.NoticeWarn, domain.NoticeConfigReload, "config reload failed", nil)
-		close(globalDone)
-	}()
-	<-routeObserved // ac is selected and routingMu is held
+		routeObserved := make(chan struct{})
+		releaseRoute := make(chan struct{})
+		d.notices.beforeGlobalDelivery = func() {
+			close(routeObserved)
+			<-releaseRoute
+		}
+		globalDone := make(chan struct{})
+		go func() {
+			d.NotifyGlobal(domain.NoticeWarn, domain.NoticeConfigReload, "config reload failed", nil)
+			close(globalDone)
+		}()
+		<-routeObserved // ac is selected and routingMu is held
 
-	detached := make(chan bool, 1)
-	go func() { detached <- d.detachIfCurrent(sess, ac) }()
-	close(releaseRoute)
-	<-globalDone
-	require.True(t, <-detached)
+		detached := make(chan bool, 1)
+		go func() { detached <- d.detachIfCurrent(sess, ac) }()
+		close(releaseRoute)
+		<-globalDone
+		require.True(t, <-detached)
 
-	// The selected attachment received the toast before it could become stale.
-	toasts, _ := visibleToasts(ac)
-	require.Len(t, toasts, 1)
-	sess.mu.Lock()
-	require.Empty(t, sess.snapshotAttachmentsLocked())
-	sess.mu.Unlock()
+		// The selected attachment received the toast before it could become stale.
+		toasts, _ := visibleToasts(ac)
+		require.Len(t, toasts, 1)
+		sess.mu.Lock()
+		require.Empty(t, sess.snapshotAttachmentsLocked())
+		sess.mu.Unlock()
+	})
 }
 
 func TestDetachedNoticeCoalescingPreservesDistinctContentAndSeverity(t *testing.T) {
-	d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
-	sess.mu.Lock()
-	clearAttachmentsForTestLocked(sess)
-	sess.mu.Unlock()
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
+		stopOverlayTimersAtCleanup(t, ac)
+		sess.mu.Lock()
+		clearAttachmentsForTestLocked(sess)
+		sess.mu.Unlock()
 
-	d.notify(sess, domain.NoticeInfo, domain.NoticeUser, "build started", nil)
-	d.notify(sess, domain.NoticeWarn, domain.NoticeUser, "build delayed", nil)
-	d.notify(sess, domain.NoticeWarn, domain.NoticeUser, "build delayed", nil)
+		d.notify(sess, domain.NoticeInfo, domain.NoticeUser, "build started", nil)
+		d.notify(sess, domain.NoticeWarn, domain.NoticeUser, "build delayed", nil)
+		d.notify(sess, domain.NoticeWarn, domain.NoticeUser, "build delayed", nil)
 
-	sess.mu.Lock()
-	sess.registerAttachmentLocked(ac)
-	sess.mu.Unlock()
-	d.drainPendingForFirstPaint(sess, ac)
+		sess.mu.Lock()
+		sess.registerAttachmentLocked(ac)
+		sess.mu.Unlock()
+		d.drainPendingForFirstPaint(sess, ac)
 
-	toasts := awaitToastCount(t, ac, 2)
-	require.Equal(t, "build delayed", toasts[0].Message)
-	require.Equal(t, domain.NoticeWarn, toasts[0].Severity)
-	require.Equal(t, 2, toasts[0].Count, "identical detached notices coalesce")
-	require.Equal(t, "build started", toasts[1].Message)
-	require.Equal(t, domain.NoticeInfo, toasts[1].Severity)
-	require.Equal(t, 1, toasts[1].Count)
+		toasts := awaitToastCount(t, ac, 2)
+		require.Equal(t, "build delayed", toasts[0].Message)
+		require.Equal(t, domain.NoticeWarn, toasts[0].Severity)
+		require.Equal(t, 2, toasts[0].Count, "identical detached notices coalesce")
+		require.Equal(t, "build started", toasts[1].Message)
+		require.Equal(t, domain.NoticeInfo, toasts[1].Severity)
+		require.Equal(t, 1, toasts[1].Count)
+	})
 }
 
 func TestNotifyGlobalQueuesWhenUnattached(t *testing.T) {
-	d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
-	sess.mu.Lock()
-	clearAttachmentsForTestLocked(sess)
-	sess.mu.Unlock()
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
+		stopOverlayTimersAtCleanup(t, ac)
+		sess.mu.Lock()
+		clearAttachmentsForTestLocked(sess)
+		sess.mu.Unlock()
 
-	d.NotifyGlobal(domain.NoticeError, domain.NoticeSnapshotWrite, "snapshot write failed", nil)
+		d.NotifyGlobal(domain.NoticeError, domain.NoticeSnapshotWrite, "snapshot write failed", nil)
 
-	require.Len(t, d.notices.history(), 1)
-	toasts, _ := visibleToasts(ac)
-	require.Empty(t, toasts, "no attached client means nothing to paint yet")
+		require.Len(t, d.notices.history(), 1)
+		toasts, _ := visibleToasts(ac)
+		require.Empty(t, toasts, "no attached client means nothing to paint yet")
 
-	// Re-attach and let firstPaint drain the pending queue.
-	sess.mu.Lock()
-	sess.registerAttachmentLocked(ac)
-	sess.mu.Unlock()
-	d.firstPaint(sess, ac)
+		// Re-attach and let firstPaint drain the pending queue.
+		sess.mu.Lock()
+		sess.registerAttachmentLocked(ac)
+		sess.mu.Unlock()
+		d.firstPaint(sess, ac)
 
-	drained := awaitToastCount(t, ac, 1)
-	require.Equal(t, domain.NoticeSnapshotWrite, drained[0].Code)
-	require.Equal(t, "snapshot write failed", drained[0].Message)
-	require.Empty(t, d.notices.drainPending(), "firstPaint must consume the queue")
+		drained := awaitToastCount(t, ac, 1)
+		require.Equal(t, domain.NoticeSnapshotWrite, drained[0].Code)
+		require.Equal(t, "snapshot write failed", drained[0].Message)
+		require.Empty(t, d.notices.drainPending(), "firstPaint must consume the queue")
+	})
 }
 
 // TestNotifyGlobalPersistDisabledDrainsAtFirstAttach guards the store-open
@@ -725,30 +778,33 @@ func TestNotifyGlobalQueuesWhenUnattached(t *testing.T) {
 // via NotifyGlobal before any client has attached, and the first attach must
 // see it via firstPaint's pending-queue drain.
 func TestNotifyGlobalPersistDisabledDrainsAtFirstAttach(t *testing.T) {
-	d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
-	sess.mu.Lock()
-	clearAttachmentsForTestLocked(sess)
-	sess.mu.Unlock()
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
+		stopOverlayTimersAtCleanup(t, ac)
+		sess.mu.Lock()
+		clearAttachmentsForTestLocked(sess)
+		sess.mu.Unlock()
 
-	cause := errors.New("open store.db: permission denied")
-	d.NotifyGlobal(domain.NoticeWarn, domain.NoticePersistDisabled,
-		"session persistence is disabled; sessions will not survive daemon restarts", cause)
+		cause := errors.New("open store.db: permission denied")
+		d.NotifyGlobal(domain.NoticeWarn, domain.NoticePersistDisabled,
+			"session persistence is disabled; sessions will not survive daemon restarts", cause)
 
-	require.Len(t, d.notices.history(), 1)
-	toasts, _ := visibleToasts(ac)
-	require.Empty(t, toasts, "no attached client means nothing to paint yet")
+		require.Len(t, d.notices.history(), 1)
+		toasts, _ := visibleToasts(ac)
+		require.Empty(t, toasts, "no attached client means nothing to paint yet")
 
-	// Re-attach and let firstPaint drain the pending queue.
-	sess.mu.Lock()
-	sess.registerAttachmentLocked(ac)
-	sess.mu.Unlock()
-	d.firstPaint(sess, ac)
+		// Re-attach and let firstPaint drain the pending queue.
+		sess.mu.Lock()
+		sess.registerAttachmentLocked(ac)
+		sess.mu.Unlock()
+		d.firstPaint(sess, ac)
 
-	drained := awaitToastCount(t, ac, 1)
-	require.Equal(t, domain.NoticePersistDisabled, drained[0].Code)
-	require.Equal(t, domain.NoticeWarn, drained[0].Severity)
-	require.Equal(t, "session persistence is disabled; sessions will not survive daemon restarts", drained[0].Message)
-	require.Empty(t, d.notices.drainPending(), "firstPaint must consume the queue")
+		drained := awaitToastCount(t, ac, 1)
+		require.Equal(t, domain.NoticePersistDisabled, drained[0].Code)
+		require.Equal(t, domain.NoticeWarn, drained[0].Severity)
+		require.Equal(t, "session persistence is disabled; sessions will not survive daemon restarts", drained[0].Message)
+		require.Empty(t, d.notices.drainPending(), "firstPaint must consume the queue")
+	})
 }
 
 // levelCaptureHandler records the slog.Level of every record it's handed, so
@@ -782,77 +838,91 @@ func TestNotifyLogsAtSeverityLevel(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d := newTestDaemon(t, nil, newNoticeClock())
-			capture := &levelCaptureHandler{}
-			d.log = slog.New(capture)
+			synctest.Test(t, func(t *testing.T) {
+				d := newTestDaemon(t, nil, newNoticeClock())
+				capture := &levelCaptureHandler{}
+				d.log = slog.New(capture)
 
-			d.notify(nil, tt.sev, domain.NoticeClipboard, "msg", nil)
+				d.notify(nil, tt.sev, domain.NoticeClipboard, "msg", nil)
 
-			require.Equal(t, []slog.Level{tt.want}, capture.levels)
+				require.Equal(t, []slog.Level{tt.want}, capture.levels)
+			})
 		})
 	}
 }
 
 func TestShowToastCoalesceAndTrim(t *testing.T) {
 	t.Run("identical notices coalesce and renew their ttl", func(t *testing.T) {
-		clk := newNoticeClock()
-		d, sess, ac, _ := newNoticeFixture(t, clk)
+		synctest.Test(t, func(t *testing.T) {
+			clk := newNoticeClock()
+			d, sess, ac, _ := newNoticeFixture(t, clk)
+			stopOverlayTimersAtCleanup(t, ac)
 
-		d.notify(sess, domain.NoticeInfo, domain.NoticeUser, "build finished", nil)
-		d.notify(sess, domain.NoticeInfo, domain.NoticeUser, "build finished", nil)
+			d.notify(sess, domain.NoticeInfo, domain.NoticeUser, "build finished", nil)
+			d.notify(sess, domain.NoticeInfo, domain.NoticeUser, "build finished", nil)
 
-		toasts := awaitToastCount(t, ac, 1)
-		require.Equal(t, 2, toasts[0].Count)
-		require.Equal(t, []time.Duration{4 * time.Second}, toastLifetimes(ac), "coalescing keeps one entry with its severity ttl")
-		_, overflow := visibleToasts(ac)
-		require.Zero(t, overflow)
-		require.Len(t, d.notices.history(), 2, "coalescing is display-only; history keeps both")
+			toasts := awaitToastCount(t, ac, 1)
+			require.Equal(t, 2, toasts[0].Count)
+			require.Equal(t, []time.Duration{4 * time.Second}, toastLifetimes(ac), "coalescing keeps one entry with its severity ttl")
+			_, overflow := visibleToasts(ac)
+			require.Zero(t, overflow)
+			require.Len(t, d.notices.history(), 2, "coalescing is display-only; history keeps both")
+		})
 	})
 
 	t.Run("same code and scope preserve distinct message and severity", func(t *testing.T) {
-		clk := newNoticeClock()
-		d, sess, ac, _ := newNoticeFixture(t, clk)
+		synctest.Test(t, func(t *testing.T) {
+			clk := newNoticeClock()
+			d, sess, ac, _ := newNoticeFixture(t, clk)
+			stopOverlayTimersAtCleanup(t, ac)
 
-		d.notify(sess, domain.NoticeInfo, domain.NoticeUser, "build started", nil)
-		d.notify(sess, domain.NoticeWarn, domain.NoticeUser, "build delayed", nil)
+			d.notify(sess, domain.NoticeInfo, domain.NoticeUser, "build started", nil)
+			d.notify(sess, domain.NoticeWarn, domain.NoticeUser, "build delayed", nil)
 
-		toasts := awaitToastCount(t, ac, 2)
-		require.Equal(t, "build delayed", toasts[0].Message)
-		require.Equal(t, domain.NoticeWarn, toasts[0].Severity)
-		require.Equal(t, "build started", toasts[1].Message)
-		require.Equal(t, domain.NoticeInfo, toasts[1].Severity)
-		require.Equal(t, []time.Duration{6 * time.Second, 4 * time.Second}, toastLifetimes(ac), "each distinct notice keeps its severity ttl")
+			toasts := awaitToastCount(t, ac, 2)
+			require.Equal(t, "build delayed", toasts[0].Message)
+			require.Equal(t, domain.NoticeWarn, toasts[0].Severity)
+			require.Equal(t, "build started", toasts[1].Message)
+			require.Equal(t, domain.NoticeInfo, toasts[1].Severity)
+			require.Equal(t, []time.Duration{6 * time.Second, 4 * time.Second}, toastLifetimes(ac), "each distinct notice keeps its severity ttl")
+		})
 	})
 
 	t.Run("same code different scope does not coalesce", func(t *testing.T) {
-		d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
+		synctest.Test(t, func(t *testing.T) {
+			d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
+			stopOverlayTimersAtCleanup(t, ac)
 
-		d.notify(sess, domain.NoticeError, domain.NoticePaneSpawn, "could not open pane", nil)
-		d.notify(nil, domain.NoticeError, domain.NoticePaneSpawn, "could not open pane", nil)
+			d.notify(sess, domain.NoticeError, domain.NoticePaneSpawn, "could not open pane", nil)
+			d.notify(nil, domain.NoticeError, domain.NoticePaneSpawn, "could not open pane", nil)
 
-		toasts := awaitToastCount(t, ac, 2)
-		require.Equal(t, 1, toasts[0].Count)
-		require.Equal(t, 1, toasts[1].Count)
+			toasts := awaitToastCount(t, ac, 2)
+			require.Equal(t, 1, toasts[0].Count)
+			require.Equal(t, 1, toasts[1].Count)
+		})
 	})
 
 	t.Run("four distinct codes show three newest first and queue one", func(t *testing.T) {
-		d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
-		codes := []domain.NoticeCode{
-			domain.NoticePaneSpawn,
-			domain.NoticeTabSpawn,
-			domain.NoticeSnapshotWrite,
-			domain.NoticeClipboard,
-		}
-		for _, c := range codes {
-			d.notify(sess, domain.NoticeError, c, c.String(), nil)
-		}
+		synctest.Test(t, func(t *testing.T) {
+			d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
+			stopOverlayTimersAtCleanup(t, ac)
+			codes := []domain.NoticeCode{
+				domain.NoticePaneSpawn,
+				domain.NoticeTabSpawn,
+				domain.NoticeSnapshotWrite,
+				domain.NoticeClipboard,
+			}
+			for _, c := range codes {
+				d.notify(sess, domain.NoticeError, c, c.String(), nil)
+			}
 
-		toasts := awaitToastCount(t, ac, maxVisibleToasts)
-		require.Equal(t, []domain.NoticeCode{codes[2], codes[1], codes[0]}, []domain.NoticeCode{
-			toasts[0].Code, toasts[1].Code, toasts[2].Code,
-		}, "the first three show newest first; the fourth waits its turn")
-		_, waiting := visibleToasts(ac)
-		require.Equal(t, 1, waiting)
+			toasts := awaitToastCount(t, ac, maxVisibleToasts)
+			require.Equal(t, []domain.NoticeCode{codes[2], codes[1], codes[0]}, []domain.NoticeCode{
+				toasts[0].Code, toasts[1].Code, toasts[2].Code,
+			}, "the first three show newest first; the fourth waits its turn")
+			_, waiting := visibleToasts(ac)
+			require.Equal(t, 1, waiting)
+		})
 	})
 }
 
@@ -868,83 +938,95 @@ func TestNoticeTTLPerSeverity(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			require.Equal(t, tc.want, noticeTTL(tc.sev))
+			synctest.Test(t, func(t *testing.T) {
+				require.Equal(t, tc.want, noticeTTL(tc.sev))
 
-			clk := newNoticeClock()
-			d, sess, ac, _ := newNoticeFixture(t, clk)
-			d.notify(sess, tc.sev, domain.NoticeClipboard, "msg", nil)
-			awaitToastCount(t, ac, 1)
-			require.Equal(t, []time.Duration{tc.want}, clk.durations(), "the retained toast timer uses the severity TTL")
+				clk := newNoticeClock()
+				d, sess, ac, _ := newNoticeFixture(t, clk)
+				stopOverlayTimersAtCleanup(t, ac)
+				d.notify(sess, tc.sev, domain.NoticeClipboard, "msg", nil)
+				awaitToastCount(t, ac, 1)
+				require.Equal(t, []time.Duration{tc.want}, clk.durations(), "the retained toast timer uses the severity TTL")
+			})
 		})
 	}
 }
 
 func TestToastExpiresOnFakeClock(t *testing.T) {
-	clk := newNoticeClock()
-	d, sess, ac, sends := newNoticeFixture(t, clk)
+	synctest.Test(t, func(t *testing.T) {
+		clk := newNoticeClock()
+		d, sess, ac, sends := newNoticeFixture(t, clk)
+		stopOverlayTimersAtCleanup(t, ac)
 
-	d.notify(sess, domain.NoticeError, domain.NoticePaneSpawn, "could not open pane", nil)
-	awaitToastCount(t, ac, 1)
-	shown := awaitFrame(t, sends, "Output")
-	shownOutput := unmarshalTestOutput(t, shown.Payload)
-	terminal := vt.NewScreen(80, 25)
-	terminal.Write(shownOutput.Data)
+		d.notify(sess, domain.NoticeError, domain.NoticePaneSpawn, "could not open pane", nil)
+		awaitToastCount(t, ac, 1)
+		shown := requireEnvelope(t, sends, "Output")
+		shownOutput := unmarshalTestOutput(t, shown.Payload)
+		terminal := vt.NewScreen(80, 25)
+		terminal.Write(shownOutput.Data)
 
-	// Short of the 8s error TTL nothing expires.
-	clk.advance(7 * time.Second)
-	toasts, _ := visibleToasts(ac)
-	require.Len(t, toasts, 1, "toast must survive until its TTL elapses")
+		// Short of the 8s error TTL nothing expires.
+		clk.advance(7 * time.Second)
+		toasts, _ := visibleToasts(ac)
+		require.Len(t, toasts, 1, "toast must survive until its TTL elapses")
 
-	clk.advance(2 * time.Second)
-	awaitToastCount(t, ac, 0)
-	_, overflow := visibleToasts(ac)
-	require.Zero(t, overflow, "overflow resets once no toast is visible")
+		clk.advance(2 * time.Second)
+		awaitToastCount(t, ac, 0)
+		_, overflow := visibleToasts(ac)
+		require.Zero(t, overflow, "overflow resets once no toast is visible")
 
-	expired := awaitFrame(t, sends, "Output")
-	expiredOutput := unmarshalTestOutput(t, expired.Payload)
-	terminal.Write(expiredOutput.Data)
-	ac.sendMu.Lock()
-	base := ac.render.cache.frame.Clone()
-	ac.sendMu.Unlock()
-	require.Equal(t, frameRows(base), frameRows(terminal), "fake-clock expiry must restore every old toast cell")
+		expired := requireEnvelope(t, sends, "Output")
+		expiredOutput := unmarshalTestOutput(t, expired.Payload)
+		terminal.Write(expiredOutput.Data)
+		ac.sendMu.Lock()
+		base := ac.render.cache.frame.Clone()
+		ac.sendMu.Unlock()
+		require.Equal(t, frameRows(base), frameRows(terminal), "fake-clock expiry must restore every old toast cell")
+	})
 }
 
 // TestToastExpiryOnlyRemovesItsOwnEntry proves a fired timer cannot dismiss a
 // toast that outlived it.
 func TestToastExpiryOnlyRemovesItsOwnEntry(t *testing.T) {
-	clk := newNoticeClock()
-	d, sess, ac, _ := newNoticeFixture(t, clk)
+	synctest.Test(t, func(t *testing.T) {
+		clk := newNoticeClock()
+		d, sess, ac, _ := newNoticeFixture(t, clk)
+		stopOverlayTimersAtCleanup(t, ac)
 
-	d.notify(sess, domain.NoticeInfo, domain.NoticeClipboard, "copied", nil) // 4s TTL
-	awaitToastCount(t, ac, 1)
-	d.notify(sess, domain.NoticeError, domain.NoticePaneSpawn, "boom", nil) // 8s TTL
-	awaitToastCount(t, ac, 2)
+		d.notify(sess, domain.NoticeInfo, domain.NoticeClipboard, "copied", nil) // 4s TTL
+		awaitToastCount(t, ac, 1)
+		d.notify(sess, domain.NoticeError, domain.NoticePaneSpawn, "boom", nil) // 8s TTL
+		awaitToastCount(t, ac, 2)
 
-	clk.advance(5 * time.Second)
+		clk.advance(5 * time.Second)
 
-	toasts := awaitToastCount(t, ac, 1)
-	require.Equal(t, domain.NoticePaneSpawn, toasts[0].Code, "only the expired info toast is removed")
+		toasts := awaitToastCount(t, ac, 1)
+		require.Equal(t, domain.NoticePaneSpawn, toasts[0].Code, "only the expired info toast is removed")
+	})
 }
 
 // TestToastBurstWaitsAndAdvancesOnExpiry pins the daemon toast queue: a burst
 // beyond the visible slots waits as "+N more" and each expiry promotes the
 // next waiting notice instead of dropping it.
 func TestToastBurstWaitsAndAdvancesOnExpiry(t *testing.T) {
-	clk := newNoticeClock()
-	d, sess, ac, _ := newNoticeFixture(t, clk)
-	codes := []domain.NoticeCode{domain.NoticePaneSpawn, domain.NoticeTabSpawn, domain.NoticeSnapshotWrite, domain.NoticeClipboard, domain.NoticeConfigReload}
-	for _, c := range codes {
-		d.notify(sess, domain.NoticeInfo, c, c.String(), nil)
-	}
-	awaitToastCount(t, ac, maxVisibleToasts)
-	_, waiting := visibleToasts(ac)
-	require.Equal(t, 2, waiting)
+	synctest.Test(t, func(t *testing.T) {
+		clk := newNoticeClock()
+		d, sess, ac, _ := newNoticeFixture(t, clk)
+		stopOverlayTimersAtCleanup(t, ac)
+		codes := []domain.NoticeCode{domain.NoticePaneSpawn, domain.NoticeTabSpawn, domain.NoticeSnapshotWrite, domain.NoticeClipboard, domain.NoticeConfigReload}
+		for _, c := range codes {
+			d.notify(sess, domain.NoticeInfo, c, c.String(), nil)
+		}
+		awaitToastCount(t, ac, maxVisibleToasts)
+		_, waiting := visibleToasts(ac)
+		require.Equal(t, 2, waiting)
 
-	clk.advance(noticeTTL(domain.NoticeInfo))
-	require.Eventually(t, func() bool {
-		ns, waiting := visibleToasts(ac)
-		return len(ns) == 2 && waiting == 0 && ns[0].Code == codes[4] && ns[1].Code == codes[3]
-	}, 2*time.Second, time.Millisecond, "expiry must promote the waiting notices")
+		clk.advance(noticeTTL(domain.NoticeInfo))
+		require.Eventually(t, func() bool {
+			ns, waiting := visibleToasts(ac)
+			return len(ns) == 2 && waiting == 0 && ns[0].Code == codes[4] && ns[1].Code == codes[3]
+		}, 2*time.Second, time.Millisecond, "expiry must promote the waiting notices")
+	})
 }
 
 // TestReportErrorClassifiedUserErrorWinsOverBenignCause proves an explicitly
@@ -952,15 +1034,44 @@ func TestToastBurstWaitsAndAdvancesOnExpiry(t *testing.T) {
 // routine sentinel. A retryable teardown abort must reach the user as its own
 // message instead of being filtered as internal control flow.
 func TestReportErrorClassifiedUserErrorWinsOverBenignCause(t *testing.T) {
-	d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
+		stopOverlayTimersAtCleanup(t, ac)
 
-	d.reportError(sess, closeTabFailureNotice(fmt.Errorf("close tab: %w", errSessionKillParticipantsChanged)))
+		d.reportError(sess, closeTabFailureNotice(fmt.Errorf("close tab: %w", errSessionKillParticipantsChanged)))
 
-	hist := d.notices.history()
-	require.Len(t, hist, 1)
-	require.Contains(t, hist[0].Message, "couldn't close tab")
-	require.Contains(t, hist[0].Message, "try again")
+		hist := d.notices.history()
+		require.Len(t, hist, 1)
+		require.Contains(t, hist[0].Message, "couldn't close tab")
+		require.Contains(t, hist[0].Message, "try again")
 
-	toasts := awaitToastCount(t, ac, 1)
-	require.Contains(t, toasts[0].Message, "try again")
+		toasts := awaitToastCount(t, ac, 1)
+		require.Contains(t, toasts[0].Message, "try again")
+	})
+}
+
+// stopOverlayTimersAtCleanup stops the retained overlay, toast and echo timer
+// goroutines when the test ends. Production never tears them down, so inside a
+// synctest bubble they would otherwise outlive the test body.
+func stopOverlayTimersAtCleanup(t testing.TB, ac *attachedClient) {
+	t.Helper()
+	t.Cleanup(func() {
+		rt := ac.overlays
+		if rt != nil {
+			rt.noticeMu.Lock()
+			rt.noticeTimer.stop()
+			rt.noticesESC.stop()
+			rt.noticeMu.Unlock()
+			rt.copyMu.Lock()
+			rt.copyESC.stop()
+			rt.copyScroll.timer.stop()
+			rt.copyMu.Unlock()
+			rt.resizeMu.Lock()
+			rt.resizeESC.stop()
+			rt.resizeMu.Unlock()
+		}
+		ac.echo.mu.Lock()
+		ac.echo.timer.stop()
+		ac.echo.mu.Unlock()
+	})
 }

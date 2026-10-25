@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/mock"
@@ -158,328 +159,347 @@ func TestFloatingTransferabilityRejectsOnlyWarmingLaunch(t *testing.T) {
 }
 
 func TestFloatingLifecycleCapturesLaunchBeforeOpenAndDoesNotHoldTabLock(t *testing.T) {
-	pty := portsmocks.NewMockPTY(t)
-	readerStarted := make(chan struct{})
-	release := make(chan struct{})
-	var releaseOnce sync.Once
-	unblock := func() { releaseOnce.Do(func() { close(release) }) }
-	pty.EXPECT().Read(mock.Anything).RunAndReturn(func([]byte) (int, error) {
-		close(readerStarted)
-		<-release
-		return 0, context.Canceled
-	}).Once()
-	pty.EXPECT().Close().RunAndReturn(func() error { unblock(); return nil }).Once()
-	factory, opened, allowOpen := newGatedOpenFactory(t, pty, nil)
-	d := newTestDaemon(t, factory, newStubClock(t))
-	cwd := t.TempDir()
-	tb := newTabWithStableID("t_stable", "p_normal", newBlockingPanePTY(t), domain.Size{Cols: 100, Rows: 40})
-	tb.ctx, tb.cancel = context.WithCancel(t.Context())
-	sess := &session{sessionCore: sessionCore{name: "work"}, cwd: cwd, env: []string{"ORDINARY=preserved", "DUP=first", "DUP=second", "PAIR=a=b", "SHELL=/bin/first", "SHELL=/bin/custom-shell", "TERM=old", "COLORTERM=old", "TERM_PROGRAM=old", "VEV=old"}, tabs: []*tab{tb}, ctx: t.Context()}
-	d.ApplyConfig(domain.Config{Theme: domain.ThemeDark, Floating: domain.FloatingConfig{Command: "btop --utf", Width: 50, Height: 50}})
-	d.startFloating(sess, tb, false)
-	// Open has started while this goroutine owns tab.mu: an external factory
-	// call under that lock would deadlock this channel-controlled test.
-	tb.mu.Lock()
-	var openCall gatedFloatingOpen
-	select {
-	case openCall = <-opened:
-	case <-time.After(time.Second):
-		t.Fatal("floating Open waited for tab.mu")
-	}
-	tb.mu.Unlock()
-	d.ApplyConfig(domain.Config{Theme: domain.ThemeDark, Floating: domain.FloatingConfig{Command: "later", Width: 90, Height: 90}})
-	allowOpen()
-	select {
-	case <-readerStarted: // install started exactly one reader after the async Open
-	case <-time.After(time.Second):
-		t.Fatal("floating pane was not installed")
-	}
-	tb.mu.Lock()
-	floating := tb.floating.pane
-	tb.mu.Unlock()
-	require.NotNil(t, floating)
-	require.Equal(t, []string{"ORDINARY=preserved", "DUP=first", "DUP=second", "PAIR=a=b", "SHELL=/bin/first", "SHELL=/bin/custom-shell", "TERM=xterm-256color", "COLORTERM=truecolor", "TERM_PROGRAM=vev", "VEV=session=work,tab=" + tb.stableID + ",pane=" + floating.stableID}, openCall.env)
-	assertPaneDefaultColors(t, floating, themeui.BuiltinDark.Foreground, themeui.BuiltinDark.Background)
-	assertPaneColorScheme(t, floating, false)
-	require.Equal(t, "/bin/custom-shell", openCall.command)
-	require.Equal(t, []string{"-lc", "btop --utf"}, openCall.args)
-	require.Equal(t, cwd, openCall.dir)
-	require.Equal(t, domain.Size{Cols: 48, Rows: 18}, openCall.size)
-	d.teardownFloating(tb, nil)
-	unblock()
-	d.sessWg.Wait()
+	synctest.Test(t, func(t *testing.T) {
+		pty := portsmocks.NewMockPTY(t)
+		readerStarted := make(chan struct{})
+		release := make(chan struct{})
+		var releaseOnce sync.Once
+		unblock := func() { releaseOnce.Do(func() { close(release) }) }
+		pty.EXPECT().Read(mock.Anything).RunAndReturn(func([]byte) (int, error) {
+			close(readerStarted)
+			<-release
+			return 0, context.Canceled
+		}).Once()
+		pty.EXPECT().Close().RunAndReturn(func() error { unblock(); return nil }).Once()
+		factory, opened, allowOpen := newGatedOpenFactory(t, pty, nil)
+		d := newTestDaemon(t, factory, newStubClock(t))
+		cwd := t.TempDir()
+		tb := newTabWithStableID("t_stable", "p_normal", newBlockingPanePTY(t), domain.Size{Cols: 100, Rows: 40})
+		tb.ctx, tb.cancel = context.WithCancel(t.Context())
+		sess := &session{sessionCore: sessionCore{name: "work"}, cwd: cwd, env: []string{"ORDINARY=preserved", "DUP=first", "DUP=second", "PAIR=a=b", "SHELL=/bin/first", "SHELL=/bin/custom-shell", "TERM=old", "COLORTERM=old", "TERM_PROGRAM=old", "VEV=old"}, tabs: []*tab{tb}, ctx: t.Context()}
+		d.ApplyConfig(domain.Config{Theme: domain.ThemeDark, Floating: domain.FloatingConfig{Command: "btop --utf", Width: 50, Height: 50}})
+		d.startFloating(sess, tb, false)
+		// Open has started while this goroutine owns tab.mu: an external factory
+		// call under that lock would deadlock this channel-controlled test.
+		tb.mu.Lock()
+		var openCall gatedFloatingOpen
+		select {
+		case openCall = <-opened:
+		case <-time.After(time.Second):
+			t.Fatal("floating Open waited for tab.mu")
+		}
+		tb.mu.Unlock()
+		d.ApplyConfig(domain.Config{Theme: domain.ThemeDark, Floating: domain.FloatingConfig{Command: "later", Width: 90, Height: 90}})
+		allowOpen()
+		select {
+		case <-readerStarted: // install started exactly one reader after the async Open
+		case <-time.After(time.Second):
+			t.Fatal("floating pane was not installed")
+		}
+		tb.mu.Lock()
+		floating := tb.floating.pane
+		tb.mu.Unlock()
+		require.NotNil(t, floating)
+		require.Equal(t, []string{"ORDINARY=preserved", "DUP=first", "DUP=second", "PAIR=a=b", "SHELL=/bin/first", "SHELL=/bin/custom-shell", "TERM=xterm-256color", "COLORTERM=truecolor", "TERM_PROGRAM=vev", "VEV=session=work,tab=" + tb.stableID + ",pane=" + floating.stableID}, openCall.env)
+		assertPaneDefaultColors(t, floating, themeui.BuiltinDark.Foreground, themeui.BuiltinDark.Background)
+		assertPaneColorScheme(t, floating, false)
+		require.Equal(t, "/bin/custom-shell", openCall.command)
+		require.Equal(t, []string{"-lc", "btop --utf"}, openCall.args)
+		require.Equal(t, cwd, openCall.dir)
+		require.Equal(t, domain.Size{Cols: 48, Rows: 18}, openCall.size)
+		d.teardownFloating(tb, nil)
+		unblock()
+		d.sessWg.Wait()
+	})
 }
 
 func TestFloatingBlockedOpenReconcilesLatestResponsiveSize(t *testing.T) {
-	initial := domain.Size{Cols: 80, Rows: 25}
-	latest := domain.Size{Cols: 79, Rows: 25}
-	cfg := domain.FloatingConfig{Width: 100, Height: 100}
-	latestGeometry := calculateContentFloatingGeometry(tabSize(latest), cfg)
+	synctest.Test(t, func(t *testing.T) {
+		initial := domain.Size{Cols: 80, Rows: 25}
+		latest := domain.Size{Cols: 79, Rows: 25}
+		cfg := domain.FloatingConfig{Width: 100, Height: 100}
+		latestGeometry := calculateContentFloatingGeometry(tabSize(latest), cfg)
 
-	readerRelease := make(chan struct{})
-	readerStarted := make(chan struct{})
-	resized := make(chan struct{})
-	floatingPTY := portsmocks.NewMockPTY(t)
-	floatingPTY.EXPECT().Read(mock.Anything).RunAndReturn(func([]byte) (int, error) {
-		close(readerStarted)
-		<-readerRelease
-		return 0, io.EOF
-	}).Once()
-	floatingPTY.EXPECT().Resize(domain.Geometry{Size: rectSize(latestGeometry.Inner)}).Run(func(domain.Geometry) { close(resized) }).Return(nil).Once()
-	floatingPTY.EXPECT().Close().RunAndReturn(func() error {
+		readerRelease := make(chan struct{})
+		readerStarted := make(chan struct{})
+		resized := make(chan struct{})
+		floatingPTY := portsmocks.NewMockPTY(t)
+		floatingPTY.EXPECT().Read(mock.Anything).RunAndReturn(func([]byte) (int, error) {
+			close(readerStarted)
+			<-readerRelease
+			return 0, io.EOF
+		}).Once()
+		floatingPTY.EXPECT().Resize(domain.Geometry{Size: rectSize(latestGeometry.Inner)}).Run(func(domain.Geometry) { close(resized) }).Return(nil).Once()
+		floatingPTY.EXPECT().Close().RunAndReturn(func() error {
+			select {
+			case <-readerRelease:
+			default:
+				close(readerRelease)
+			}
+			return nil
+		}).Once()
+		factory, opened, allowOpen := newGatedOpenFactory(t, floatingPTY, nil)
+		d := newTestDaemon(t, factory, newStubClock(t))
+		d.ApplyConfig(domain.Config{Floating: cfg})
+		tabCtx, cancelTab := context.WithCancel(t.Context())
+		t.Cleanup(cancelTab)
+		tb := newTab(&transactionalResizePTY{}, tabSize(initial))
+		tb.ctx, tb.cancel = tabCtx, cancelTab
+		sess := &session{sessionCore: sessionCore{id: "responsive-open", name: "work"}, tabs: []*tab{tb}, ctx: t.Context()}
+
+		d.startFloating(sess, tb, true)
+		openCall := <-opened
+		require.Equal(t, rectSize(calculateContentFloatingGeometry(tabSize(initial), cfg).Inner), openCall.size)
+		require.True(t, sess.geometry.requestResize(d, sess, nil, latest, true))
+		allowOpen()
 		select {
-		case <-readerRelease:
-		default:
-			close(readerRelease)
+		case <-resized:
+		case <-time.After(time.Second):
+			t.Fatal("floating install did not reconcile the resize committed while Open was blocked")
 		}
-		return nil
-	}).Once()
-	factory, opened, allowOpen := newGatedOpenFactory(t, floatingPTY, nil)
-	d := newTestDaemon(t, factory, newStubClock(t))
-	d.ApplyConfig(domain.Config{Floating: cfg})
-	tabCtx, cancelTab := context.WithCancel(t.Context())
-	t.Cleanup(cancelTab)
-	tb := newTab(&transactionalResizePTY{}, tabSize(initial))
-	tb.ctx, tb.cancel = tabCtx, cancelTab
-	sess := &session{sessionCore: sessionCore{id: "responsive-open", name: "work"}, tabs: []*tab{tb}, ctx: t.Context()}
-
-	d.startFloating(sess, tb, true)
-	openCall := <-opened
-	require.Equal(t, rectSize(calculateContentFloatingGeometry(tabSize(initial), cfg).Inner), openCall.size)
-	require.True(t, sess.geometry.requestResize(d, sess, nil, latest, true))
-	allowOpen()
-	select {
-	case <-resized:
-	case <-time.After(time.Second):
-		t.Fatal("floating install did not reconcile the resize committed while Open was blocked")
-	}
-	select {
-	case <-readerStarted:
-	case <-time.After(time.Second):
-		t.Fatal("floating reader did not start")
-	}
-
-	require.Eventually(t, func() bool {
-		tb.mu.Lock()
-		p := tb.floating.pane
-		visible := tb.floating.state == floatingVisible
-		tb.mu.Unlock()
-		if !visible || p == nil {
-			return false
+		select {
+		case <-readerStarted:
+		case <-time.After(time.Second):
+			t.Fatal("floating reader did not start")
 		}
-		p.mu.Lock()
-		defer p.mu.Unlock()
-		return p.popupGeometry == latestGeometry && p.rect == latestGeometry.Inner
-	}, time.Second, time.Millisecond, "floating install retained the stale Open geometry")
-	d.teardownFloating(tb, nil)
-	d.sessWg.Wait()
+
+		require.Eventually(t, func() bool {
+			tb.mu.Lock()
+			p := tb.floating.pane
+			visible := tb.floating.state == floatingVisible
+			tb.mu.Unlock()
+			if !visible || p == nil {
+				return false
+			}
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			return p.popupGeometry == latestGeometry && p.rect == latestGeometry.Inner
+		}, time.Second, time.Millisecond, "floating install retained the stale Open geometry")
+		d.teardownFloating(tb, nil)
+		d.sessWg.Wait()
+	})
 }
 
 func TestFloatingLaunchOwnershipJoinsShutdown(t *testing.T) {
-	floatingPTY := portsmocks.NewMockPTY(t)
-	readerStarted := make(chan struct{})
-	readerRelease := make(chan struct{})
-	var releaseOnce sync.Once
-	releaseReader := func() { releaseOnce.Do(func() { close(readerRelease) }) }
-	var closeCount int
-	floatingPTY.EXPECT().Read(mock.Anything).RunAndReturn(func([]byte) (int, error) {
-		close(readerStarted)
-		<-readerRelease
-		return 0, io.EOF
-	}).Once()
-	floatingPTY.EXPECT().Close().RunAndReturn(func() error {
-		closeCount++
-		releaseReader()
-		return nil
-	}).Once()
-	factory, opened, releaseOpen := newGatedOpenFactory(t, floatingPTY, nil)
-	d := newTestDaemon(t, factory, newStubClock(t))
-	tb := newFloatingTestTab(t)
-	sessCtx, cancel := context.WithCancel(t.Context())
-	sess := &session{sessionCore: sessionCore{id: "floating-ownership", name: "work"}, tabs: []*tab{tb}, ctx: sessCtx, cancel: cancel}
-	d.mu.Lock()
-	d.sessions[sess.id] = sess
-	d.mu.Unlock()
+	synctest.Test(t, func(t *testing.T) {
+		floatingPTY := portsmocks.NewMockPTY(t)
+		readerStarted := make(chan struct{})
+		readerRelease := make(chan struct{})
+		var releaseOnce sync.Once
+		releaseReader := func() { releaseOnce.Do(func() { close(readerRelease) }) }
+		var closeCount int
+		floatingPTY.EXPECT().Read(mock.Anything).RunAndReturn(func([]byte) (int, error) {
+			close(readerStarted)
+			<-readerRelease
+			return 0, io.EOF
+		}).Once()
+		floatingPTY.EXPECT().Close().RunAndReturn(func() error {
+			closeCount++
+			releaseReader()
+			return nil
+		}).Once()
+		factory, opened, releaseOpen := newGatedOpenFactory(t, floatingPTY, nil)
+		d := newTestDaemon(t, factory, newStubClock(t))
+		tb := newFloatingTestTab(t)
+		sessCtx, cancel := context.WithCancel(t.Context())
+		sess := &session{sessionCore: sessionCore{id: "floating-ownership", name: "work"}, tabs: []*tab{tb}, ctx: sessCtx, cancel: cancel}
+		d.mu.Lock()
+		d.sessions[sess.id] = sess
+		d.mu.Unlock()
 
-	// Keep a known worker alive while the waiter starts. Releasing it after
-	// Open is blocked deterministically exposes an uncounted launch worker.
-	d.sessWg.Add(1)
-	joined := waitGroupDone(&d.sessWg)
-	d.startFloating(sess, tb, true)
-	select {
-	case <-opened:
-	case <-time.After(time.Second):
-		t.Fatal("floating Open did not start")
-	}
-	d.sessWg.Done()
-	// Waiting while Open is blocked must retain the launch worker. Otherwise
-	// daemon shutdown can finish and a late install can Add reader goroutines.
-	launchUnaccounted := false
-	select {
-	case <-joined:
-		launchUnaccounted = true
-	case <-time.After(time.Second):
-	}
-	releaseOpen()
-	select {
-	case <-readerStarted:
-	case <-time.After(time.Second):
-		t.Fatal("floating reader did not start")
-	}
-	require.NoError(t, d.killSession(sess, protocol.ReasonSessionKilled, false))
-	select {
-	case <-waitGroupDone(&d.sessWg):
-	case <-time.After(time.Second):
-		t.Fatal("floating launch, reader, and scheduler did not join")
-	}
-	tb.mu.Lock()
-	require.Nil(t, tb.floating.pane, "shutdown leaked an installed floating pane")
-	require.Equal(t, floatingUninitialized, tb.floating.state)
-	tb.mu.Unlock()
-	require.False(t, launchUnaccounted, "blocked floating launch was not accounted by sessWg")
-	require.Equal(t, 1, closeCount, "floating PTY must close exactly once")
+		// Keep a known worker alive while the waiter starts. Releasing it after
+		// Open is blocked deterministically exposes an uncounted launch worker.
+		d.sessWg.Add(1)
+		joined := waitGroupDone(&d.sessWg)
+		d.startFloating(sess, tb, true)
+		select {
+		case <-opened:
+		case <-time.After(time.Second):
+			t.Fatal("floating Open did not start")
+		}
+		d.sessWg.Done()
+		// Waiting while Open is blocked must retain the launch worker. Otherwise
+		// daemon shutdown can finish and a late install can Add reader goroutines.
+		launchUnaccounted := false
+		select {
+		case <-joined:
+			launchUnaccounted = true
+		case <-time.After(time.Second):
+		}
+		releaseOpen()
+		select {
+		case <-readerStarted:
+		case <-time.After(time.Second):
+			t.Fatal("floating reader did not start")
+		}
+		require.NoError(t, d.killSession(sess, protocol.ReasonSessionKilled, false))
+		select {
+		case <-waitGroupDone(&d.sessWg):
+		case <-time.After(time.Second):
+			t.Fatal("floating launch, reader, and scheduler did not join")
+		}
+		tb.mu.Lock()
+		require.Nil(t, tb.floating.pane, "shutdown leaked an installed floating pane")
+		require.Equal(t, floatingUninitialized, tb.floating.state)
+		tb.mu.Unlock()
+		require.False(t, launchUnaccounted, "blocked floating launch was not accounted by sessWg")
+		require.Equal(t, 1, closeCount, "floating PTY must close exactly once")
+	})
 }
 
 func TestFloatingLifecycleStaleSuccessAndOldExitCannotReplaceCurrentSlot(t *testing.T) {
-	pty := portsmocks.NewMockPTY(t)
-	closed := make(chan struct{})
-	pty.EXPECT().Close().RunAndReturn(func() error { close(closed); return nil }).Once()
-	factory, opened, allowOpen := newGatedOpenFactory(t, pty, nil)
-	d := newTestDaemon(t, factory, newStubClock(t))
-	tb := newFloatingTestTab(t)
-	sess := &session{sessionCore: sessionCore{name: "work"}, tabs: []*tab{tb}, ctx: t.Context()}
-	d.startFloating(sess, tb, false)
-	<-opened
-	d.teardownFloating(tb, nil) // invalidate before the delayed Open returns
-	allowOpen()
-	select {
-	case <-closed:
-	case <-time.After(time.Second):
-		t.Fatal("stale completion did not close its PTY")
-	}
-	d.sessWg.Wait()
+	synctest.Test(t, func(t *testing.T) {
+		pty := portsmocks.NewMockPTY(t)
+		closed := make(chan struct{})
+		pty.EXPECT().Close().RunAndReturn(func() error { close(closed); return nil }).Once()
+		factory, opened, allowOpen := newGatedOpenFactory(t, pty, nil)
+		d := newTestDaemon(t, factory, newStubClock(t))
+		tb := newFloatingTestTab(t)
+		sess := &session{sessionCore: sessionCore{name: "work"}, tabs: []*tab{tb}, ctx: t.Context()}
+		d.startFloating(sess, tb, false)
+		<-opened
+		d.teardownFloating(tb, nil) // invalidate before the delayed Open returns
+		allowOpen()
+		select {
+		case <-closed:
+		case <-time.After(time.Second):
+			t.Fatal("stale completion did not close its PTY")
+		}
+		d.sessWg.Wait()
 
-	first := &pane{}
-	second := &pane{}
-	tb.mu.Lock()
-	g1 := tb.beginFloatingWarmLocked(true)
-	publishPaneOwner(first, sess, tb, g1)
-	require.True(t, tb.installFloatingLocked(first, g1))
-	clearSucceeded := tb.clearFloatingLocked(first, g1)
-	require.True(t, clearSucceeded)
-	generation := tb.beginFloatingWarmLocked(true)
-	require.True(t, tb.installFloatingLocked(second, generation))
-	tb.mu.Unlock()
-	d.reapInstalledFloating(first)
-	tb.mu.Lock()
-	require.Same(t, second, tb.floating.pane, "old EOF must not clear replacement")
-	tb.mu.Unlock()
+		first := &pane{}
+		second := &pane{}
+		tb.mu.Lock()
+		g1 := tb.beginFloatingWarmLocked(true)
+		publishPaneOwner(first, sess, tb, g1)
+		require.True(t, tb.installFloatingLocked(first, g1))
+		clearSucceeded := tb.clearFloatingLocked(first, g1)
+		require.True(t, clearSucceeded)
+		generation := tb.beginFloatingWarmLocked(true)
+		require.True(t, tb.installFloatingLocked(second, generation))
+		tb.mu.Unlock()
+		d.reapInstalledFloating(first)
+		tb.mu.Lock()
+		require.Same(t, second, tb.floating.pane, "old EOF must not clear replacement")
+		tb.mu.Unlock()
+	})
 }
 
 func TestFloatingExitUsesCurrentOwnerAfterTabTransfer(t *testing.T) {
-	factory := &lifetimePTYFactory{}
-	d := newTestDaemon(t, factory, newStubClock(t))
-	tb := newFloatingTestTab(t)
-	source := &session{sessionCore: sessionCore{id: "source", name: "source"}, tabs: []*tab{tb}, ctx: t.Context()}
-	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination"}, tabs: []*tab{tb}, ctx: t.Context()}
+	synctest.Test(t, func(t *testing.T) {
+		factory := &lifetimePTYFactory{}
+		d := newTestDaemon(t, factory, newStubClock(t))
+		tb := newFloatingTestTab(t)
+		source := &session{sessionCore: sessionCore{id: "source", name: "source"}, tabs: []*tab{tb}, ctx: t.Context()}
+		destination := &session{sessionCore: sessionCore{id: "destination", name: "destination"}, tabs: []*tab{tb}, ctx: t.Context()}
 
-	tb.mu.Lock()
-	generation := tb.beginFloatingWarmLocked(false)
-	tb.mu.Unlock()
-	d.openAndInstallFloating(source, tb, floatingLaunchSpec{
-		sessionName:  source.name,
-		size:         domain.Size{Cols: 20, Rows: 8},
-		geometry:     floatingGeometry{Inner: domain.Rect{Width: 20, Height: 8}},
-		paneStableID: "p_floating",
-		parentCtx:    tb.ctx,
-	}, generation)
+		tb.mu.Lock()
+		generation := tb.beginFloatingWarmLocked(false)
+		tb.mu.Unlock()
+		d.openAndInstallFloating(source, tb, floatingLaunchSpec{
+			sessionName:  source.name,
+			size:         domain.Size{Cols: 20, Rows: 8},
+			geometry:     floatingGeometry{Inner: domain.Rect{Width: 20, Height: 8}},
+			paneStableID: "p_floating",
+			parentCtx:    tb.ctx,
+		}, generation)
 
-	tb.mu.Lock()
-	floating := tb.floating.pane
-	tb.mu.Unlock()
-	require.NotNil(t, floating)
-	tb.mu.Lock()
-	floating.mu.Lock()
-	floating.publishOwnerLocked(destination, tb, generation)
-	floating.mu.Unlock()
-	tb.mu.Unlock()
+		tb.mu.Lock()
+		floating := tb.floating.pane
+		tb.mu.Unlock()
+		require.NotNil(t, floating)
+		tb.mu.Lock()
+		floating.mu.Lock()
+		floating.publishOwnerLocked(destination, tb, generation)
+		floating.mu.Unlock()
+		tb.mu.Unlock()
 
-	sourceClient := &attachedClient{render: attachmentRenderState{panes: map[*pane]capturedPaneRenderState{floating: {}}}}
-	sourceClient.initOverlays()
-	destinationClient := &attachedClient{render: attachmentRenderState{panes: map[*pane]capturedPaneRenderState{floating: {}}}}
-	destinationClient.initOverlays()
-	source.registerAttachment(sourceClient)
-	destination.registerAttachment(destinationClient)
+		sourceClient := &attachedClient{render: attachmentRenderState{panes: map[*pane]capturedPaneRenderState{floating: {}}}}
+		sourceClient.initOverlays()
+		stopOverlayTimersAtCleanup(t, sourceClient)
+		destinationClient := &attachedClient{render: attachmentRenderState{panes: map[*pane]capturedPaneRenderState{floating: {}}}}
+		destinationClient.initOverlays()
+		stopOverlayTimersAtCleanup(t, destinationClient)
+		source.registerAttachment(sourceClient)
+		destination.registerAttachment(destinationClient)
 
-	floating.onExit()
-	d.sessWg.Wait()
+		floating.onExit()
+		d.sessWg.Wait()
 
-	tb.mu.Lock()
-	require.Equal(t, floatingUninitialized, tb.floating.state)
-	require.Nil(t, tb.floating.pane)
-	tb.mu.Unlock()
-	sourceClient.sendMu.Lock()
-	_, sourceRetained := sourceClient.render.panes[floating]
-	sourceClient.sendMu.Unlock()
-	destinationClient.sendMu.Lock()
-	_, destinationRetained := destinationClient.render.panes[floating]
-	destinationClient.sendMu.Unlock()
-	require.True(t, sourceRetained, "exit must not clean up the retired source owner")
-	require.False(t, destinationRetained, "exit must clean up the current destination owner")
+		tb.mu.Lock()
+		require.Equal(t, floatingUninitialized, tb.floating.state)
+		require.Nil(t, tb.floating.pane)
+		tb.mu.Unlock()
+		sourceClient.sendMu.Lock()
+		_, sourceRetained := sourceClient.render.panes[floating]
+		sourceClient.sendMu.Unlock()
+		destinationClient.sendMu.Lock()
+		_, destinationRetained := destinationClient.render.panes[floating]
+		destinationClient.sendMu.Unlock()
+		require.True(t, sourceRetained, "exit must not clean up the retired source owner")
+		require.False(t, destinationRetained, "exit must clean up the current destination owner")
+	})
 }
 
 func TestFloatingReapAndTeardownCloseMatchingPaneOnce(t *testing.T) {
-	pty, _ := newBlockingPTY(t)
-	tb := newFloatingTestTab(t)
-	p := newPane(layout.PaneID("floating"), pty, domain.Size{Cols: 10, Rows: 10})
-	sess := &session{}
-	tb.mu.Lock()
-	g := tb.beginFloatingWarmLocked(true)
-	publishPaneOwner(p, sess, tb, g)
-	require.True(t, tb.installFloatingLocked(p, g))
-	tb.mu.Unlock()
-	d := newTestDaemon(t, nil, newStubClock(t))
-	d.reapInstalledFloating(p)
-	d.teardownFloating(tb, nil)
-	pty.AssertNumberOfCalls(t, "Close", 1)
+	synctest.Test(t, func(t *testing.T) {
+		pty, _ := newBlockingPTY(t)
+		tb := newFloatingTestTab(t)
+		p := newPane(layout.PaneID("floating"), pty, domain.Size{Cols: 10, Rows: 10})
+		sess := &session{}
+		tb.mu.Lock()
+		g := tb.beginFloatingWarmLocked(true)
+		publishPaneOwner(p, sess, tb, g)
+		require.True(t, tb.installFloatingLocked(p, g))
+		tb.mu.Unlock()
+		d := newTestDaemon(t, nil, newStubClock(t))
+		d.reapInstalledFloating(p)
+		d.teardownFloating(tb, nil)
+		pty.AssertNumberOfCalls(t, "Close", 1)
+	})
 }
 
 func TestFloatingTeardownClosesInstalledPaneOnce(t *testing.T) {
-	pty, _ := newBlockingPTY(t)
-	tb := newFloatingTestTab(t)
-	p := newPane(layout.PaneID("floating"), pty, domain.Size{Cols: 10, Rows: 10})
-	tb.mu.Lock()
-	g := tb.beginFloatingWarmLocked(false)
-	require.True(t, tb.installFloatingLocked(p, g))
-	tb.mu.Unlock()
-	d := newTestDaemon(t, nil, newStubClock(t))
-	d.teardownFloating(tb, nil)
-	d.teardownFloating(tb, nil)
-	pty.AssertNumberOfCalls(t, "Close", 1)
+	synctest.Test(t, func(t *testing.T) {
+		pty, _ := newBlockingPTY(t)
+		tb := newFloatingTestTab(t)
+		p := newPane(layout.PaneID("floating"), pty, domain.Size{Cols: 10, Rows: 10})
+		tb.mu.Lock()
+		g := tb.beginFloatingWarmLocked(false)
+		require.True(t, tb.installFloatingLocked(p, g))
+		tb.mu.Unlock()
+		d := newTestDaemon(t, nil, newStubClock(t))
+		d.teardownFloating(tb, nil)
+		d.teardownFloating(tb, nil)
+		pty.AssertNumberOfCalls(t, "Close", 1)
+	})
 }
 
 func TestFloatingTeardownClearsCapturedCopyMode(t *testing.T) {
-	pty, _ := newBlockingPTY(t)
-	tb := newFloatingTestTab(t)
-	p := newPane(layout.PaneID("floating"), pty, domain.Size{Cols: 10, Rows: 10})
-	tb.mu.Lock()
-	generation := tb.beginFloatingWarmLocked(true)
-	require.True(t, tb.installFloatingLocked(p, generation))
-	tb.mu.Unlock()
-	ac := &attachedClient{}
-	ac.initOverlays()
-	ac.overlays.copyMu.Lock()
-	ac.overlays.copyMode = &scopy.Mode{}
-	ac.overlays.copyPane = p
-	ac.overlays.copyMu.Unlock()
-	d := newTestDaemon(t, nil, newStubClock(t))
+	synctest.Test(t, func(t *testing.T) {
+		pty, _ := newBlockingPTY(t)
+		tb := newFloatingTestTab(t)
+		p := newPane(layout.PaneID("floating"), pty, domain.Size{Cols: 10, Rows: 10})
+		tb.mu.Lock()
+		generation := tb.beginFloatingWarmLocked(true)
+		require.True(t, tb.installFloatingLocked(p, generation))
+		tb.mu.Unlock()
+		ac := &attachedClient{}
+		ac.initOverlays()
+		stopOverlayTimersAtCleanup(t, ac)
+		ac.overlays.copyMu.Lock()
+		ac.overlays.copyMode = &scopy.Mode{}
+		ac.overlays.copyPane = p
+		ac.overlays.copyMu.Unlock()
+		d := newTestDaemon(t, nil, newStubClock(t))
 
-	d.teardownFloating(tb, ac)
+		d.teardownFloating(tb, ac)
 
-	require.False(t, ac.overlays.copyActive())
-	ac.overlays.copyMu.Lock()
-	require.Nil(t, ac.overlays.copyPane)
-	ac.overlays.copyMu.Unlock()
+		require.False(t, ac.overlays.copyActive())
+		ac.overlays.copyMu.Lock()
+		require.Nil(t, ac.overlays.copyPane)
+		ac.overlays.copyMu.Unlock()
+	})
 }
 
 func TestFloatingEOFRepaintsVisibleSlotOnly(t *testing.T) {
@@ -487,6 +507,7 @@ func TestFloatingEOFRepaintsVisibleSlotOnly(t *testing.T) {
 		t.Helper()
 		normalPTY, releaseNormal := newBlockingPTY(t)
 		d, sess, ac, sends := newManualSessionWithPTYs(t, normalPTY)
+		stopOverlayTimersAtCleanup(t, ac)
 		tb := testAttachmentTab(sess)
 		require.NotNil(t, tb)
 		tb.mu.Lock()
@@ -514,7 +535,7 @@ func TestFloatingEOFRepaintsVisibleSlotOnly(t *testing.T) {
 		// Establish a renderer shadow first. The EOF repaint must reset it and
 		// redraw the underlying cell rather than depending on popup damage.
 		d.paint(sess, ac, true, nil)
-		baseline := awaitFrame(t, sends, "Output")
+		baseline := requireEnvelope(t, sends, "Output")
 		baselineOutput := unmarshalTestOutput(t, baseline.Payload)
 		require.Contains(t, string(baselineOutput.Data), "underlying-cell")
 
@@ -534,55 +555,61 @@ func TestFloatingEOFRepaintsVisibleSlotOnly(t *testing.T) {
 	}
 
 	t.Run("visible matching EOF clears and fully repaints underlying content", func(t *testing.T) {
-		_, _, _, sends, tb, floating, exit := newCase(t, floatingVisible)
-		exit()
+		synctest.Test(t, func(t *testing.T) {
+			_, _, _, sends, tb, floating, exit := newCase(t, floatingVisible)
+			exit()
 
-		tb.mu.Lock()
-		require.Equal(t, floatingUninitialized, tb.floating.state)
-		require.Nil(t, tb.floating.pane)
-		tb.mu.Unlock()
-		repaint := awaitFrame(t, sends, "Output")
-		output := unmarshalTestOutput(t, repaint.Payload)
-		require.Zero(t, output.Base, "visible EOF must force a dependency-free full repaint")
-		require.Contains(t, string(output.Data), "underlying-cell", "repaint must restore cells previously covered by the popup")
-		require.NotNil(t, floating)
+			tb.mu.Lock()
+			require.Equal(t, floatingUninitialized, tb.floating.state)
+			require.Nil(t, tb.floating.pane)
+			tb.mu.Unlock()
+			repaint := requireEnvelope(t, sends, "Output")
+			output := unmarshalTestOutput(t, repaint.Payload)
+			require.Zero(t, output.Base, "visible EOF must force a dependency-free full repaint")
+			require.Contains(t, string(output.Data), "underlying-cell", "repaint must restore cells previously covered by the popup")
+			require.NotNil(t, floating)
+		})
 	})
 
 	t.Run("hidden matching EOF clears without repaint", func(t *testing.T) {
-		_, _, _, sends, tb, _, exit := newCase(t, floatingHidden)
-		exit()
+		synctest.Test(t, func(t *testing.T) {
+			_, _, _, sends, tb, _, exit := newCase(t, floatingHidden)
+			exit()
 
-		tb.mu.Lock()
-		require.Equal(t, floatingUninitialized, tb.floating.state)
-		require.Nil(t, tb.floating.pane)
-		tb.mu.Unlock()
-		select {
-		case frame := <-sends:
-			t.Fatalf("hidden EOF unexpectedly repainted: %#v", frame)
-		default:
-		}
+			tb.mu.Lock()
+			require.Equal(t, floatingUninitialized, tb.floating.state)
+			require.Nil(t, tb.floating.pane)
+			tb.mu.Unlock()
+			select {
+			case frame := <-sends:
+				t.Fatalf("hidden EOF unexpectedly repainted: %#v", frame)
+			default:
+			}
+		})
 	})
 
 	t.Run("stale EOF is ignored without repaint", func(t *testing.T) {
-		_, _, _, sends, tb, stale, exit := newCase(t, floatingHidden)
-		tb.mu.Lock()
-		generation := tb.floating.generation
-		require.True(t, tb.clearFloatingLocked(stale, generation))
-		current := newPane(layout.PaneID("replacement"), newBlockingPanePTY(t), domain.Size{Cols: 20, Rows: 8})
-		currentGeneration := tb.beginFloatingWarmLocked(true)
-		require.True(t, tb.installFloatingLocked(current, currentGeneration))
-		tb.mu.Unlock()
-		exit()
+		synctest.Test(t, func(t *testing.T) {
+			_, _, _, sends, tb, stale, exit := newCase(t, floatingHidden)
+			tb.mu.Lock()
+			generation := tb.floating.generation
+			require.True(t, tb.clearFloatingLocked(stale, generation))
+			current := newPane(layout.PaneID("replacement"), newBlockingPanePTY(t), domain.Size{Cols: 20, Rows: 8})
+			currentGeneration := tb.beginFloatingWarmLocked(true)
+			require.True(t, tb.installFloatingLocked(current, currentGeneration))
+			tb.mu.Unlock()
+			exit()
 
-		tb.mu.Lock()
-		require.Same(t, current, tb.floating.pane)
-		require.Equal(t, floatingVisible, tb.floating.state)
-		tb.mu.Unlock()
-		select {
-		case frame := <-sends:
-			t.Fatalf("stale EOF unexpectedly repainted: %#v", frame)
-		default:
-		}
+			tb.mu.Lock()
+			require.Same(t, current, tb.floating.pane)
+			require.Equal(t, floatingVisible, tb.floating.state)
+			tb.mu.Unlock()
+			select {
+			case frame := <-sends:
+				t.Fatalf("stale EOF unexpectedly repainted: %#v", frame)
+			default:
+			}
+		})
 	})
 }
 
@@ -612,33 +639,35 @@ func TestFloatingLaunchUsesLiveOrValidatedSessionCwd(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			factory := portsmocks.NewMockPTYFactory(t)
-			opened := make(chan string, 1)
-			factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
-				func(_ context.Context, _ string, _ []string, _ []string, cwd string, _ domain.Geometry) (ports.PTY, error) {
-					opened <- cwd
-					return nil, io.ErrUnexpectedEOF
-				}).Once()
-			d := newTestDaemon(t, factory, newStubClock(t))
-			d.dirOrHome = func(cwd string) string {
-				if cwd == "/invalid" {
-					return "/home/test"
+			synctest.Test(t, func(t *testing.T) {
+				factory := portsmocks.NewMockPTYFactory(t)
+				opened := make(chan string, 1)
+				factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+					func(_ context.Context, _ string, _ []string, _ []string, cwd string, _ domain.Geometry) (ports.PTY, error) {
+						opened <- cwd
+						return nil, io.ErrUnexpectedEOF
+					}).Once()
+				d := newTestDaemon(t, factory, newStubClock(t))
+				d.dirOrHome = func(cwd string) string {
+					if cwd == "/invalid" {
+						return "/home/test"
+					}
+					return cwd
 				}
-				return cwd
-			}
-			if tt.liveCwd != "" {
-				WithProcessInspector(&processInspectorFake{cwd: func(int) (string, error) { return tt.liveCwd, nil }})(d)
-			}
-			tb := newFloatingTestTab(t)
-			sess := &session{sessionCore: sessionCore{name: "work"}, cwd: tt.sessionCwd, tabs: []*tab{tb}, ctx: t.Context()}
-			d.startFloating(sess, tb, false)
-			select {
-			case got := <-opened:
-				require.Equal(t, tt.wantCwd, got)
-			case <-time.After(time.Second):
-				t.Fatal("floating PTY was not opened")
-			}
-			d.sessWg.Wait()
+				if tt.liveCwd != "" {
+					WithProcessInspector(&processInspectorFake{cwd: func(int) (string, error) { return tt.liveCwd, nil }})(d)
+				}
+				tb := newFloatingTestTab(t)
+				sess := &session{sessionCore: sessionCore{name: "work"}, cwd: tt.sessionCwd, tabs: []*tab{tb}, ctx: t.Context()}
+				d.startFloating(sess, tb, false)
+				select {
+				case got := <-opened:
+					require.Equal(t, tt.wantCwd, got)
+				case <-time.After(time.Second):
+					t.Fatal("floating PTY was not opened")
+				}
+				d.sessWg.Wait()
+			})
 		})
 	}
 }
@@ -662,87 +691,91 @@ func (h *floatingLogHandler) Handle(ctx context.Context, r slog.Record) error {
 }
 
 func TestFloatingLaunchFailureCapturesSessionNameBeforeConcurrentRename(t *testing.T) {
-	factory, opened, release := newGatedOpenFactory(t, nil, io.ErrUnexpectedEOF)
-	var logs bytes.Buffer
-	handled := make(chan struct{})
-	d := newTestDaemon(t, factory, newStubClock(t))
-	d.log = slog.New(&floatingLogHandler{Handler: slog.NewTextHandler(&logs, nil), handled: handled})
-	tb := newFloatingTestTab(t)
-	sess := &session{sessionCore: sessionCore{name: "captured"}, tabs: []*tab{tb}, ctx: t.Context()}
-	d.startFloating(sess, tb, false)
-	<-opened
-	stopRename := make(chan struct{})
-	renameDone := make(chan struct{})
-	go func() {
-		defer close(renameDone)
-		for {
-			select {
-			case <-stopRename:
-				return
-			default:
+	synctest.Test(t, func(t *testing.T) {
+		factory, opened, release := newGatedOpenFactory(t, nil, io.ErrUnexpectedEOF)
+		var logs bytes.Buffer
+		handled := make(chan struct{})
+		d := newTestDaemon(t, factory, newStubClock(t))
+		d.log = slog.New(&floatingLogHandler{Handler: slog.NewTextHandler(&logs, nil), handled: handled})
+		tb := newFloatingTestTab(t)
+		sess := &session{sessionCore: sessionCore{name: "captured"}, tabs: []*tab{tb}, ctx: t.Context()}
+		d.startFloating(sess, tb, false)
+		<-opened
+		stopRename := make(chan struct{})
+		renameDone := make(chan struct{})
+		go func() {
+			defer close(renameDone)
+			for {
+				select {
+				case <-stopRename:
+					return
+				default:
+				}
+				sess.mu.Lock()
+				sess.name = "renamed"
+				sess.mu.Unlock()
 			}
-			sess.mu.Lock()
-			sess.name = "renamed"
-			sess.mu.Unlock()
+		}()
+		release()
+		select {
+		case <-handled:
+		case <-time.After(time.Second):
+			t.Fatal("floating launch failure was not logged")
 		}
-	}()
-	release()
-	select {
-	case <-handled:
-	case <-time.After(time.Second):
-		t.Fatal("floating launch failure was not logged")
-	}
-	close(stopRename)
-	<-renameDone
-	d.sessWg.Wait()
-	require.True(t, strings.Contains(logs.String(), "session=captured"), logs.String())
+		close(stopRename)
+		<-renameDone
+		d.sessWg.Wait()
+		require.True(t, strings.Contains(logs.String(), "session=captured"), logs.String())
+	})
 }
 
 func TestFloatingInstallLogsSessionNameSafelyDuringRename(t *testing.T) {
-	floatingPTY, _ := newBlockingPTY(t)
-	factory, opened, allowOpen := newGatedOpenFactory(t, floatingPTY, nil)
-	var logs bytes.Buffer
-	handled := make(chan struct{})
-	d := newTestDaemon(t, factory, newStubClock(t))
-	d.log = slog.New(&floatingLogHandler{Handler: slog.NewTextHandler(&logs, nil), handled: handled})
-	tb := newFloatingTestTab(t)
-	sess := &session{sessionCore: sessionCore{name: "captured"}, tabs: []*tab{tb}, ctx: t.Context()}
+	synctest.Test(t, func(t *testing.T) {
+		floatingPTY, _ := newBlockingPTY(t)
+		factory, opened, allowOpen := newGatedOpenFactory(t, floatingPTY, nil)
+		var logs bytes.Buffer
+		handled := make(chan struct{})
+		d := newTestDaemon(t, factory, newStubClock(t))
+		d.log = slog.New(&floatingLogHandler{Handler: slog.NewTextHandler(&logs, nil), handled: handled})
+		tb := newFloatingTestTab(t)
+		sess := &session{sessionCore: sessionCore{name: "captured"}, tabs: []*tab{tb}, ctx: t.Context()}
 
-	d.startFloating(sess, tb, false)
-	<-opened
-	renamed := make(chan struct{})
-	stopRename := make(chan struct{})
-	renameDone := make(chan struct{})
-	go func() {
-		defer close(renameDone)
-		sess.mu.Lock()
-		sess.name = "renamed"
-		sess.mu.Unlock()
-		close(renamed)
-		for {
-			select {
-			case <-stopRename:
-				return
-			default:
-			}
+		d.startFloating(sess, tb, false)
+		<-opened
+		renamed := make(chan struct{})
+		stopRename := make(chan struct{})
+		renameDone := make(chan struct{})
+		go func() {
+			defer close(renameDone)
 			sess.mu.Lock()
 			sess.name = "renamed"
 			sess.mu.Unlock()
+			close(renamed)
+			for {
+				select {
+				case <-stopRename:
+					return
+				default:
+				}
+				sess.mu.Lock()
+				sess.name = "renamed"
+				sess.mu.Unlock()
+			}
+		}()
+		<-renamed
+		allowOpen()
+		select {
+		case <-handled:
+		case <-time.After(time.Second):
+			t.Fatal("installed floating pane was not logged")
 		}
-	}()
-	<-renamed
-	allowOpen()
-	select {
-	case <-handled:
-	case <-time.After(time.Second):
-		t.Fatal("installed floating pane was not logged")
-	}
-	close(stopRename)
-	<-renameDone
-	require.Contains(t, logs.String(), "session=renamed", logs.String())
+		close(stopRename)
+		<-renameDone
+		require.Contains(t, logs.String(), "session=renamed", logs.String())
 
-	d.teardownFloating(tb, nil)
-	d.sessWg.Wait()
+		d.teardownFloating(tb, nil)
+		d.sessWg.Wait()
+	})
 }
 
 // TestFloatingAsyncSpawnFailureToastsOnlyForUserOpen drives a failed
@@ -761,33 +794,36 @@ func TestFloatingAsyncSpawnFailureToastsOnlyForUserOpen(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			spawnErr := errors.New("fork/exec: no such file or directory")
-			factory := portsmocks.NewMockPTYFactory(t)
-			factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
-				Return(nil, spawnErr).Once()
-			d := newTestDaemon(t, factory, newStubClock(t))
-			tb := newFloatingTestTab(t)
-			tr, _ := newCapturingTransport(t)
-			ac := &attachedClient{tr: tr, output: newOutputStateStream(), geometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}}
-			ac.initOverlays()
-			sess := &session{sessionCore: sessionCore{id: "floating-spawn", name: "work", attachments: map[*attachedClient]struct{}{ac: {}}}, tabs: []*tab{tb}, ctx: t.Context()}
-			ac.setSession(sess)
+			synctest.Test(t, func(t *testing.T) {
+				spawnErr := errors.New("fork/exec: no such file or directory")
+				factory := portsmocks.NewMockPTYFactory(t)
+				factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+					Return(nil, spawnErr).Once()
+				d := newTestDaemon(t, factory, newStubClock(t))
+				tb := newFloatingTestTab(t)
+				tr, _ := newCapturingTransport(t)
+				ac := &attachedClient{tr: tr, output: newOutputStateStream(), geometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}}
+				ac.initOverlays()
+				stopOverlayTimersAtCleanup(t, ac)
+				sess := &session{sessionCore: sessionCore{id: "floating-spawn", name: "work", attachments: map[*attachedClient]struct{}{ac: {}}}, tabs: []*tab{tb}, ctx: t.Context()}
+				ac.setSession(sess)
 
-			d.startFloating(sess, tb, tc.userOpen)
+				d.startFloating(sess, tb, tc.userOpen)
 
-			// The launch worker (registered via d.sessWg.Go in launchFloating)
-			// runs failFloatingLaunch synchronously before returning, so
-			// waiting on the group is a deterministic completion signal.
-			d.sessWg.Wait()
+				// The launch worker (registered via d.sessWg.Go in launchFloating)
+				// runs failFloatingLaunch synchronously before returning, so
+				// waiting on the group is a deterministic completion signal.
+				d.sessWg.Wait()
 
-			if tc.userOpen {
-				toasts := awaitToastCount(t, ac, 1)
-				require.Equal(t, domain.NoticeFloatingSpawn, toasts[0].Code)
-				require.Equal(t, "couldn't open floating pane: command failed to start", toasts[0].Message)
-			} else {
-				ns, _ := visibleToasts(ac)
-				require.Empty(t, ns, "background prewarm failure must not toast")
-			}
+				if tc.userOpen {
+					toasts := awaitToastCount(t, ac, 1)
+					require.Equal(t, domain.NoticeFloatingSpawn, toasts[0].Code)
+					require.Equal(t, "couldn't open floating pane: command failed to start", toasts[0].Message)
+				} else {
+					ns, _ := visibleToasts(ac)
+					require.Empty(t, ns, "background prewarm failure must not toast")
+				}
+			})
 		})
 	}
 }
@@ -805,33 +841,37 @@ func TestToggleFloatingStructuralErrorsAreUserErrors(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := tc.d.toggleFloating(tc.sess, nil)
-			require.Error(t, err)
+			synctest.Test(t, func(t *testing.T) {
+				err := tc.d.toggleFloating(tc.sess, nil)
+				require.Error(t, err)
 
-			var ue *domain.UserError
-			require.ErrorAs(t, err, &ue)
-			require.Equal(t, domain.NoticeFloatingSpawn, ue.Code)
-			require.Equal(t, domain.NoticeError, ue.Severity)
-			require.Equal(t, tc.wantMsg, ue.Msg)
-			if tc.cause != nil {
-				require.NotContains(t, ue.Msg, tc.cause.Error())
-				require.ErrorIs(t, ue, tc.cause)
-			}
+				var ue *domain.UserError
+				require.ErrorAs(t, err, &ue)
+				require.Equal(t, domain.NoticeFloatingSpawn, ue.Code)
+				require.Equal(t, domain.NoticeError, ue.Severity)
+				require.Equal(t, tc.wantMsg, ue.Msg)
+				if tc.cause != nil {
+					require.NotContains(t, ue.Msg, tc.cause.Error())
+					require.ErrorIs(t, ue, tc.cause)
+				}
+			})
 		})
 	}
 }
 
 func TestFloatingToggleUsesVisibleTarget(t *testing.T) {
-	d := newTestDaemon(t, nil, newStubClock(t))
-	tb := newFloatingTestTab(t)
-	sess := &session{tabs: []*tab{tb}, ctx: t.Context()}
-	tb.mu.Lock()
-	g := tb.beginFloatingWarmLocked(false)
-	floating := newPane(layout.PaneID("floating"), nil, domain.Size{Cols: 20, Rows: 8})
-	require.True(t, tb.installFloatingLocked(floating, g))
-	tb.mu.Unlock()
-	require.NoError(t, d.toggleFloating(sess, nil))
-	tb.mu.Lock()
-	require.Same(t, floating, tb.terminalTargetLocked())
-	tb.mu.Unlock()
+	synctest.Test(t, func(t *testing.T) {
+		d := newTestDaemon(t, nil, newStubClock(t))
+		tb := newFloatingTestTab(t)
+		sess := &session{tabs: []*tab{tb}, ctx: t.Context()}
+		tb.mu.Lock()
+		g := tb.beginFloatingWarmLocked(false)
+		floating := newPane(layout.PaneID("floating"), nil, domain.Size{Cols: 20, Rows: 8})
+		require.True(t, tb.installFloatingLocked(floating, g))
+		tb.mu.Unlock()
+		require.NoError(t, d.toggleFloating(sess, nil))
+		tb.mu.Lock()
+		require.Same(t, floating, tb.terminalTargetLocked())
+		tb.mu.Unlock()
+	})
 }

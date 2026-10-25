@@ -3,6 +3,7 @@ package daemon
 import (
 	"strconv"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -27,6 +28,7 @@ func mouseCopyHarness(t *testing.T, rows ...string) (*Daemon, *session, *attache
 	p, release := newBlockingPTY(t)
 	t.Cleanup(release)
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
+	stopOverlayTimersAtCleanup(t, ac)
 	clock := &manualMouseClock{t: t, now: time.Unix(1, 0)}
 	d.clock = clock
 	pane := testAttachmentTab(sess).focusedPane()
@@ -43,26 +45,28 @@ func copyMouseInput(d *Daemon, sess *session, ac *attachedClient, raw string) {
 
 func TestCopyDoubleClick(t *testing.T) {
 	t.Run("same normalized position within interval selects word", func(t *testing.T) {
-		d, sess, ac, clock := mouseCopyHarness(t, "a界 beta")
-		pane := testAttachmentTab(sess).focusedPane()
-		d.exitCopyMode(ac)
-		pane.mu.Lock()
-		require.True(t, pane.screen.Cell(2, 0).Continuation)
-		pane.mu.Unlock()
-		d.enterCopyMode(sess, ac)
+		synctest.Test(t, func(t *testing.T) {
+			d, sess, ac, clock := mouseCopyHarness(t, "a界 beta")
+			pane := testAttachmentTab(sess).focusedPane()
+			d.exitCopyMode(ac)
+			pane.mu.Lock()
+			require.True(t, pane.screen.Cell(2, 0).Continuation)
+			pane.mu.Unlock()
+			d.enterCopyMode(sess, ac)
 
-		// SGR column 3 is the continuation cell of the wide glyph at column 2.
-		copyMouseInput(d, sess, ac, "\x1b[<0;3;2M\x1b[<0;3;2m")
-		clock.Advance(copyDoubleClickInterval)
-		copyMouseInput(d, sess, ac, "\x1b[<0;3;2M")
+			// SGR column 3 is the continuation cell of the wide glyph at column 2.
+			copyMouseInput(d, sess, ac, "\x1b[<0;3;2M\x1b[<0;3;2m")
+			clock.Advance(copyDoubleClickInterval)
+			copyMouseInput(d, sess, ac, "\x1b[<0;3;2M")
 
-		ac.overlays.copyMu.Lock()
-		selection := ac.overlays.copyMode.Selection()
-		pointer := ac.overlays.copyPointer
-		ac.overlays.copyMu.Unlock()
-		require.True(t, selection.Enabled)
-		require.Equal(t, scopy.Word, selection.Granularity)
-		require.Equal(t, scopy.Pos{Row: 0, Col: 1}, pointer.press)
+			ac.overlays.copyMu.Lock()
+			selection := ac.overlays.copyMode.Selection()
+			pointer := ac.overlays.copyPointer
+			ac.overlays.copyMu.Unlock()
+			require.True(t, selection.Enabled)
+			require.Equal(t, scopy.Word, selection.Granularity)
+			require.Equal(t, scopy.Pos{Row: 0, Col: 1}, pointer.press)
+		})
 	})
 
 	for _, tc := range []struct {
@@ -74,71 +78,81 @@ func TestCopyDoubleClick(t *testing.T) {
 		{name: "different position", second: "\x1b[<0;2;2M"},
 	} {
 		t.Run(tc.name+" stays passive", func(t *testing.T) {
-			d, sess, ac, clock := mouseCopyHarness(t, "alpha")
-			copyMouseInput(d, sess, ac, "\x1b[<0;1;2M\x1b[<0;1;2m")
-			clock.Advance(tc.advance)
-			copyMouseInput(d, sess, ac, tc.second)
-			ac.overlays.copyMu.Lock()
-			selection := ac.overlays.copyMode.Selection()
-			ac.overlays.copyMu.Unlock()
-			require.False(t, selection.Enabled)
+			synctest.Test(t, func(t *testing.T) {
+				d, sess, ac, clock := mouseCopyHarness(t, "alpha")
+				copyMouseInput(d, sess, ac, "\x1b[<0;1;2M\x1b[<0;1;2m")
+				clock.Advance(tc.advance)
+				copyMouseInput(d, sess, ac, tc.second)
+				ac.overlays.copyMu.Lock()
+				selection := ac.overlays.copyMode.Selection()
+				ac.overlays.copyMu.Unlock()
+				require.False(t, selection.Enabled)
+			})
 		})
 	}
 
 	t.Run("different pane is not a double click", func(t *testing.T) {
-		d := newTestDaemon(t, nil, &manualMouseClock{t: t, now: time.Unix(1, 0)})
-		rt := newOverlayRuntime(&attachedClient{})
-		p1 := newPane("one", nil, domain.Size{Cols: 4, Rows: 1})
-		p2 := newPane("two", nil, domain.Size{Cols: 4, Rows: 1})
-		rt.copyClick = copyClickCandidate{valid: true, pane: p1, pos: scopy.Pos{Row: 0, Col: 1}, at: d.clock.Now()}
-		require.False(t, d.isCopyDoubleClickLocked(rt, p2, scopy.Pos{Row: 0, Col: 1}, d.clock.Now()))
+		synctest.Test(t, func(t *testing.T) {
+			d := newTestDaemon(t, nil, &manualMouseClock{t: t, now: time.Unix(1, 0)})
+			rt := newOverlayRuntime(&attachedClient{})
+			p1 := newPane("one", nil, domain.Size{Cols: 4, Rows: 1})
+			p2 := newPane("two", nil, domain.Size{Cols: 4, Rows: 1})
+			rt.copyClick = copyClickCandidate{valid: true, pane: p1, pos: scopy.Pos{Row: 0, Col: 1}, at: d.clock.Now()}
+			require.False(t, d.isCopyDoubleClickLocked(rt, p2, scopy.Pos{Row: 0, Col: 1}, d.clock.Now()))
+		})
 	})
 
 	for _, text := range []string{"alpha beta", "alpha/beta"} {
 		t.Run("separator is passive "+text, func(t *testing.T) {
-			d, sess, ac, clock := mouseCopyHarness(t, text)
-			if text == "alpha/beta" {
-				cfg := domain.Defaults()
-				cfg.Copy.WordSeparators = "/"
-				d.ApplyConfig(cfg)
-				d.exitCopyMode(ac)
-				d.enterCopyMode(sess, ac)
-			}
-			copyMouseInput(d, sess, ac, "\x1b[<0;6;2M\x1b[<0;6;2m")
-			clock.Advance(time.Millisecond)
-			copyMouseInput(d, sess, ac, "\x1b[<0;6;2M")
-			ac.overlays.copyMu.Lock()
-			selection := ac.overlays.copyMode.Selection()
-			ac.overlays.copyMu.Unlock()
-			require.False(t, selection.Enabled)
+			synctest.Test(t, func(t *testing.T) {
+				d, sess, ac, clock := mouseCopyHarness(t, text)
+				if text == "alpha/beta" {
+					cfg := domain.Defaults()
+					cfg.Copy.WordSeparators = "/"
+					d.ApplyConfig(cfg)
+					d.exitCopyMode(ac)
+					d.enterCopyMode(sess, ac)
+				}
+				copyMouseInput(d, sess, ac, "\x1b[<0;6;2M\x1b[<0;6;2m")
+				clock.Advance(time.Millisecond)
+				copyMouseInput(d, sess, ac, "\x1b[<0;6;2M")
+				ac.overlays.copyMu.Lock()
+				selection := ac.overlays.copyMode.Selection()
+				ac.overlays.copyMu.Unlock()
+				require.False(t, selection.Enabled)
+			})
 		})
 	}
 
 	t.Run("normal screen double click publishes word drag", func(t *testing.T) {
-		d, sess, ac, clock := mouseCopyHarness(t, "alpha beta")
-		d.exitCopyMode(ac)
-		copyMouseInput(d, sess, ac, "\x1b[<0;1;2M\x1b[<0;1;2m")
-		clock.Advance(time.Millisecond)
-		copyMouseInput(d, sess, ac, "\x1b[<0;1;2M\x1b[<32;7;2M")
-		ac.overlays.copyMu.Lock()
-		selection := ac.overlays.copyMode.Selection()
-		text := ac.overlays.copyMode.SelectedText()
-		pointer := ac.overlays.copyPointer
-		ac.overlays.copyMu.Unlock()
-		require.Equal(t, scopy.Word, selection.Granularity)
-		require.True(t, pointer.wordDrag)
-		require.Equal(t, "alpha beta", text)
+		synctest.Test(t, func(t *testing.T) {
+			d, sess, ac, clock := mouseCopyHarness(t, "alpha beta")
+			d.exitCopyMode(ac)
+			copyMouseInput(d, sess, ac, "\x1b[<0;1;2M\x1b[<0;1;2m")
+			clock.Advance(time.Millisecond)
+			copyMouseInput(d, sess, ac, "\x1b[<0;1;2M\x1b[<32;7;2M")
+			ac.overlays.copyMu.Lock()
+			selection := ac.overlays.copyMode.Selection()
+			text := ac.overlays.copyMode.SelectedText()
+			pointer := ac.overlays.copyPointer
+			ac.overlays.copyMu.Unlock()
+			require.Equal(t, scopy.Word, selection.Granularity)
+			require.True(t, pointer.wordDrag)
+			require.Equal(t, "alpha beta", text)
+		})
 	})
 
 	t.Run("first click drag invalidates candidate", func(t *testing.T) {
-		d, sess, ac, clock := mouseCopyHarness(t, "alpha")
-		copyMouseInput(d, sess, ac, "\x1b[<0;1;2M\x1b[<32;2;2M\x1b[<0;2;2m")
-		clock.Advance(time.Millisecond)
-		copyMouseInput(d, sess, ac, "\x1b[<0;1;2M")
-		ac.overlays.copyMu.Lock()
-		selection := ac.overlays.copyMode.Selection()
-		ac.overlays.copyMu.Unlock()
-		require.NotEqual(t, scopy.Word, selection.Granularity)
+		synctest.Test(t, func(t *testing.T) {
+			d, sess, ac, clock := mouseCopyHarness(t, "alpha")
+			copyMouseInput(d, sess, ac, "\x1b[<0;1;2M\x1b[<32;2;2M\x1b[<0;2;2m")
+			clock.Advance(time.Millisecond)
+			copyMouseInput(d, sess, ac, "\x1b[<0;1;2M")
+			ac.overlays.copyMu.Lock()
+			selection := ac.overlays.copyMode.Selection()
+			ac.overlays.copyMu.Unlock()
+			require.NotEqual(t, scopy.Word, selection.Granularity)
+		})
 	})
 }
 
@@ -243,23 +257,25 @@ func TestNormalScreenPassiveDoubleClickSetsMappedCursor(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			d, sess, ac, clock := mouseCopyHarness(t, tc.text)
-			d.exitCopyMode(ac)
-			if tc.setup != nil {
-				tc.setup(d)
-			}
+			synctest.Test(t, func(t *testing.T) {
+				d, sess, ac, clock := mouseCopyHarness(t, tc.text)
+				d.exitCopyMode(ac)
+				if tc.setup != nil {
+					tc.setup(d)
+				}
 
-			copyMouseInput(d, sess, ac, "\x1b[<0;6;2M\x1b[<0;6;2m")
-			clock.Advance(time.Millisecond)
-			copyMouseInput(d, sess, ac, "\x1b[<0;6;2M")
+				copyMouseInput(d, sess, ac, "\x1b[<0;6;2M\x1b[<0;6;2m")
+				clock.Advance(time.Millisecond)
+				copyMouseInput(d, sess, ac, "\x1b[<0;6;2M")
 
-			ac.overlays.copyMu.Lock()
-			mode := ac.overlays.copyMode
-			selection := mode.Selection()
-			cursor := mode.Cursor()
-			ac.overlays.copyMu.Unlock()
-			require.False(t, selection.Enabled)
-			require.Equal(t, scopy.Pos{Row: 0, Col: 5}, cursor)
+				ac.overlays.copyMu.Lock()
+				mode := ac.overlays.copyMode
+				selection := mode.Selection()
+				cursor := mode.Cursor()
+				ac.overlays.copyMu.Unlock()
+				require.False(t, selection.Enabled)
+				require.Equal(t, scopy.Pos{Row: 0, Col: 5}, cursor)
+			})
 		})
 	}
 }
@@ -321,24 +337,27 @@ func TestCopyPointerResetClearsClick(t *testing.T) {
 }
 
 func TestCopyWordSelectionYanksExactOSC52(t *testing.T) {
-	p, release := newBlockingPTY(t)
-	defer release()
-	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	clock := &manualMouseClock{t: t, now: time.Unix(1, 0)}
-	d.clock = clock
-	writeTestRow(testAttachmentTab(sess).focusedPane().screen, 0, "alpha beta")
-	d.enterCopyMode(sess, ac)
-	mustOutputData(t, sends)
+	synctest.Test(t, func(t *testing.T) {
+		p, release := newBlockingPTY(t)
+		defer release()
+		d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+		stopOverlayTimersAtCleanup(t, ac)
+		clock := &manualMouseClock{t: t, now: time.Unix(1, 0)}
+		d.clock = clock
+		writeTestRow(testAttachmentTab(sess).focusedPane().screen, 0, "alpha beta")
+		d.enterCopyMode(sess, ac)
+		mustOutputData(t, sends)
 
-	copyMouseInput(d, sess, ac, "\x1b[<0;1;2M\x1b[<0;1;2m")
-	clock.Advance(time.Millisecond)
-	copyMouseInput(d, sess, ac, "\x1b[<0;1;2M")
-	mustOutputData(t, sends)
-	copyMouseInput(d, sess, ac, "y")
-	// The selection repaint can have been queued before the synchronous OSC 52
-	// output; consume it, then assert the wire payload itself byte-for-byte.
-	mustOutputData(t, sends)
-	require.Equal(t, scopy.OSC52("alpha")[0], mustOutputData(t, sends))
+		copyMouseInput(d, sess, ac, "\x1b[<0;1;2M\x1b[<0;1;2m")
+		clock.Advance(time.Millisecond)
+		copyMouseInput(d, sess, ac, "\x1b[<0;1;2M")
+		mustOutputData(t, sends)
+		copyMouseInput(d, sess, ac, "y")
+		// The selection repaint can have been queued before the synchronous OSC 52
+		// output; consume it, then assert the wire payload itself byte-for-byte.
+		mustOutputData(t, sends)
+		require.Equal(t, scopy.OSC52("alpha")[0], mustOutputData(t, sends))
+	})
 }
 
 func TestCopyPointerAndClickResetOnCopyExitAndReplacement(t *testing.T) {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -135,19 +136,21 @@ func TestCommandRequestTrackerTimeoutAndGenerationIsolation(t *testing.T) {
 		}
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
-				tracker := NewCommandRequestTracker()
-				requestID, outcome := tracker.Publish(1)
-				ctx, clock, drive := tt.setup(t, tracker, requestID)
-				waitDone := make(chan error, 1)
-				go func() {
-					_, err := tracker.Wait(ctx, clock, requestID, 1, outcome)
-					waitDone <- err
-				}()
-				if drive != nil {
-					drive()
-				}
-				require.ErrorIs(t, <-waitDone, tt.wantErr)
-				require.Equal(t, tt.wantPending, tracker.PendingCount())
+				synctest.Test(t, func(t *testing.T) {
+					tracker := NewCommandRequestTracker()
+					requestID, outcome := tracker.Publish(1)
+					ctx, clock, drive := tt.setup(t, tracker, requestID)
+					waitDone := make(chan error, 1)
+					go func() {
+						_, err := tracker.Wait(ctx, clock, requestID, 1, outcome)
+						waitDone <- err
+					}()
+					if drive != nil {
+						drive()
+					}
+					require.ErrorIs(t, <-waitDone, tt.wantErr)
+					require.Equal(t, tt.wantPending, tracker.PendingCount())
+				})
 			})
 		}
 	})

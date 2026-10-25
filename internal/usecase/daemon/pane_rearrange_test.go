@@ -6,6 +6,7 @@ import (
 	"maps"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -127,30 +128,32 @@ func TestMutateTargetLayoutRejectsStaleTargetsBeforeMutation(t *testing.T) {
 }
 
 func TestPaneRearrangeResizeRunsWithoutDaemonStateLocks(t *testing.T) {
-	h := newPaneRearrangeHarness(t, domain.Size{Cols: 80, Rows: 22}, threeColumnTree())
-	locksAvailable := make(chan bool, 8)
-	for _, tracked := range h.ptys {
-		tracked.onResize = func() { locksAvailable <- h.stateLocksAvailable() }
-	}
+	synctest.Test(t, func(t *testing.T) {
+		h := newPaneRearrangeHarness(t, domain.Size{Cols: 80, Rows: 22}, threeColumnTree())
+		locksAvailable := make(chan bool, 8)
+		for _, tracked := range h.ptys {
+			tracked.onResize = func() { locksAvailable <- h.stateLocksAvailable() }
+		}
 
-	done := make(chan error, 1)
-	go func() {
-		done <- (daemonActions{d: h.daemon}).Run(daemonActionRequest{
-			kind: daemonActionConsumeOrExpelPane, target: h.target("pane-1"), direction: layout.Right,
-		})
-	}()
+		done := make(chan error, 1)
+		go func() {
+			done <- (daemonActions{d: h.daemon}).Run(daemonActionRequest{
+				kind: daemonActionConsumeOrExpelPane, target: h.target("pane-1"), direction: layout.Right,
+			})
+		}()
 
-	select {
-	case err := <-done:
-		require.NoError(t, err)
-	case <-time.After(2 * time.Second):
-		t.Fatal("pane rearrange blocked while PTY.Resize attempted to re-enter daemon state locks")
-	}
-	require.NotZero(t, h.totalResizes())
-	close(locksAvailable)
-	for available := range locksAvailable {
-		require.True(t, available, "PTY.Resize ran while a daemon, session, tab, or pane state lock was held")
-	}
+		select {
+		case err := <-done:
+			require.NoError(t, err)
+		case <-time.After(2 * time.Second):
+			t.Fatal("pane rearrange blocked while PTY.Resize attempted to re-enter daemon state locks")
+		}
+		require.NotZero(t, h.totalResizes())
+		close(locksAvailable)
+		for available := range locksAvailable {
+			require.True(t, available, "PTY.Resize ran while a daemon, session, tab, or pane state lock was held")
+		}
+	})
 }
 
 func TestPaneRearrangeUsesExplicitTargetAndPreservesPaneIdentity(t *testing.T) {
@@ -294,28 +297,30 @@ func TestPaneRearrangeNoChangeAdapterSideEffects(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := newPaneRearrangeHarness(t, domain.Size{Cols: 80, Rows: 22}, threeColumnTree())
-			ac := &attachedClient{}
-			ac.setSession(h.session)
-			h.session.mu.Lock()
-			h.session.registerAttachmentLocked(ac)
-			h.session.mu.Unlock()
-			invalidations := make(chan renderInvalidation, 2)
-			rc := newRenderCoordinator(renderCoordinatorOptions{onInvalidate: func(inv renderInvalidation) { invalidations <- inv }})
-			rc.attach(ac)
-			h.session.installRenderCoordinator(rc)
-			before := h.snapshot()
+			synctest.Test(t, func(t *testing.T) {
+				h := newPaneRearrangeHarness(t, domain.Size{Cols: 80, Rows: 22}, threeColumnTree())
+				ac := &attachedClient{}
+				ac.setSession(h.session)
+				h.session.mu.Lock()
+				h.session.registerAttachmentLocked(ac)
+				h.session.mu.Unlock()
+				invalidations := make(chan renderInvalidation, 2)
+				rc := newRenderCoordinator(renderCoordinatorOptions{onInvalidate: func(inv renderInvalidation) { invalidations <- inv }})
+				rc.attach(ac)
+				h.session.installRenderCoordinator(rc)
+				before := h.snapshot()
 
-			require.NoError(t, tt.invoke(h, ac))
+				require.NoError(t, tt.invoke(h, ac))
 
-			require.Equal(t, before, h.snapshot(), "adapter no-change must not publish layout state")
-			require.Empty(t, h.daemon.notices.history())
-			if tt.wantCleanupInvalidation {
-				invalidation := awaitInvalidation(t, invalidations)
-				require.Equal(t, "palette.go", invalidation.producer)
-				require.True(t, invalidation.reset)
-			}
-			requireNoInvalidation(t, invalidations)
+				require.Equal(t, before, h.snapshot(), "adapter no-change must not publish layout state")
+				require.Empty(t, h.daemon.notices.history())
+				if tt.wantCleanupInvalidation {
+					invalidation := awaitInvalidation(t, invalidations)
+					require.Equal(t, "palette.go", invalidation.producer)
+					require.True(t, invalidation.reset)
+				}
+				requireNoInvalidation(t, invalidations)
+			})
 		})
 	}
 }

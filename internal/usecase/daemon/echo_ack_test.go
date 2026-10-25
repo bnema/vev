@@ -3,6 +3,7 @@ package daemon
 import (
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -64,81 +65,93 @@ func (c *echoTestClock) nextTimer(t *testing.T) (*manualAttentionTimer, time.Dur
 }
 
 func TestEchoAckWaitsForEchoTimeoutAndSendsAckOnlyOutput(t *testing.T) {
-	clock := newEchoTestClock()
-	d, sess, ac, sends := newManualSessionWithPTYsClock(t, clock, newQuietPTY(t))
+	synctest.Test(t, func(t *testing.T) {
+		clock := newEchoTestClock()
+		d, sess, ac, sends := newManualSessionWithPTYsClock(t, clock, newQuietPTY(t))
+		stopOverlayTimersAtCleanup(t, ac)
 
-	// Drive the production input path so the acknowledgement wiring is
-	// covered, not just the tracker.
-	d.handleSequencedInput(sess, ac, 1, []byte("a"))
-	clock.advance(20 * time.Millisecond)
-	d.handleSequencedInput(sess, ac, 2, []byte("b"))
-	timer, delay := clock.nextTimer(t)
-	require.Equal(t, echoAckDelay, delay)
-	require.Zero(t, ac.echoAck.Load(), "input is not echoed when applied")
+		// Drive the production input path so the acknowledgement wiring is
+		// covered, not just the tracker.
+		d.handleSequencedInput(sess, ac, 1, []byte("a"))
+		clock.advance(20 * time.Millisecond)
+		d.handleSequencedInput(sess, ac, 2, []byte("b"))
+		timer, delay := clock.nextTimer(t)
+		require.Equal(t, echoAckDelay, delay)
+		require.Zero(t, ac.echoAck.Load(), "input is not echoed when applied")
 
-	clock.advance(30 * time.Millisecond)
-	timer.fire()
-	output := decodeServerMessage(t, awaitFrame(t, sends, "Output")).(protocol.Output)
-	require.Equal(t, uint64(1), output.Echo)
-	require.Zero(t, output.New, "an ack-only output is a side effect")
-	require.Empty(t, output.Data)
+		clock.advance(30 * time.Millisecond)
+		timer.fire()
+		output := decodeServerMessage(t, requireEnvelope(t, sends, "Output")).(protocol.Output)
+		require.Equal(t, uint64(1), output.Echo)
+		require.Zero(t, output.New, "an ack-only output is a side effect")
+		require.Empty(t, output.Data)
 
-	// Input 2 is still younger than the timeout: the tracker re-arms for its
-	// remaining age.
-	timer, delay = clock.nextTimer(t)
-	require.Equal(t, 20*time.Millisecond, delay)
-	clock.advance(20 * time.Millisecond)
-	timer.fire()
-	output = decodeServerMessage(t, awaitFrame(t, sends, "Output")).(protocol.Output)
-	require.Equal(t, uint64(2), output.Echo)
-	require.Equal(t, uint64(2), ac.echoAck.Load())
+		// Input 2 is still younger than the timeout: the tracker re-arms for its
+		// remaining age.
+		timer, delay = clock.nextTimer(t)
+		require.Equal(t, 20*time.Millisecond, delay)
+		clock.advance(20 * time.Millisecond)
+		timer.fire()
+		output = decodeServerMessage(t, requireEnvelope(t, sends, "Output")).(protocol.Output)
+		require.Equal(t, uint64(2), output.Echo)
+		require.Equal(t, uint64(2), ac.echoAck.Load())
+	})
 }
 
 func TestEchoAckIgnoresUnsequencedAndStaleInput(t *testing.T) {
-	clock := newEchoTestClock()
-	d, _, ac, _ := newManualSessionWithPTYsClock(t, clock, newQuietPTY(t))
-	ac.echoAck.Store(5)
+	synctest.Test(t, func(t *testing.T) {
+		clock := newEchoTestClock()
+		d, _, ac, _ := newManualSessionWithPTYsClock(t, clock, newQuietPTY(t))
+		stopOverlayTimersAtCleanup(t, ac)
+		ac.echoAck.Store(5)
 
-	d.noteInputApplied(ac, 0)
-	d.noteInputApplied(ac, 5)
-	require.Empty(t, ac.echo.pending)
-	require.Empty(t, clock.timers)
+		d.noteInputApplied(ac, 0)
+		d.noteInputApplied(ac, 5)
+		require.Empty(t, ac.echo.pending)
+		require.Empty(t, clock.timers)
+	})
 }
 
 func TestResetEchoAckDropsPendingInput(t *testing.T) {
-	clock := newEchoTestClock()
-	d, _, ac, sends := newManualSessionWithPTYsClock(t, clock, newQuietPTY(t))
+	synctest.Test(t, func(t *testing.T) {
+		clock := newEchoTestClock()
+		d, _, ac, sends := newManualSessionWithPTYsClock(t, clock, newQuietPTY(t))
+		stopOverlayTimersAtCleanup(t, ac)
 
-	d.noteInputApplied(ac, 7)
-	timer, _ := clock.nextTimer(t)
-	ac.resetEchoAck()
-	clock.advance(echoAckDelay)
-	timer.fire()
+		d.noteInputApplied(ac, 7)
+		timer, _ := clock.nextTimer(t)
+		ac.resetEchoAck()
+		clock.advance(echoAckDelay)
+		timer.fire()
 
-	require.Zero(t, ac.echoAck.Load())
-	require.Empty(t, drainAllFrames(sends), "a reset tracker must not publish the old link's input")
+		require.Zero(t, ac.echoAck.Load())
+		require.Empty(t, drainAllFrames(sends), "a reset tracker must not publish the old link's input")
+	})
 }
 
 func TestEchoAckWaitsWhileOutputWindowIsFull(t *testing.T) {
-	clock := newEchoTestClock()
-	d, _, ac, sends := newManualSessionWithPTYsClock(t, clock, newQuietPTY(t))
-	ac.output.maxOutstandingAtomic.Store(1)
-	ac.output.outstandingAtomic.Store(1)
+	synctest.Test(t, func(t *testing.T) {
+		clock := newEchoTestClock()
+		d, _, ac, sends := newManualSessionWithPTYsClock(t, clock, newQuietPTY(t))
+		stopOverlayTimersAtCleanup(t, ac)
+		ac.output.maxOutstandingAtomic.Store(1)
+		ac.output.outstandingAtomic.Store(1)
 
-	d.noteInputApplied(ac, 1)
-	timer, _ := clock.nextTimer(t)
-	clock.advance(echoAckDelay)
-	timer.fire()
+		d.noteInputApplied(ac, 1)
+		timer, _ := clock.nextTimer(t)
+		clock.advance(echoAckDelay)
+		timer.fire()
 
-	retry, delay := clock.nextTimer(t)
-	require.Equal(t, echoAckDelay, delay, "a full window defers the ack")
-	require.Equal(t, uint64(1), ac.echoAck.Load(), "the next frame may still carry it")
-	require.Empty(t, drainAllFrames(sends), "no ack-only output may overtake withheld frames")
+		retry, delay := clock.nextTimer(t)
+		require.Equal(t, echoAckDelay, delay, "a full window defers the ack")
+		require.Equal(t, uint64(1), ac.echoAck.Load(), "the next frame may still carry it")
+		require.Empty(t, drainAllFrames(sends), "no ack-only output may overtake withheld frames")
 
-	ac.output.outstandingAtomic.Store(0)
-	clock.advance(echoAckDelay)
-	retry.fire()
-	output := decodeServerMessage(t, awaitFrame(t, sends, "Output")).(protocol.Output)
-	require.Equal(t, uint64(1), output.Echo)
-	require.Zero(t, output.New)
+		ac.output.outstandingAtomic.Store(0)
+		clock.advance(echoAckDelay)
+		retry.fire()
+		output := decodeServerMessage(t, requireEnvelope(t, sends, "Output")).(protocol.Output)
+		require.Equal(t, uint64(1), output.Echo)
+		require.Zero(t, output.New)
+	})
 }

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -22,31 +23,33 @@ func TestAfterFrameQueueReleasesOnlyAfterALaterCapture(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var q afterFrameQueue
-			ran := make(chan string, len(tt.steps))
-			for _, step := range tt.steps {
-				switch {
-				case step == "capture":
-					q.beginCapture()
-				case step[:4] == "add:":
-					id := step[4:]
-					q.add(func() { ran <- id })
-				case step[:5] == "emit:":
-					q.emitted(uint64(step[5] - '0'))
+			synctest.Test(t, func(t *testing.T) {
+				var q afterFrameQueue
+				ran := make(chan string, len(tt.steps))
+				for _, step := range tt.steps {
+					switch {
+					case step == "capture":
+						q.beginCapture()
+					case step[:4] == "add:":
+						id := step[4:]
+						q.add(func() { ran <- id })
+					case step[:5] == "emit:":
+						q.emitted(uint64(step[5] - '0'))
+					}
 				}
-			}
-			q.runReady()
-			q.runReady()
-			var got []string
-			for range tt.wantRan {
-				got = append(got, awaitTestValue(t, ran, "released work did not run"))
-			}
-			require.ElementsMatch(t, tt.wantRan, got)
-			select {
-			case extra := <-ran:
-				t.Fatalf("unexpected work %q ran", extra)
-			case <-time.After(50 * time.Millisecond):
-			}
+				q.runReady()
+				q.runReady()
+				var got []string
+				for range tt.wantRan {
+					got = append(got, awaitTestValue(t, ran, "released work did not run"))
+				}
+				require.ElementsMatch(t, tt.wantRan, got)
+				select {
+				case extra := <-ran:
+					t.Fatalf("unexpected work %q ran", extra)
+				case <-time.After(50 * time.Millisecond):
+				}
+			})
 		})
 	}
 }
@@ -66,42 +69,45 @@ func TestAfterNextFrameRunsOrDropsByCapability(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d, source, ac, _, _, releases, _ := setupMovePickerSessionsCore(t, newStubClock(t), 0)
-			defer releaseAll(releases)
-			effect, admitted := ac.beginAttachmentEffect(captureAttachmentCapability(source, ac, ac.transport()))
-			require.True(t, admitted)
-			ran := make(chan struct{}, 1)
-			d.queueAfterNextFrame(ac, effect, func(*attachmentEffect) { ran <- struct{}{} })
-			effect.End()
-			if tt.reconnect {
-				ac.replaceTransport(ac.transport())
-				ac.installTestAttachmentCapability(captureAttachmentCapability(source, ac, ac.transport()))
-			}
-			var frozen attachmentTransitionGuard
-			if tt.freeze {
-				frozen = freezeAttachmentEffectGates(ac)
-				require.True(t, frozen.acquired)
-			}
-			ac.afterFrame.emitted(ac.afterFrame.beginCapture())
-			ac.afterFrame.runReady()
-			if tt.freeze {
-				// Released while frozen: it waits, with no further paint needed.
+			synctest.Test(t, func(t *testing.T) {
+				d, source, ac, _, _, releases, _ := setupMovePickerSessionsCore(t, newStubClock(t), 0)
+				stopOverlayTimersAtCleanup(t, ac)
+				defer releaseAll(releases)
+				effect, admitted := ac.beginAttachmentEffect(captureAttachmentCapability(source, ac, ac.transport()))
+				require.True(t, admitted)
+				ran := make(chan struct{}, 1)
+				d.queueAfterNextFrame(ac, effect, func(*attachmentEffect) { ran <- struct{}{} })
+				effect.End()
+				if tt.reconnect {
+					ac.replaceTransport(ac.transport())
+					ac.installTestAttachmentCapability(captureAttachmentCapability(source, ac, ac.transport()))
+				}
+				var frozen attachmentTransitionGuard
+				if tt.freeze {
+					frozen = freezeAttachmentEffectGates(ac)
+					require.True(t, frozen.acquired)
+				}
+				ac.afterFrame.emitted(ac.afterFrame.beginCapture())
+				ac.afterFrame.runReady()
+				if tt.freeze {
+					// Released while frozen: it waits, with no further paint needed.
+					select {
+					case <-ran:
+						t.Fatal("work ran while the attachment was frozen")
+					case <-time.After(50 * time.Millisecond):
+					}
+					frozen.unfreeze()
+				}
+				if tt.wantRun {
+					awaitTestValue(t, ran, "queued work did not run after the frame")
+					return
+				}
 				select {
 				case <-ran:
-					t.Fatal("work ran while the attachment was frozen")
-				case <-time.After(50 * time.Millisecond):
+					t.Fatal("work ran for a reconnected attachment")
+				case <-time.After(100 * time.Millisecond):
 				}
-				frozen.unfreeze()
-			}
-			if tt.wantRun {
-				awaitTestValue(t, ran, "queued work did not run after the frame")
-				return
-			}
-			select {
-			case <-ran:
-				t.Fatal("work ran for a reconnected attachment")
-			case <-time.After(100 * time.Millisecond):
-			}
+			})
 		})
 	}
 }
