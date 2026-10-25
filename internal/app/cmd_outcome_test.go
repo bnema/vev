@@ -25,15 +25,16 @@ import (
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
+	wiremocks "github.com/bnema/vev/internal/protocol/wire/mocks"
 	"github.com/bnema/vev/internal/usecase/daemon"
 )
 
 // countCommandRequests reports how many CommandRequests the transport placed on
 // the wire: exactly one is the no-replay invariant.
-func countCommandRequests(t *testing.T, transport *cmdTestTransport) int {
+func countCommandRequests(t *testing.T, state *cmdTransportState) int {
 	t.Helper()
 	count := 0
-	for _, frame := range transport.sent {
+	for _, frame := range state.sent {
 		message, err := sessionwire.DecodeClientEnvelope(frame.Payload)
 		if err != nil {
 			continue
@@ -46,7 +47,7 @@ func countCommandRequests(t *testing.T, transport *cmdTestTransport) int {
 }
 
 // runCmdReply drives one runCmdWithDeps invocation against a scripted transport.
-func runCmdReply(ctx context.Context, transport *cmdTestTransport, clock ports.Clock) error {
+func runCmdReply(ctx context.Context, transport wire.Transport, clock ports.Clock) error {
 	return runCmdWithDeps(ctx, cmdInvocation{slug: "split-right"}, cmdDeps{
 		stdout: io.Discard,
 		getenv: func(string) string { return "" },
@@ -88,60 +89,62 @@ func malformedCommandOutcomeEnvelope(t *testing.T) wire.Envelope {
 func TestRunCmdLostUncorrelatedOrWrongTypedReplyIsOutcomeUnknown(t *testing.T) {
 	tests := []struct {
 		name        string
-		transport   *cmdTestTransport
+		opts        []func(*wiremocks.MockTransport, *cmdTransportState)
 		wantContain string
 	}{
 		{
 			name:        "reply lost with EOF",
-			transport:   &cmdTestTransport{recvErr: io.EOF},
+			opts:        []func(*wiremocks.MockTransport, *cmdTransportState){func(_ *wiremocks.MockTransport, s *cmdTransportState) { s.recvErr = io.EOF }},
 			wantContain: "EOF",
 		},
 		{
 			name:        "reply lost with a closed pipe",
-			transport:   &cmdTestTransport{recvErr: io.ErrClosedPipe},
+			opts:        []func(*wiremocks.MockTransport, *cmdTransportState){func(_ *wiremocks.MockTransport, s *cmdTransportState) { s.recvErr = io.ErrClosedPipe }},
 			wantContain: "closed pipe",
 		},
 		{
 			name:        "wrong reply type",
-			transport:   &cmdTestTransport{recv: mustServerEnvelope(protocol.Pong{})},
+			opts:        []func(*wiremocks.MockTransport, *cmdTransportState){cmdReply(mustServerEnvelope(protocol.Pong{}))},
 			wantContain: "unexpected command reply protocol.Pong",
 		},
 		{
 			name: "wrong reply request ID",
-			transport: &cmdTestTransport{preserveReplyID: true, recv: mustServerEnvelope(protocol.CommandResult{
-				RequestID: 99, Outcome: protocol.CommandSucceeded,
-			})},
+			opts: []func(*wiremocks.MockTransport, *cmdTransportState){
+				cmdReply(mustServerEnvelope(protocol.CommandResult{RequestID: 99, Outcome: protocol.CommandSucceeded})),
+				func(_ *wiremocks.MockTransport, s *cmdTransportState) { s.preserveReplyID = true },
+			},
 			wantContain: "unexpected command reply request ID 99",
 		},
 		{
 			name:        "malformed outcome bytes are refused",
-			transport:   &cmdTestTransport{recv: malformedCommandOutcomeEnvelope(t)},
+			opts:        []func(*wiremocks.MockTransport, *cmdTransportState){cmdReply(malformedCommandOutcomeEnvelope(t))},
 			wantContain: "wire value out of semantic range",
 		},
 		{
 			name: "truncated envelope bytes are refused",
-			transport: &cmdTestTransport{recv: rawServerEnvelope(
-				mustServerEnvelope(protocol.CommandResult{RequestID: 1, Outcome: protocol.CommandSucceeded}).Payload[:3])},
+			opts: []func(*wiremocks.MockTransport, *cmdTransportState){cmdReply(rawServerEnvelope(
+				mustServerEnvelope(protocol.CommandResult{RequestID: 1, Outcome: protocol.CommandSucceeded}).Payload[:3]))},
 			wantContain: "wire: envelope is truncated",
 		},
 		{
 			name: "definite daemon unknown outcome",
-			transport: &cmdTestTransport{recv: mustServerEnvelope(protocol.CommandResult{
+			opts: []func(*wiremocks.MockTransport, *cmdTransportState){cmdReply(mustServerEnvelope(protocol.CommandResult{
 				Outcome: protocol.CommandOutcomeUnknown, Text: "daemon is shutting down",
-			})},
+			}))},
 			wantContain: "daemon is shutting down",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := runCmdReply(context.Background(), tt.transport, nil)
+			transport, state := newCmdTransportMock(t, tt.opts...)
+			err := runCmdReply(context.Background(), transport, nil)
 
 			require.ErrorIs(t, err, errCommandOutcomeUnknown, "a lost or uncorrelated reply is outcome-unknown")
 			require.NotErrorIs(t, err, errCommandNotSent, "the request was sent, so the outcome is not a definite not-sent")
 			require.ErrorContains(t, err, tt.wantContain)
 			require.Equal(t, 3, ExitCode(err))
-			require.Equal(t, 1, countCommandRequests(t, tt.transport), "an indeterminate command must never be resent")
-			require.Equal(t, 1, tt.transport.closeCalls, "the one-shot connection is retired exactly once")
+			require.Equal(t, 1, countCommandRequests(t, state), "an indeterminate command must never be resent")
+			require.Equal(t, 1, state.closeCalls, "the one-shot connection is retired exactly once")
 		})
 	}
 }
@@ -152,7 +155,10 @@ func TestRunCmdLostUncorrelatedOrWrongTypedReplyIsOutcomeUnknown(t *testing.T) {
 func TestRunCmdCancelAfterSendIsOutcomeUnknownWithoutResend(t *testing.T) {
 	replyStarted := make(chan struct{})
 	recvGate := make(chan struct{})
-	transport := &cmdTestTransport{replyStarted: replyStarted, recvGate: recvGate}
+	transport, state := newCmdTransportMock(t, func(_ *wiremocks.MockTransport, s *cmdTransportState) {
+		s.replyStarted = replyStarted
+		s.recvGate = recvGate
+	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -168,8 +174,8 @@ func TestRunCmdCancelAfterSendIsOutcomeUnknownWithoutResend(t *testing.T) {
 
 	require.ErrorIs(t, err, errCommandOutcomeUnknown)
 	require.Equal(t, 3, ExitCode(err))
-	require.Equal(t, 1, countCommandRequests(t, transport), "a canceled command must never be resent")
-	require.Equal(t, 1, transport.closeCalls, "cancellation after the send must retire the connection")
+	require.Equal(t, 1, countCommandRequests(t, state), "a canceled command must never be resent")
+	require.Equal(t, 1, state.closeCalls, "cancellation after the send must retire the connection")
 }
 
 // TestRunCmdTimeoutAfterSendIsOutcomeUnknownWithoutResend proves a request
@@ -189,7 +195,10 @@ func TestRunCmdTimeoutAfterSendIsOutcomeUnknownWithoutResend(t *testing.T) {
 
 	replyStarted := make(chan struct{})
 	recvGate := make(chan struct{})
-	transport := &cmdTestTransport{replyStarted: replyStarted, recvGate: recvGate}
+	transport, state := newCmdTransportMock(t, func(_ *wiremocks.MockTransport, s *cmdTransportState) {
+		s.replyStarted = replyStarted
+		s.recvGate = recvGate
+	})
 	done := make(chan error, 1)
 	go func() { done <- runCmdReply(context.Background(), transport, clock) }()
 
@@ -202,15 +211,15 @@ func TestRunCmdTimeoutAfterSendIsOutcomeUnknownWithoutResend(t *testing.T) {
 	require.ErrorIs(t, err, errCommandOutcomeUnknown)
 	require.ErrorContains(t, err, daemon.ErrCommandRequestTimeout.Error())
 	require.Equal(t, 3, ExitCode(err))
-	require.Equal(t, 1, countCommandRequests(t, transport), "a timed-out command must never be resent")
-	require.Equal(t, 1, transport.closeCalls, "a result timeout must retire the connection")
+	require.Equal(t, 1, countCommandRequests(t, state), "a timed-out command must never be resent")
+	require.Equal(t, 1, state.closeCalls, "a result timeout must retire the connection")
 }
 
 // TestRunCmdCancelBeforeSendIsDefiniteNotSent proves a caller already canceled
 // before the request is sent reports a definite not-sent outcome, puts no
 // CommandRequest on the wire, and is not misclassified as unknown.
 func TestRunCmdCancelBeforeSendIsDefiniteNotSent(t *testing.T) {
-	transport := &cmdTestTransport{recv: mustServerEnvelope(protocol.CommandResult{Outcome: protocol.CommandSucceeded})}
+	transport, state := newCmdTransportMock(t, cmdReply(mustServerEnvelope(protocol.CommandResult{Outcome: protocol.CommandSucceeded})))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -218,7 +227,7 @@ func TestRunCmdCancelBeforeSendIsDefiniteNotSent(t *testing.T) {
 
 	require.ErrorIs(t, err, errCommandNotSent)
 	require.NotErrorIs(t, err, errCommandOutcomeUnknown, "a not-sent command has a definite outcome")
-	require.Equal(t, 0, countCommandRequests(t, transport), "a canceled-before-send command must not reach the wire")
+	require.Equal(t, 0, countCommandRequests(t, state), "a canceled-before-send command must not reach the wire")
 }
 
 // TestRunCmdSuccessAndFailurePreserveCorrelationAndBoundedError proves a
@@ -249,7 +258,7 @@ func TestRunCmdSuccessAndFailurePreserveCorrelationAndBoundedError(t *testing.T)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			out := new(strings.Builder)
-			transport := &cmdTestTransport{recv: mustServerEnvelope(tt.result)}
+			transport, state := newCmdTransportMock(t, cmdReply(mustServerEnvelope(tt.result)))
 			err := runCmdWithDeps(context.Background(), cmdInvocation{slug: "split-right"}, cmdDeps{
 				stdout: out,
 				getenv: func(string) string { return "" },
@@ -257,7 +266,7 @@ func TestRunCmdSuccessAndFailurePreserveCorrelationAndBoundedError(t *testing.T)
 			})
 
 			require.Equal(t, tt.wantCode, ExitCode(err))
-			require.Equal(t, 1, countCommandRequests(t, transport), "a definite outcome sends exactly one request")
+			require.Equal(t, 1, countCommandRequests(t, state), "a definite outcome sends exactly one request")
 			require.NotErrorIs(t, err, errCommandOutcomeUnknown, "a definite outcome is never reported as unknown")
 			if tt.result.Outcome == protocol.CommandSucceeded {
 				require.NoError(t, err)

@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/adapters/brokerconfig"
@@ -26,6 +27,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/bnema/vev/internal/usecase/broker"
@@ -577,7 +579,7 @@ func TestBrokerLocalObservationNeverSpawnsDaemon(t *testing.T) {
 	_, binding := testLocalSandboxConfig(t)
 	var modes []ports.BrokerDaemonStartMode
 	var mu sync.Mutex
-	probe, err := newDynamicLocalRouteProbe(binding.Route, binding.Policy, brokerLocalTestEpoch, testEndpointConnectorFunc(func(_ context.Context, target ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
+	probe, err := newDynamicLocalRouteProbe(binding.Route, binding.Policy, brokerLocalTestEpoch, newEndpointConnectorMock(t, func(_ context.Context, target ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
 		mu.Lock()
 		modes = append(modes, target.StartMode)
 		mu.Unlock()
@@ -694,17 +696,20 @@ func TestBrokerLocalObservationRegistryPublishesLocalFirst(t *testing.T) {
 // observation dial target carries the existing-only authorization: an
 // observation must never start a stopped daemon, and the resolved target is
 // where that decision is carried to the transport.
-type testEndpointConnectorFunc func(context.Context, ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error)
-
-func (f testEndpointConnectorFunc) Connect(ctx context.Context, target ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
-	return f(ctx, target)
+// newEndpointConnectorMock is a ports.BrokerEndpointConnector whose Connect runs
+// the supplied function.
+func newEndpointConnectorMock(t *testing.T, connect func(context.Context, ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error)) *portsmocks.MockBrokerEndpointConnector {
+	t.Helper()
+	connector := portsmocks.NewMockBrokerEndpointConnector(t)
+	connector.EXPECT().Connect(mock.Anything, mock.Anything).RunAndReturn(connect).Maybe()
+	return connector
 }
 
 func TestBrokerLocalProbeLoadsIdentityOnEveryAttempt(t *testing.T) {
 	_, binding := testLocalSandboxConfig(t)
 	var identity ports.BrokerDaemonIdentity
 	var dials []ports.BrokerDialTarget
-	probe, err := newDynamicLocalRouteProbe(binding.Route, binding.Policy, brokerLocalTestEpoch, testEndpointConnectorFunc(func(_ context.Context, target ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
+	probe, err := newDynamicLocalRouteProbe(binding.Route, binding.Policy, brokerLocalTestEpoch, newEndpointConnectorMock(t, func(_ context.Context, target ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
 		dials = append(dials, target)
 		return nil, errors.New("socket absent")
 	}), func() (ports.BrokerDaemonIdentity, error) {
@@ -729,7 +734,7 @@ func TestBrokerLocalProbeLoadsIdentityOnEveryAttempt(t *testing.T) {
 func TestBrokerLocalProbeIdentityCorruptionIsDiagnosticWithoutDial(t *testing.T) {
 	_, binding := testLocalSandboxConfig(t)
 	dialed := false
-	probe, err := newDynamicLocalRouteProbe(binding.Route, binding.Policy, brokerLocalTestEpoch, testEndpointConnectorFunc(func(context.Context, ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
+	probe, err := newDynamicLocalRouteProbe(binding.Route, binding.Policy, brokerLocalTestEpoch, newEndpointConnectorMock(t, func(context.Context, ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
 		dialed = true
 		return nil, nil
 	}), func() (ports.BrokerDaemonIdentity, error) {
@@ -820,16 +825,12 @@ func waitLocalEntry(t *testing.T, registry *broker.Registry, predicate func(port
 	}
 }
 
-// noDialHostProbe is a ports.BrokerHostProbe that never dials: a membership test
-// supplies it only because the registry requires a remote probe to observe
-// hosts, never to own their authority.
-type noDialHostProbe struct{}
-
-func (noDialHostProbe) Probe(context.Context, domain.RemoteRegistration) (ports.BrokerDaemonObservation, error) {
-	return ports.BrokerDaemonObservation{}, errors.New("membership authority must not dial")
-}
-
+// unreachableHostProbe is a ports.BrokerHostProbe that never dials: a
+// membership test supplies it only because the registry requires a remote probe
+// to observe hosts, never to own their authority.
 func unreachableHostProbe(t *testing.T) ports.BrokerHostProbe {
 	t.Helper()
-	return noDialHostProbe{}
+	probe := portsmocks.NewMockBrokerHostProbe(t)
+	probe.EXPECT().Probe(mock.Anything, mock.Anything).Return(ports.BrokerDaemonObservation{}, errors.New("membership authority must not dial")).Maybe()
+	return probe
 }

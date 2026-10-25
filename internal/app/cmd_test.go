@@ -16,6 +16,7 @@ import (
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
+	wiremocks "github.com/bnema/vev/internal/protocol/wire/mocks"
 	"github.com/bnema/vev/internal/usecase/daemon"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -182,14 +183,14 @@ func TestMoveCmdPreservesPositionalArguments(t *testing.T) {
 		t.Run(tt.slug, func(t *testing.T) {
 			parsed, err := parseArgs(append([]string{"cmd", tt.slug}, tt.args...))
 			require.NoError(t, err)
-			transport := &cmdTestTransport{recv: mustServerEnvelope(protocol.CommandResult{Outcome: protocol.CommandSucceeded})}
+			transport, state := newCmdTransportMock(t, cmdReply(mustServerEnvelope(protocol.CommandResult{Outcome: protocol.CommandSucceeded})))
 			require.NoError(t, runCmdWithDeps(context.Background(), parsed.cmd, cmdDeps{
 				stdout: io.Discard,
 				getenv: func(string) string { return "" },
 				dial:   func(context.Context, string) (wire.Transport, error) { return transport, nil },
 			}))
-			require.Len(t, transport.sent, 2)
-			message, err := sessionwire.DecodeClientEnvelope(transport.sent[1].Payload)
+			require.Len(t, state.sent, 2)
+			message, err := sessionwire.DecodeClientEnvelope(state.sent[1].Payload)
 			require.NoError(t, err)
 			request := message.(protocol.CommandRequest)
 			require.Equal(t, tt.slug, request.Slug)
@@ -223,9 +224,9 @@ func TestMoveCmdInvalidArgumentResultExitsTwo(t *testing.T) {
 		{slug: "move-tab", args: []string{"work", "extra"}},
 	} {
 		t.Run(invocation.slug+"/"+strconv.Itoa(len(invocation.args)), func(t *testing.T) {
-			transport := &cmdTestTransport{recv: mustServerEnvelope(protocol.CommandResult{
+			transport, _ := newCmdTransportMock(t, cmdReply(mustServerEnvelope(protocol.CommandResult{
 				Outcome: protocol.CommandFailed, Code: protocol.ErrInvalidCommandArgs, Text: "invalid command arguments",
-			})}
+			})))
 			err := runCmdWithDeps(context.Background(), invocation, cmdDeps{
 				stdout: io.Discard,
 				getenv: func(string) string { return "" },
@@ -246,14 +247,14 @@ func TestTargetPaneCmdsParseAndUseSelfTarget(t *testing.T) {
 		t.Run(slug, func(t *testing.T) {
 			invocation, err := parseArgs([]string{"cmd", "--self", slug})
 			require.NoError(t, err)
-			transport := &cmdTestTransport{recv: mustServerEnvelope(protocol.CommandResult{Outcome: protocol.CommandSucceeded})}
+			transport, state := newCmdTransportMock(t, cmdReply(mustServerEnvelope(protocol.CommandResult{Outcome: protocol.CommandSucceeded})))
 			require.NoError(t, runCmdWithDeps(context.Background(), invocation.cmd, cmdDeps{
 				stdout: io.Discard,
 				getenv: func(string) string { return "session=work,tab=t_abc,pane=p_def" },
 				dial:   func(context.Context, string) (wire.Transport, error) { return transport, nil },
 			}))
-			require.Len(t, transport.sent, 2)
-			message, err := sessionwire.DecodeClientEnvelope(transport.sent[1].Payload)
+			require.Len(t, state.sent, 2)
+			message, err := sessionwire.DecodeClientEnvelope(state.sent[1].Payload)
 			require.NoError(t, err)
 			request := message.(protocol.CommandRequest)
 			require.Equal(t, slug, request.Slug)
@@ -266,7 +267,7 @@ func TestTargetPaneCmdsParseAndUseSelfTarget(t *testing.T) {
 }
 
 func TestRunCmdBuildsOneShotTargetedRequest(t *testing.T) {
-	transport := &cmdTestTransport{recv: mustServerEnvelope(protocol.CommandResult{Outcome: protocol.CommandSucceeded, Output: "done"})}
+	transport, state := newCmdTransportMock(t, cmdReply(mustServerEnvelope(protocol.CommandResult{Outcome: protocol.CommandSucceeded, Output: "done"})))
 	out := new(strings.Builder)
 	err := runCmdWithDeps(context.Background(), cmdInvocation{slug: "split-right", self: true}, cmdDeps{
 		stdout: out,
@@ -276,10 +277,10 @@ func TestRunCmdBuildsOneShotTargetedRequest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runCmdWithDeps: %v", err)
 	}
-	if len(transport.sent) != 2 || transport.recvCalls != 2 || transport.closeCalls != 1 {
-		t.Fatalf("transport calls: sent=%d recv=%d close=%d", len(transport.sent), transport.recvCalls, transport.closeCalls)
+	if len(state.sent) != 2 || state.recvCalls != 2 || state.closeCalls != 1 {
+		t.Fatalf("transport calls: sent=%d recv=%d close=%d", len(state.sent), state.recvCalls, state.closeCalls)
 	}
-	message, err := sessionwire.DecodeClientEnvelope(transport.sent[1].Payload)
+	message, err := sessionwire.DecodeClientEnvelope(state.sent[1].Payload)
 	if err != nil {
 		t.Fatalf("decode request: %v", err)
 	}
@@ -293,7 +294,7 @@ func TestRunCmdBuildsOneShotTargetedRequest(t *testing.T) {
 }
 
 func TestRunCmdVEVWithoutSelfUsesIDsOnlyAsSessionLocator(t *testing.T) {
-	transport := &cmdTestTransport{recv: mustServerEnvelope(protocol.CommandResult{Outcome: protocol.CommandSucceeded})}
+	transport, state := newCmdTransportMock(t, cmdReply(mustServerEnvelope(protocol.CommandResult{Outcome: protocol.CommandSucceeded})))
 	err := runCmdWithDeps(context.Background(), cmdInvocation{slug: "split-right"}, cmdDeps{
 		stdout: io.Discard,
 		getenv: func(string) string { return "session=old,tab=t_abc,pane=p_def" },
@@ -302,7 +303,7 @@ func TestRunCmdVEVWithoutSelfUsesIDsOnlyAsSessionLocator(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runCmdWithDeps: %v", err)
 	}
-	message, err := sessionwire.DecodeClientEnvelope(transport.sent[1].Payload)
+	message, err := sessionwire.DecodeClientEnvelope(state.sent[1].Payload)
 	if err != nil {
 		t.Fatalf("decode request: %v", err)
 	}
@@ -313,7 +314,7 @@ func TestRunCmdVEVWithoutSelfUsesIDsOnlyAsSessionLocator(t *testing.T) {
 }
 
 func TestRunCmdExplicitSessionDoesNotUseEnvIDsWithoutSelf(t *testing.T) {
-	transport := &cmdTestTransport{recv: mustServerEnvelope(protocol.CommandResult{Outcome: protocol.CommandSucceeded})}
+	transport, state := newCmdTransportMock(t, cmdReply(mustServerEnvelope(protocol.CommandResult{Outcome: protocol.CommandSucceeded})))
 	err := runCmdWithDeps(context.Background(), cmdInvocation{slug: "new-tab", session: "current"}, cmdDeps{
 		stdout: io.Discard,
 		getenv: func(string) string { return "session=old,tab=t_abc,pane=p_def" },
@@ -322,7 +323,7 @@ func TestRunCmdExplicitSessionDoesNotUseEnvIDsWithoutSelf(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runCmdWithDeps: %v", err)
 	}
-	message, err := sessionwire.DecodeClientEnvelope(transport.sent[1].Payload)
+	message, err := sessionwire.DecodeClientEnvelope(state.sent[1].Payload)
 	if err != nil {
 		t.Fatalf("decode request: %v", err)
 	}
@@ -366,7 +367,10 @@ func TestRunCmdTimesOutPendingRequest(t *testing.T) {
 	}).Return(timer).Once()
 	recvStarted := make(chan struct{})
 	recvGate := make(chan struct{})
-	transport := &cmdTestTransport{recvStarted: recvStarted, recvGate: recvGate}
+	transport, state := newCmdTransportMock(t, func(_ *wiremocks.MockTransport, state *cmdTransportState) {
+		state.recvStarted = recvStarted
+		state.recvGate = recvGate
+	})
 	done := make(chan error, 1)
 	go func() {
 		done <- runCmdWithDeps(context.Background(), cmdInvocation{slug: "split-right"}, cmdDeps{
@@ -386,7 +390,7 @@ func TestRunCmdTimesOutPendingRequest(t *testing.T) {
 	if ExitCode(err) != 3 || !errors.Is(err, daemon.ErrCommandRequestTimeout) {
 		t.Fatalf("timeout error=%v code=%d", err, ExitCode(err))
 	}
-	message, decodeErr := sessionwire.DecodeClientEnvelope(transport.sent[1].Payload)
+	message, decodeErr := sessionwire.DecodeClientEnvelope(state.sent[1].Payload)
 	if decodeErr != nil {
 		t.Fatalf("decode=%v, want non-zero request ID", decodeErr)
 	}
@@ -398,9 +402,9 @@ func TestRunCmdTimesOutPendingRequest(t *testing.T) {
 
 func TestRunCmdZeroRequestIDReplyIsRejected(t *testing.T) {
 	const want = "unexpected command reply request ID 0"
-	transport := &cmdTestTransport{preserveReplyID: true, recv: mustServerEnvelope(protocol.CommandResult{
+	transport, _ := newCmdTransportMock(t, cmdReply(mustServerEnvelope(protocol.CommandResult{
 		Outcome: protocol.CommandFailed, Code: protocol.ErrInternal, Text: want,
-	})}
+	})), func(_ *wiremocks.MockTransport, state *cmdTransportState) { state.preserveReplyID = true })
 	err := runCmdWithDeps(context.Background(), cmdInvocation{slug: "split-right"}, cmdDeps{
 		stdout: io.Discard,
 		getenv: func(string) string { return "" },
@@ -467,7 +471,7 @@ func TestRunCmdClassifiesDaemonCommandErrors(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := &cmdTestTransport{recv: mustServerEnvelope(tt.result)}
+			transport, _ := newCmdTransportMock(t, cmdReply(mustServerEnvelope(tt.result)))
 			err := runCmdWithDeps(context.Background(), cmdInvocation{slug: "split-right"}, cmdDeps{
 				stdout: io.Discard,
 				getenv: func(string) string { return "" },
@@ -480,7 +484,9 @@ func TestRunCmdClassifiesDaemonCommandErrors(t *testing.T) {
 	}
 }
 
-type cmdTestTransport struct {
+// cmdTransportState is the recorded and scripted state behind one
+// newCmdTransportMock. It implements no interface; the mock closures capture it.
+type cmdTransportState struct {
 	sent            []wire.Envelope
 	recv            wire.Envelope
 	recvErr         error
@@ -492,51 +498,65 @@ type cmdTestTransport struct {
 	preserveReplyID bool
 }
 
-func (t *cmdTestTransport) Send(frame wire.Envelope) error {
-	t.sent = append(t.sent, frame)
-	return nil
+// cmdReply scripts the one reply the transport serves after the preamble.
+func cmdReply(reply wire.Envelope) func(*wiremocks.MockTransport, *cmdTransportState) {
+	return func(_ *wiremocks.MockTransport, state *cmdTransportState) { state.recv = reply }
 }
 
-// Recv serves the server preamble response on the first call, then the
-// queued reply: typed client connections run the preamble lazily.
-func (t *cmdTestTransport) Recv() (wire.Envelope, error) {
-	t.recvCalls++
-	if t.recvStarted != nil {
-		select {
-		case <-t.recvStarted:
-		default:
-			close(t.recvStarted)
+// newCmdTransportMock is a wire.Transport that records what is sent and serves
+// the server preamble response on the first Recv, then the scripted reply:
+// typed client connections run the preamble lazily. Options register overrides
+// first, then the defaults are registered with Maybe.
+func newCmdTransportMock(t *testing.T, opts ...func(*wiremocks.MockTransport, *cmdTransportState)) (*wiremocks.MockTransport, *cmdTransportState) {
+	t.Helper()
+	transport := wiremocks.NewMockTransport(t)
+	state := &cmdTransportState{}
+	for _, opt := range opts {
+		opt(transport, state)
+	}
+	transport.EXPECT().Send(mock.Anything).RunAndReturn(func(frame wire.Envelope) error {
+		state.sent = append(state.sent, frame)
+		return nil
+	}).Maybe()
+	transport.EXPECT().Recv().RunAndReturn(func() (wire.Envelope, error) {
+		state.recvCalls++
+		if state.recvStarted != nil {
+			select {
+			case <-state.recvStarted:
+			default:
+				close(state.recvStarted)
+			}
 		}
-	}
-	if t.recvCalls == 1 {
-		return mustPreambleResponse(), nil
-	}
-	if t.replyStarted != nil {
-		select {
-		case <-t.replyStarted:
-		default:
-			close(t.replyStarted)
+		if state.recvCalls == 1 {
+			return mustPreambleResponse(), nil
 		}
-	}
-	if t.recvGate != nil {
-		<-t.recvGate
-	}
-	if t.recvErr == nil && !t.preserveReplyID {
-		message, err := sessionwire.DecodeServerEnvelope(t.recv.Payload)
-		if err == nil {
-			if result, ok := message.(protocol.CommandResult); ok && result.RequestID == 0 {
-				requestMessage, decodeErr := sessionwire.DecodeClientEnvelope(t.sent[1].Payload)
-				if decodeErr == nil {
-					result.RequestID = requestMessage.(protocol.CommandRequest).RequestID
-					t.recv = mustServerEnvelope(result)
+		if state.replyStarted != nil {
+			select {
+			case <-state.replyStarted:
+			default:
+				close(state.replyStarted)
+			}
+		}
+		if state.recvGate != nil {
+			<-state.recvGate
+		}
+		if state.recvErr == nil && !state.preserveReplyID {
+			message, err := sessionwire.DecodeServerEnvelope(state.recv.Payload)
+			if err == nil {
+				if result, ok := message.(protocol.CommandResult); ok && result.RequestID == 0 {
+					requestMessage, decodeErr := sessionwire.DecodeClientEnvelope(state.sent[1].Payload)
+					if decodeErr == nil {
+						result.RequestID = requestMessage.(protocol.CommandRequest).RequestID
+						state.recv = mustServerEnvelope(result)
+					}
 				}
 			}
 		}
-	}
-	return t.recv, t.recvErr
-}
-
-func (t *cmdTestTransport) Close() error {
-	t.closeCalls++
-	return nil
+		return state.recv, state.recvErr
+	}).Maybe()
+	transport.EXPECT().Close().RunAndReturn(func() error {
+		state.closeCalls++
+		return nil
+	}).Maybe()
+	return transport, state
 }

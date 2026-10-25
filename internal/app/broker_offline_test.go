@@ -23,6 +23,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/lifecycle"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 )
 
@@ -136,13 +137,16 @@ func awaitSandboxCancel(t *testing.T, cancel context.CancelFunc, done <-chan err
 	}
 }
 
-// fatalListener is a ports.BrokerListener whose Accept always reports one
+// newFatalListener is a ports.BrokerListener whose Accept always reports one
 // fixed terminal error, so a test can drive the accept drain without a carriage.
-type fatalListener struct{ err error }
-
-func (l fatalListener) Accept() (ports.BrokerCoreService, error) { return nil, l.err }
-func (l fatalListener) Close() error                             { return nil }
-func (l fatalListener) Addr() string                             { return "fatal" }
+func newFatalListener(t *testing.T, err error) *portsmocks.MockBrokerListener {
+	t.Helper()
+	listener := portsmocks.NewMockBrokerListener(t)
+	listener.EXPECT().Accept().Return(nil, err).Maybe()
+	listener.EXPECT().Close().Return(nil).Maybe()
+	listener.EXPECT().Addr().Return("fatal").Maybe()
+	return listener
+}
 
 // TestDrainBrokerAcceptClassifiesTerminalFailure proves the drain treats a
 // listener close as an orderly end with no log and no failure signal, while any
@@ -165,7 +169,7 @@ func TestDrainBrokerAcceptClassifiesTerminalFailure(t *testing.T) {
 			started := make(chan struct{})
 			drained := make(chan struct{})
 			failed := make(chan struct{})
-			go drainBrokerAccept(fatalListener{err: tt.err}, log, started, drained, failed)
+			go drainBrokerAccept(newFatalListener(t, tt.err), log, started, drained, failed)
 
 			select {
 			case <-started:
@@ -356,21 +360,21 @@ func TestBrokerServeCancelCleanup(t *testing.T) {
 
 }
 
-// wedgedListener is a ports.BrokerListener whose Accept always reports one
+// newWedgedListener is a ports.BrokerListener whose Accept always reports one
 // unexpected terminal failure and whose Close records that the sandbox tore it
 // down, so a test can prove an accept failure does not leave a bound broker.
-type wedgedListener struct {
-	err    error
-	addr   string
-	closed atomic.Bool
+func newWedgedListener(t *testing.T, err error, addr string) (*portsmocks.MockBrokerListener, *atomic.Bool) {
+	t.Helper()
+	closed := &atomic.Bool{}
+	listener := portsmocks.NewMockBrokerListener(t)
+	listener.EXPECT().Accept().Return(nil, err).Maybe()
+	listener.EXPECT().Close().RunAndReturn(func() error {
+		closed.Store(true)
+		return nil
+	}).Maybe()
+	listener.EXPECT().Addr().Return(addr).Maybe()
+	return listener, closed
 }
-
-func (l *wedgedListener) Accept() (ports.BrokerCoreService, error) { return nil, l.err }
-func (l *wedgedListener) Close() error {
-	l.closed.Store(true)
-	return nil
-}
-func (l *wedgedListener) Addr() string { return l.addr }
 
 // TestBrokerServeShutsDownOnUnexpectedAcceptFailure proves an unexpected
 // terminal accept failure commits shutdown and drains the listener, instead of
@@ -379,7 +383,7 @@ func TestBrokerServeShutsDownOnUnexpectedAcceptFailure(t *testing.T) {
 	layout := emptyProductionBrokerLayout(t, "")
 	clock, _ := newSandboxClockMock(t)
 
-	listener := &wedgedListener{err: errors.New("carriage accept failed"), addr: "wedged"}
+	listener, listenerClosed := newWedgedListener(t, errors.New("carriage accept failed"), "wedged")
 	deps, ready := testBrokerServeDeps(clock)
 	deps.listen = func(string, ports.BrokerEpoch, ports.BrokerAuthority, brokeripc.Config) (ports.BrokerListener, error) {
 		return listener, nil
@@ -395,7 +399,7 @@ func TestBrokerServeShutsDownOnUnexpectedAcceptFailure(t *testing.T) {
 	case <-time.After(brokerTestWait):
 		t.Fatal("the broker wedged on an unexpected accept failure")
 	}
-	require.True(t, listener.closed.Load(), "shutdown must close the wedged listener")
+	require.True(t, listenerClosed.Load(), "shutdown must close the wedged listener")
 	requireOwnerLockReleased(t, layout.Runtime)
 
 }

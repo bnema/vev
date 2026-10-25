@@ -32,6 +32,7 @@ import (
 	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/platform"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/daemon"
 	"github.com/bnema/vev/internal/usecase/recovery"
@@ -115,7 +116,7 @@ func startPersistentOfflineClientFixture(t *testing.T, shell string, shellArgs [
 		}
 	}()
 	streamSeen := make(chan struct{}, 16)
-	counting := &countingServerListener{ServerListener: aggregate, seen: streamSeen}
+	counting := newCountingServerListener(t, aggregate, streamSeen)
 	daemonOpts := []daemon.Option{daemon.WithShell(shell, shellArgs)}
 	var fixtureCatalogue *persist.Persister
 	if persistEnabled {
@@ -201,20 +202,24 @@ func startPersistentOfflineClientFixture(t *testing.T, shell string, shellArgs [
 	}
 }
 
-type countingServerListener struct {
-	ports.ServerListener
-	seen chan<- struct{}
-}
-
-func (l *countingServerListener) Accept() (ports.ServerConnection, error) {
-	connection, err := l.ServerListener.Accept()
-	if err == nil {
-		select {
-		case l.seen <- struct{}{}:
-		default:
+// newCountingServerListener wraps a real server listener in a generated mock
+// that forwards to it and signals seen on every accepted connection.
+func newCountingServerListener(t *testing.T, inner ports.ServerListener, seen chan<- struct{}) *portsmocks.MockServerListener {
+	t.Helper()
+	listener := portsmocks.NewMockServerListener(t)
+	listener.EXPECT().Accept().RunAndReturn(func() (ports.ServerConnection, error) {
+		connection, err := inner.Accept()
+		if err == nil {
+			select {
+			case seen <- struct{}{}:
+			default:
+			}
 		}
-	}
-	return connection, err
+		return connection, err
+	}).Maybe()
+	listener.EXPECT().Close().RunAndReturn(inner.Close).Maybe()
+	listener.EXPECT().Addr().RunAndReturn(inner.Addr).Maybe()
+	return listener
 }
 
 func awaitLogicalStream(t *testing.T, streams <-chan struct{}) {
