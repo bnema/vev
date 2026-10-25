@@ -71,12 +71,12 @@ func startInputHarnessOn(t *testing.T, themes *terminalThemeState, request ports
 	h := &inputHarness{
 		stream: stream,
 		pump:   pump,
-		term:   newWorkerTestTerminal(),
+		term:   newWorkerTestTerminal(t),
 		clock:  newSupervisorTestClock(t),
 		reader: reader,
 		events: make(chan AttachmentEvent, 1),
 	}
-	host := newAttachmentHost(attachmentHostConfig{Terminal: h.term, Clock: newSupervisorTestClock(t).port, Input: pump})
+	host := newAttachmentHost(attachmentHostConfig{Terminal: h.term.port, Clock: newSupervisorTestClock(t).port, Input: pump})
 	cfg := sessionTestWorkerConfig(request)
 	cfg.Clock = h.clock.port
 	cfg.Theme = themes

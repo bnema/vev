@@ -108,7 +108,7 @@ func TestAttachmentReportsHeldCtrl(t *testing.T) {
 		pump.start()
 		defer pump.stop()
 		stream := newSessionStream(t)
-		host := newWorkerTestHost(t, newWorkerTestTerminal(), pump, nil)
+		host := newWorkerTestHost(t, newWorkerTestTerminal(t), pump, nil)
 		cfg := sessionTestWorkerConfig(sessionTestRequest(true))
 		clock := newSupervisorTestClock(t)
 		cfg.Clock = clock.port

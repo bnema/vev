@@ -337,7 +337,7 @@ func awaitHello(t *testing.T, stream *streamLog) protocol.Hello {
 func TestSessionAttachmentWorkerStaysConnectingUntilPublication(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		stream := newSessionStream(t)
-		terminal := newWorkerTestTerminal()
+		terminal := newWorkerTestTerminal(t)
 		attached := newSessionTestAttachments()
 		events := sessionTestRun(t, stream.conn, terminal, sessionTestWorkerConfig(sessionTestRequest(true)), attached)
 
@@ -354,11 +354,13 @@ func TestSessionAttachmentWorkerStaysConnectingUntilPublication(t *testing.T) {
 
 		stream.deliver(protocol.Welcome{SessionName: "alpha"})
 		// Welcome alone must not attach, write, or publish.
-		require.Never(t, attached.attached, 20*time.Millisecond, 2*time.Millisecond, "Welcome alone must never attach")
+		synctest.Wait()
+		require.False(t, attached.attached(), "Welcome alone must never attach")
 		require.Zero(t, terminal.flushCount(), "Welcome alone writes nothing")
 		require.Empty(t, terminal.publications(), "Welcome alone publishes nothing")
 
 		stream.deliver(sessionTestOutput(1, "\x1b[Hready"))
+		synctest.Wait()
 		require.Equal(t, AttachmentToken{Generation: 4, Attempt: 1}, attached.token(t))
 		require.Equal(t, "\x1b[Hready", terminal.written())
 		require.Equal(t, 1, terminal.flushCount())
@@ -502,7 +504,7 @@ func TestSessionAttachmentWorkerFailureStages(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				stream := newSessionStream(t)
-				terminal := newWorkerTestTerminal()
+				terminal := newWorkerTestTerminal(t)
 				attached := newSessionTestAttachments()
 				events := sessionTestRun(t, stream.conn, terminal, sessionTestWorkerConfig(sessionTestRequest(true)), attached)
 				awaitHello(t, stream)
@@ -552,9 +554,9 @@ func TestSessionAttachmentWorkerHelloEnvironment(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				stream := newSessionStream(t)
-				terminal := newWorkerTestTerminal()
+				terminal := newWorkerTestTerminal(t)
 				attached := newSessionTestAttachments()
-				supervisor := &Supervisor{cfg: SupervisorConfig{Terminal: terminal, AttachmentEnvironment: tt.env}, clientID: [16]byte{1}}
+				supervisor := &Supervisor{cfg: SupervisorConfig{Terminal: terminal.port, AttachmentEnvironment: tt.env}, clientID: [16]byte{1}}
 				request := sessionTestRequest(true)
 				worker, err := supervisor.newAttachmentWorker(request, attachmentTab{}, nil, SessionEnvironment{Provenance: SessionEnvironmentLocalCLI, Cwd: tt.env.Cwd, Env: append([]string(nil), request.Env...)})
 				require.NoError(t, err)
@@ -588,7 +590,7 @@ func TestSessionAttachmentWorkerHandlesProtocolErrorAfterWelcome(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				stream := newSessionStream(t)
-				terminal := newWorkerTestTerminal()
+				terminal := newWorkerTestTerminal(t)
 				attachments := newSessionTestAttachments()
 				events := sessionTestRun(t, stream.conn, terminal, sessionTestWorkerConfig(sessionTestRequest(true)), attachments)
 				awaitHello(t, stream)
@@ -641,7 +643,7 @@ func TestSessionAttachmentWorkerValidatesIdentityByAdmission(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				stream := newSessionStream(t)
-				terminal := newWorkerTestTerminal()
+				terminal := newWorkerTestTerminal(t)
 				attached := newSessionTestAttachments()
 				events := sessionTestRun(t, stream.conn, terminal, sessionTestWorkerConfig(tt.request), attached)
 				awaitHello(t, stream)
@@ -673,7 +675,7 @@ func TestSessionAttachmentWorkerValidatesIdentityByAdmission(t *testing.T) {
 func TestSessionAttachmentWorkerRemoteHello(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		stream := newSessionStream(t)
-		terminal := newWorkerTestTerminal()
+		terminal := newWorkerTestTerminal(t)
 		attached := newSessionTestAttachments()
 		request := sessionTestRequest(false)
 		events := sessionTestRun(t, stream.conn, terminal, sessionTestWorkerConfig(request), attached)
@@ -701,7 +703,7 @@ func TestSessionAttachmentWorkerRemoteHello(t *testing.T) {
 func TestSessionAttachmentWorkerNeverReadsTerminalInput(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		stream := newSessionStream(t)
-		terminal := newWorkerTestTerminal()
+		terminal := newWorkerTestTerminal(t)
 		attached := newSessionTestAttachments()
 		events := sessionTestRun(t, stream.conn, terminal, sessionTestWorkerConfig(sessionTestRequest(true)), attached)
 

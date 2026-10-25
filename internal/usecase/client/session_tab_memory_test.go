@@ -48,9 +48,9 @@ func TestSessionTabMemorySurvivesAttachmentSwap(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				terminal := newWorkerTestTerminal()
+				terminal := newWorkerTestTerminal(t)
 				supervisor := &Supervisor{
-					cfg: SupervisorConfig{Terminal: terminal}, clientID: [16]byte{1},
+					cfg: SupervisorConfig{Terminal: terminal.port}, clientID: [16]byte{1},
 					attachments: &attachmentHost{geometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}, geometryValid: true},
 				}
 				request := sessionTestRequest(local)
@@ -94,7 +94,7 @@ func TestSessionTabMemorySurvivesAttachmentSwap(t *testing.T) {
 func TestSessionTabMemorySamePeerRoundTrip(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		stream := newSessionStream(t)
-		terminal := newWorkerTestTerminal()
+		terminal := newWorkerTestTerminal(t)
 		attachments := newSessionTestAttachments()
 		var memory sessionTabMemory
 		cfg := sessionTestWorkerConfig(sessionTestRequest(true))
@@ -175,7 +175,7 @@ func TestSessionTabMemoryPreservesStoppedRemoteSelector(t *testing.T) {
 		cfg.Tab = attachmentTab{stopped: &selector}
 		cfg.SessionEnvironment = SessionEnvironment{Provenance: SessionEnvironmentRemote}
 		stream := newSessionStream(t)
-		events := sessionTestRun(t, stream.conn, newWorkerTestTerminal(), cfg, newSessionTestAttachments())
+		events := sessionTestRun(t, stream.conn, newWorkerTestTerminal(t), cfg, newSessionTestAttachments())
 		t.Cleanup(func() { _ = stream.conn.Close(); <-events })
 		hello := awaitHello(t, stream)
 		require.Equal(t, &selector, hello.SessionTarget)

@@ -104,7 +104,7 @@ func TestTerminalInputPumpStripsFocusReports(t *testing.T) {
 		pump.start()
 		defer pump.stop()
 		defer pw.Close()
-		host := newWorkerTestHost(t, newWorkerTestTerminal(), pump, nil)
+		host := newWorkerTestHost(t, newWorkerTestTerminal(t), pump, nil)
 
 		observed := make(chan []byte, 1)
 		focus := make(chan domain.TerminalFocus, 1)
@@ -151,7 +151,7 @@ func TestAttachmentDeclaresFocusInHelloThenReportsChanges(t *testing.T) {
 		pump := newTerminalInputPump(blockingReader{})
 		pump.focus.set(domain.TerminalFocusUnfocused)
 		stream := newSessionStream(t)
-		host := newWorkerTestHost(t, newWorkerTestTerminal(), pump, nil)
+		host := newWorkerTestHost(t, newWorkerTestTerminal(t), pump, nil)
 		worker, err := newSessionAttachmentWorker(sessionTestWorkerConfig(sessionTestRequest(true)))
 		require.NoError(t, err)
 		ctx, cancel := context.WithCancel(context.Background())

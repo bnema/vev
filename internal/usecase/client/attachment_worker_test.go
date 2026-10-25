@@ -36,7 +36,13 @@ func authorityToken(a *attachmentAuthority) AttachmentToken {
 // workerTestTerminal is the supervisor-owned terminal: it counts raw restores
 // so a test can prove the worker mechanism never restores, captures written
 // output, and doubles as the UI publication transaction.
+type workerTerminalMocks struct {
+	*portsmocks.MockTerminal
+	*portsmocks.MockUIOutputTransaction
+}
+
 type workerTestTerminal struct {
+	port       workerTerminalMocks
 	mu         sync.Mutex
 	out        bytes.Buffer
 	flushes    int
@@ -51,13 +57,25 @@ type workerTestTerminal struct {
 	publishErr error
 }
 
-func newWorkerTestTerminal() *workerTestTerminal {
-	return &workerTestTerminal{resizes: make(chan domain.Geometry, 4)}
+func newWorkerTestTerminal(t *testing.T) *workerTestTerminal {
+	w := &workerTestTerminal{resizes: make(chan domain.Geometry, 4)}
+	w.port = workerTerminalMocks{portsmocks.NewMockTerminal(t), portsmocks.NewMockUIOutputTransaction(t)}
+	w.port.MockTerminal.EXPECT().EnableKittyKeyboard(mock.Anything).RunAndReturn(w.recordEnableKittyKeyboard).Maybe()
+	w.port.MockTerminal.EXPECT().EnterRaw().RunAndReturn(w.recordEnterRaw).Maybe()
+	w.port.MockTerminal.EXPECT().Geometry().RunAndReturn(w.recordGeometry).Maybe()
+	w.port.MockTerminal.EXPECT().ResizeEvents().RunAndReturn(w.recordResizeEvents).Maybe()
+	w.port.MockTerminal.EXPECT().In().RunAndReturn(w.recordIn).Maybe()
+	w.port.MockTerminal.EXPECT().Out().RunAndReturn(w.recordOut).Maybe()
+	w.port.MockTerminal.EXPECT().Flush().RunAndReturn(w.recordFlush).Maybe()
+	w.port.MockUIOutputTransaction.EXPECT().BeginOutput(mock.Anything).Run(w.recordBeginOutput).Maybe()
+	w.port.MockUIOutputTransaction.EXPECT().EndOutput(mock.Anything).Run(w.recordEndOutput).Maybe()
+	w.port.MockUIOutputTransaction.EXPECT().PublishContext(mock.Anything).RunAndReturn(w.recordPublishContext).Maybe()
+	return w
 }
 
-func (t *workerTestTerminal) EnableKittyKeyboard(int) error { return nil }
+func (t *workerTestTerminal) recordEnableKittyKeyboard(int) error { return nil }
 
-func (t *workerTestTerminal) EnterRaw() (func() error, error) {
+func (t *workerTestTerminal) recordEnterRaw() (func() error, error) {
 	return func() error {
 		t.mu.Lock()
 		t.restores++
@@ -66,15 +84,15 @@ func (t *workerTestTerminal) EnterRaw() (func() error, error) {
 	}, nil
 }
 
-func (t *workerTestTerminal) Geometry() (domain.Geometry, error) { return domain.Geometry{}, nil }
+func (t *workerTestTerminal) recordGeometry() (domain.Geometry, error) { return domain.Geometry{}, nil }
 
-func (t *workerTestTerminal) ResizeEvents() <-chan domain.Geometry { return t.resizes }
+func (t *workerTestTerminal) recordResizeEvents() <-chan domain.Geometry { return t.resizes }
 
-func (t *workerTestTerminal) In() io.Reader { return nil }
+func (t *workerTestTerminal) recordIn() io.Reader { return nil }
 
-func (t *workerTestTerminal) Out() io.Writer { return &workerTestWriter{t} }
+func (t *workerTestTerminal) recordOut() io.Writer { return &workerTestWriter{t} }
 
-func (t *workerTestTerminal) Flush() error {
+func (t *workerTestTerminal) recordFlush() error {
 	t.mu.Lock()
 	t.flushes++
 	t.steps = append(t.steps, "flush")
@@ -82,20 +100,20 @@ func (t *workerTestTerminal) Flush() error {
 	return t.flushErr
 }
 
-func (t *workerTestTerminal) BeginOutput(ports.UIContext) {
+func (t *workerTestTerminal) recordBeginOutput(ports.UIContext) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.steps = append(t.steps, "begin")
 }
 
-func (t *workerTestTerminal) EndOutput(success bool) {
+func (t *workerTestTerminal) recordEndOutput(success bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.steps = append(t.steps, "end")
 	t.successes = append(t.successes, success)
 }
 
-func (t *workerTestTerminal) PublishContext(context ports.UIContext) error {
+func (t *workerTestTerminal) recordPublishContext(context ports.UIContext) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.published = append(t.published, context)
@@ -160,7 +178,7 @@ func blockingWorker(t *testing.T) *MockAttachmentWorker {
 
 func newWorkerTestHost(t *testing.T, term *workerTestTerminal, input *terminalInputPump, onAttached func(AttachmentToken)) *attachmentHost {
 	return newAttachmentHost(attachmentHostConfig{
-		Terminal:   term,
+		Terminal:   term.port,
 		Clock:      newSupervisorTestClock(t).port,
 		Input:      input,
 		OnAttached: onAttached,
@@ -172,7 +190,7 @@ func newWorkerTestHost(t *testing.T, term *workerTestTerminal, input *terminalIn
 // first is live and succeeds once the first is cancelled.
 func TestAttachmentWorkerExclusiveForeground(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		term := newWorkerTestTerminal()
+		term := newWorkerTestTerminal(t)
 		host := newWorkerTestHost(t, term, nil, nil)
 
 		run1, ok := host.Begin(context.Background(), AttachmentToken{Generation: 1, Attempt: 1}, blockingWorker(t), newSessionStream(t).conn)
@@ -197,7 +215,7 @@ func TestAttachmentWorkerExclusiveForeground(t *testing.T) {
 // granted, so a worker can never run without a supervisor generation.
 func TestAttachmentWorkerZeroTokenRefused(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		host := newWorkerTestHost(t, newWorkerTestTerminal(), nil, nil)
+		host := newWorkerTestHost(t, newWorkerTestTerminal(t), nil, nil)
 		_, ok := host.Begin(context.Background(), AttachmentToken{}, blockingWorker(t), newSessionStream(t).conn)
 		require.False(t, ok)
 		require.Nil(t, host.authority.foreground())
@@ -210,7 +228,7 @@ func TestAttachmentWorkerZeroTokenRefused(t *testing.T) {
 // closed.
 func TestAttachmentWorkerCanceledGenerationCannotAct(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		term := newWorkerTestTerminal()
+		term := newWorkerTestTerminal(t)
 		host := newWorkerTestHost(t, term, nil, nil)
 		stream := newSessionStream(t)
 
@@ -252,7 +270,7 @@ func TestAttachmentWorkerCanceledGenerationCannotAct(t *testing.T) {
 // consumes the shared terminal pump and forwards the bytes on its own stream.
 func TestAttachmentWorkerConsumesAndForwardsInput(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		term := newWorkerTestTerminal()
+		term := newWorkerTestTerminal(t)
 		pr, pw := io.Pipe()
 		pump := newTerminalInputPump(pr)
 		pump.start()
@@ -292,7 +310,7 @@ func TestAttachmentWorkerConsumesAndForwardsInput(t *testing.T) {
 // supervisor's resize events and forwards them on its stream.
 func TestAttachmentWorkerResizeAuthorized(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		term := newWorkerTestTerminal()
+		term := newWorkerTestTerminal(t)
 		host := newWorkerTestHost(t, term, nil, nil)
 		stream := newSessionStream(t)
 		geometry := domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}
@@ -328,7 +346,7 @@ func TestAttachmentWorkerResizeAuthorized(t *testing.T) {
 // generation is stamped onto the publication.
 func TestAttachmentWorkerPublishesUIAuthorized(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		term := newWorkerTestTerminal()
+		term := newWorkerTestTerminal(t)
 		attached := make(chan AttachmentToken, 1)
 		host := newWorkerTestHost(t, term, nil, func(token AttachmentToken) { attached <- token })
 		stream := newSessionStream(t)
@@ -383,7 +401,7 @@ func TestAttachmentWorkerEventReturnsToPickerWithoutTerminalRestore(t *testing.T
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				term := newWorkerTestTerminal()
+				term := newWorkerTestTerminal(t)
 				host := newWorkerTestHost(t, term, nil, nil)
 				stream := newSessionStream(t)
 				// The worker reports a spoofed token; the host must override it with
@@ -414,7 +432,7 @@ func TestAttachmentWorkerEventReturnsToPickerWithoutTerminalRestore(t *testing.T
 // discarded rather than returned as an adopted result.
 func TestAttachmentWorkerLateEventDiscardedOnCancellation(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		term := newWorkerTestTerminal()
+		term := newWorkerTestTerminal(t)
 		host := newWorkerTestHost(t, term, nil, nil)
 		stream := newSessionStream(t)
 		run, ok := host.Begin(context.Background(), AttachmentToken{Generation: 1, Attempt: 1}, blockingWorker(t), stream.conn)
@@ -436,7 +454,7 @@ func TestAttachmentWorkerLateEventDiscardedOnCancellation(t *testing.T) {
 // duplicating a reader.
 func TestAttachmentWorkerPreservesResidualInputAcrossAttempts(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		term := newWorkerTestTerminal()
+		term := newWorkerTestTerminal(t)
 		pr, pw := io.Pipe()
 		pump := newTerminalInputPump(pr)
 		pump.start()
@@ -490,7 +508,7 @@ func TestAttachmentWorkerPreservesResidualInputAcrossAttempts(t *testing.T) {
 // Close the foreground is already released and a late write is refused.
 func TestAttachmentWorkerRevokesBeforeClosingStream(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		term := newWorkerTestTerminal()
+		term := newWorkerTestTerminal(t)
 		host := newWorkerTestHost(t, term, nil, nil)
 		stream := newSessionStream(t)
 
@@ -520,7 +538,7 @@ func TestAttachmentWorkerRevokesBeforeClosingStream(t *testing.T) {
 // admit exactly one foreground owner under the race detector.
 func TestAttachmentWorkerConcurrentBeginSingleOwner(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		term := newWorkerTestTerminal()
+		term := newWorkerTestTerminal(t)
 		host := newWorkerTestHost(t, term, nil, nil)
 
 		const contenders = 8
@@ -556,7 +574,7 @@ func TestAttachmentWorkerConcurrentBeginSingleOwner(t *testing.T) {
 // release the foreground, close every stream, and never leave a live owner.
 func TestAttachmentWorkerRepeatedAttemptsNoLeak(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		term := newWorkerTestTerminal()
+		term := newWorkerTestTerminal(t)
 		host := newWorkerTestHost(t, term, nil, nil)
 
 		const attempts = 64
@@ -581,7 +599,7 @@ func TestAttachmentWorkerRepeatedAttemptsNoLeak(t *testing.T) {
 
 func TestAttachmentWorkerRetiredOutcomeNeverAdopted(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		host := newWorkerTestHost(t, newWorkerTestTerminal(), nil, nil)
+		host := newWorkerTestHost(t, newWorkerTestTerminal(t), nil, nil)
 		run, ok := host.Begin(context.Background(), AttachmentToken{1, 1}, blockingWorker(t), newSessionStream(t).conn)
 		require.True(t, ok)
 		run.Cancel()
@@ -661,7 +679,7 @@ func TestAttachmentWorkerPumpClaimAndCancelRace(t *testing.T) {
 		pump := newTerminalInputPump(pr)
 		pump.start()
 		defer pump.stop()
-		host := newWorkerTestHost(t, newWorkerTestTerminal(), pump, nil)
+		host := newWorkerTestHost(t, newWorkerTestTerminal(t), pump, nil)
 		rival, claimed := pump.tryClaim()
 		require.True(t, claimed)
 		_, ok := host.Begin(context.Background(), AttachmentToken{1, 1}, blockingWorker(t), newSessionStream(t).conn)
@@ -692,7 +710,7 @@ func TestAttachmentWorkerPumpClaimAndCancelRace(t *testing.T) {
 
 func TestAttachmentWorkerClosedResizeDisabled(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		term := newWorkerTestTerminal()
+		term := newWorkerTestTerminal(t)
 		close(term.resizes) // uiterm-like terminal: no physical resize events
 		host := newWorkerTestHost(t, term, nil, nil)
 		run, ok := host.Begin(context.Background(), AttachmentToken{1, 1}, blockingWorker(t), newSessionStream(t).conn)
@@ -733,7 +751,7 @@ func TestAttachmentWorkerOutputTransaction(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				term := newWorkerTestTerminal()
+				term := newWorkerTestTerminal(t)
 				term.writeErr, term.flushErr, term.publishErr, term.shortWrite = tc.writeErr, tc.flushErr, tc.publishErr, tc.shortWrite
 				host := newWorkerTestHost(t, term, nil, nil)
 				run, ok := host.Begin(context.Background(), AttachmentToken{9, 2}, blockingWorker(t), newSessionStream(t).conn)
@@ -754,18 +772,16 @@ func TestAttachmentWorkerOutputTransaction(t *testing.T) {
 	}
 }
 
-// Hide the transaction methods to model a physical terminal without UI output.
-type workerBareTerminal struct{ ports.Terminal }
-
 func TestAttachmentWorkerNilSeams(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		var nilTerm *workerTestTerminal
+		var nilTerm *portsmocks.MockTerminal
+		var nilUI *portsmocks.MockUIOutputTransaction
 		var nilWorker *MockAttachmentWorker
 		var nilStream *portsmocks.MockBrokerLogicalConnection
 		var nilClock *portsmocks.MockClock
 		for _, cfg := range []attachmentHostConfig{
 			{},
-			{Terminal: nilTerm, UI: nilTerm, Clock: nilClock},
+			{Terminal: nilTerm, UI: nilUI, Clock: nilClock},
 		} {
 			host := newAttachmentHost(cfg)
 			_, ok := host.Begin(nil, AttachmentToken{1, 1}, nilWorker, newSessionStream(t).conn)
@@ -779,8 +795,8 @@ func TestAttachmentWorkerNilSeams(t *testing.T) {
 			require.ErrorIs(t, run.fg.Output(ports.UIContext{}, nil), errAttachmentForegroundRevoked)
 		}
 
-		term := newWorkerTestTerminal()
-		host := newAttachmentHost(attachmentHostConfig{Terminal: workerBareTerminal{term}, UI: nilTerm})
+		term := newWorkerTestTerminal(t)
+		host := newAttachmentHost(attachmentHostConfig{Terminal: term.port.MockTerminal, UI: nilUI})
 		run, ok := host.Begin(nil, AttachmentToken{1, 1}, blockingWorker(t), newSessionStream(t).conn)
 		require.True(t, ok)
 		require.NoError(t, run.fg.Output(ports.UIContext{}, []byte("frame")))
@@ -797,7 +813,7 @@ func TestAttachmentWorkerNilSeams(t *testing.T) {
 // path still stamps the granted generation on every publication.
 func TestAttachmentWorkerGenerationIsSupervisorSupplied(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		term := newWorkerTestTerminal()
+		term := newWorkerTestTerminal(t)
 		pump := newTerminalInputPump(nil)
 		host := newWorkerTestHost(t, term, pump, nil)
 		for i := uint64(1); i <= 3; i++ {
@@ -828,7 +844,7 @@ func TestAttachmentWorkerBeginRefusalsRetainStream(t *testing.T) {
 	})
 	t.Run("zero token", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			host := newWorkerTestHost(t, newWorkerTestTerminal(), nil, nil)
+			host := newWorkerTestHost(t, newWorkerTestTerminal(t), nil, nil)
 			stream := newSessionStream(t)
 			_, ok := host.Begin(context.Background(), AttachmentToken{}, blockingWorker(t), stream.conn)
 			require.False(t, ok)
@@ -839,7 +855,7 @@ func TestAttachmentWorkerBeginRefusalsRetainStream(t *testing.T) {
 	})
 	t.Run("nil worker", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			host := newWorkerTestHost(t, newWorkerTestTerminal(), nil, nil)
+			host := newWorkerTestHost(t, newWorkerTestTerminal(t), nil, nil)
 			stream := newSessionStream(t)
 			_, ok := host.Begin(context.Background(), AttachmentToken{1, 1}, nil, stream.conn)
 			require.False(t, ok)
@@ -849,7 +865,7 @@ func TestAttachmentWorkerBeginRefusalsRetainStream(t *testing.T) {
 	})
 	t.Run("nil stream", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			host := newWorkerTestHost(t, newWorkerTestTerminal(), nil, nil)
+			host := newWorkerTestHost(t, newWorkerTestTerminal(t), nil, nil)
 			_, ok := host.Begin(context.Background(), AttachmentToken{1, 1}, blockingWorker(t), nil)
 			require.False(t, ok)
 			require.Nil(t, host.authority.foreground())
@@ -857,7 +873,7 @@ func TestAttachmentWorkerBeginRefusalsRetainStream(t *testing.T) {
 	})
 	t.Run("foreground already live", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			host := newWorkerTestHost(t, newWorkerTestTerminal(), nil, nil)
+			host := newWorkerTestHost(t, newWorkerTestTerminal(t), nil, nil)
 			first, ok := host.Begin(context.Background(), AttachmentToken{1, 1}, blockingWorker(t), newSessionStream(t).conn)
 			require.True(t, ok)
 			stream := newSessionStream(t)
@@ -872,7 +888,7 @@ func TestAttachmentWorkerBeginRefusalsRetainStream(t *testing.T) {
 	t.Run("rival consumer owns input", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			pump := newTerminalInputPump(nil)
-			host := newWorkerTestHost(t, newWorkerTestTerminal(), pump, nil)
+			host := newWorkerTestHost(t, newWorkerTestTerminal(t), pump, nil)
 			rival, claimed := pump.tryClaim()
 			require.True(t, claimed)
 			defer pump.revoke(rival)
@@ -986,7 +1002,7 @@ func TestAttachmentWorkerFinalizePreservesUndecidedInput(t *testing.T) {
 
 func TestAttachmentWorkerRetirementPrecedesWorkerCancellation(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		host := newWorkerTestHost(t, newWorkerTestTerminal(), nil, nil)
+		host := newWorkerTestHost(t, newWorkerTestTerminal(t), nil, nil)
 		ready := make(chan *attachmentRun, 1)
 		checked := make(chan bool, 1)
 		worker := newTestWorker(t, func(ctx context.Context, fg AttachmentForeground) AttachmentEvent {
