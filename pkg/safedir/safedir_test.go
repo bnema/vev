@@ -7,6 +7,7 @@ import (
 	"testing"
 )
 
+// real I/O: reads and writes real files in temp directories.
 func TestEnsurePrivate(t *testing.T) {
 	tests := []struct {
 		name    string
