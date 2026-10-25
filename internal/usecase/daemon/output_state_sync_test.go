@@ -310,10 +310,10 @@ func TestResizeGrowthFirstFrameIncludesConcurrentPTYRedraw(t *testing.T) {
 
 			// The resize deadline drives coordinator prepare/apply/commit. No test
 			// writes the grown columns directly.
-			clock := &signalClock{timers: make(chan *signalTimer, 2)}
+			clock, clockTimers := newSignalClock(t, 2)
 			d.clock = clock
 			d.resize(sess, ac, domain.Size{Cols: 120, Rows: 24})
-			timer := <-clock.timers
+			timer := <-clockTimers
 			done := captureResizeCallbackDone(t, sess.renderCoordinator())
 			timer.ch <- time.Time{}
 			awaitTestCompletion(t, done, "resize callback did not complete")
@@ -337,13 +337,13 @@ func TestResizeWithoutPTYOutputFlushesOneFullFrameAtDeadline(t *testing.T) {
 	p, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	clk := &signalClock{timers: make(chan *signalTimer, 1)}
+	clk, clkTimers := newSignalClock(t, 1)
 	d.clock = clk
 
 	d.resize(sess, ac, domain.Size{Cols: 120, Rows: 24})
-	var timer *signalTimer
+	var timer *testTimer
 	select {
-	case timer = <-clk.timers:
+	case timer = <-clkTimers:
 	case <-time.After(time.Second):
 		t.Fatal("resize did not schedule a bounded paint")
 	}
@@ -366,21 +366,21 @@ func TestResizeBurstFlushesOnlyLatestGeometry(t *testing.T) {
 	p, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	clk := &signalClock{timers: make(chan *signalTimer, 2)}
+	clk, clkTimers := newSignalClock(t, 2)
 	d.clock = clk
 
 	d.resize(sess, ac, domain.Size{Cols: 100, Rows: 24})
-	var first *signalTimer
+	var first *testTimer
 	select {
-	case first = <-clk.timers:
+	case first = <-clkTimers:
 	case <-time.After(time.Second):
 		t.Fatal("first resize did not schedule a bounded paint")
 	}
 	firstDone := captureResizeCallbackDone(t, sess.renderCoordinator())
 	d.resize(sess, ac, domain.Size{Cols: 120, Rows: 24})
-	var latest *signalTimer
+	var latest *testTimer
 	select {
-	case latest = <-clk.timers:
+	case latest = <-clkTimers:
 	case <-time.After(time.Second):
 		t.Fatal("latest resize did not replace the bounded paint")
 	}

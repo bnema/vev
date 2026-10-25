@@ -206,7 +206,7 @@ func (c *commandResultCaptureTransport) isClosed() bool {
 // completion produces no second result and cannot change the observed outcome.
 func TestHandleCommandTimeoutSendsOneCorrelatedUnknownAndDropsLateCompletion(t *testing.T) {
 	factory := newGatedControlFactory()
-	clock := &signalClock{timers: make(chan *signalTimer, 16)}
+	clock, clockTimers := newSignalClock(t, 16)
 	d := newTestDaemon(t, factory, clock)
 	addControlSession(t, d, "work", "t_work", "p_work")
 	t.Cleanup(func() {
@@ -222,7 +222,7 @@ func TestHandleCommandTimeoutSendsOneCorrelatedUnknownAndDropsLateCompletion(t *
 
 	// The command is admitted and parked inside its pane spawn.
 	awaitTestCompletion(t, factory.entered, "command was not dispatched")
-	timer := <-clock.timers
+	timer := <-clockTimers
 	require.Equal(t, CommandRequestTimeout, timer.duration)
 	timer.ch <- time.Time{}
 
@@ -249,7 +249,7 @@ func TestHandleCommandTimeoutSendsOneCorrelatedUnknownAndDropsLateCompletion(t *
 // one-shot control connection, so a late completion has no channel to answer on.
 func TestHandleCommandTimeoutRetiresConnectionAfterOneResult(t *testing.T) {
 	factory := newGatedControlFactory()
-	clock := &signalClock{timers: make(chan *signalTimer, 16)}
+	clock, clockTimers := newSignalClock(t, 16)
 	d := newTestDaemon(t, factory, clock)
 	addControlSession(t, d, "work", "t_work", "p_work")
 	t.Cleanup(func() {
@@ -263,7 +263,7 @@ func TestHandleCommandTimeoutRetiresConnectionAfterOneResult(t *testing.T) {
 	go func() { done <- d.handleCommandFrame(&rawServerConnection{raw: capture}, frame) }()
 
 	awaitTestCompletion(t, factory.entered, "command was not dispatched")
-	timer := <-clock.timers
+	timer := <-clockTimers
 	require.Equal(t, CommandRequestTimeout, timer.duration)
 	timer.ch <- time.Time{}
 	require.NoError(t, <-done)

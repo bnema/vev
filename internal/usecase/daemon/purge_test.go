@@ -1043,7 +1043,7 @@ func TestPurgeAllAdmissionDrainBoundedWithUncooperativeRepository(t *testing.T) 
 	snapshot := restoreAcceptanceSession(t, "work")
 	generation := acceptanceGeneration(t, snapshot, 5)
 	repository := newCancellationIgnoringRepository(generation)
-	clock := &signalClock{timers: make(chan *signalTimer, 8)}
+	clock, clockTimers := newSignalClock(t, 8)
 	pty, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
 
@@ -1067,7 +1067,7 @@ func TestPurgeAllAdmissionDrainBoundedWithUncooperativeRepository(t *testing.T) 
 	go func() { purged <- d.purgeAllSessions(protocol.ReasonSessionKilled) }()
 
 	// The purge is parked in its admission drain; fire the bounded deadline.
-	timer := awaitTestValue(t, clock.timers, "purge did not arm its bounded admission deadline")
+	timer := awaitTestValue(t, clockTimers, "purge did not arm its bounded admission deadline")
 	timer.ch <- time.Now()
 
 	result := awaitTestValue(t, purged, "KillAll did not return after its bounded drain")
@@ -1223,7 +1223,7 @@ func seedPurgeableLiveSession(t *testing.T, d *Daemon, catalogue *durableRecover
 // live budget are separate deadlines, so a fresh live budget is armed when the
 // live phase begins.
 func TestPurgeAllLiveDeadlineSkipIsTypedAndRetryable(t *testing.T) {
-	clock := &signalClock{timers: make(chan *signalTimer, 64)}
+	clock, clockTimers := newSignalClock(t, 64)
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
 	catalogue := newDurableRecoveryCatalogue(nil)
 	WithCatalogue(catalogue, nil)(d)
@@ -1234,8 +1234,8 @@ func TestPurgeAllLiveDeadlineSkipIsTypedAndRetryable(t *testing.T) {
 	purged := make(chan purgeResult, 1)
 	go func() { purged <- d.purgeAllSessions(protocol.ReasonSessionKilled) }()
 
-	admission := awaitTestValue(t, clock.timers, "purge did not arm its admission deadline")
-	liveBudget := awaitTestValue(t, clock.timers, "purge did not arm a separate live-teardown budget")
+	admission := awaitTestValue(t, clockTimers, "purge did not arm its admission deadline")
+	liveBudget := awaitTestValue(t, clockTimers, "purge did not arm a separate live-teardown budget")
 	require.NotSame(t, admission, liveBudget, "live teardown must spend its own budget, not the admission drain's")
 	liveBudget.ch <- time.Now()
 
@@ -1283,7 +1283,7 @@ func TestPurgeAllLiveDeadlineSkipIsTypedAndRetryable(t *testing.T) {
 // as purged.
 func TestPurgeAllLiveBudgetSkipsEveryRemainingSlowUnit(t *testing.T) {
 	const units = 3
-	clock := &signalClock{timers: make(chan *signalTimer, 64)}
+	clock, clockTimers := newSignalClock(t, 64)
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
 	catalogue := newDurableRecoveryCatalogue(nil)
 	WithCatalogue(catalogue, nil)(d)
@@ -1300,8 +1300,8 @@ func TestPurgeAllLiveBudgetSkipsEveryRemainingSlowUnit(t *testing.T) {
 	purged := make(chan purgeResult, 1)
 	go func() { purged <- d.purgeAllSessions(protocol.ReasonSessionKilled) }()
 
-	_ = awaitTestValue(t, clock.timers, "purge did not arm its admission deadline")
-	liveBudget := awaitTestValue(t, clock.timers, "purge did not arm a separate live-teardown budget")
+	_ = awaitTestValue(t, clockTimers, "purge did not arm its admission deadline")
+	liveBudget := awaitTestValue(t, clockTimers, "purge did not arm a separate live-teardown budget")
 	liveBudget.ch <- time.Now()
 
 	result := awaitTestValue(t, purged, "purge did not return after the shared live budget expired")
@@ -1340,7 +1340,7 @@ func TestPurgeAllLiveBudgetSkipsEveryRemainingSlowUnit(t *testing.T) {
 // counting as a completed stop. A later deadline-free pass completes the stop
 // once the competing owner releases teardown.
 func TestTerminateAllForShutdownReportsDeadlineSkippedSession(t *testing.T) {
-	clock := &signalClock{timers: make(chan *signalTimer, 64)}
+	clock, clockTimers := newSignalClock(t, 64)
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
 
 	live := newSnapshotTestSession(t, "0", true, "/tmp")
@@ -1352,7 +1352,7 @@ func TestTerminateAllForShutdownReportsDeadlineSkippedSession(t *testing.T) {
 
 	deadline := newSnapshotShutdownDeadline(clock)
 	defer deadline.stop()
-	timer := awaitTestValue(t, clock.timers, "shutdown deadline did not arm")
+	timer := awaitTestValue(t, clockTimers, "shutdown deadline did not arm")
 	timer.ch <- time.Now()
 
 	require.True(t, d.terminateAllForShutdown(protocol.ReasonServerShutdown, deadline),
@@ -1376,7 +1376,7 @@ func TestTerminateAllForShutdownReportsDeadlineSkippedSession(t *testing.T) {
 // budget expires, the purge reports supersession instead of a drain timeout and
 // removes nothing, so the stop keeps ownership of every lifecycle.
 func TestPurgeAdmissionDeadlineDefersToConcurrentExplicitStop(t *testing.T) {
-	clock := &signalClock{timers: make(chan *signalTimer, 64)}
+	clock, clockTimers := newSignalClock(t, 64)
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
 	catalogue := newDurableRecoveryCatalogue(nil)
 	WithCatalogue(catalogue, nil)(d)
@@ -1396,7 +1396,7 @@ func TestPurgeAdmissionDeadlineDefersToConcurrentExplicitStop(t *testing.T) {
 	d.mu.Lock()
 	d.closing = true
 	d.mu.Unlock()
-	admission := awaitTestValue(t, clock.timers, "purge did not arm its admission deadline")
+	admission := awaitTestValue(t, clockTimers, "purge did not arm its admission deadline")
 	admission.ch <- time.Now()
 
 	result := awaitTestValue(t, purged, "purge did not return after the drain budget expired")
@@ -1420,7 +1420,7 @@ func TestPurgeAdmissionDeadlineDefersToConcurrentExplicitStop(t *testing.T) {
 // classified as superseded rather than a teardown failure, and it stays live for
 // the stop to preserve.
 func TestPurgeLiveDeadlineDefersToConcurrentExplicitStop(t *testing.T) {
-	clock := &signalClock{timers: make(chan *signalTimer, 64)}
+	clock, clockTimers := newSignalClock(t, 64)
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
 	catalogue := newDurableRecoveryCatalogue(nil)
 	WithCatalogue(catalogue, nil)(d)
@@ -1430,8 +1430,8 @@ func TestPurgeLiveDeadlineDefersToConcurrentExplicitStop(t *testing.T) {
 
 	purged := make(chan purgeResult, 1)
 	go func() { purged <- d.purgeAllSessions(protocol.ReasonSessionKilled) }()
-	_ = awaitTestValue(t, clock.timers, "purge did not arm its admission deadline")
-	liveBudget := awaitTestValue(t, clock.timers, "purge did not arm a separate live-teardown budget")
+	_ = awaitTestValue(t, clockTimers, "purge did not arm its admission deadline")
+	liveBudget := awaitTestValue(t, clockTimers, "purge did not arm a separate live-teardown budget")
 
 	d.mu.Lock()
 	d.closing = true
@@ -1663,7 +1663,7 @@ func TestPurgeAllAlreadyRemovedParticipantChangeIsSuccess(t *testing.T) {
 // admission is released, the daemon keeps serving, and its next purge removes
 // the leftovers.
 func TestPurgeAllStoppedSweepDeadlineIsTypedAndReleasesGate(t *testing.T) {
-	clock := &signalClock{timers: make(chan *signalTimer, 64)}
+	clock, clockTimers := newSignalClock(t, 64)
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
 	catalogue := newDurableRecoveryCatalogue(nil)
 	repository := newBlockingPurgeDeleteRepository()
@@ -1675,8 +1675,8 @@ func TestPurgeAllStoppedSweepDeadlineIsTypedAndReleasesGate(t *testing.T) {
 	purged := make(chan purgeResult, 1)
 	go func() { purged <- d.purgeAllSessions(protocol.ReasonSessionKilled) }()
 
-	admission := awaitTestValue(t, clock.timers, "purge did not arm its admission deadline")
-	stoppedBudget := awaitTestValue(t, clock.timers, "purge did not arm a separate stopped sweep budget")
+	admission := awaitTestValue(t, clockTimers, "purge did not arm its admission deadline")
+	stoppedBudget := awaitTestValue(t, clockTimers, "purge did not arm a separate stopped sweep budget")
 	require.NotSame(t, admission, stoppedBudget, "the sweep must spend its own budget, not the admission drain's")
 	awaitTestValue(t, repository.entered, "the sweep did not start its uncooperative delete")
 	stoppedBudget.ch <- time.Now()
@@ -1727,7 +1727,7 @@ func TestPurgeAllStoppedSweepDeadlineIsTypedAndReleasesGate(t *testing.T) {
 // budget: the stopped budget expiring leaves a parked live unit untouched and
 // arms a fresh live budget, whose expiry then reports that live unit.
 func TestPurgeAllStoppedAndLiveBudgetsAreIndependent(t *testing.T) {
-	clock := &signalClock{timers: make(chan *signalTimer, 64)}
+	clock, clockTimers := newSignalClock(t, 64)
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
 	catalogue := newDurableRecoveryCatalogue(nil)
 	repository := newBlockingPurgeDeleteRepository()
@@ -1740,13 +1740,13 @@ func TestPurgeAllStoppedAndLiveBudgetsAreIndependent(t *testing.T) {
 	purged := make(chan purgeResult, 1)
 	go func() { purged <- d.purgeAllSessions(protocol.ReasonSessionKilled) }()
 
-	admission := awaitTestValue(t, clock.timers, "purge did not arm its admission deadline")
-	stoppedBudget := awaitTestValue(t, clock.timers, "purge did not arm a stopped sweep budget")
+	admission := awaitTestValue(t, clockTimers, "purge did not arm its admission deadline")
+	stoppedBudget := awaitTestValue(t, clockTimers, "purge did not arm a stopped sweep budget")
 	require.NotSame(t, admission, stoppedBudget)
 	awaitTestValue(t, repository.entered, "the sweep did not start its uncooperative delete")
 	stoppedBudget.ch <- time.Now()
 
-	liveBudget := awaitTestValue(t, clock.timers, "the expired sweep did not arm a fresh live budget")
+	liveBudget := awaitTestValue(t, clockTimers, "the expired sweep did not arm a fresh live budget")
 	require.NotSame(t, admission, liveBudget)
 	require.NotSame(t, stoppedBudget, liveBudget)
 	liveBudget.ch <- time.Now()
@@ -1787,7 +1787,7 @@ func TestPurgeAllStoppedAndLiveBudgetsAreIndependent(t *testing.T) {
 // budget expires, the purge reports supersession rather than typed
 // stopped/broken failures, so the stop keeps authority over every record.
 func TestPurgeAllStoppedSweepDeadlineDefersToExplicitShutdown(t *testing.T) {
-	clock := &signalClock{timers: make(chan *signalTimer, 64)}
+	clock, clockTimers := newSignalClock(t, 64)
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
 	catalogue := newDurableRecoveryCatalogue(nil)
 	repository := newBlockingPurgeDeleteRepository()
@@ -1799,8 +1799,8 @@ func TestPurgeAllStoppedSweepDeadlineDefersToExplicitShutdown(t *testing.T) {
 	purged := make(chan purgeResult, 1)
 	go func() { purged <- d.purgeAllSessions(protocol.ReasonSessionKilled) }()
 
-	_ = awaitTestValue(t, clock.timers, "purge did not arm its admission deadline")
-	stoppedBudget := awaitTestValue(t, clock.timers, "purge did not arm a stopped sweep budget")
+	_ = awaitTestValue(t, clockTimers, "purge did not arm its admission deadline")
+	stoppedBudget := awaitTestValue(t, clockTimers, "purge did not arm a stopped sweep budget")
 	awaitTestValue(t, repository.entered, "the sweep did not start its uncooperative delete")
 
 	// The stop begins exactly as the sweep budget expires and is deliberately not
@@ -1945,7 +1945,7 @@ func (r *blockingPublicationRepository) Publish(context.Context, ports.SnapshotP
 // admission open, the live unit is reported as a typed skip instead of being
 // counted as purged, and a later purge removes it once the publisher returns.
 func TestPurgeAllLiveQuarantineJoinBoundedByDeadlineReleasesAdmission(t *testing.T) {
-	clock := &signalClock{timers: make(chan *signalTimer, 64)}
+	clock, clockTimers := newSignalClock(t, 64)
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
 	catalogue := newDurableRecoveryCatalogue(nil)
 	repository := newBlockingPublicationRepository()
@@ -1974,8 +1974,8 @@ func TestPurgeAllLiveQuarantineJoinBoundedByDeadlineReleasesAdmission(t *testing
 	purged := make(chan purgeResult, 1)
 	go func() { purged <- d.purgeAllSessions(protocol.ReasonSessionKilled) }()
 
-	_ = awaitTestValue(t, clock.timers, "purge did not arm its admission deadline")
-	liveBudget := awaitTestValue(t, clock.timers, "purge did not arm a separate live-teardown budget")
+	_ = awaitTestValue(t, clockTimers, "purge did not arm its admission deadline")
+	liveBudget := awaitTestValue(t, clockTimers, "purge did not arm a separate live-teardown budget")
 	liveBudget.ch <- time.Now()
 
 	result := awaitTestValue(t, purged, "purge did not return while the publisher stayed blocked")
@@ -2009,7 +2009,7 @@ func TestPurgeAllLiveQuarantineJoinBoundedByDeadlineReleasesAdmission(t *testing
 // permanently ineligible. The surviving session checkpoints again, an EOF
 // teardown completes, and its attached client is never left frozen.
 func TestPurgeAllLiveQuarantineAbortRestoresSurvivingSession(t *testing.T) {
-	clock := &signalClock{timers: make(chan *signalTimer, 64)}
+	clock, clockTimers := newSignalClock(t, 64)
 	d, live, ac, _ := newManualSessionWithPTYsClock(t, clock, newQuietPTY(t))
 	live.createdAt = 42
 	live.snapEligible.Store(true)
@@ -2038,8 +2038,8 @@ func TestPurgeAllLiveQuarantineAbortRestoresSurvivingSession(t *testing.T) {
 	purged := make(chan purgeResult, 1)
 	go func() { purged <- d.purgeAllSessions(protocol.ReasonSessionKilled) }()
 
-	_ = awaitTestValue(t, clock.timers, "purge did not arm its admission deadline")
-	liveBudget := awaitTestValue(t, clock.timers, "purge did not arm a separate live-teardown budget")
+	_ = awaitTestValue(t, clockTimers, "purge did not arm its admission deadline")
+	liveBudget := awaitTestValue(t, clockTimers, "purge did not arm a separate live-teardown budget")
 	liveBudget.ch <- time.Now()
 
 	result := awaitTestValue(t, purged, "purge did not return while the publisher stayed blocked")
@@ -2203,7 +2203,7 @@ func (r *blockingLiveDeleteRepository) DeleteIncarnation(context.Context, domain
 // delete, and once the stale delete returns the name is free for a later
 // same-name lifecycle.
 func TestPurgeAllLiveDurableDeleteBoundedDetachesAndReleasesGate(t *testing.T) {
-	clock := &signalClock{timers: make(chan *signalTimer, 64)}
+	clock, clockTimers := newSignalClock(t, 64)
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
 	catalogue := newDurableRecoveryCatalogue(nil)
 	repository := newBlockingLiveDeleteRepository()
@@ -2221,8 +2221,8 @@ func TestPurgeAllLiveDurableDeleteBoundedDetachesAndReleasesGate(t *testing.T) {
 	purged := make(chan purgeResult, 1)
 	go func() { purged <- d.purgeAllSessions(protocol.ReasonSessionKilled) }()
 
-	_ = awaitTestValue(t, clock.timers, "purge did not arm its admission deadline")
-	liveBudget := awaitTestValue(t, clock.timers, "purge did not arm a separate live-teardown budget")
+	_ = awaitTestValue(t, clockTimers, "purge did not arm its admission deadline")
+	liveBudget := awaitTestValue(t, clockTimers, "purge did not arm a separate live-teardown budget")
 	awaitTestValue(t, repository.entered, "the live purge did not start its uncooperative delete")
 	liveBudget.ch <- time.Now()
 
@@ -2288,7 +2288,7 @@ func TestPurgeAllLiveDurableDeleteBoundedDetachesAndReleasesGate(t *testing.T) {
 // and createdAt it captured: a same-name replacement lifecycle that holds the
 // name when the stale delete returns is never removed.
 func TestPurgeAllDetachedLiveDeleteFencesSameNameReplacement(t *testing.T) {
-	clock := &signalClock{timers: make(chan *signalTimer, 64)}
+	clock, clockTimers := newSignalClock(t, 64)
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
 	catalogue := newDurableRecoveryCatalogue(nil)
 	repository := newBlockingLiveDeleteRepository()
@@ -2306,8 +2306,8 @@ func TestPurgeAllDetachedLiveDeleteFencesSameNameReplacement(t *testing.T) {
 	purged := make(chan purgeResult, 1)
 	go func() { purged <- d.purgeAllSessions(protocol.ReasonSessionKilled) }()
 
-	_ = awaitTestValue(t, clock.timers, "purge did not arm its admission deadline")
-	liveBudget := awaitTestValue(t, clock.timers, "purge did not arm a separate live-teardown budget")
+	_ = awaitTestValue(t, clockTimers, "purge did not arm its admission deadline")
+	liveBudget := awaitTestValue(t, clockTimers, "purge did not arm a separate live-teardown budget")
 	awaitTestValue(t, repository.entered, "the live purge did not start its uncooperative delete")
 	liveBudget.ch <- time.Now()
 	result := awaitTestValue(t, purged, "purge did not return while the live durable delete stayed blocked")
@@ -2338,7 +2338,7 @@ func TestPurgeAllDetachedLiveDeleteFencesSameNameReplacement(t *testing.T) {
 // pending verdict is still recorded, using bounded non-sensitive fields instead
 // of the user-chosen session name.
 func TestPurgeAllLogsDetachedLiveDeleteLateFailure(t *testing.T) {
-	clock := &signalClock{timers: make(chan *signalTimer, 64)}
+	clock, clockTimers := newSignalClock(t, 64)
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
 	var logged syncedLogBuffer
 	d.log = slog.New(slog.NewTextHandler(&logged, nil))
@@ -2359,8 +2359,8 @@ func TestPurgeAllLogsDetachedLiveDeleteLateFailure(t *testing.T) {
 	purged := make(chan purgeResult, 1)
 	go func() { purged <- d.purgeAllSessions(protocol.ReasonSessionKilled) }()
 
-	_ = awaitTestValue(t, clock.timers, "purge did not arm its admission deadline")
-	liveBudget := awaitTestValue(t, clock.timers, "purge did not arm a separate live-teardown budget")
+	_ = awaitTestValue(t, clockTimers, "purge did not arm its admission deadline")
+	liveBudget := awaitTestValue(t, clockTimers, "purge did not arm a separate live-teardown budget")
 	awaitTestValue(t, repository.entered, "the live purge did not start its uncooperative delete")
 	liveBudget.ch <- time.Now()
 

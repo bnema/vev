@@ -128,10 +128,10 @@ func TestNoticesLoneEscapeClosesAfterDelay(t *testing.T) {
 	d.enterNotices(sess, ac)
 	awaitFrame(t, sends, "Output")
 
-	clk := &signalClock{timers: make(chan *signalTimer, 1)}
+	clk, clkTimers := newSignalClock(t, 1)
 	d.clock = clk
 	d.handleInput(sess, ac, []byte("\x1b"))
-	timer := <-clk.timers
+	timer := <-clkTimers
 	require.True(t, ac.overlays.noticesActive())
 
 	timer.ch <- time.Now()

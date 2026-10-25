@@ -248,7 +248,7 @@ func TestKillSessionAcquisitionTimeoutDoesNotPublishPartialInvalidation(t *testi
 	blockedSnapshot := blocked.transportSnapshot()
 	laterSnapshot := later.transportSnapshot()
 
-	clock := &signalClock{timers: make(chan *signalTimer, 1)}
+	clock, clockTimers := newSignalClock(t, 1)
 	d.clock = clock
 	frozenByKill := make(chan *attachedClient, 3)
 	d.afterAttachmentEffectGateFrozen = func(_ string, ac *attachedClient) { frozenByKill <- ac }
@@ -256,7 +256,7 @@ func TestKillSessionAcquisitionTimeoutDoesNotPublishPartialInvalidation(t *testi
 	go func() { killDone <- d.killSession(sess, protocol.ReasonSessionKilled, false) }()
 
 	require.Same(t, first, awaitTestValue(t, frozenByKill, "teardown did not acquire the first attachment effect gate"))
-	deadline := awaitTestValue(t, clock.timers, "teardown did not arm the gate acquisition deadline")
+	deadline := awaitTestValue(t, clockTimers, "teardown did not arm the gate acquisition deadline")
 	require.Equal(t, detachNotifyTimeout, deadline.duration)
 	deadline.ch <- time.Now()
 	select {
@@ -411,12 +411,12 @@ func TestShutdownSignalsServeWhenParticipantGateAcquisitionTimesOut(t *testing.T
 	require.True(t, owner.acquired)
 	defer owner.unfreeze()
 
-	clock := &signalClock{timers: make(chan *signalTimer, 1)}
+	clock, clockTimers := newSignalClock(t, 1)
 	d.clock = clock
 	shutdownDone := make(chan bool, 1)
 	go func() { shutdownDone <- d.shutdownAll(protocol.ReasonServerShutdown) }()
 
-	deadline := awaitTestValue(t, clock.timers, "shutdown did not arm the gate acquisition deadline")
+	deadline := awaitTestValue(t, clockTimers, "shutdown did not arm the gate acquisition deadline")
 	deadline.ch <- clock.Now()
 	require.False(t, awaitTestValue(t, shutdownDone, "shutdown did not return after its gate acquisition deadline"))
 
@@ -466,7 +466,7 @@ func TestRenderSendFailureCleanupIsDeadlineBoundedWhileAttachmentEffectGateIsBus
 	token.lease = rc.attachmentLease(ac)
 	ac.installTestAttachmentCapability(token)
 
-	clock := &signalClock{timers: make(chan *signalTimer, 1)}
+	clock, clockTimers := newSignalClock(t, 1)
 	d.clock = clock
 	frozen := freezeAttachmentEffectGates(ac)
 	defer frozen.unfreeze()
@@ -475,7 +475,7 @@ func TestRenderSendFailureCleanupIsDeadlineBoundedWhileAttachmentEffectGateIsBus
 
 	launchCleanup := d.reserveAttachmentSendErrorCleanup(token, transport)
 	launchCleanup()
-	deadline := awaitTestValue(t, clock.timers, "render cleanup did not arm its deadline")
+	deadline := awaitTestValue(t, clockTimers, "render cleanup did not arm its deadline")
 	require.Equal(t, detachNotifyTimeout, deadline.duration)
 	deadline.ch <- time.Now()
 	awaitTestCompletion(t, cleanupDone, "deadline did not release blocked render cleanup")

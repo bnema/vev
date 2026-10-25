@@ -561,7 +561,7 @@ func TestCopyModeOversizedYankShowsTooLargeFeedback(t *testing.T) {
 func TestCopyModeLoneEscapeExitsAfterDelay(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	clk := &signalClock{timers: make(chan *signalTimer, 1)}
+	clk, clkTimers := newSignalClock(t, 1)
 	d.clock = clk
 	installTestHistory(sess.tabs[0].focusedPane(), vt.HistoryConfig{MaxRows: 4})
 	sess.tabs[0].focusedPane().screen.Write([]byte("live"))
@@ -569,7 +569,7 @@ func TestCopyModeLoneEscapeExitsAfterDelay(t *testing.T) {
 	d.enterCopyMode(sess, ac)
 	awaitFrame(t, sends, "Output")
 	d.handleInput(sess, ac, []byte("\x1b"))
-	timer := <-clk.timers
+	timer := <-clkTimers
 	ac.overlays.copyMu.Lock()
 	require.NotNil(t, ac.overlays.copyMode)
 	ac.overlays.copyMu.Unlock()
@@ -585,7 +585,7 @@ func TestCopyModePendingEscapeDoesNotCloseNewMode(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	clk := &signalClock{timers: make(chan *signalTimer, 1)}
+	clk, clkTimers := newSignalClock(t, 1)
 	d.clock = clk
 	installTestHistory(sess.tabs[0].focusedPane(), vt.HistoryConfig{MaxRows: 4})
 	sess.tabs[0].focusedPane().screen.Write([]byte("live"))
@@ -593,7 +593,7 @@ func TestCopyModePendingEscapeDoesNotCloseNewMode(t *testing.T) {
 	d.enterCopyMode(sess, ac)
 	awaitFrame(t, sends, "Output")
 	d.handleInput(sess, ac, []byte("\x1b"))
-	timer := <-clk.timers
+	timer := <-clkTimers
 	d.enterCopyMode(sess, ac)
 	awaitFrame(t, sends, "Output")
 

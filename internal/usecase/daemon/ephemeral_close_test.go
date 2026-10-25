@@ -66,7 +66,7 @@ func TestEphemeralCloseOnExitWaitsForParkExpiry(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			clock := &signalClock{timers: make(chan *signalTimer, 8)}
+			clock, clockTimers := newSignalClock(t, 8)
 			pty, release := newBlockingPTY(t)
 			defer release()
 			d := newTestDaemon(t, newFactory(t, pty), clock)
@@ -82,7 +82,7 @@ func TestEphemeralCloseOnExitWaitsForParkExpiry(t *testing.T) {
 
 			// A link loss parks: the session must survive so the client can resume.
 			d.clientGone(sess, ac, tr, false)
-			<-clock.timers
+			<-clockTimers
 			d.reapAbandonedEphemeral(sess)
 			require.True(t, d.sessionRegistered(sess), "parked attachment keeps the ephemeral session")
 

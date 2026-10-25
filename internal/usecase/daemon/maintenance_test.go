@@ -42,19 +42,19 @@ func TestSnapshotGarbageCollectionRunsAfterRestorationThenPeriodically(t *testin
 						Return(nil).Times(passes)
 				}
 
-				clk := &signalClock{timers: make(chan *signalTimer, 1)}
+				clk, clkTimers := newSignalClock(t, 1)
 				d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clk)
 				WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, repository, nil))(d)
 				WithSnapshotGarbageCollection()(d)
 				d.startDurableMaintenance()
 
 				synctest.Wait()
-				require.Empty(t, clk.timers, "GC must wait for restoration to finish")
+				require.Empty(t, clkTimers, "GC must wait for restoration to finish")
 				d.closeRestoreDone()
 
 				for pass := range passes {
 					synctest.Wait()
-					timer := <-clk.timers
+					timer := <-clkTimers
 					require.Equal(t, snapshotGarbageCollectionInterval, timer.duration)
 					if tt.wantCollect {
 						require.Len(t, collected, 1)

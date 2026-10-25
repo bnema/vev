@@ -46,7 +46,7 @@ func TestAcceptedHandshakeDeadlineSeamResolution(t *testing.T) {
 }
 
 func TestNewHandshakeContextConsumesAcceptedQueueTime(t *testing.T) {
-	clock := &signalClock{timers: make(chan *signalTimer, 2)}
+	clock, clockTimers := newSignalClock(t, 2)
 	d := newTestDaemon(t, nil, clock)
 
 	// signalClock.Now is the zero time, so a deadline 4s after it leaves only
@@ -54,7 +54,7 @@ func TestNewHandshakeContextConsumesAcceptedQueueTime(t *testing.T) {
 	ctx, timedOut, finish := d.newHandshakeContext(context.Background(), time.Time{}.Add(4*time.Second))
 	defer finish()
 
-	timer := <-clock.timers
+	timer := <-clockTimers
 	require.Equal(t, 4*time.Second, timer.duration, "queue time must be consumed from the accepted budget")
 	require.NoError(t, ctx.Err())
 	select {
@@ -69,7 +69,7 @@ func TestNewHandshakeContextConsumesAcceptedQueueTime(t *testing.T) {
 }
 
 func TestNewHandshakeContextExpiredAcceptedDeadlineFailsPromptly(t *testing.T) {
-	clock := &signalClock{timers: make(chan *signalTimer, 1)}
+	clock, clockTimers := newSignalClock(t, 1)
 	d := newTestDaemon(t, nil, clock)
 
 	ctx, timedOut, finish := d.newHandshakeContext(context.Background(), time.Time{}.Add(-time.Second))
@@ -80,7 +80,7 @@ func TestNewHandshakeContextExpiredAcceptedDeadlineFailsPromptly(t *testing.T) {
 		t.Fatal("an already-expired accepted deadline did not publish the timeout signal")
 	}
 	select {
-	case timer := <-clock.timers:
+	case timer := <-clockTimers:
 		t.Fatalf("an already-expired accepted deadline started a new %s budget", timer.duration)
 	default:
 	}
@@ -96,7 +96,7 @@ func TestNewHandshakeContextExpiredAcceptedDeadlineFailsPromptly(t *testing.T) {
 func TestAcceptedHandshakeDeadlineSpansFirstFrameThroughWelcome(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	clock := &signalClock{timers: make(chan *signalTimer, 4)}
+	clock, clockTimers := newSignalClock(t, 4)
 	d := newTestDaemon(t, newFactory(t, pty), clock)
 
 	conn := &acceptedDeadlineConn{
@@ -116,7 +116,7 @@ func TestAcceptedHandshakeDeadlineSpansFirstFrameThroughWelcome(t *testing.T) {
 		close(done)
 	}()
 
-	timer := <-clock.timers
+	timer := <-clockTimers
 	require.Equal(t, 9*time.Second, timer.duration,
 		"handleConn must adopt the accepted deadline rather than start 15s")
 	<-conn.welcome
@@ -133,7 +133,7 @@ func TestAcceptedHandshakeDeadlineSpansFirstFrameThroughWelcome(t *testing.T) {
 // already-expired accepted connection promptly: it closes the transport,
 // returns, and never starts a fresh 15s receive budget.
 func TestExpiredAcceptedHandshakeDeadlineClosesConn(t *testing.T) {
-	clock := &signalClock{timers: make(chan *signalTimer, 1)}
+	clock, clockTimers := newSignalClock(t, 1)
 	d := newTestDaemon(t, nil, clock)
 
 	conn := &acceptedDeadlineConn{
@@ -149,7 +149,7 @@ func TestExpiredAcceptedHandshakeDeadlineClosesConn(t *testing.T) {
 	awaitTestCompletion(t, done, "an expired accepted deadline did not fail promptly")
 	requireClosedHandshakeTransport(t, conn.handshakeBlockingTransport)
 	select {
-	case timer := <-clock.timers:
+	case timer := <-clockTimers:
 		t.Fatalf("an expired accepted deadline started a fresh %s budget", timer.duration)
 	default:
 	}
@@ -162,7 +162,7 @@ func TestExpiredAcceptedHandshakeDeadlineClosesConn(t *testing.T) {
 // TestHandleHelloAdoptsExpiredAcceptedDeadline proves the direct handleHello
 // entry point honors the same optional seam as handleConn.
 func TestHandleHelloAdoptsExpiredAcceptedDeadline(t *testing.T) {
-	clock := &signalClock{timers: make(chan *signalTimer, 1)}
+	clock, clockTimers := newSignalClock(t, 1)
 	d := newTestDaemon(t, nil, clock)
 
 	conn := &acceptedDeadlineConn{
@@ -184,7 +184,7 @@ func TestHandleHelloAdoptsExpiredAcceptedDeadline(t *testing.T) {
 	awaitTestCompletion(t, done, "handleHello did not fail on an expired accepted deadline")
 	requireClosedHandshakeTransport(t, conn.handshakeBlockingTransport)
 	select {
-	case timer := <-clock.timers:
+	case timer := <-clockTimers:
 		t.Fatalf("handleHello started a fresh %s budget for an expired accepted deadline", timer.duration)
 	default:
 	}

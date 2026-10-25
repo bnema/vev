@@ -145,7 +145,7 @@ func TestAttachmentResizeKeepsPeerWindowAndExpandsSharedContent(t *testing.T) {
 func TestAttachmentFirstPaintDoesNotWaitForBlockedPeer(t *testing.T) {
 	pty, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
-	clock := &signalClock{timers: make(chan *signalTimer, 16)}
+	clock, _ := newSignalClock(t, 16)
 	d := newTestDaemon(t, newFactory(t, pty), clock)
 	oldTransport := &blockedAttachmentTransport{entered: make(chan struct{}), release: make(chan struct{}), sends: make(chan wire.Envelope, 8)}
 	sess, old, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{1}}, oldTransport)
@@ -181,7 +181,7 @@ func TestAttachmentFirstPaintDoesNotWaitForBlockedPeer(t *testing.T) {
 func TestMultiAttachmentHandshakeFirstPaintNotGatedByBlockedPeer(t *testing.T) {
 	pty, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
-	clock := &signalClock{timers: make(chan *signalTimer, 16)}
+	clock, _ := newSignalClock(t, 16)
 	d := newTestDaemon(t, newFactory(t, pty), clock)
 	oldTransport := &blockedAttachmentTransport{entered: make(chan struct{}), release: make(chan struct{}), sends: make(chan wire.Envelope, 8)}
 	sess, old, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{1}}, oldTransport)

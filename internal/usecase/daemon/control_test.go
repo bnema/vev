@@ -134,7 +134,7 @@ func TestHandleCommandTimesOutWithRequestGeneration(t *testing.T) {
 	gate := &ptyOpenGate{entered: make(chan struct{}), release: make(chan struct{})}
 	factory, closeFactory := newControlPTYFactory(t, gate)
 	t.Cleanup(closeFactory)
-	clock := &signalClock{timers: make(chan *signalTimer, 1)}
+	clock, clockTimers := newSignalClock(t, 1)
 	d := newTestDaemon(t, factory, clock)
 	addControlSession(t, d, "work", "t_work", "p_work")
 	frame := commandFrame(t, protocol.CommandRequest{
@@ -147,7 +147,7 @@ func TestHandleCommandTimesOutWithRequestGeneration(t *testing.T) {
 		done <- d.handleCommandFrame(tr, frame)
 	}()
 	<-gate.entered
-	timer := <-clock.timers
+	timer := <-clockTimers
 	require.Equal(t, CommandRequestTimeout, timer.duration)
 	timer.ch <- time.Time{}
 	result := awaitCommandResult(t, sends)
@@ -159,7 +159,7 @@ func TestHandleCommandTimesOutWithRequestGeneration(t *testing.T) {
 }
 
 func TestHandleCommandResponseSendTimeoutClosesTransport(t *testing.T) {
-	clock := &signalClock{timers: make(chan *signalTimer, 1)}
+	clock, clockTimers := newSignalClock(t, 1)
 	d := newTestDaemon(t, nil, clock)
 	tr := newBlockingControlSendTransport()
 	frame := commandFrame(t, protocol.CommandRequest{RequestID: 41, Attached: true})
@@ -167,7 +167,7 @@ func TestHandleCommandResponseSendTimeoutClosesTransport(t *testing.T) {
 	go func() { done <- d.handleCommandFrame(tr, frame) }()
 
 	<-tr.started
-	timer := <-clock.timers
+	timer := <-clockTimers
 	timer.ch <- time.Time{}
 	select {
 	case err := <-done:

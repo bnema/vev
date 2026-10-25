@@ -43,37 +43,32 @@ func newStubTimer(t testing.TB) *portsmocks.MockTimer {
 	return timer
 }
 
-type signalClock struct {
-	called chan struct{}
-	timers chan *signalTimer
-	once   sync.Once
-}
-
-func (c *signalClock) Now() time.Time { return time.Time{} }
-func (c *signalClock) NewTimer(d time.Duration) ports.Timer {
-	if c.called != nil {
-		c.once.Do(func() { close(c.called) })
-	}
-	if c.timers == nil {
+func newSignalClock(t testing.TB, buffer int) (*portsmocks.MockClock, <-chan *testTimer) {
+	t.Helper()
+	timers := make(chan *testTimer, buffer)
+	c := portsmocks.NewMockClock(t)
+	c.EXPECT().Now().Return(time.Time{}).Maybe()
+	c.EXPECT().NewTimer(mock.Anything).RunAndReturn(func(d time.Duration) ports.Timer {
 		timer := &portsmocks.MockTimer{}
-		timer.EXPECT().C().Return(nil).Maybe()
+		timer.Test(t)
+		tt := &testTimer{MockTimer: timer, ch: make(chan time.Time, 1), duration: d}
+		timer.EXPECT().C().Return((<-chan time.Time)(tt.ch)).Maybe()
 		timer.EXPECT().Reset(mock.Anything).Return(false).Maybe()
 		timer.EXPECT().Stop().Return(true).Maybe()
+		t.Cleanup(func() { timer.AssertExpectations(t) })
+		timers <- tt
 		return timer
-	}
-	t := &signalTimer{ch: make(chan time.Time, 1), duration: d}
-	c.timers <- t
-	return t
+	}).Maybe()
+	return c, timers
 }
 
-type signalTimer struct {
+type testTimer struct {
+	*portsmocks.MockTimer
 	ch       chan time.Time
 	duration time.Duration
 }
 
-func (t *signalTimer) C() <-chan time.Time      { return t.ch }
-func (t *signalTimer) Reset(time.Duration) bool { return false }
-func (t *signalTimer) Stop() bool               { return true }
+func (tt *testTimer) fire() { tt.ch <- time.Time{} }
 
 func newTestDaemon(t testing.TB, ptys ports.PTYFactory, clk ports.Clock) *Daemon {
 	t.Helper()

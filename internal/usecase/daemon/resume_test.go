@@ -173,7 +173,7 @@ func TestParkedResumeRejectsMismatchedRemoteTargetBeforeClaim(t *testing.T) {
 }
 
 func TestFailedResumeRearmsParkExpiryAfterClaimTimerFires(t *testing.T) {
-	clock := &signalClock{timers: make(chan *signalTimer, 8)}
+	clock, clockTimers := newSignalClock(t, 8)
 	pty, release := newBlockingPTY(t)
 	defer release()
 	d := newTestDaemon(t, newFactory(t, pty), clock)
@@ -183,7 +183,7 @@ func TestFailedResumeRearmsParkExpiryAfterClaimTimerFires(t *testing.T) {
 	require.NoError(t, err)
 	token := ac.resumeToken
 	d.clientGone(sess, ac, oldTransport, false)
-	parkTimer := <-clock.timers
+	parkTimer := <-clockTimers
 	d.mu.Lock()
 	parked := d.resume.parked[token]
 	d.mu.Unlock()
@@ -201,7 +201,7 @@ func TestFailedResumeRearmsParkExpiryAfterClaimTimerFires(t *testing.T) {
 	parkTimer.ch <- time.Time{}
 	d.expireParked(token, parked)
 	require.True(t, d.abortResumeClaim(ac))
-	rearmedTimer := <-clock.timers
+	rearmedTimer := <-clockTimers
 	require.NotSame(t, parkTimer, rearmedTimer)
 	d.mu.Lock()
 	rearmed := d.resume.parked[token]
@@ -250,7 +250,7 @@ func TestBoundedSendTimeoutCannotTargetResumedTransport(t *testing.T) {
 	token := ac.resumeToken
 	d.clientGone(sess, ac, oldTransport, false)
 
-	clock := &signalClock{timers: make(chan *signalTimer, 1)}
+	clock, clockTimers := newSignalClock(t, 1)
 	d.clock = clock
 	ac.sendMu.Lock()
 	expected := ac.transportSnapshot()
@@ -270,7 +270,7 @@ func TestBoundedSendTimeoutCannotTargetResumedTransport(t *testing.T) {
 
 	// The worker is parked behind sendMu, so it has not observed a transport.
 	// Expire its deadline before resuming this same attachment with a new link.
-	timer := <-clock.timers
+	timer := <-clockTimers
 	timer.ch <- time.Time{}
 	got := <-result
 	require.ErrorIs(t, got.err, errSendTimedOut)
@@ -297,7 +297,7 @@ func TestBoundedSendTimeoutCannotTargetResumedTransport(t *testing.T) {
 }
 
 func TestDetachedNotificationTimeoutClosesCapturedTransportOnce(t *testing.T) {
-	clock := &signalClock{timers: make(chan *signalTimer, 1)}
+	clock, clockTimers := newSignalClock(t, 1)
 	d := newTestDaemon(t, nil, clock)
 	tr := newCloseCountingBlockedTransport()
 	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
@@ -306,7 +306,7 @@ func TestDetachedNotificationTimeoutClosesCapturedTransportOnce(t *testing.T) {
 		ac:        ac,
 		transport: ac.transportSnapshot(),
 	}, protocol.ReasonDetach)
-	timer := <-clock.timers
+	timer := <-clockTimers
 	timer.ch <- time.Time{}
 	d.waitNotifies()
 
@@ -1269,7 +1269,7 @@ func TestExplicitDetachDoesNotPark(t *testing.T) {
 }
 
 func TestResumeParkUsesConfiguredGraceAndExpiresOnlyAfterGrace(t *testing.T) {
-	clk := &signalClock{timers: make(chan *signalTimer, 8)}
+	clk, clkTimers := newSignalClock(t, 8)
 	pty, release := newBlockingPTY(t)
 	defer release()
 	d := newTestDaemon(t, newFactory(t, pty), clk)
@@ -1280,7 +1280,7 @@ func TestResumeParkUsesConfiguredGraceAndExpiresOnlyAfterGrace(t *testing.T) {
 	token := ac.resumeToken
 
 	d.clientGone(sess, ac, ac.transport(), false)
-	timer := <-clk.timers
+	timer := <-clkTimers
 	require.Equal(t, 20*time.Minute, timer.duration)
 	d.mu.Lock()
 	_, parkedBeforeGrace := d.resume.parked[token]
@@ -1297,7 +1297,7 @@ func TestResumeParkUsesConfiguredGraceAndExpiresOnlyAfterGrace(t *testing.T) {
 }
 
 func TestParkExpiryAndShutdownCleanup(t *testing.T) {
-	clk := &signalClock{timers: make(chan *signalTimer, 8)}
+	clk, clkTimers := newSignalClock(t, 8)
 	pty, release := newBlockingPTY(t)
 	defer release()
 	d := newTestDaemon(t, newFactory(t, pty), clk)
@@ -1306,7 +1306,7 @@ func TestParkExpiryAndShutdownCleanup(t *testing.T) {
 	require.NoError(t, err)
 	token := ac.resumeToken
 	d.clientGone(sess, ac, ac.transport(), false)
-	timer := <-clk.timers
+	timer := <-clkTimers
 	timer.ch <- clk.Now()
 	require.Eventually(t, func() bool {
 		d.mu.Lock()
@@ -1393,7 +1393,7 @@ func TestDiscardingParkedAttachmentDoesNotOwnPreviousSession(t *testing.T) {
 }
 
 func TestEphemeralParkExpiryKeepsSessionWhenCloseOnExitOff(t *testing.T) {
-	clk := &signalClock{timers: make(chan *signalTimer, 8)}
+	clk, clkTimers := newSignalClock(t, 8)
 	pty, release := newBlockingPTY(t)
 	defer release()
 	d := newTestDaemon(t, newFactory(t, pty), clk)
@@ -1406,7 +1406,7 @@ func TestEphemeralParkExpiryKeepsSessionWhenCloseOnExitOff(t *testing.T) {
 	require.NotZero(t, token)
 
 	d.clientGone(sess, ac, ac.transport(), false)
-	timer := <-clk.timers
+	timer := <-clkTimers
 	timer.ch <- clk.Now()
 
 	require.Eventually(t, func() bool {

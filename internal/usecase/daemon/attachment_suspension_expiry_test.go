@@ -62,7 +62,7 @@ func (t *expiryCloseSignalTransport) Close() error {
 // newSuspendedExpiryFixture creates one manual session, suspends its sole
 // attachment, and returns the armed fake-clock safety timer plus a transport
 // whose Close call can be observed.
-func newSuspendedExpiryFixture(t *testing.T) (*Daemon, *session, *attachedClient, *signalTimer, *expiryCloseSignalTransport) {
+func newSuspendedExpiryFixture(t *testing.T) (*Daemon, *session, *attachedClient, *testTimer, *expiryCloseSignalTransport) {
 	t.Helper()
 	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
 	WithSuspendedSafetyExpiry(testSuspendedExpiry)(d)
@@ -72,16 +72,16 @@ func newSuspendedExpiryFixture(t *testing.T) (*Daemon, *session, *attachedClient
 	ac.resumeCapable, ac.resumeToken = true, 123
 	token := sess.captureAttachmentCapability(ac, tr)
 	ac.installTestAttachmentCapability(token)
-	clock := &signalClock{timers: make(chan *signalTimer, 64)}
+	clock, clockTimers := newSignalClock(t, 64)
 	d.clock = clock
 	require.NoError(t, d.suspendAttachment(token, protocol.SuspendAttachment{RequestID: 1}))
-	timer := awaitTimerWithDuration(t, clock.timers, testSuspendedExpiry)
+	timer := awaitTimerWithDuration(t, clockTimers, testSuspendedExpiry)
 	return d, sess, ac, timer, tr
 }
 
 // awaitTimerWithDuration drains unrelated watchdog timers (the suspension ACK
 // has its own bounded-send deadline) until the requested one is armed.
-func awaitTimerWithDuration(t *testing.T, timers <-chan *signalTimer, want time.Duration) *signalTimer {
+func awaitTimerWithDuration(t *testing.T, timers <-chan *testTimer, want time.Duration) *testTimer {
 	t.Helper()
 	for range 8 {
 		timer := awaitTestValue(t, timers, "expected timer was never armed")

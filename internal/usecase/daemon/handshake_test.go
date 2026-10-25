@@ -171,7 +171,7 @@ func TestHandshakeFailureAfterWelcomeDoesNotReportExplicitDetach(t *testing.T) {
 }
 
 func TestHandshakeTimeoutClosesBlockedReceive(t *testing.T) {
-	clock := &signalClock{timers: make(chan *signalTimer, 1)}
+	clock, clockTimers := newSignalClock(t, 1)
 	d := newTestDaemon(t, nil, clock)
 	tr := newHandshakeBlockingTransport(false)
 	done := make(chan struct{})
@@ -180,7 +180,7 @@ func TestHandshakeTimeoutClosesBlockedReceive(t *testing.T) {
 		close(done)
 	}()
 
-	timer := <-clock.timers
+	timer := <-clockTimers
 	require.Equal(t, protocol.HandshakeTimeout, timer.duration)
 	timer.ch <- time.Time{}
 	awaitTestCompletion(t, done, "handshake receive did not stop after timeout")
@@ -202,7 +202,7 @@ func TestFailedResumeHandshakeRestoresParkedCredential(t *testing.T) {
 	d.clientGone(sess, ac, oldTransport, false)
 	require.Empty(t, sess.snapshotAttachments())
 
-	clock := &signalClock{timers: make(chan *signalTimer, 1)}
+	clock, clockTimers := newSignalClock(t, 1)
 	d.clock = clock
 	resumeTransport := newHandshakeBlockingTransport(true)
 	done := make(chan struct{})
@@ -211,7 +211,7 @@ func TestFailedResumeHandshakeRestoresParkedCredential(t *testing.T) {
 		close(done)
 	}()
 
-	timer := <-clock.timers
+	timer := <-clockTimers
 	require.Equal(t, protocol.HandshakeTimeout, timer.duration)
 	<-resumeTransport.welcome
 	timer.ch <- time.Time{}
@@ -230,7 +230,7 @@ func TestFailedResumeHandshakeRestoresParkedCredential(t *testing.T) {
 func TestHandshakeTimeoutClosesBlockedWelcomeSend(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	clock := &signalClock{timers: make(chan *signalTimer, 4)}
+	clock, clockTimers := newSignalClock(t, 4)
 	d := newTestDaemon(t, newFactory(t, pty), clock)
 	tr := newHandshakeBlockingTransport(true)
 	done := make(chan struct{})
@@ -239,7 +239,7 @@ func TestHandshakeTimeoutClosesBlockedWelcomeSend(t *testing.T) {
 		close(done)
 	}()
 
-	timer := <-clock.timers
+	timer := <-clockTimers
 	require.Equal(t, protocol.HandshakeTimeout, timer.duration)
 	<-tr.welcome
 	timer.ch <- time.Time{}
@@ -261,7 +261,7 @@ func requireClosedHandshakeTransport(t *testing.T, tr *handshakeBlockingTranspor
 }
 
 func TestHandshakeTimeoutCancelsRouteRestoreWait(t *testing.T) {
-	clock := &signalClock{timers: make(chan *signalTimer, 1)}
+	clock, clockTimers := newSignalClock(t, 1)
 	d := newTestDaemon(t, nil, clock)
 	restoreDone := make(chan struct{})
 	d.mu.Lock()
@@ -275,7 +275,7 @@ func TestHandshakeTimeoutCancelsRouteRestoreWait(t *testing.T) {
 		close(done)
 	}()
 
-	timer := <-clock.timers
+	timer := <-clockTimers
 	require.Equal(t, protocol.HandshakeTimeout, timer.duration)
 	timer.ch <- time.Time{}
 	awaitTestCompletion(t, done, "route restore wait did not stop after handshake timeout")
@@ -294,7 +294,7 @@ func TestHandshakeTimeoutRemovesRestoredEmptySession(t *testing.T) {
 	d.inactive["restored"] = inactiveSession{name: "restored", cwd: "/tmp", state: protocol.SessionDown}
 	d.mu.Unlock()
 
-	clock := &signalClock{timers: make(chan *signalTimer, 4)}
+	clock, clockTimers := newSignalClock(t, 4)
 	d.clock = clock
 	tr := newHandshakeBlockingTransport(true)
 	done := make(chan struct{})
@@ -303,7 +303,7 @@ func TestHandshakeTimeoutRemovesRestoredEmptySession(t *testing.T) {
 		close(done)
 	}()
 
-	timer := <-clock.timers
+	timer := <-clockTimers
 	require.Equal(t, protocol.HandshakeTimeout, timer.duration)
 	<-tr.welcome
 	timer.ch <- time.Time{}
@@ -324,7 +324,7 @@ func TestHandshakeTimeoutPreservesUnrelatedAttachment(t *testing.T) {
 	sess, old, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "shared", Size: domain.Size{Cols: 80, Rows: 24}}, oldTransport)
 	require.NoError(t, err)
 
-	clock := &signalClock{timers: make(chan *signalTimer, 1)}
+	clock, clockTimers := newSignalClock(t, 1)
 	d.clock = clock
 	tr := newHandshakeBlockingTransport(true)
 	done := make(chan struct{})
@@ -333,7 +333,7 @@ func TestHandshakeTimeoutPreservesUnrelatedAttachment(t *testing.T) {
 		close(done)
 	}()
 
-	timer := <-clock.timers
+	timer := <-clockTimers
 	require.Equal(t, protocol.HandshakeTimeout, timer.duration)
 	<-tr.welcome
 	timer.ch <- time.Time{}

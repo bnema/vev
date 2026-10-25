@@ -519,7 +519,7 @@ func TestGraphicsNamespacePoolExhaustionFallsBackToText(t *testing.T) {
 }
 
 func TestGraphicsNamespaceQuarantineFencesTimedOutLateDelete(t *testing.T) {
-	clock := &signalClock{timers: make(chan *signalTimer, 1)}
+	clock, clockTimers := newSignalClock(t, 1)
 	d := newTestDaemon(t, nil, clock)
 	key := "session:stale:attachment"
 	d.mu.Lock()
@@ -544,7 +544,7 @@ func TestGraphicsNamespaceQuarantineFencesTimedOutLateDelete(t *testing.T) {
 		close(cleanupDone)
 	}()
 	awaitTestCompletion(t, transport.started, "timed-out cleanup did not reach the stale transport")
-	timer := awaitTestValue(t, clock.timers, "cleanup watchdog timer was not armed")
+	timer := awaitTestValue(t, clockTimers, "cleanup watchdog timer was not armed")
 	timer.ch <- time.Time{}
 	awaitTestCompletion(t, cleanupDone, "timed-out cleanup did not retire the attachment")
 
