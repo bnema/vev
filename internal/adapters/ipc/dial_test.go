@@ -7,12 +7,16 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/adapters/observability"
-	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/stretchr/testify/mock"
 )
 
-type dialTestObserver struct{}
-
-func (dialTestObserver) ObserveRuntime(ports.RuntimeMark) {}
+func newDialTestObserver(t *testing.T) *portsmocks.MockRuntimeObserver {
+	t.Helper()
+	observer := portsmocks.NewMockRuntimeObserver(t)
+	observer.EXPECT().ObserveRuntime(mock.Anything).Maybe()
+	return observer
+}
 
 func TestDialContextCanceledOrExpired(t *testing.T) {
 	tests := []struct {
@@ -62,7 +66,7 @@ func TestDialContextPreservesOptions(t *testing.T) {
 	}
 	defer func() { _ = listener.Close() }()
 
-	observer := observability.NewSerialized(dialTestObserver{}, 1)
+	observer := observability.NewSerialized(newDialTestObserver(t), 1)
 	defer observer.Close()
 	transport, err := DialContext(context.Background(), dir, WithRuntimeObserver(observer))
 	if err != nil {

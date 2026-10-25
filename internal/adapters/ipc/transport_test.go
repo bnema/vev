@@ -297,6 +297,7 @@ func TestTransportAsyncEgressPreservesWelcomeBeforeOutput(t *testing.T) {
 	}
 }
 
+// real I/O: net.Pipe-backed transport with a pooled-channel framer that cannot run in a synctest bubble.
 func TestTransportSendWaitsForEgressCapacity(t *testing.T) {
 	const timeout = time.Second
 
@@ -320,9 +321,9 @@ func TestTransportSendWaitsForEgressCapacity(t *testing.T) {
 	want := wire.Envelope{Payload: []byte("synchronous")}
 	sent := make(chan error, 1)
 	go func() { sent <- server.Send(want) }()
-	// Send must park behind the full egress queue; give the goroutine a
-	// moment to reach the queue, then prove it has not returned.
-	time.Sleep(20 * time.Millisecond)
+	// Send must park behind the full egress queue; wait until it has, then
+	// prove it has not returned.
+	waitSendParked(t, timeout)
 	select {
 	case err := <-sent:
 		t.Fatalf("Send returned before capacity was available: %v", err)
@@ -348,6 +349,7 @@ func TestTransportSendWaitsForEgressCapacity(t *testing.T) {
 	}
 }
 
+// real I/O: net.Pipe-backed transport with a pooled-channel framer that cannot run in a synctest bubble.
 func TestTransportCloseInterruptsSendWaitingForEgressCapacity(t *testing.T) {
 	const timeout = time.Second
 
@@ -364,7 +366,7 @@ func TestTransportCloseInterruptsSendWaitingForEgressCapacity(t *testing.T) {
 
 	sent := make(chan error, 1)
 	go func() { sent <- server.Send(wire.Envelope{Payload: []byte("synchronous")}) }()
-	time.Sleep(20 * time.Millisecond)
+	waitSendParked(t, timeout)
 
 	closeTransport(t, server)
 	select {
