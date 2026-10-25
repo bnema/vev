@@ -13,21 +13,26 @@ import (
 	"io"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
 )
 
-// gatedControlFactory blocks its first pane Open until release, so a test holds
-// a dispatched command inside its PTY spawn while the request deadline expires.
-// Later Opens (a background floating prewarm) return immediately.
-type gatedControlFactory struct {
+// gatedControl drives a MockPTYFactory whose first pane Open blocks until
+// release, so a test holds a dispatched command inside its PTY spawn while the
+// request deadline expires. Later Opens (a background floating prewarm) return
+// immediately. It is a plain state holder and implements no port.
+type gatedControl struct {
+	factory *portsmocks.MockPTYFactory
 	entered chan struct{}
 	release chan struct{}
 	// gateOnce signals first-Open entry exactly once; releaseOnce closes the
@@ -37,88 +42,93 @@ type gatedControlFactory struct {
 	releaseOnce sync.Once
 
 	mu          sync.Mutex
-	ptys        []*gatedControlPTY
-	first       *gatedControlPTY
+	ptys        []*gatedPane
+	first       *gatedPane
 	firstOpened bool
 	shut        bool
 }
 
-func newGatedControlFactory() *gatedControlFactory {
-	f := &gatedControlFactory{entered: make(chan struct{}), release: make(chan struct{})}
-	// Pre-allocate the gated pane so a test can await its reader even while the
-	// first Open is still parked inside the gate.
-	f.first = &gatedControlPTY{readStarted: make(chan struct{}), stop: make(chan struct{})}
-	return f
-}
-
-func (f *gatedControlFactory) Open(_ context.Context, _ string, _ []string, _ []string, _ string, _ domain.Geometry) (ports.PTY, error) {
-	f.mu.Lock()
-	first := f.first
-	gate := !f.firstOpened
-	if gate {
-		f.firstOpened = true
-	}
-	f.mu.Unlock()
-	if gate {
-		f.gateOnce.Do(func() { close(f.entered) })
-		<-f.release
-		return first, nil
-	}
-	p := &gatedControlPTY{readStarted: make(chan struct{}), stop: make(chan struct{})}
-	f.mu.Lock()
-	f.ptys = append(f.ptys, p)
-	shut := f.shut
-	f.mu.Unlock()
-	if shut {
-		_ = p.Close()
-	}
-	return p, nil
-}
-
-func (f *gatedControlFactory) releaseOpen() {
-	f.releaseOnce.Do(func() { close(f.release) })
-}
-
-func (f *gatedControlFactory) firstReadStarted() <-chan struct{} {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.first.readStarted
-}
-
-func (f *gatedControlFactory) close() {
-	f.releaseOpen()
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.shut = true
-	_ = f.first.Close()
-	for _, p := range f.ptys {
-		_ = p.Close()
-	}
-}
-
-// gatedControlPTY signals when its reader starts and parks until closed, so a
-// test observes a committed tab's launched reader without sleeping.
-type gatedControlPTY struct {
+// gatedPane is the state behind one gated MockPTY.
+type gatedPane struct {
+	pty         *portsmocks.MockPTY
 	readStarted chan struct{}
 	stop        chan struct{}
 	startOnce   sync.Once
 	closeOnce   sync.Once
 }
 
-func (p *gatedControlPTY) Read([]byte) (int, error) {
-	p.startOnce.Do(func() { close(p.readStarted) })
-	<-p.stop
-	return 0, io.EOF
+func (p *gatedPane) close() { p.closeOnce.Do(func() { close(p.stop) }) }
+
+// newGatedPane returns a MockPTY that signals when its reader starts and parks
+// until closed, so a test observes a committed tab's launched reader.
+func newGatedPane(t testing.TB) *gatedPane {
+	p := &gatedPane{readStarted: make(chan struct{}), stop: make(chan struct{})}
+	p.pty = portsmocks.NewMockPTY(t)
+	p.pty.EXPECT().Read(mock.Anything).RunAndReturn(func([]byte) (int, error) {
+		p.startOnce.Do(func() { close(p.readStarted) })
+		<-p.stop
+		return 0, io.EOF
+	}).Maybe()
+	p.pty.EXPECT().Write(mock.Anything).RunAndReturn(func(b []byte) (int, error) { return len(b), nil }).Maybe()
+	p.pty.EXPECT().Resize(mock.Anything).Return(nil).Maybe()
+	p.pty.EXPECT().Pid().Return(0).Maybe()
+	p.pty.EXPECT().ForegroundPgid().Return(0, nil).Maybe()
+	p.pty.EXPECT().Close().RunAndReturn(func() error { p.close(); return nil }).Maybe()
+	return p
 }
 
-func (*gatedControlPTY) Write(b []byte) (int, error)  { return len(b), nil }
-func (*gatedControlPTY) Resize(domain.Geometry) error { return nil }
-func (*gatedControlPTY) Pid() int                     { return 0 }
-func (*gatedControlPTY) ForegroundPgid() (int, error) { return 0, nil }
+func newGatedControlFactory(t testing.TB) *gatedControl {
+	f := &gatedControl{entered: make(chan struct{}), release: make(chan struct{})}
+	// Pre-allocate the gated pane so a test can await its reader even while the
+	// first Open is still parked inside the gate.
+	f.first = newGatedPane(t)
+	f.factory = portsmocks.NewMockPTYFactory(t)
+	f.factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+		func(context.Context, string, []string, []string, string, domain.Geometry) (ports.PTY, error) {
+			f.mu.Lock()
+			first := f.first
+			gate := !f.firstOpened
+			if gate {
+				f.firstOpened = true
+			}
+			f.mu.Unlock()
+			if gate {
+				f.gateOnce.Do(func() { close(f.entered) })
+				<-f.release
+				return first.pty, nil
+			}
+			p := newGatedPane(t)
+			f.mu.Lock()
+			f.ptys = append(f.ptys, p)
+			shut := f.shut
+			f.mu.Unlock()
+			if shut {
+				p.close()
+			}
+			return p.pty, nil
+		}).Maybe()
+	return f
+}
 
-func (p *gatedControlPTY) Close() error {
-	p.closeOnce.Do(func() { close(p.stop) })
-	return nil
+func (f *gatedControl) releaseOpen() {
+	f.releaseOnce.Do(func() { close(f.release) })
+}
+
+func (f *gatedControl) firstReadStarted() <-chan struct{} {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.first.readStarted
+}
+
+func (f *gatedControl) close() {
+	f.releaseOpen()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.shut = true
+	f.first.close()
+	for _, p := range f.ptys {
+		p.close()
+	}
 }
 
 func controlSessionTabCount(t *testing.T, d *Daemon, name string) int {
@@ -171,74 +181,78 @@ func commandResultsOf(t *testing.T, log *connLog) []protocol.CommandResult {
 // correlated to its RequestID. The command then commits late; that late
 // completion produces no second result and cannot change the observed outcome.
 func TestHandleCommandTimeoutSendsOneCorrelatedUnknownAndDropsLateCompletion(t *testing.T) {
-	factory := newGatedControlFactory()
-	clock, clockTimers := newSignalClock(t, 16)
-	d := newTestDaemon(t, factory, clock)
-	addControlSession(t, d, "work", "t_work", "p_work")
-	t.Cleanup(func() {
-		factory.close()
-		d.sessWg.Wait()
+	synctest.Test(t, func(t *testing.T) {
+		factory := newGatedControlFactory(t)
+		clock, clockTimers := newSignalClock(t, 16)
+		d := newTestDaemon(t, factory.factory, clock)
+		addControlSession(t, d, "work", "t_work", "p_work")
+		t.Cleanup(func() {
+			factory.close()
+			d.sessWg.Wait()
+		})
+
+		frame := commandFrame(t, protocol.CommandRequest{RequestID: 17, Slug: "new-tab", TargetSession: "work"})
+		tr, sends, releaseConn := newConn(t, frame)
+		defer releaseConn()
+		done := make(chan error, 1)
+		go func() { done <- d.handleCommandFrame(tr, frame) }()
+
+		// The command is admitted and parked inside its pane spawn.
+		requireReceived(t, factory.entered, "command was not dispatched")
+		timer := <-clockTimers
+		require.Equal(t, CommandRequestTimeout, timer.duration)
+		timer.ch <- time.Time{}
+
+		result := awaitCommandResult(t, sends)
+		require.Equal(t, uint64(17), result.RequestID, "the unknown outcome must correlate to its request")
+		require.Equal(t, protocol.CommandOutcomeUnknown, result.Outcome)
+		require.True(t, result.Valid(), "%+v must obey the outcome contract", result)
+		require.Zero(t, result.Code, "an unknown outcome carries no definite code")
+		require.Empty(t, result.Output, "an unknown outcome carries no output")
+		require.Equal(t, ErrCommandRequestTimeout.Error(), result.Text)
+		require.NoError(t, <-done, "the one-shot handler must answer and return")
+
+		// Release the parked command: it now commits after the client already saw
+		// the unknown outcome.
+		factory.releaseOpen()
+		requireReceived(t, factory.firstReadStarted(), "late completion never committed its tab")
+		require.Equal(t, 2, controlSessionTabCount(t, d, "work"), "the timed-out command still committed late")
+
+		requireNoFurtherCommandResults(t, sends)
 	})
-
-	frame := commandFrame(t, protocol.CommandRequest{RequestID: 17, Slug: "new-tab", TargetSession: "work"})
-	tr, sends, releaseConn := newConn(t, frame)
-	defer releaseConn()
-	done := make(chan error, 1)
-	go func() { done <- d.handleCommandFrame(tr, frame) }()
-
-	// The command is admitted and parked inside its pane spawn.
-	awaitTestCompletion(t, factory.entered, "command was not dispatched")
-	timer := <-clockTimers
-	require.Equal(t, CommandRequestTimeout, timer.duration)
-	timer.ch <- time.Time{}
-
-	result := awaitCommandResult(t, sends)
-	require.Equal(t, uint64(17), result.RequestID, "the unknown outcome must correlate to its request")
-	require.Equal(t, protocol.CommandOutcomeUnknown, result.Outcome)
-	require.True(t, result.Valid(), "%+v must obey the outcome contract", result)
-	require.Zero(t, result.Code, "an unknown outcome carries no definite code")
-	require.Empty(t, result.Output, "an unknown outcome carries no output")
-	require.Equal(t, ErrCommandRequestTimeout.Error(), result.Text)
-	require.NoError(t, <-done, "the one-shot handler must answer and return")
-
-	// Release the parked command: it now commits after the client already saw
-	// the unknown outcome.
-	factory.releaseOpen()
-	awaitTestCompletion(t, factory.firstReadStarted(), "late completion never committed its tab")
-	require.Equal(t, 2, controlSessionTabCount(t, d, "work"), "the timed-out command still committed late")
-
-	requireNoFurtherCommandResults(t, sends)
 }
 
 // TestHandleCommandTimeoutRetiresConnectionAfterOneResult proves the timeout
 // path attempts exactly one correlated unknown result and then retires the
 // one-shot control connection, so a late completion has no channel to answer on.
 func TestHandleCommandTimeoutRetiresConnectionAfterOneResult(t *testing.T) {
-	factory := newGatedControlFactory()
-	clock, clockTimers := newSignalClock(t, 16)
-	d := newTestDaemon(t, factory, clock)
-	addControlSession(t, d, "work", "t_work", "p_work")
-	t.Cleanup(func() {
-		factory.close()
-		d.sessWg.Wait()
+	synctest.Test(t, func(t *testing.T) {
+		factory := newGatedControlFactory(t)
+		clock, clockTimers := newSignalClock(t, 16)
+		d := newTestDaemon(t, factory.factory, clock)
+		addControlSession(t, d, "work", "t_work", "p_work")
+		t.Cleanup(func() {
+			factory.close()
+			d.sessWg.Wait()
+		})
+
+		capture, captureLog := newTrackedConnection(t)
+		frame := commandFrame(t, protocol.CommandRequest{RequestID: 23, Slug: "new-tab", TargetSession: "work"})
+		done := make(chan error, 1)
+		go func() { done <- d.handleCommandFrame(capture, frame) }()
+
+		requireReceived(t, factory.entered, "command was not dispatched")
+		timer := <-clockTimers
+		require.Equal(t, CommandRequestTimeout, timer.duration)
+		timer.ch <- time.Time{}
+		require.NoError(t, <-done)
+
+		results := commandResultsOf(t, captureLog)
+		require.Len(t, results, 1, "a timed-out command answers exactly one result")
+		require.Equal(t, uint64(23), results[0].RequestID)
+		require.Equal(t, protocol.CommandOutcomeUnknown, results[0].Outcome)
+		require.True(t, captureLog.Closed(), "a one-shot control connection is retired after its result")
 	})
-
-	capture, captureLog := newTrackedConnection(t)
-	frame := commandFrame(t, protocol.CommandRequest{RequestID: 23, Slug: "new-tab", TargetSession: "work"})
-	done := make(chan error, 1)
-	go func() { done <- d.handleCommandFrame(capture, frame) }()
-
-	awaitTestCompletion(t, factory.entered, "command was not dispatched")
-	timer := <-clockTimers
-	require.Equal(t, CommandRequestTimeout, timer.duration)
-	timer.ch <- time.Time{}
-	require.NoError(t, <-done)
-
-	results := commandResultsOf(t, captureLog)
-	require.Len(t, results, 1, "a timed-out command answers exactly one result")
-	require.Equal(t, uint64(23), results[0].RequestID)
-	require.Equal(t, protocol.CommandOutcomeUnknown, results[0].Outcome)
-	require.True(t, captureLog.Closed(), "a one-shot control connection is retired after its result")
 }
 
 // TestHandleCommandDefiniteOutcomesPreserveCorrelationAndOutcome proves each
@@ -284,25 +298,27 @@ func TestHandleCommandDefiniteOutcomesPreserveCorrelationAndOutcome(t *testing.T
 	}
 	for i, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d := newTestDaemon(t, nil, newStubClock(t))
-			request := tt.request
-			request.RequestID = uint64(31 + i)
+			synctest.Test(t, func(t *testing.T) {
+				d := newTestDaemon(t, nil, newStubClock(t))
+				request := tt.request
+				request.RequestID = uint64(31 + i)
 
-			result := sendCommand(t, d, request)
+				result := sendCommand(t, d, request)
 
-			require.Equal(t, request.RequestID, result.RequestID, "the outcome must correlate to its request")
-			require.Equal(t, tt.wantOutcome, result.Outcome)
-			require.True(t, result.Valid(), "%+v must obey the outcome contract", result)
-			if tt.wantOutcome == protocol.CommandFailed {
-				require.Equal(t, tt.wantCode, result.Code)
-				require.NotEmpty(t, result.Text, "a definite failure must carry bounded error text")
-				require.LessOrEqual(t, len(result.Text), wire.ControlEnvelopeLimit)
-				require.Empty(t, result.Output, "a failure must not carry success output")
-			} else {
-				require.Zero(t, result.Code)
-				require.Empty(t, result.Text)
-				require.NotEmpty(t, result.Output)
-			}
+				require.Equal(t, request.RequestID, result.RequestID, "the outcome must correlate to its request")
+				require.Equal(t, tt.wantOutcome, result.Outcome)
+				require.True(t, result.Valid(), "%+v must obey the outcome contract", result)
+				if tt.wantOutcome == protocol.CommandFailed {
+					require.Equal(t, tt.wantCode, result.Code)
+					require.NotEmpty(t, result.Text, "a definite failure must carry bounded error text")
+					require.LessOrEqual(t, len(result.Text), wire.ControlEnvelopeLimit)
+					require.Empty(t, result.Output, "a failure must not carry success output")
+				} else {
+					require.Zero(t, result.Code)
+					require.Empty(t, result.Text)
+					require.NotEmpty(t, result.Output)
+				}
+			})
 		})
 	}
 }
