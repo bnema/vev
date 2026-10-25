@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -31,8 +32,7 @@ const (
 	brokerTestEndpoint    = "offline@daemon:2222"
 	brokerTestIdentity    = "offline-daemon"
 	brokerTestWait        = 5 * time.Second
-	brokerTestPollTick    = 5 * time.Millisecond
-	brokerTestIdleAdvance = time.Minute
+	brokerTestIdleAdvance = brokerconfig.MaxIdleGrace
 )
 
 // brokerTestPolicy is the exact policy provisioned and offered by the fixture.
@@ -164,36 +164,39 @@ func TestDrainBrokerAcceptClassifiesTerminalFailure(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var buffer bytes.Buffer
-			log := slog.New(slog.NewTextHandler(&buffer, nil))
-			started := make(chan struct{})
-			drained := make(chan struct{})
-			failed := make(chan struct{})
-			go drainBrokerAccept(newFatalListener(t, tt.err), log, started, drained, failed)
+			synctest.Test(t, func(t *testing.T) {
+				var buffer bytes.Buffer
+				log := slog.New(slog.NewTextHandler(&buffer, nil))
+				started := make(chan struct{})
+				drained := make(chan struct{})
+				failed := make(chan struct{})
+				go drainBrokerAccept(newFatalListener(t, tt.err), log, started, drained, failed)
 
-			select {
-			case <-started:
-			case <-time.After(brokerTestWait):
-				t.Fatal("the drain never started")
-			}
-			select {
-			case <-drained:
-			case <-time.After(brokerTestWait):
-				t.Fatal("the drain did not stop on a terminal accept failure")
-			}
+				synctest.Wait()
+				select {
+				case <-started:
+				default:
+					t.Fatal("the drain never started")
+				}
+				select {
+				case <-drained:
+				default:
+					t.Fatal("the drain did not stop on a terminal accept failure")
+				}
 
-			select {
-			case <-failed:
-				require.True(t, tt.wantFailed, "an orderly listener close must not signal failure")
-			default:
-				require.False(t, tt.wantFailed, "an unexpected terminal failure must signal shutdown")
-			}
+				select {
+				case <-failed:
+					require.True(t, tt.wantFailed, "an orderly listener close must not signal failure")
+				default:
+					require.False(t, tt.wantFailed, "an unexpected terminal failure must signal shutdown")
+				}
 
-			if tt.wantLogged {
-				require.Contains(t, buffer.String(), "broker_offline_accept_failed")
-				return
-			}
-			require.Empty(t, strings.TrimSpace(buffer.String()), "an orderly listener close must not be logged")
+				if tt.wantLogged {
+					require.Contains(t, buffer.String(), "broker_offline_accept_failed")
+					return
+				}
+				require.Empty(t, strings.TrimSpace(buffer.String()), "an orderly listener close must not be logged")
+			})
 		})
 	}
 }
@@ -308,7 +311,8 @@ func waitForSandboxShutdown(t *testing.T, clk *sandboxClockState, done <-chan er
 		case err := <-done:
 			require.NoError(t, err)
 			return
-		case <-time.After(brokerTestPollTick):
+		case <-clk.armed:
+			// A timer was armed: the idle grace is now pending, so step past it.
 			clk.Advance(brokerTestIdleAdvance)
 		case <-deadline:
 			t.Fatal("idle sandbox did not shut down")
@@ -513,14 +517,17 @@ func newBrokerMuxFixtureAt(t *testing.T, policy ports.BrokerPolicy, route string
 }
 
 func TestSandboxClockFiresOnAdvance(t *testing.T) {
-	clk, state := newSandboxClockMock(t)
-	timer := clk.NewTimer(time.Minute)
-	require.True(t, timer.Stop())
-	timer = clk.NewTimer(time.Minute)
-	state.Advance(time.Minute)
-	select {
-	case <-timer.C():
-	case <-time.After(brokerTestWait):
-		t.Fatal("manual timer did not fire")
-	}
+	synctest.Test(t, func(t *testing.T) {
+		clk, state := newSandboxClockMock(t)
+		timer := clk.NewTimer(time.Minute)
+		require.True(t, timer.Stop())
+		timer = clk.NewTimer(time.Minute)
+		state.Advance(time.Minute)
+		synctest.Wait()
+		select {
+		case <-timer.C():
+		default:
+			t.Fatal("manual timer did not fire")
+		}
+	})
 }

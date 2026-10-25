@@ -23,6 +23,9 @@ type sandboxClockState struct {
 	now    time.Time
 	order  uint64
 	timers map[*sandboxTimerState]struct{}
+	// armed receives one signal each time a timer is armed or reset, so a test
+	// advances time on the event that makes it matter instead of polling.
+	armed chan struct{}
 }
 
 // sandboxTimerState is the state behind one sandbox timer mock.
@@ -40,7 +43,7 @@ type sandboxTimerState struct {
 func newSandboxClockMock(t *testing.T, opts ...func(*portsmocks.MockClock, *sandboxClockState)) (*portsmocks.MockClock, *sandboxClockState) {
 	t.Helper()
 	clk := portsmocks.NewMockClock(t)
-	state := &sandboxClockState{now: time.Unix(0, 0), timers: make(map[*sandboxTimerState]struct{})}
+	state := &sandboxClockState{now: time.Unix(0, 0), timers: make(map[*sandboxTimerState]struct{}), armed: make(chan struct{}, 1)}
 	for _, opt := range opts {
 		opt(clk, state)
 	}
@@ -127,6 +130,10 @@ func (t *sandboxTimerState) arm(d time.Duration) {
 	t.when = t.clock.now.Add(d)
 	t.active = true
 	t.clock.timers[t] = struct{}{}
+	select {
+	case t.clock.armed <- struct{}{}:
+	default:
+	}
 }
 
 // lifecycleTimerState is the state behind one manual snapshot-shutdown timer

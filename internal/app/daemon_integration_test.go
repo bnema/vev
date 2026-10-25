@@ -15,6 +15,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/mock"
@@ -1358,20 +1359,23 @@ func runBlockedSnapshotWriterShutdown(t *testing.T) blockedSnapshotWriterShutdow
 }
 
 func TestLifecycleManualTimerRepeatedFireIsNonBlocking(t *testing.T) {
-	_, timer := newLifecycleTimerMock(t)
-	timer.fire()
-
-	returned := make(chan struct{})
-	go func() {
+	synctest.Test(t, func(t *testing.T) {
+		_, timer := newLifecycleTimerMock(t)
 		timer.fire()
-		close(returned)
-	}()
 
-	select {
-	case <-returned:
-	case <-time.After(time.Second):
-		t.Fatal("repeated manual timer fire blocked on a pending tick")
-	}
+		returned := make(chan struct{})
+		go func() {
+			timer.fire()
+			close(returned)
+		}()
+
+		synctest.Wait()
+		select {
+		case <-returned:
+		default:
+			t.Fatal("repeated manual timer fire blocked on a pending tick")
+		}
+	})
 }
 
 func TestLifecycleSocketCloseCatalogueRace(t *testing.T) {

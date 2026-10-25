@@ -300,7 +300,7 @@ func TestOfflineEphemeralSessionIsNotPersistedViaBroker(t *testing.T) {
 		records, err := fixture.catalogue.Records()
 		require.NoError(t, err)
 		return len(records) == 1 && records[0].Name == "persisted"
-	}, brokerTestWait, brokerTestPollTick, "the durable catalogue must hold exactly the named session")
+	}, brokerTestWait, pollInterval, "the durable catalogue must hold exactly the named session")
 
 	records, err := fixture.catalogue.Records()
 	require.NoError(t, err)
