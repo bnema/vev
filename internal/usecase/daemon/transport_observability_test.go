@@ -378,13 +378,3 @@ func TestTransportObservabilityACKBlockedStartPublishesBeforeEnd(t *testing.T) {
 		}
 	})
 }
-
-// daemonRuntimeObserver is still used by transactional_resize_test.go (batch B).
-// Migrate that file to newRuntimeObserver, then delete this type.
-//
-//testpolicy:double transitional recorder for batch-B transactional_resize_test.go
-type daemonRuntimeObserver struct{ marks []ports.RuntimeMark }
-
-func (o *daemonRuntimeObserver) ObserveRuntime(mark ports.RuntimeMark) {
-	o.marks = append(o.marks, mark)
-}

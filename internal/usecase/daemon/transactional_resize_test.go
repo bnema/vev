@@ -462,7 +462,7 @@ func TestTransactionalResizeRejectsNewerEpochBeforeSessionPublication(t *testing
 		first, second := newTransactionalResizePTY(t), newTransactionalResizePTY(t)
 		d, sess, ac, _ := newManualSessionWithPTYs(t, first, second)
 		stopOverlayTimersAtCleanup(t, ac)
-		observer := &daemonRuntimeObserver{}
+		observer, observed := newRuntimeObserver(t, nil)
 		d.runtimeObserver = observer
 		rc := d.attachCoordinator(sess, nil, ac, true)
 		lease := rc.attachmentLease(ac)
@@ -479,7 +479,7 @@ func TestTransactionalResizeRejectsNewerEpochBeforeSessionPublication(t *testing
 				p.mu.Unlock()
 			}
 			require.False(t, sess.snapDirty.Load())
-			for _, mark := range observer.marks {
+			for _, mark := range observed.snapshot() {
 				require.NotEqual(t, ports.RuntimeResizeCommitted, mark.Kind)
 			}
 			newer = rc.recordResizeRequestForLease(domain.Size{Cols: 120, Rows: 34}, ac, lease)
@@ -504,7 +504,7 @@ func TestTransactionalResizeRejectsNewerEpochBeforeSessionPublication(t *testing
 			require.Equal(t, domain.Size{Cols: 120, Rows: 32}, domain.Size{Cols: p.screen.Columns(), Rows: p.screen.Rows()})
 		}
 		committed := 0
-		for _, mark := range observer.marks {
+		for _, mark := range observed.snapshot() {
 			if mark.Kind == ports.RuntimeResizeCommitted {
 				committed++
 			}

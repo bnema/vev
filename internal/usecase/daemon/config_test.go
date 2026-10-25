@@ -15,7 +15,7 @@ import (
 
 // captureKeyHandler records router output.
 //
-//testpolicy:double keys.MockHandler is generated into keys' own _test.go file and cannot be imported from daemon tests
+//testpolicy:double keys.MockHandler lives in keys' _test.go; an importable keysmocks package would import keys (Action) and keys' in-package tests would then form an import cycle, and boundary_test allows only ports/wire mocks as test support
 type captureKeyHandler struct {
 	actions []keys.Action
 	forward [][]byte

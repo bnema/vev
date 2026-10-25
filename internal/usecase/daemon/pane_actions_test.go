@@ -339,57 +339,42 @@ func TestLayoutApplicationRejectsStaleCloseFocusAndSize(t *testing.T) {
 	}
 
 	t.Run("close removes a stale plan member", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
-			first, entered, release := newBlockedPTY()
-			second := newTransactionalResizePTY(t)
-			d, sess, ac, _ := newManualSessionWithPTYs(t, first)
-			stopOverlayTimersAtCleanup(t, ac)
-			tb := testAttachmentTab(sess)
-			p1 := tb.focusedPane()
-			p2 := newPane("pane-2", second, domain.Size{Cols: 80, Rows: 23})
-			tb.mu.Lock()
-			tb.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf(p1.id), layout.NewLeaf(p2.id)}}, Focus: p1.id}
-			tb.panes[p2.id] = p2
-			tb.bumpLayoutGenerationLocked()
-			tb.mu.Unlock()
+		first, entered, release := newBlockedPTY()
+		second := newTransactionalResizePTY(t)
+		d, sess, ac, _ := newManualSessionWithPTYs(t, first)
+		stopOverlayTimersAtCleanup(t, ac)
+		tb := testAttachmentTab(sess)
+		p1 := tb.focusedPane()
+		p2 := newPane("pane-2", second, domain.Size{Cols: 80, Rows: 23})
+		tb.mu.Lock()
+		tb.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf(p1.id), layout.NewLeaf(p2.id)}}, Focus: p1.id}
+		tb.panes[p2.id] = p2
+		tb.bumpLayoutGenerationLocked()
+		tb.mu.Unlock()
 
-			done := make(chan struct{})
-			go func() { sess.geometry.applyTabLayout(d, sess, tb); close(done) }()
-			awaitSignal(t, entered, "old layout apply did not block")
-			closed := make(chan error, 1)
-			go func() { closed <- d.closePane(sess, tb, p2.id, nil, false) }()
-			// closePane parks on the layout-apply sync.Mutex, which is not a durable
-			// block, so synctest.Wait cannot observe it. Yield (no time involved)
-			// until its tab mutation is visible.
-			closeMutated := false
-			for range 100000 {
-				tb.mu.Lock()
-				closeMutated = tb.panes[p2.id] == nil && tb.layoutGeneration > 1
-				tb.mu.Unlock()
-				if closeMutated {
-					break
-				}
-				runtime.Gosched()
-			}
-			require.True(t, closeMutated, "close must mutate before its serialized apply waits")
-			require.Equal(t, domain.Rect{Width: 80, Height: 23}, p1.rect, "stale plan published before release")
-			close(release)
-			awaitSignal(t, done, "stale layout apply did not finish")
-			require.NoError(t, <-closed)
+		done := make(chan struct{})
+		go func() { sess.geometry.applyTabLayout(d, sess, tb); close(done) }()
+		receiveBounded(t, entered, "old layout apply did not block")
+		closed := make(chan error, 1)
+		go func() { closed <- d.closePane(sess, tb, p2.id, nil, false) }()
+		awaitTabMutation(t, tb, p2.id)
+		require.Equal(t, domain.Rect{Width: 80, Height: 23}, p1.rect, "stale plan published before release")
+		close(release)
+		receiveBounded(t, done, "stale layout apply did not finish")
+		require.NoError(t, <-closed)
 
-			tb.mu.Lock()
-			_, exists := tb.panes[p2.id]
-			tb.mu.Unlock()
-			require.False(t, exists)
-			require.Equal(t, domain.Rect{Width: 80, Height: 23}, p2.rect, "removed pane received a stale rectangle publication")
-			require.Equal(t, domain.Size{Cols: 80, Rows: 23}, domain.Size{Cols: p2.screen.Columns(), Rows: p2.screen.Rows()}, "removed pane received a stale screen publication")
-			p2.mu.Lock()
-			require.False(t, p2.resizeApplying, "removed pane gate was not cancelled")
-			p2.mu.Unlock()
-			require.Equal(t, domain.Rect{Width: 80, Height: 23}, p1.rect)
-			require.Equal(t, []domain.Size{{Cols: 40, Rows: 23}, {Cols: 80, Rows: 23}}, first.requested(), "the rejected plan must be followed by a fresh surviving-pane apply")
-			require.Equal(t, []domain.Size{{Cols: 39, Rows: 23}}, second.requested(), "the removed pane may receive an obsolete external resize but must never be published")
-		})
+		tb.mu.Lock()
+		_, exists := tb.panes[p2.id]
+		tb.mu.Unlock()
+		require.False(t, exists)
+		require.Equal(t, domain.Rect{Width: 80, Height: 23}, p2.rect, "removed pane received a stale rectangle publication")
+		require.Equal(t, domain.Size{Cols: 80, Rows: 23}, domain.Size{Cols: p2.screen.Columns(), Rows: p2.screen.Rows()}, "removed pane received a stale screen publication")
+		p2.mu.Lock()
+		require.False(t, p2.resizeApplying, "removed pane gate was not cancelled")
+		p2.mu.Unlock()
+		require.Equal(t, domain.Rect{Width: 80, Height: 23}, p1.rect)
+		require.Equal(t, []domain.Size{{Cols: 40, Rows: 23}, {Cols: 80, Rows: 23}}, first.requested(), "the rejected plan must be followed by a fresh surviving-pane apply")
+		require.Equal(t, []domain.Size{{Cols: 39, Rows: 23}}, second.requested(), "the removed pane may receive an obsolete external resize but must never be published")
 	})
 
 	t.Run("focus expansion replaces a stale stack placement", func(t *testing.T) {
@@ -1014,5 +999,30 @@ func TestSplitPaneUsesExactAuthoritativeEnvironment(t *testing.T) {
 			require.Equal(t, "/usr/bin/fish", command)
 			require.Equal(t, append(tt.want, "VEV=session=s,tab="+tabID+",pane="+paneID), gotEnv)
 		})
+	}
+}
+
+// awaitTabMutation waits for a pane close to remove id and bump the layout
+// generation. The closing goroutine then parks on the tab's layout-apply
+// sync.Mutex, which is not a durable block, so no bubble can observe it and no
+// mock call or channel reports the progress. One bounded real-time wait.
+//
+//testpolicy:realtime sync.Mutex wait invisible to synctest
+func awaitTabMutation(t *testing.T, tb *tab, id layout.PaneID) {
+	t.Helper()
+	deadline := time.After(testWaitTimeout)
+	for {
+		tb.mu.Lock()
+		mutated := tb.panes[id] == nil && tb.layoutGeneration > 1
+		tb.mu.Unlock()
+		if mutated {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("close must mutate before its serialized apply waits")
+		default:
+			runtime.Gosched()
+		}
 	}
 }

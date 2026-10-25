@@ -624,16 +624,3 @@ func TestPokeAttentionTickerIsNonBlockingCapOne(t *testing.T) {
 		require.Len(t, d.animWake, 1)
 	})
 }
-
-// manualAttentionTimer is still consumed by echo_ack_test.go (batch B owns that
-// file and its echoTestClock). Remove it once echo_ack_test.go no longer uses it.
-//
-//testpolicy:double transitional timer for batch-B echoTestClock; no new users
-type manualAttentionTimer struct {
-	ch chan time.Time
-}
-
-func (t *manualAttentionTimer) C() <-chan time.Time      { return t.ch }
-func (t *manualAttentionTimer) Reset(time.Duration) bool { return true }
-func (t *manualAttentionTimer) Stop() bool               { return true }
-func (t *manualAttentionTimer) fire()                    { t.ch <- time.Now() }
