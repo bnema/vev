@@ -1,11 +1,10 @@
 package daemon
 
 import (
-	"errors"
-	"io"
 	"slices"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -27,99 +26,55 @@ func releaseTestGate(t *testing.T, ch chan struct{}) func() {
 	return release
 }
 
-type blockedRenderReplacementTransport struct {
-	sendEntered chan struct{}
-	closed      chan struct{}
-	sendOnce    sync.Once
-	closeOnce   sync.Once
-	locksFree   chan bool
-	d           *Daemon
-	sess        *session
-}
-
-func newBlockedRenderReplacementTransport(d *Daemon, sess *session) *blockedRenderReplacementTransport {
-	return &blockedRenderReplacementTransport{
-		sendEntered: make(chan struct{}),
-		closed:      make(chan struct{}),
-		locksFree:   make(chan bool, 1),
-		d:           d,
-		sess:        sess,
-	}
-}
-
-func (t *blockedRenderReplacementTransport) Send(wire.Envelope) error {
-	t.sendOnce.Do(func() { close(t.sendEntered) })
-	<-t.closed
-	return errors.New("transport closed")
-}
-
-func (*blockedRenderReplacementTransport) Recv() (wire.Envelope, error) {
-	return wire.Envelope{}, io.EOF
-}
-
-func (t *blockedRenderReplacementTransport) Close() error {
-	locksFree := t.d.mu.TryLock()
-	if locksFree {
-		t.d.mu.Unlock()
-	}
-	if locksFree {
-		locksFree = t.d.notices.routingMu.TryLock()
-		if locksFree {
-			t.d.notices.routingMu.Unlock()
-		}
-	}
-	if locksFree {
-		locksFree = t.sess.mu.TryLock()
-		if locksFree {
-			t.sess.mu.Unlock()
-		}
-	}
-	if locksFree {
-		if rc := t.sess.renderCoordinator(); rc != nil {
-			locksFree = rc.mu.TryLock()
-			if locksFree {
-				rc.mu.Unlock()
+// newBlockedRenderReplacementConnection blocks the first send until the
+// connection is closed. Close records, before completing, whether the daemon,
+// notice-routing, session and render-coordinator locks were all free, which
+// proves replacement teardown never closes a link under those locks.
+func newBlockedRenderReplacementConnection(t testing.TB, d *Daemon, sess *session) (*mockServerConnection, *connLog, *sendGate, <-chan bool) {
+	t.Helper()
+	gate := newSendGate()
+	locksFree := make(chan bool, 1)
+	var once sync.Once
+	conn, log := newTrackedConnection(t,
+		withSendBlockedUntilClose(gate),
+		withCloseHook(func() {
+			free := tryLockFree(&d.mu)
+			if free {
+				free = tryLockFree(&d.notices.routingMu)
 			}
-		}
-	}
-	t.closeOnce.Do(func() {
-		t.locksFree <- locksFree
-		close(t.closed)
-	})
-	return nil
+			if free {
+				free = tryLockFree(&sess.mu)
+			}
+			if free {
+				if rc := sess.renderCoordinator(); rc != nil {
+					free = tryLockFree(&rc.mu)
+				}
+			}
+			once.Do(func() { locksFree <- free })
+		}),
+	)
+	return conn, log, gate, locksFree
 }
 
-type teardownBlockingTransport struct {
-	sendEntered chan struct{}
-	closed      chan struct{}
-	sendOnce    sync.Once
-	closeOnce   sync.Once
-}
-
-func newTeardownBlockingTransport() *teardownBlockingTransport {
-	return &teardownBlockingTransport{sendEntered: make(chan struct{}), closed: make(chan struct{})}
-}
-
-func (t *teardownBlockingTransport) Send(wire.Envelope) error {
-	t.sendOnce.Do(func() { close(t.sendEntered) })
-	<-t.closed
-	return errors.New("transport closed")
-}
-
-func (*teardownBlockingTransport) Recv() (wire.Envelope, error) { return wire.Envelope{}, io.EOF }
-
-func (t *teardownBlockingTransport) Close() error {
-	t.closeOnce.Do(func() { close(t.closed) })
-	return nil
-}
-
-func (t *teardownBlockingTransport) Closed() bool {
-	select {
-	case <-t.closed:
-		return true
-	default:
+// tryLockFree reports whether mu was immediately lockable, releasing it again.
+func tryLockFree(mu interface {
+	TryLock() bool
+	Unlock()
+}) bool {
+	if !mu.TryLock() {
 		return false
 	}
+	mu.Unlock()
+	return true
+}
+
+// newTeardownBlockingConnection blocks every send until the connection closes;
+// gate.entered fires when the first send is blocked.
+func newTeardownBlockingConnection(t testing.TB) (*mockServerConnection, *connLog, *sendGate) {
+	t.Helper()
+	gate := newSendGate()
+	conn, log := newTrackedConnection(t, withSendBlockedUntilClose(gate))
+	return conn, log, gate
 }
 
 func startBlockedAttachmentSend(t *testing.T, token attachmentCapability) <-chan struct{} {
@@ -314,12 +269,12 @@ func TestKillSessionAcquisitionTimeoutDoesNotPublishPartialInvalidation(t *testi
 
 func TestKillSessionInterruptsOnlyExactParticipantBlockedSends(t *testing.T) {
 	d, sess, snatched, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
-	snatchedTransport := newTeardownBlockingTransport()
+	snatchedTransport, snatchedLog, snatchedGate := newTeardownBlockingConnection(t)
 	snatched.replaceTransport(snatchedTransport)
 	d.attachCoordinator(sess, nil, snatched, true)
 	snatched.installTestAttachmentCapability(sess.captureAttachmentCapability(snatched, snatchedTransport))
 
-	activeTransport := newTeardownBlockingTransport()
+	activeTransport, activeLog, activeGate := newTeardownBlockingConnection(t)
 	active := &attachedClient{tr: activeTransport, output: newOutputStateStream(), geometry: domain.Geometry{Size: snatched.geometry.Size}}
 	active.initOverlays()
 	transition, err := d.transitionAttachment(attachmentTransitionRequest{
@@ -342,8 +297,8 @@ func TestKillSessionInterruptsOnlyExactParticipantBlockedSends(t *testing.T) {
 	activeToken := sess.captureAttachmentCapability(active, activeTransport)
 	snatchedDone := startBlockedAttachmentSend(t, snatchedToken)
 	activeDone := startBlockedAttachmentSend(t, activeToken)
-	awaitTestCompletion(t, snatchedTransport.sendEntered, "snatched send did not block")
-	awaitTestCompletion(t, activeTransport.sendEntered, "active send did not block")
+	awaitTestCompletion(t, snatchedGate.entered, "snatched send did not block")
+	awaitTestCompletion(t, activeGate.entered, "active send did not block")
 
 	killDone := make(chan error, 1)
 	go func() { killDone <- d.killSession(sess, protocol.ReasonSessionKilled, false) }()
@@ -359,8 +314,8 @@ func TestKillSessionInterruptsOnlyExactParticipantBlockedSends(t *testing.T) {
 	awaitTestCompletion(t, activeDone, "active attachment effect ticket did not retire")
 	d.waitNotifies()
 
-	require.True(t, snatchedTransport.Closed())
-	require.True(t, activeTransport.Closed())
+	require.True(t, snatchedLog.Closed())
+	require.True(t, activeLog.Closed())
 	require.False(t, unrelatedTransportLog.Closed(), "unrelated session transport was interrupted")
 	require.Contains(t, unrelated.snapshotAttachments(), unrelatedClient)
 	require.Same(t, unrelated, unrelatedClient.currentSession())
@@ -370,14 +325,14 @@ func TestKillSessionInterruptsOnlyExactParticipantBlockedSends(t *testing.T) {
 
 func TestKillSessionInterruptsCapturedSendWithoutClosingNewerIncarnation(t *testing.T) {
 	d, sess, ac, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
-	stale := newTeardownBlockingTransport()
+	stale, staleLog, staleGate := newTeardownBlockingConnection(t)
 	ac.replaceTransport(stale)
 	d.attachCoordinator(sess, nil, ac, true)
 	ac.installTestAttachmentCapability(sess.captureAttachmentCapability(ac, stale))
 
 	token := sess.captureAttachmentCapability(ac, stale)
 	sendDone := startBlockedAttachmentSend(t, token)
-	awaitTestCompletion(t, stale.sendEntered, "captured incarnation send did not block")
+	awaitTestCompletion(t, staleGate.entered, "captured incarnation send did not block")
 	fresh, freshLog := newTrackedConnection(t)
 	d.afterAttachmentEffectParticipantsSnapshotted = func(string, []*attachedClient) {
 		ac.replaceTransport(fresh)
@@ -388,7 +343,7 @@ func TestKillSessionInterruptsCapturedSendWithoutClosingNewerIncarnation(t *test
 	// silent nil would report a teardown that never happened as success.
 	require.ErrorIs(t, d.killSession(sess, protocol.ReasonSessionKilled, false), errSessionKillParticipantsChanged)
 	awaitTestCompletion(t, sendDone, "captured incarnation attachment effect ticket did not retire")
-	require.True(t, stale.Closed(), "exact captured in-flight transport was not interrupted")
+	require.True(t, staleLog.Closed(), "exact captured in-flight transport was not interrupted")
 	require.False(t, freshLog.Closed(), "newer transport incarnation was interrupted")
 	require.Same(t, fresh, ac.transport())
 	d.mu.Lock()
@@ -433,14 +388,14 @@ func TestShutdownSignalsServeWhenParticipantGateAcquisitionTimesOut(t *testing.T
 
 func TestShutdownInterruptsBlockedParticipantSend(t *testing.T) {
 	d, sess, active, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
-	blocked := newTeardownBlockingTransport()
+	blocked, blockedLog, blockedGate := newTeardownBlockingConnection(t)
 	active.replaceTransport(blocked)
 	d.attachCoordinator(sess, nil, active, true)
 	active.installTestAttachmentCapability(sess.captureAttachmentCapability(active, blocked))
 
 	token := sess.captureAttachmentCapability(active, blocked)
 	sendDone := startBlockedAttachmentSend(t, token)
-	awaitTestCompletion(t, blocked.sendEntered, "active send did not block")
+	awaitTestCompletion(t, blockedGate.entered, "active send did not block")
 
 	shutdownDone := make(chan bool, 1)
 	go func() { shutdownDone <- d.shutdownAll(protocol.ReasonServerShutdown) }()
@@ -453,7 +408,7 @@ func TestShutdownInterruptsBlockedParticipantSend(t *testing.T) {
 	}
 	awaitTestCompletion(t, sendDone, "shutdown-interrupted attachment effect ticket did not retire")
 	d.waitNotifies()
-	require.True(t, blocked.Closed())
+	require.True(t, blockedLog.Closed())
 	requireAttachmentEffectGateRetired(t, active)
 }
 
@@ -488,63 +443,58 @@ func TestRenderSendFailureCleanupIsDeadlineBoundedWhileAttachmentEffectGateIsBus
 }
 
 func TestAttachmentEffectGateReplacementInterruptsBlockedOldRenderBeforePublication(t *testing.T) {
-	d, sess, old, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
-	oldTransport := newBlockedRenderReplacementTransport(d, sess)
-	old.replaceTransport(oldTransport)
-	rc := d.attachCoordinator(sess, nil, old, true)
-	lease := rc.attachmentLease(old)
-	token := sess.captureAttachmentCapability(old, oldTransport)
-	token.lease = lease
-	old.installTestAttachmentCapability(token)
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, old, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
+		oldTransport, oldLog, oldGate, oldLocksFree := newBlockedRenderReplacementConnection(t, d, sess)
+		old.replaceTransport(oldTransport)
+		rc := d.attachCoordinator(sess, nil, old, true)
+		lease := rc.attachmentLease(old)
+		token := sess.captureAttachmentCapability(old, oldTransport)
+		token.lease = lease
+		old.installTestAttachmentCapability(token)
 
-	paintDone := make(chan struct{})
-	go func() {
-		d.paint(sess, old, true, lease)
-		close(paintDone)
-	}()
-	<-oldTransport.sendEntered
+		paintDone := make(chan struct{})
+		go func() {
+			d.paint(sess, old, true, lease)
+			close(paintDone)
+		}()
+		requireReceived(t, oldGate.entered, "old render send never blocked")
 
-	newTransport, newTransportLog := newTrackedConnection(t)
-	next := &attachedClient{tr: newTransport, output: newOutputStateStream(), geometry: domain.Geometry{Size: old.geometry.Size}}
-	next.initOverlays()
-	transitionDone := make(chan attachmentTransitionResult, 1)
-	transitionErr := make(chan error, 1)
-	go func() {
-		result, err := d.transitionAttachment(attachmentTransitionRequest{
-			target: sess, next: next, expectedTransport: next.transportSnapshot(), ready: true,
-		})
-		transitionDone <- result
-		transitionErr <- err
-	}()
+		newTransport, newTransportLog := newTrackedConnection(t)
+		next := &attachedClient{tr: newTransport, output: newOutputStateStream(), geometry: domain.Geometry{Size: old.geometry.Size}}
+		next.initOverlays()
+		transitionDone := make(chan attachmentTransitionResult, 1)
+		transitionErr := make(chan error, 1)
+		go func() {
+			result, err := d.transitionAttachment(attachmentTransitionRequest{
+				target: sess, next: next, expectedTransport: next.transportSnapshot(), ready: true,
+			})
+			transitionDone <- result
+			transitionErr <- err
+		}()
 
-	var result attachmentTransitionResult
-	select {
-	case result = <-transitionDone:
-	case <-time.After(time.Second):
-		t.Fatal("replacement publication remained blocked behind the old render send")
-	}
-	require.NoError(t, <-transitionErr)
-	require.True(t, slices.Contains(sess.snapshotAttachments(), next))
-	require.True(t, slices.Contains(sess.snapshotAttachments(), old))
-	require.False(t, newTransportLog.Closed(), "new attachment transport was affected by publication")
+		result := requireReceived(t, transitionDone, "replacement publication remained blocked behind the old render send")
+		require.NoError(t, requireReceived(t, transitionErr, "replacement publication reported no error result"))
+		require.True(t, slices.Contains(sess.snapshotAttachments(), next))
+		require.True(t, slices.Contains(sess.snapshotAttachments(), old))
+		require.False(t, newTransportLog.Closed(), "new attachment transport was affected by publication")
 
-	// Generic attachment publication does not interrupt or retire another
-	// registered connection. Release the test transport explicitly.
-	require.NoError(t, oldTransport.Close())
-	select {
-	case <-paintDone:
-	case <-time.After(time.Second):
-		t.Fatal("closing the test transport did not unblock its render")
-	}
-	d.deferAttachmentTransitionCleanups(result)
-	d.attachmentCleanupWg.Wait()
-	require.Same(t, oldTransport, old.transport(), "unrelated attachment link was retired")
-	require.False(t, newTransportLog.Closed())
+		// Generic attachment publication does not interrupt or retire another
+		// registered connection. Release the test transport explicitly.
+		require.NoError(t, oldTransport.Close())
+		require.True(t, oldLog.Closed())
+		requireReceived(t, paintDone, "closing the test transport did not unblock its render")
+		d.deferAttachmentTransitionCleanups(result)
+		d.attachmentCleanupWg.Wait()
+		require.Same(t, oldTransport, old.transport(), "unrelated attachment link was retired")
+		require.False(t, newTransportLog.Closed())
+		require.True(t, requireReceived(t, oldLocksFree, "replacement close never recorded lock state"), "replacement teardown closed the link while holding a daemon, session or render lock")
+	})
 }
 
 func TestAttachmentEffectGateAdmittedEffectCompletesBeforeConflictingTransition(t *testing.T) {
 	d, sess, old, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
-	oldTransport := newDatagramTestTransport()
+	oldTransport, _, _ := newChannelConnection(t)
 	old.replaceTransport(oldTransport)
 	rc := d.attachCoordinator(sess, nil, old, true)
 	token := sess.captureAttachmentCapability(old, oldTransport)
@@ -644,7 +594,7 @@ func TestAttachmentEffectGateAdmittedActiveEffectsFinishBeforeReplacement(t *tes
 		t.Run(tt.name, func(t *testing.T) {
 			pty := &transactionalResizePTY{}
 			d, sess, old, _ := newManualSessionWithPTYs(t, pty)
-			oldTransport := newDatagramTestTransport()
+			oldTransport, _, _ := newChannelConnection(t)
 			old.replaceTransport(oldTransport)
 			old.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: old}, &d.bindings)
 			rc := d.attachCoordinator(sess, nil, old, true)
@@ -856,7 +806,7 @@ func TestPickerDeleteSourceForCurrentInitiatorDoesNotDeadlock(t *testing.T) {
 
 func TestAttachmentEffectGateAdmittedFirstPaintFinishesBeforeReplacement(t *testing.T) {
 	d, sess, old, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
-	oldTransport := newDatagramTestTransport()
+	oldTransport, _, _ := newChannelConnection(t)
 	old.replaceTransport(oldTransport)
 	rc := d.attachCoordinator(sess, nil, old, true)
 	token := sess.captureAttachmentCapability(old, oldTransport)
@@ -891,12 +841,12 @@ func TestAttachmentEffectGateAdmittedFirstPaintFinishesBeforeReplacement(t *test
 
 func TestAttachmentEffectGateReversedConcurrentTransitionsDoNotDeadlock(t *testing.T) {
 	d, first, a, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
-	aTransport := newDatagramTestTransport()
+	aTransport, _, _ := newChannelConnection(t)
 	a.replaceTransport(aTransport)
 	d.attachCoordinator(first, nil, a, true)
 	first.captureAttachmentCapability(a, aTransport)
 
-	bTransport := newDatagramTestTransport()
+	bTransport, _, _ := newChannelConnection(t)
 	b := &attachedClient{tr: bTransport, output: newOutputStateStream(), geometry: domain.Geometry{Size: a.geometry.Size}}
 	b.initOverlays()
 	second := &session{sessionCore: sessionCore{id: "second", name: "second", attachments: map[*attachedClient]struct{}{b: {}}}}
@@ -949,7 +899,7 @@ func TestAttachmentEffectGateReversedConcurrentTransitionsDoNotDeadlock(t *testi
 
 func TestAttachmentEffectGateFrozenConnectionRejectsLateEffect(t *testing.T) {
 	d, sess, ac, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
-	transport := newDatagramTestTransport()
+	transport, _, _ := newChannelConnection(t)
 	ac.replaceTransport(transport)
 	rc := d.attachCoordinator(sess, nil, ac, true)
 	token := sess.captureAttachmentCapability(ac, transport)

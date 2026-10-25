@@ -3,11 +3,12 @@ package daemon
 import (
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/domain/layout"
 	"github.com/bnema/vev/internal/ports"
-	"github.com/stretchr/testify/require"
 )
 
 func TestResetCaptureRefreshesPaneAfterPeerAcknowledgesSharedDamage(t *testing.T) {
@@ -112,7 +113,7 @@ func TestRenderDamageReceiptRetainsRealVTDamageAcrossFailedEmission(t *testing.T
 		},
 		{
 			name: "send failure",
-			fail: func(_ *composedRenderFrame, ac *attachedClient) { ac.replaceTransport(cacheFailTransport{}) },
+			fail: func(_ *composedRenderFrame, ac *attachedClient) { ac.replaceTransport(newFailingConnection(t)) },
 			restore: func(sess *session, ac *attachedClient, healthy ports.ServerConnection) {
 				sess.mu.Lock()
 				sess.registerAttachmentLocked(ac)

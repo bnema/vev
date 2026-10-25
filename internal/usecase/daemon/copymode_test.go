@@ -18,7 +18,6 @@ import (
 	renderer "github.com/bnema/vev-vt/ansi"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/domain/layout"
-	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
@@ -34,7 +33,10 @@ func TestBoundedSendOutputErrTransportReturnsTransportUsedBySend(t *testing.T) {
 	ac.initOverlays()
 	replacement := newQuietConnection(t)
 	sendErr := errors.New("send failed")
-	failed := &swapErrorTransport{ac: ac, replacement: replacement, err: sendErr}
+	failed, _ := newTrackedConnection(t, withSendFunc(func(wire.Envelope, *connLog) error {
+		ac.replaceTransport(replacement)
+		return sendErr
+	}))
 	ac.replaceTransport(failed)
 
 	used, err := d.boundedSendOutputErrTransport(ac, []byte("copy"))
@@ -49,7 +51,17 @@ func TestOwnedSynchronousSendReturnsCapturedTransportAcrossReplacement(t *testin
 	replacement, replacementLog := newTrackedConnection(t)
 	sendErr := errors.New("owned send failed")
 	ac := &attachedClient{output: newOutputStateStream()}
-	failed := &ownedSwapErrorTransport{ac: ac, replacement: replacement, err: sendErr, sent: make(chan wire.Envelope, 1)}
+	failed, failedFrames := newCapabilityConnection(t, ownedSynchronousCapabilities(), func(c *portsmocks.MockServerConnection, frames *typedFrames) {
+		c.EXPECT().SendOutputSynchronous(mock.Anything).RunAndReturn(func(output protocol.Output) error {
+			envelope, err := testServerEnvelope(output)
+			if err != nil {
+				return err
+			}
+			frames.sends <- envelope
+			ac.replaceTransport(replacement)
+			return sendErr
+		}).Maybe()
+	})
 	ac.replaceTransport(failed)
 	sess := &session{sessionCore: sessionCore{name: "work", attachments: map[*attachedClient]struct{}{ac: {}}}}
 	ac.setSession(sess)
@@ -59,42 +71,12 @@ func TestOwnedSynchronousSendReturnsCapturedTransportAcrossReplacement(t *testin
 	require.ErrorIs(t, err, sendErr)
 	require.Same(t, failed, used)
 	require.Same(t, replacement, ac.transport())
-	out := unmarshalTestOutput(t, (<-failed.sent).Payload)
+	out := unmarshalTestOutput(t, (<-failedFrames.sends).Payload)
 	require.Equal(t, []byte("copy"), out.Data)
 	d.detachOnSendError(sess, ac, used)
 	require.True(t, slices.Contains(sess.snapshotAttachments(), ac))
 	require.False(t, replacementLog.Closed())
 }
-
-type swapErrorTransport struct {
-	ac          *attachedClient
-	replacement ports.ServerConnection
-	err         error
-}
-
-func (t *swapErrorTransport) Send(wire.Envelope) error {
-	t.ac.replaceTransport(t.replacement)
-	return t.err
-}
-
-func (t *swapErrorTransport) Recv() (wire.Envelope, error) { return wire.Envelope{}, io.EOF }
-func (t *swapErrorTransport) Close() error                 { return nil }
-
-type ownedSwapErrorTransport struct {
-	ac          *attachedClient
-	replacement ports.ServerConnection
-	err         error
-	sent        chan wire.Envelope
-}
-
-func (t *ownedSwapErrorTransport) Send(f wire.Envelope) error { return t.SendSynchronous(f) }
-func (t *ownedSwapErrorTransport) SendSynchronous(f wire.Envelope) error {
-	t.sent <- f
-	t.ac.replaceTransport(t.replacement)
-	return t.err
-}
-func (t *ownedSwapErrorTransport) Recv() (wire.Envelope, error) { return wire.Envelope{}, io.EOF }
-func (t *ownedSwapErrorTransport) Close() error                 { return nil }
 
 // stubClock returns timers whose channel never fires, so a scheduler under it
 // blocks in its debounce loop until the session context is cancelled. Used by

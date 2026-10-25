@@ -11,7 +11,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
+
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/domain/layout"
@@ -21,8 +25,6 @@ import (
 	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/command"
-	"github.com/stretchr/testify/mock"
-	"github.com/stretchr/testify/require"
 )
 
 func TestPaletteAndControlShareExplicitDaemonActionTarget(t *testing.T) {
@@ -159,27 +161,25 @@ func TestHandleCommandTimesOutWithRequestGeneration(t *testing.T) {
 }
 
 func TestHandleCommandResponseSendTimeoutClosesTransport(t *testing.T) {
-	clock, clockTimers := newSignalClock(t, 1)
-	d := newTestDaemon(t, nil, clock)
-	tr := newBlockingControlSendTransport()
-	frame := commandFrame(t, protocol.CommandRequest{RequestID: 41, Attached: true})
-	done := make(chan error, 1)
-	go func() { done <- d.handleCommandFrame(tr, frame) }()
+	synctest.Test(t, func(t *testing.T) {
+		clock, clockTimers := newSignalClock(t, 1)
+		d := newTestDaemon(t, nil, clock)
+		gate := newSendGate()
+		tr, trLog := newTrackedConnection(t, withSendFunc(func(_ wire.Envelope, log *connLog) error {
+			gate.enter()
+			<-log.Done()
+			return io.ErrClosedPipe
+		}))
+		frame := commandFrame(t, protocol.CommandRequest{RequestID: 41, Attached: true})
+		done := make(chan error, 1)
+		go func() { done <- d.handleCommandFrame(tr, frame) }()
 
-	<-tr.started
-	timer := <-clockTimers
-	timer.ch <- time.Time{}
-	select {
-	case err := <-done:
-		require.ErrorIs(t, err, errSendTimedOut)
-	case <-time.After(testWaitTimeout):
-		t.Fatal("bounded control response did not return")
-	}
-	select {
-	case <-tr.closed:
-	default:
-		t.Fatal("timed-out control response did not close its transport")
-	}
+		requireReceived(t, gate.entered, "control response send never started")
+		timer := requireReceived(t, clockTimers, "control response watchdog was not armed")
+		timer.fire()
+		require.ErrorIs(t, requireReceived(t, done, "bounded control response did not return"), errSendTimedOut)
+		require.True(t, trLog.Closed(), "timed-out control response did not close its transport")
+	})
 }
 
 func TestHandleCommandAttachedRejectionReturnsSendFailure(t *testing.T) {
@@ -187,7 +187,7 @@ func TestHandleCommandAttachedRejectionReturnsSendFailure(t *testing.T) {
 	var logs bytes.Buffer
 	d.log = slog.New(slog.NewTextHandler(&logs, nil))
 	sendErr := errors.New("command result send failed")
-	tr := &commandSendErrorTransport{err: sendErr}
+	tr, trLog := newTrackedConnection(t, withSendError(sendErr))
 
 	err := d.handleCommandFrame(tr, commandFrame(t, protocol.CommandRequest{
 		RequestID: 41,
@@ -196,7 +196,7 @@ func TestHandleCommandAttachedRejectionReturnsSendFailure(t *testing.T) {
 
 	require.ErrorIs(t, err, sendErr)
 	require.Contains(t, logs.String(), "command response send failed")
-	require.True(t, tr.closed, "the failed one-shot transport must still close")
+	require.True(t, trLog.Closed(), "the failed one-shot transport must still close")
 }
 
 func TestHandleConnRoutesCommand(t *testing.T) {
@@ -1462,42 +1462,6 @@ func newControlPTYFactory(t testing.TB, gate *ptyOpenGate) (*portsmocks.MockPTYF
 	}
 	return factory, closeAll
 }
-
-type blockingControlSendTransport struct {
-	started chan struct{}
-	closed  chan struct{}
-	once    sync.Once
-}
-
-func newBlockingControlSendTransport() *blockingControlSendTransport {
-	return &blockingControlSendTransport{started: make(chan struct{}), closed: make(chan struct{})}
-}
-
-func (tr *blockingControlSendTransport) Send(wire.Envelope) error {
-	tr.once.Do(func() { close(tr.started) })
-	<-tr.closed
-	return io.ErrClosedPipe
-}
-
-func (*blockingControlSendTransport) Recv() (wire.Envelope, error) { return wire.Envelope{}, io.EOF }
-func (tr *blockingControlSendTransport) Close() error {
-	tr.once.Do(func() { close(tr.started) })
-	select {
-	case <-tr.closed:
-	default:
-		close(tr.closed)
-	}
-	return nil
-}
-
-type commandSendErrorTransport struct {
-	err    error
-	closed bool
-}
-
-func (tr *commandSendErrorTransport) Send(wire.Envelope) error  { return tr.err }
-func (*commandSendErrorTransport) Recv() (wire.Envelope, error) { return wire.Envelope{}, io.EOF }
-func (tr *commandSendErrorTransport) Close() error              { tr.closed = true; return nil }
 
 func addControlSession(t *testing.T, d *Daemon, name, tabID, paneID string) *session {
 	tb := newTabWithStableID(tabID, paneID, newQuietPTY(t), domain.Size{Cols: 80, Rows: 22})

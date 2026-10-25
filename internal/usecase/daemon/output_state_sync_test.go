@@ -1,10 +1,7 @@
 package daemon
 
 import (
-	"errors"
-	"io"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -19,47 +16,11 @@ import (
 	"github.com/bnema/vev/internal/protocol/wire"
 )
 
-type datagramTestTransport struct {
-	sends chan wire.Envelope
-	recv  chan wire.Envelope
-	once  sync.Once
-}
-
-type failingOutputTransport struct{}
-
-func (failingOutputTransport) Send(wire.Envelope) error     { return errors.New("send failed") }
-func (failingOutputTransport) Recv() (wire.Envelope, error) { return wire.Envelope{}, io.EOF }
-func (failingOutputTransport) Close() error                 { return nil }
-
-type asyncPaintTransport struct {
-	syncSends  chan wire.Envelope
-	asyncSends chan wire.Envelope
-}
-
-func (t *asyncPaintTransport) Send(f wire.Envelope) error      { t.syncSends <- f; return nil }
-func (t *asyncPaintTransport) SendAsync(f wire.Envelope) error { t.asyncSends <- f; return nil }
-func (t *asyncPaintTransport) Recv() (wire.Envelope, error)    { return wire.Envelope{}, io.EOF }
-func (t *asyncPaintTransport) Close() error                    { return nil }
-
-func newDatagramTestTransport() *datagramTestTransport {
-	return &datagramTestTransport{sends: make(chan wire.Envelope, 64), recv: make(chan wire.Envelope, 64)}
-}
-
-func (t *datagramTestTransport) Send(f wire.Envelope) error { t.sends <- f; return nil }
-func (t *datagramTestTransport) Recv() (wire.Envelope, error) {
-	f, ok := <-t.recv
-	if !ok {
-		return wire.Envelope{}, io.EOF
-	}
-	return f, nil
-}
-func (t *datagramTestTransport) Close() error { t.once.Do(func() { close(t.recv) }); return nil }
-
 func TestDatagramAttachPipelinesRendererBeforeAck(t *testing.T) {
 	p, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
 	d, sess, _, _ := newManualSessionWithPTYs(t, p)
-	tr := newDatagramTestTransport()
+	tr, trSends, trRecv := newChannelConnection(t)
 	routed, ac, err := d.route(protocol.Hello{
 		Version:           protocol.Version,
 		Intent:            protocol.IntentAttach,
@@ -78,40 +39,40 @@ func TestDatagramAttachPipelinesRendererBeforeAck(t *testing.T) {
 
 	sess.tabs[0].focusedPane().screen.Write([]byte("A"))
 	d.paint(sess, ac, false, nil)
-	first := awaitFrame(t, tr.sends, "Output")
+	first := awaitFrame(t, trSends, "Output")
 	out := unmarshalTestOutput(t, first.Payload)
 	require.Equal(t, uint64(1), out.New)
 
 	sess.tabs[0].focusedPane().screen.Write([]byte("\rB"))
 	d.paint(sess, ac, false, nil)
-	updated := awaitFrame(t, tr.sends, "Output")
+	updated := awaitFrame(t, trSends, "Output")
 	out = unmarshalTestOutput(t, updated.Payload)
 	require.Equal(t, uint64(2), out.New)
 	// Both states were emitted before the Ack; the ordered dependency chain
 	// must therefore remain valid without waiting for renderer acknowledgement.
-	tr.recv <- mustClientEnvelope(protocol.Ack{Epoch: out.Epoch, State: out.New})
+	trRecv <- mustClientEnvelope(protocol.Ack{Epoch: out.Epoch, State: out.New})
 	require.NoError(t, tr.Close())
 	d.runConnLoop(ac)
 
 	// The production Ack path retires retained states without moving the
 	// renderer baseline backward.
 	d.paint(sess, ac, false, nil)
-	require.Empty(t, tr.sends)
+	require.Empty(t, trSends)
 }
 
 func TestPaintExplicitlyUsesAsyncTransportCapability(t *testing.T) {
 	p, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
-	tr := &asyncPaintTransport{syncSends: make(chan wire.Envelope, 1), asyncSends: make(chan wire.Envelope, 1)}
+	tr, frames := newCapabilityConnection(t, asyncCapabilities())
 	ac.replaceTransport(tr)
 	sess.tabs[0].focusedPane().screen.Write([]byte("A"))
 
 	d.paint(sess, ac, false, nil)
 
-	awaitFrame(t, tr.asyncSends, "Output")
+	awaitFrame(t, frames.async, "Output")
 	select {
-	case frame := <-tr.syncSends:
+	case frame := <-frames.sends:
 		t.Fatalf("paint used synchronous Send: %+v", envelopeMessageName(t, frame.Payload))
 	default:
 	}
@@ -121,7 +82,7 @@ func TestDatagramMultipleUnackedScrollPaintsMatchLatestFrame(t *testing.T) {
 	p, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
 	d, sess, _, _ := newManualSessionWithPTYs(t, p)
-	tr := newDatagramTestTransport()
+	tr, trSends, _ := newChannelConnection(t)
 	_, ac, err := d.route(protocol.Hello{
 		Version:           protocol.Version,
 		Intent:            protocol.IntentAttach,
@@ -141,7 +102,7 @@ func TestDatagramMultipleUnackedScrollPaintsMatchLatestFrame(t *testing.T) {
 	pane.screen.ClearDamage()
 	client := vt.NewScreen(80, 25)
 	d.paint(sess, ac, true, nil)
-	first := mustApplyOutput(t, client, awaitFrame(t, tr.sends, "Output"))
+	first := mustApplyOutput(t, client, awaitFrame(t, trSends, "Output"))
 	ac.ackOutputState(first.Epoch, first.New)
 
 	// Preserve the frame after one scroll while inducing a real VT scroll
@@ -161,7 +122,7 @@ func TestDatagramMultipleUnackedScrollPaintsMatchLatestFrame(t *testing.T) {
 		pane.screen.Write([]byte("\nq"))
 		writeTestFrame(t, pane.screen, desired)
 		d.paint(sess, ac, false, nil)
-		mustApplyOutput(t, client, awaitFrame(t, tr.sends, "Output"))
+		mustApplyOutput(t, client, awaitFrame(t, trSends, "Output"))
 	}
 
 	require.Equal(t, 'B', client.Cell(0, 1).Rune,
@@ -264,7 +225,7 @@ func TestFailedPaintSendRollsBackOutputState(t *testing.T) {
 	p, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
-	ac.replaceTransport(failingOutputTransport{})
+	ac.replaceTransport(newFailingConnection(t))
 	sess.tabs[0].focusedPane().screen.Write([]byte("A"))
 
 	d.paint(sess, ac, false, nil)

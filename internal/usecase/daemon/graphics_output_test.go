@@ -2,13 +2,14 @@ package daemon
 
 import (
 	"bytes"
-	"io"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 
 	vt "github.com/bnema/vev-vt"
 	"github.com/bnema/vev-vt/graphics"
@@ -17,7 +18,6 @@ import (
 	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
-	"github.com/stretchr/testify/require"
 )
 
 func attachmentOutputWithGraphics(state *graphicsOutputState) *attachmentOutput {
@@ -50,34 +50,29 @@ func recordIndex(data []byte, record string) int {
 	return bytes.Index(data, []byte(record))
 }
 
-type lateGraphicsCleanupTransport struct {
-	started     chan struct{}
-	release     chan struct{}
-	finished    chan struct{}
-	sends       chan wire.Envelope
-	startedOnce sync.Once
-	finishOnce  sync.Once
+// lateGraphicsCleanup holds one cleanup send open until released, then
+// delivers the stale frame, so a test can prove a late success is not a
+// terminal ACK.
+type lateGraphicsCleanup struct {
+	*sendGate
+	sends    chan wire.Envelope
+	finished chan struct{}
 }
 
-func newLateGraphicsCleanupTransport() *lateGraphicsCleanupTransport {
-	return &lateGraphicsCleanupTransport{
-		started:  make(chan struct{}),
-		release:  make(chan struct{}),
-		finished: make(chan struct{}),
-		sends:    make(chan wire.Envelope, 1),
-	}
+func newLateGraphicsCleanupConnection(t testing.TB) (*mockServerConnection, *lateGraphicsCleanup) {
+	t.Helper()
+	late := &lateGraphicsCleanup{sendGate: newSendGate(), sends: make(chan wire.Envelope, 1), finished: make(chan struct{})}
+	var finishOnce sync.Once
+	conn, _ := newTrackedConnection(t, withSendFunc(func(frame wire.Envelope, log *connLog) error {
+		late.enter()
+		late.wait()
+		log.record(frame)
+		late.sends <- frame
+		finishOnce.Do(func() { close(late.finished) })
+		return nil
+	}))
+	return conn, late
 }
-
-func (t *lateGraphicsCleanupTransport) Send(frame wire.Envelope) error {
-	t.startedOnce.Do(func() { close(t.started) })
-	<-t.release
-	t.sends <- frame
-	t.finishOnce.Do(func() { close(t.finished) })
-	return nil
-}
-
-func (*lateGraphicsCleanupTransport) Recv() (wire.Envelope, error) { return wire.Envelope{}, io.EOF }
-func (*lateGraphicsCleanupTransport) Close() error                 { return nil }
 
 func TestGraphicsOutputReplaysStaticKittenIcatFixture(t *testing.T) {
 	state := newGraphicsOutputState()
@@ -411,7 +406,7 @@ func TestGraphicsNamespaceQuarantinesOnParkExpiryAndFailedCleanup(t *testing.T) 
 	require.NoError(t, err)
 	seed.commit()
 	failed := &attachedClient{
-		tr:     failingOutputTransport{},
+		tr:     newFailingConnection(t),
 		output: attachmentOutputWithGraphics(failedState),
 	}
 	d.mu.Lock()
@@ -536,14 +531,14 @@ func TestGraphicsNamespaceQuarantineFencesTimedOutLateDelete(t *testing.T) {
 	}
 	require.NotZero(t, oldID)
 
-	transport := newLateGraphicsCleanupTransport()
+	transport, late := newLateGraphicsCleanupConnection(t)
 	ac := &attachedClient{tr: transport, output: attachmentOutputWithGraphics(oldState)}
 	cleanupDone := make(chan struct{})
 	go func() {
 		_ = d.cleanupAttachmentOutput(ac)
 		close(cleanupDone)
 	}()
-	awaitTestCompletion(t, transport.started, "timed-out cleanup did not reach the stale transport")
+	awaitTestCompletion(t, late.entered, "timed-out cleanup did not reach the stale transport")
 	timer := awaitTestValue(t, clockTimers, "cleanup watchdog timer was not armed")
 	timer.ch <- time.Time{}
 	awaitTestCompletion(t, cleanupDone, "timed-out cleanup did not retire the attachment")
@@ -566,9 +561,9 @@ func TestGraphicsNamespaceQuarantineFencesTimedOutLateDelete(t *testing.T) {
 	require.NotZero(t, newID)
 	require.NotEqual(t, oldID, newID, "fresh attachment IDs must not share the quarantined block")
 
-	close(transport.release)
-	staleFrame := awaitTestValue(t, transport.sends, "late stale cleanup did not execute")
-	awaitTestCompletion(t, transport.finished, "late stale cleanup did not return")
+	late.open()
+	staleFrame := awaitTestValue(t, late.sends, "late stale cleanup did not execute")
+	awaitTestCompletion(t, late.finished, "late stale cleanup did not return")
 	staleOutput := unmarshalTestOutput(t, staleFrame.Payload)
 	require.Contains(t, string(staleOutput.Data), "i="+strconv.FormatUint(oldID, 10))
 	require.NotContains(t, string(staleOutput.Data), "i="+strconv.FormatUint(newID, 10), "late cleanup must never target the fresh attachment")

@@ -3,11 +3,12 @@ package daemon
 import (
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
-	"github.com/stretchr/testify/require"
 )
 
 func TestCopyCacheFailedPublicationAndRetry(t *testing.T) {
@@ -33,7 +34,7 @@ func TestCopyCacheFailedPublicationAndRetry(t *testing.T) {
 			if failure == "prepare" {
 				pending.frame = renderer.Frame{Width: 1}
 			} else {
-				ac.replaceTransport(cacheFailTransport{})
+				ac.replaceTransport(newFailingConnection(t))
 			}
 			ac.sendMu.Lock()
 			require.True(t, d.publishCapturedFrameForTest(sess, ac, &state, pending))

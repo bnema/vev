@@ -4,12 +4,13 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 
 	vt "github.com/bnema/vev-vt"
 	renderer "github.com/bnema/vev-vt/ansi"
@@ -25,34 +26,13 @@ import (
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/internal/usecase/visualsearch"
-	"github.com/stretchr/testify/require"
 )
-
-// scriptedReplayTransport is intentionally a wire.Transport only: replay
-// assertions must not depend on any adapter's framing implementation.
-type scriptedReplayTransport struct {
-	t      *testing.T
-	frames []wire.Envelope
-	next   int
-}
-
-func (s *scriptedReplayTransport) Send(got wire.Envelope) error {
-	s.t.Helper()
-	if s.next >= len(s.frames) {
-		s.t.Errorf("unexpected frame %#v", got)
-		return nil
-	}
-	want := s.frames[s.next]
-	s.next++
-	require.Equal(s.t, want.Payload, got.Payload)
-	return nil
-}
-func (*scriptedReplayTransport) Recv() (wire.Envelope, error) { return wire.Envelope{}, io.EOF }
-func (*scriptedReplayTransport) Close() error                 { return nil }
 
 func TestTransportReplayFinalShadowAndTerminalBytes(t *testing.T) {
 	frames := replaytest.Transcript()
-	transport := &scriptedReplayTransport{t: t, frames: frames}
+	// The replay is asserted against a raw wire transport mock: it must not
+	// depend on any adapter's framing implementation.
+	transport, transportLog := newTrackedConnection(t)
 	terminal := vt.NewScreen(8, 3)
 	for _, frame := range frames {
 		require.NoError(t, transport.Send(frame))
@@ -60,7 +40,11 @@ func TestTransportReplayFinalShadowAndTerminalBytes(t *testing.T) {
 		require.Equal(t, frame.Payload, mustServerEnvelope(output).Payload, "output payload must remain byte exact")
 		terminal.Write(output.Data)
 	}
-	require.Equal(t, len(frames), transport.next)
+	sent := transportLog.Sends()
+	require.Len(t, sent, len(frames))
+	for i, frame := range frames {
+		require.Equal(t, frame.Payload, sent[i].Payload)
+	}
 	require.Equal(t, []string{"one     ", "TWO     ", "        "}, frameRows(terminal), "terminal replay is the final renderer shadow")
 }
 
@@ -226,7 +210,7 @@ func TestPublishFrameFailedSendDoesNotPublishCursorOrOutputState(t *testing.T) {
 	healthy := ac.transport()
 	beforeCursor := cursorOut{valid: true, row: 1, col: 2, style: 1, hasStyle: true}
 	ac.output.lastCursor = beforeCursor
-	ac.replaceTransport(cacheFailTransport{})
+	ac.replaceTransport(newFailingConnection(t))
 	state := cacheState("failed", 1)
 	state.attachment = ac
 	composed := composeFrame(state, ac.render.cache, ac.render.spare)

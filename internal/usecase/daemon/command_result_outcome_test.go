@@ -150,38 +150,10 @@ func requireNoFurtherCommandResults(t *testing.T, sends chan wire.Envelope) {
 	}
 }
 
-// commandResultCaptureTransport records every server envelope and whether the
-// one-shot control connection was retired, so a test can assert both without a
-// mock expectation race.
-type commandResultCaptureTransport struct {
-	mu     sync.Mutex
-	sends  []wire.Envelope
-	closed bool
-}
-
-func (c *commandResultCaptureTransport) Send(envelope wire.Envelope) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.sends = append(c.sends, envelope)
-	return nil
-}
-
-func (*commandResultCaptureTransport) Recv() (wire.Envelope, error) {
-	return wire.Envelope{}, io.EOF
-}
-
-func (c *commandResultCaptureTransport) Close() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.closed = true
-	return nil
-}
-
-func (c *commandResultCaptureTransport) commandResults(t *testing.T) []protocol.CommandResult {
+// commandResultsOf decodes the CommandResult frames a connection received.
+func commandResultsOf(t *testing.T, log *connLog) []protocol.CommandResult {
 	t.Helper()
-	c.mu.Lock()
-	frames := append([]wire.Envelope(nil), c.sends...)
-	c.mu.Unlock()
+	frames := log.Sends()
 	results := make([]protocol.CommandResult, 0, len(frames))
 	for _, frame := range frames {
 		message, err := sessionwire.DecodeServerEnvelope(frame.Payload)
@@ -191,12 +163,6 @@ func (c *commandResultCaptureTransport) commandResults(t *testing.T) []protocol.
 		}
 	}
 	return results
-}
-
-func (c *commandResultCaptureTransport) isClosed() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.closed
 }
 
 // TestHandleCommandTimeoutSendsOneCorrelatedUnknownAndDropsLateCompletion is
@@ -257,10 +223,10 @@ func TestHandleCommandTimeoutRetiresConnectionAfterOneResult(t *testing.T) {
 		d.sessWg.Wait()
 	})
 
-	capture := &commandResultCaptureTransport{}
+	capture, captureLog := newTrackedConnection(t)
 	frame := commandFrame(t, protocol.CommandRequest{RequestID: 23, Slug: "new-tab", TargetSession: "work"})
 	done := make(chan error, 1)
-	go func() { done <- d.handleCommandFrame(&rawServerConnection{raw: capture}, frame) }()
+	go func() { done <- d.handleCommandFrame(capture, frame) }()
 
 	awaitTestCompletion(t, factory.entered, "command was not dispatched")
 	timer := <-clockTimers
@@ -268,11 +234,11 @@ func TestHandleCommandTimeoutRetiresConnectionAfterOneResult(t *testing.T) {
 	timer.ch <- time.Time{}
 	require.NoError(t, <-done)
 
-	results := capture.commandResults(t)
+	results := commandResultsOf(t, captureLog)
 	require.Len(t, results, 1, "a timed-out command answers exactly one result")
 	require.Equal(t, uint64(23), results[0].RequestID)
 	require.Equal(t, protocol.CommandOutcomeUnknown, results[0].Outcome)
-	require.True(t, capture.isClosed(), "a one-shot control connection is retired after its result")
+	require.True(t, captureLog.Closed(), "a one-shot control connection is retired after its result")
 }
 
 // TestHandleCommandDefiniteOutcomesPreserveCorrelationAndOutcome proves each

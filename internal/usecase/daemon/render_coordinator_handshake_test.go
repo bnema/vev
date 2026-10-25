@@ -1,9 +1,9 @@
 package daemon
 
 import (
-	"io"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -11,44 +11,6 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol/wire"
 )
-
-// fanoutBlockingTransport blocks only the first output send. The paired
-// healthy attachment must still receive its frame while this peer is stuck.
-type fanoutBlockingTransport struct {
-	sent       chan wire.Envelope
-	entered    chan struct{}
-	release    chan struct{}
-	done       chan struct{}
-	enteredOne sync.Once
-	releaseOne sync.Once
-	doneOne    sync.Once
-}
-
-func newFanoutBlockingTransport() *fanoutBlockingTransport {
-	return &fanoutBlockingTransport{
-		sent:    make(chan wire.Envelope, 8),
-		entered: make(chan struct{}),
-		release: make(chan struct{}),
-		done:    make(chan struct{}),
-	}
-}
-
-func (t *fanoutBlockingTransport) Send(frame wire.Envelope) error {
-	t.sent <- frame
-	if envelopeMessageName(nil, frame.Payload) == "Output" {
-		t.enteredOne.Do(func() { close(t.entered) })
-		<-t.release
-	}
-	t.doneOne.Do(func() { close(t.done) })
-	return nil
-}
-
-func (t *fanoutBlockingTransport) Recv() (wire.Envelope, error) { return wire.Envelope{}, io.EOF }
-
-func (t *fanoutBlockingTransport) Close() error {
-	t.releaseOne.Do(func() { close(t.release) })
-	return nil
-}
 
 // Fresh producer state may arrive after route has published an attachment but
 // before the transport has accepted Welcome. It must remain pending until the
@@ -79,44 +41,51 @@ func TestRenderCoordinatorFreshWakeWaitsForWelcome(t *testing.T) {
 	requireNoWake(t, h.wakes)
 }
 
+// TestRenderCoordinatorFanoutDoesNotWaitForSlowTransport blocks only the first
+// output send of one attachment. The paired healthy attachment must still
+// receive its frame while this peer is stuck.
 func TestRenderCoordinatorFanoutDoesNotWaitForSlowTransport(t *testing.T) {
-	d, sess, healthy, healthySends, _ := newManualTabSession(t, 1)
-	slowTransport := newFanoutBlockingTransport()
-	slow := &attachedClient{
-		tr:       slowTransport,
-		output:   newOutputStateStream(),
-		geometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}},
-	}
-	slow.initOverlays()
-	slow.setSession(sess)
-	sess.core().mu.Lock()
-	sess.core().attachments[slow] = struct{}{}
-	sess.core().mu.Unlock()
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, healthy, healthySends, _ := newManualTabSession(t, 1)
+		gate := newSendGate()
+		done := make(chan struct{})
+		var doneOnce sync.Once
+		slowTransport, _ := newTrackedConnection(t,
+			withSendFunc(func(frame wire.Envelope, log *connLog) error {
+				log.record(frame)
+				if envelopeMessageName(nil, frame.Payload) == "Output" {
+					gate.enter()
+					gate.wait()
+				}
+				doneOnce.Do(func() { close(done) })
+				return nil
+			}),
+			withCloseHook(gate.open),
+		)
+		slow := &attachedClient{
+			tr:       slowTransport,
+			output:   newOutputStateStream(),
+			geometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}},
+		}
+		slow.initOverlays()
+		slow.setSession(sess)
+		sess.core().mu.Lock()
+		sess.core().attachments[slow] = struct{}{}
+		sess.core().mu.Unlock()
 
-	rc := d.ensureRenderCoordinator(sess)
-	rc.opts.clock = nil // publish, then fire synchronously below
-	rc.attach(healthy)
-	rc.attach(slow)
-	rc.invalidate(renderInvalidation{class: invalidateUrgent, reset: true, producer: "fanout"})
-	rc.fireCurrent(false)
+		rc := d.ensureRenderCoordinator(sess)
+		rc.opts.clock = nil // publish, then fire synchronously below
+		rc.attach(healthy)
+		rc.attach(slow)
+		rc.invalidate(renderInvalidation{class: invalidateUrgent, reset: true, producer: "fanout"})
+		rc.fireCurrent(false)
 
-	select {
-	case frame := <-healthySends:
+		frame := requireReceived(t, healthySends, "healthy attachment remained blocked behind the slow transport")
 		require.Equal(t, "Output", envelopeMessageName(t, frame.Payload), "healthy attachment did not receive output")
-	case <-time.After(2 * time.Second):
-		t.Fatal("healthy attachment remained blocked behind the slow transport")
-	}
-	select {
-	case <-slowTransport.entered:
-	case <-time.After(2 * time.Second):
-		t.Fatal("slow transport did not enter its blocked output send")
-	}
-	slowTransport.releaseOne.Do(func() { close(slowTransport.release) })
-	select {
-	case <-slowTransport.done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("slow output send did not finish after release")
-	}
+		requireReceived(t, gate.entered, "slow transport did not enter its blocked output send")
+		gate.open()
+		requireReceived(t, done, "slow output send did not finish after release")
+	})
 }
 
 func TestRenderCoordinatorWelcomeReadinessIsAttachmentScoped(t *testing.T) {

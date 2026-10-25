@@ -248,7 +248,7 @@ func TestRenderStageHooksCountProductionBoundariesOnFailedSend(t *testing.T) {
 		compose: func() { compositions++ },
 		emit:    func() { emissions++ },
 	}
-	ac.replaceTransport(cacheFailTransport{})
+	ac.replaceTransport(newFailingConnection(t))
 	p := sess.tabs[0].focusedPane()
 	p.mu.Lock()
 	p.screen.Write([]byte("hook"))
@@ -1373,6 +1373,11 @@ const outputPayloadHeaderBytes = 24
 
 type countingOutputMetrics struct{ frames, bytes, payloadBytes uint64 }
 
+// countingOutputTransport is a deliberate hand-written ports.ServerConnection
+// exception. The allocation-budget tests (TestLivePaintAllocationBudget,
+// TestCopyEnterAllocationBudget) count allocations per paint, and a generated
+// testify mock allocates on every Called, which would swamp the budget. It adds
+// no behavior beyond counting Output frames.
 type countingOutputTransport struct {
 	mu sync.Mutex
 	countingOutputMetrics
@@ -1477,3 +1482,28 @@ func (s *countingSnapshotRepository) lastPayload() []byte {
 	defer s.mu.Unlock()
 	return s.last
 }
+
+func (t *countingOutputTransport) ReceiveClient() (protocol.ClientMessage, error) {
+	return testReceiveClient(t)
+}
+func (t *countingOutputTransport) SendServer(m protocol.ServerMessage) error {
+	return testSendServer(t, m)
+}
+func (t *countingOutputTransport) SendServerAsync(m protocol.ServerMessage) error {
+	return testSendServerAsync(t, m)
+}
+func (t *countingOutputTransport) SendServerSynchronous(m protocol.ServerMessage) error {
+	return testSendServerSynchronous(t, m)
+}
+func (t *countingOutputTransport) SendOutput(o protocol.Output) error { return testSendOutput(t, o) }
+func (t *countingOutputTransport) SendOutputAsync(o protocol.Output) error {
+	return testSendOutputAsync(t, o)
+}
+func (t *countingOutputTransport) SendOutputSynchronous(o protocol.Output) error {
+	return testSendOutputSynchronous(t, o)
+}
+func (t *countingOutputTransport) Capabilities() protocol.ConnectionCapabilities {
+	return testServerCapabilities(t)
+}
+func (t *countingOutputTransport) LinkState() ports.LinkState         { return testLinkState(t) }
+func (t *countingOutputTransport) LinkEvents() <-chan ports.LinkEvent { return testLinkEvents(t) }

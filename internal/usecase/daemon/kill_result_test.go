@@ -8,7 +8,6 @@ package daemon
 import (
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"strconv"
 	"sync"
@@ -208,30 +207,6 @@ func TestHandleKillDaemonSendsResultBeforeTeardownAndClose(t *testing.T) {
 	}
 }
 
-// recordFailTransport records every sent envelope then fails, so a test can
-// inspect the exact result an undeliverable control send attempted.
-type recordFailTransport struct {
-	mu   sync.Mutex
-	sent []wire.Envelope
-	err  error
-}
-
-func (t *recordFailTransport) Send(envelope wire.Envelope) error {
-	t.mu.Lock()
-	t.sent = append(t.sent, envelope)
-	t.mu.Unlock()
-	return t.err
-}
-
-func (*recordFailTransport) Recv() (wire.Envelope, error) { return wire.Envelope{}, io.EOF }
-func (*recordFailTransport) Close() error                 { return nil }
-
-func (t *recordFailTransport) payloads() []wire.Envelope {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return append([]wire.Envelope(nil), t.sent...)
-}
-
 // TestHandleKillAllSupersededByDaemonShutdownSendsOneUnknownOutcome proves a
 // KillAll that an explicit daemon shutdown superseded answers with exactly one
 // correlated KillOutcomeUnknown carrying ErrServerShutdown, records the outcome
@@ -247,10 +222,10 @@ func TestHandleKillAllSupersededByDaemonShutdownSendsOneUnknownOutcome(t *testin
 	d.closing = true
 	d.mu.Unlock()
 
-	recorder := &recordFailTransport{err: errors.New("client gone")}
-	d.handleKill(&rawServerConnection{raw: recorder}, protocol.Kill{RequestID: 5, Scope: protocol.KillAll})
+	recorder, recorderLog := newTrackedConnection(t, withSendError(errors.New("client gone")))
+	d.handleKill(recorder, protocol.Kill{RequestID: 5, Scope: protocol.KillAll})
 
-	payloads := recorder.payloads()
+	payloads := recorderLog.Sends()
 	require.Len(t, payloads, 1, "a superseded kill-all must attempt exactly one result")
 	message, err := sessionwire.DecodeServerEnvelope(payloads[0].Payload)
 	require.NoError(t, err)
@@ -280,13 +255,13 @@ func TestKillAllUndeliverableResultIsLogged(t *testing.T) {
 	require.NoError(t, d.catalogue.Create(record))
 	d.inactive["stopped"] = inactiveSessionFromRecord(record, protocol.SessionDown, nil)
 
-	recorder := &recordFailTransport{err: errors.New("client gone")}
-	d.handleKill(&rawServerConnection{raw: recorder}, protocol.Kill{RequestID: 1, Scope: protocol.KillAll})
+	recorder, recorderLog := newTrackedConnection(t, withSendError(errors.New("client gone")))
+	d.handleKill(recorder, protocol.Kill{RequestID: 1, Scope: protocol.KillAll})
 
 	require.Contains(t, logged.String(), "kill result")
 	require.Contains(t, logged.String(), "client gone")
 
-	payloads := recorder.payloads()
+	payloads := recorderLog.Sends()
 	require.Len(t, payloads, 1, "exactly one result is attempted")
 	message, err := sessionwire.DecodeServerEnvelope(payloads[0].Payload)
 	require.NoError(t, err)
