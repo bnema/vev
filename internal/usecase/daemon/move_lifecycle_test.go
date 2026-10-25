@@ -47,6 +47,28 @@ func awaitDaemonMoveClosing(t *testing.T, d *Daemon) {
 	}
 }
 
+// awaitMoveTeardownStateRealtime is awaitMoveTeardownState for tests outside a
+// bubble: it waits on the teardown change channel under one bounded guard.
+//
+//testpolicy:realtime used only by tests that cannot run in a synctest bubble
+func awaitMoveTeardownStateRealtime(t *testing.T, sess *session, reservations, waiters uint) {
+	t.Helper()
+	for {
+		sess.teardownMu.Lock()
+		gotReservations, gotWaiters := sess.moveReservations, sess.teardownWaiters
+		changed := sess.teardownChangeLocked()
+		sess.teardownMu.Unlock()
+		if gotReservations == reservations && gotWaiters == waiters {
+			return
+		}
+		select {
+		case <-changed:
+		case <-time.After(testWaitTimeout):
+			t.Fatalf("move reservations/waiters = %d/%d, want %d/%d", gotReservations, gotWaiters, reservations, waiters)
+		}
+	}
+}
+
 func TestMoveLifecycleReservationMakesTeardownWait(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		d := newTestDaemon(t, nil, newStubClock(t))
@@ -121,7 +143,10 @@ func TestMoveLifecycleReservationsUseStableSessionOrder(t *testing.T) {
 		require.NotNil(t, reservation)
 		reservation.Release()
 	}
-	awaitDaemonMoveActive(t, d, 0)
+	d.moveLifecycleMu.Lock()
+	active := d.moveLifecycleActive
+	d.moveLifecycleMu.Unlock()
+	require.Zero(t, active, "released reservations must leave no active move lifecycle")
 }
 
 func TestMoveLifecycleReservationRejectsTeardownWithoutLeakingCounts(t *testing.T) {
@@ -217,37 +242,36 @@ func TestMoveLifecycleReservationWaitCanBeCancelledWithoutChangingCounts(t *test
 	})
 }
 
+//testpolicy:realtime waiting teardown callers re-signal each other, so a bubble never reaches quiescence while a move is reserved
 func TestMoveLifecycleReservationWakesAllTeardownWaiters(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		d := newTestDaemon(t, nil, newStubClock(t))
-		sess := &session{sessionCore: sessionCore{id: "source"}}
-		reservation, err := d.reserveMoveLifecycles(sess, sess)
-		require.NoError(t, err)
+	d := newTestDaemon(t, nil, newStubClock(t))
+	sess := &session{sessionCore: sessionCore{id: "source"}}
+	reservation, err := d.reserveMoveLifecycles(sess, sess)
+	require.NoError(t, err)
 
-		claimed := make(chan struct{}, 2)
-		finish := make(chan struct{}, 2)
-		done := make(chan struct{}, 2)
-		for range 2 {
-			go func() {
-				if sess.beginTeardown(nil) {
-					claimed <- struct{}{}
-					<-finish
-					sess.finishTeardown()
-				}
-				done <- struct{}{}
-			}()
-		}
-		awaitMoveTeardownState(t, sess, 1, 2)
-		reservation.Release()
-		for range 2 {
-			requireReceived(t, claimed, "teardown waiter did not claim ownership")
-			finish <- struct{}{}
-		}
-		for range 2 {
-			requireReceived(t, done, "teardown waiter did not complete")
-		}
-		awaitMoveTeardownState(t, sess, 0, 0)
-	})
+	claimed := make(chan struct{}, 2)
+	finish := make(chan struct{}, 2)
+	done := make(chan struct{}, 2)
+	for range 2 {
+		go func() {
+			if sess.beginTeardown(nil) {
+				claimed <- struct{}{}
+				<-finish
+				sess.finishTeardown()
+			}
+			done <- struct{}{}
+		}()
+	}
+	awaitMoveTeardownStateRealtime(t, sess, 1, 2)
+	reservation.Release()
+	for range 2 {
+		receiveBounded(t, claimed, "teardown waiter did not claim ownership")
+		finish <- struct{}{}
+	}
+	for range 2 {
+		receiveBounded(t, done, "teardown waiter did not complete")
+	}
+	awaitMoveTeardownStateRealtime(t, sess, 0, 0)
 }
 
 func TestDaemonShutdownDrainsMoveBeforePaneLifetimeCancellation(t *testing.T) {
