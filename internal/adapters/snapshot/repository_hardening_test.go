@@ -11,6 +11,7 @@ import (
 	codec "github.com/bnema/vev/internal/snapshotcodec"
 )
 
+// real I/O: reads and writes real files in temp directories.
 func TestReadBoundedRejectsUnsafeFiles(t *testing.T) {
 	dir := t.TempDir()
 	regular := filepath.Join(dir, "regular")
