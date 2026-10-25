@@ -20,6 +20,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/mock"
@@ -237,42 +238,45 @@ func TestResolveAttachCreationIntentMissingSessionPrompt(t *testing.T) {
 }
 
 func TestResolveAttachCreationIntentCancelledPromptClosesThePeek(t *testing.T) {
-	service := portsmocks.NewMockBrokerService(t)
-	service.EXPECT().Snapshot().Return(terminalCompositionSnapshot(nil, nil)).Once()
-	service.EXPECT().Close().Return(nil).Once()
-	withDaemonSessions(t, nil, nil)
-	withPreflightBroker(t, func(context.Context) (ports.BrokerService, error) { return service, nil })
-	withAttachInteractiveConsole(t, true)
+	synctest.Test(t, func(t *testing.T) {
+		service := portsmocks.NewMockBrokerService(t)
+		service.EXPECT().Snapshot().Return(terminalCompositionSnapshot(nil, nil)).Once()
+		service.EXPECT().Close().Return(nil).Once()
+		withDaemonSessions(t, nil, nil)
+		withPreflightBroker(t, func(context.Context) (ports.BrokerService, error) { return service, nil })
+		withAttachInteractiveConsole(t, true)
 
-	terminal := portsmocks.NewMockTerminal(t)
-	reader, writer := io.Pipe()
-	t.Cleanup(func() { _ = reader.Close(); _ = writer.Close() })
-	terminal.EXPECT().In().Return(reader).Maybe()
-	terminal.EXPECT().Out().Return(io.Discard).Maybe()
-	terminal.EXPECT().Flush().Return(nil).Maybe()
+		terminal := portsmocks.NewMockTerminal(t)
+		reader, writer := io.Pipe()
+		t.Cleanup(func() { _ = reader.Close(); _ = writer.Close() })
+		terminal.EXPECT().In().Return(reader).Maybe()
+		terminal.EXPECT().Out().Return(io.Discard).Maybe()
+		terminal.EXPECT().Flush().Return(nil).Maybe()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct {
-		intent  uint8
-		service ports.BrokerService
-		err     error
-	}, 1)
-	go func() {
-		intent, got, err := resolveAttachCreationIntent(ctx, protocol.IntentAttach, "gone", "", terminal)
-		done <- struct {
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct {
 			intent  uint8
 			service ports.BrokerService
 			err     error
-		}{intent, got, err}
-	}()
-	cancel()
-	select {
-	case result := <-done:
-		require.ErrorIs(t, result.err, context.Canceled)
-		require.Nil(t, result.service, "a cancelled prompt closes and drops the peeked connection")
-	case <-time.After(5 * time.Second):
-		t.Fatal("resolveAttachCreationIntent did not release on cancellation")
-	}
+		}, 1)
+		go func() {
+			intent, got, err := resolveAttachCreationIntent(ctx, protocol.IntentAttach, "gone", "", terminal)
+			done <- struct {
+				intent  uint8
+				service ports.BrokerService
+				err     error
+			}{intent, got, err}
+		}()
+		cancel()
+		synctest.Wait()
+		select {
+		case result := <-done:
+			require.ErrorIs(t, result.err, context.Canceled)
+			require.Nil(t, result.service, "a cancelled prompt closes and drops the peeked connection")
+		default:
+			t.Fatal("resolveAttachCreationIntent did not release on cancellation")
+		}
+	})
 }
 
 func TestConfirmMissingSessionCreate(t *testing.T) {
@@ -317,6 +321,7 @@ func TestConfirmMissingSessionCreate(t *testing.T) {
 // show the question: the prompt must keep the plain attach path instead of
 // consuming an answer nobody was asked for. The input blocks forever, so a
 // prompt that reads it would only return on context expiry.
+// real I/O: the console is an os.Pipe and the output an on-disk file, which do not block durably in a bubble.
 func TestConfirmMissingSessionCreateFailureAttaches(t *testing.T) {
 	closedOut, err := os.CreateTemp(t.TempDir(), "vev-console")
 	require.NoError(t, err)
@@ -354,6 +359,7 @@ func TestConfirmMissingSessionCreateFailureAttaches(t *testing.T) {
 // adapter, whose output is buffered: the prompt has to flush the question
 // before it blocks on the answer, or the user waits in front of a blank
 // console and the question only shows up after the client repaints.
+// real I/O: the console is a pair of os.Pipe files driven through the real terminal adapter.
 func TestConfirmMissingSessionCreateFlushesQuestion(t *testing.T) {
 	withAttachInteractiveConsole(t, true)
 	consoleIn, answers, err := os.Pipe()
