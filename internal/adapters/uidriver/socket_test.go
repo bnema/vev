@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/bnema/vev/internal/ports"
@@ -50,6 +51,7 @@ func TestValidateSocketPathUsesPlatformLimit(t *testing.T) {
 	}
 }
 
+// real I/O: binds real unix sockets in temp directories.
 func TestListenUnixServesPrivateAttachmentAndCleansOwnedSocket(t *testing.T) {
 	service := portsmocks.NewMockUIService(t)
 	service.EXPECT().Capture("attachment").Return(testSnapshot(), nil).Once()
@@ -83,6 +85,7 @@ func TestListenUnixServesPrivateAttachmentAndCleansOwnedSocket(t *testing.T) {
 	require.ErrorIs(t, err, os.ErrNotExist)
 }
 
+// real I/O: binds real unix sockets in temp directories.
 func TestListenUnixRejectsUnsafeParentSymlink(t *testing.T) {
 	root := shortDir(t)
 	target := filepath.Join(root, "target")
@@ -93,6 +96,7 @@ func TestListenUnixRejectsUnsafeParentSymlink(t *testing.T) {
 	require.Error(t, err)
 }
 
+// real I/O: binds real unix sockets in temp directories.
 func TestListenUnixRejectsExistingPathWithoutRemovingIt(t *testing.T) {
 	path := filepath.Join(shortDir(t), "ui.sock")
 	require.NoError(t, os.WriteFile(path, []byte("keep"), 0o600))
@@ -103,6 +107,7 @@ func TestListenUnixRejectsExistingPathWithoutRemovingIt(t *testing.T) {
 	require.Equal(t, []byte("keep"), data)
 }
 
+// real I/O: binds real unix sockets in temp directories.
 func TestUnixEndpointClosePreservesReplacementPath(t *testing.T) {
 	directory := shortDir(t)
 	path := filepath.Join(directory, "ui.sock")
@@ -122,60 +127,65 @@ func TestUnixEndpointClosePreservesReplacementPath(t *testing.T) {
 }
 
 func TestServeUsesAttachmentWideActionLimitAcrossConnections(t *testing.T) {
-	service := portsmocks.NewMockUIService(t)
-	started := make(chan struct{})
-	release := make(chan struct{})
-	service.EXPECT().Action(mock.Anything, mock.Anything).RunAndReturn(func(ctx context.Context, _ ports.UIActionRequest) (ports.UIActionResult, error) {
-		close(started)
+	synctest.Test(t, func(t *testing.T) {
+		service := portsmocks.NewMockUIService(t)
+		started := make(chan struct{})
+		release := make(chan struct{})
+		service.EXPECT().Action(mock.Anything, mock.Anything).RunAndReturn(func(ctx context.Context, _ ports.UIActionRequest) (ports.UIActionResult, error) {
+			close(started)
+			select {
+			case <-release:
+				return ports.UIActionResult{ActionID: 1, Accepted: true, Status: ports.UIActionProcessed}, nil
+			case <-ctx.Done():
+				return ports.UIActionResult{}, ctx.Err()
+			}
+		}).Once()
+		server := New(service, nil)
+		firstHost, firstPeer := net.Pipe()
+		secondHost, secondPeer := net.Pipe()
+		defer func() { _ = firstPeer.Close() }()
+		defer func() { _ = secondPeer.Close() }()
+		firstDone := make(chan error, 1)
+		secondDone := make(chan error, 1)
+		go func() { firstDone <- server.Serve(context.Background(), firstHost, testReady(true)) }()
+		go func() { secondDone <- server.Serve(context.Background(), secondHost, testReady(true)) }()
+		firstDecoder := json.NewDecoder(firstPeer)
+		secondDecoder := json.NewDecoder(secondPeer)
+		require.Zero(t, readEnvelope(t, firstDecoder).ID)
+		require.Zero(t, readEnvelope(t, secondDecoder).ID)
+		request := `{"version":1,"id":1,"op":"text","attachment":"a","generation":1,"text":"x"}` + "\n"
+		_, err := firstPeer.Write([]byte(request))
+		require.NoError(t, err)
+		synctest.Wait()
 		select {
-		case <-release:
-			return ports.UIActionResult{ActionID: 1, Accepted: true, Status: ports.UIActionProcessed}, nil
-		case <-ctx.Done():
-			return ports.UIActionResult{}, ctx.Err()
+		case <-started:
+		default:
+			t.Fatal("first action did not start")
 		}
-	}).Once()
-	server := New(service, nil)
-	firstHost, firstPeer := net.Pipe()
-	secondHost, secondPeer := net.Pipe()
-	defer func() { _ = firstPeer.Close() }()
-	defer func() { _ = secondPeer.Close() }()
-	firstDone := make(chan error, 1)
-	secondDone := make(chan error, 1)
-	go func() { firstDone <- server.Serve(context.Background(), firstHost, testReady(true)) }()
-	go func() { secondDone <- server.Serve(context.Background(), secondHost, testReady(true)) }()
-	firstDecoder := json.NewDecoder(firstPeer)
-	secondDecoder := json.NewDecoder(secondPeer)
-	require.Zero(t, readEnvelope(t, firstDecoder).ID)
-	require.Zero(t, readEnvelope(t, secondDecoder).ID)
-	request := `{"version":1,"id":1,"op":"text","attachment":"a","generation":1,"text":"x"}` + "\n"
-	_, err := firstPeer.Write([]byte(request))
-	require.NoError(t, err)
-	select {
-	case <-started:
-	case <-time.After(time.Second):
-		t.Fatal("first action did not start")
-	}
-	_, err = secondPeer.Write([]byte(request))
-	require.NoError(t, err)
-	busy := readEnvelope(t, secondDecoder)
-	require.Equal(t, ports.UIErrBusy, busy.Error.Code)
-	close(release)
-	processed := readEnvelope(t, firstDecoder)
-	require.Nil(t, processed.Error)
-	require.NoError(t, firstPeer.Close())
-	require.NoError(t, secondPeer.Close())
-	select {
-	case <-firstDone:
-	case <-time.After(time.Second):
-		t.Fatal("first socket server did not stop")
-	}
-	select {
-	case <-secondDone:
-	case <-time.After(time.Second):
-		t.Fatal("second socket server did not stop")
-	}
+		_, err = secondPeer.Write([]byte(request))
+		require.NoError(t, err)
+		busy := readEnvelope(t, secondDecoder)
+		require.Equal(t, ports.UIErrBusy, busy.Error.Code)
+		close(release)
+		processed := readEnvelope(t, firstDecoder)
+		require.Nil(t, processed.Error)
+		require.NoError(t, firstPeer.Close())
+		require.NoError(t, secondPeer.Close())
+		synctest.Wait()
+		select {
+		case <-firstDone:
+		default:
+			t.Fatal("first socket server did not stop")
+		}
+		select {
+		case <-secondDone:
+		case <-time.After(time.Second):
+			t.Fatal("second socket server did not stop")
+		}
+	})
 }
 
+// real I/O: binds real unix sockets in temp directories.
 func TestBridgeUsesExistingSocketWithoutCreatingAttachment(t *testing.T) {
 	directory := shortDir(t)
 	path := filepath.Join(directory, "ui.sock")
