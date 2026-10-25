@@ -48,22 +48,26 @@ func channelClosed(ch <-chan struct{}) bool {
 }
 
 func TestNewStreamEngine(t *testing.T) {
-	e := NewStreamEngine()
-	require.Zero(t, e.Live())
-	require.Zero(t, e.AggregateBytes())
-	require.False(t, e.Closed())
-	require.NoError(t, e.Err())
-	require.Equal(t, domain.RemoteFailureNone, e.FailureKind())
-	require.NotNil(t, e.Done())
+	inBubble(t, func(t *testing.T) {
+		e := NewStreamEngine()
+		require.Zero(t, e.Live())
+		require.Zero(t, e.AggregateBytes())
+		require.False(t, e.Closed())
+		require.NoError(t, e.Err())
+		require.Equal(t, domain.RemoteFailureNone, e.FailureKind())
+		require.NotNil(t, e.Done())
+	})
 }
 
 func TestStreamStateStrings(t *testing.T) {
-	require.Equal(t, "opening", StreamOpening.String())
-	require.Equal(t, "open", StreamOpen.String())
-	require.Equal(t, "closing", StreamClosing.String())
-	require.Equal(t, "terminal", StreamTerminal.String())
-	require.Equal(t, "unknown", StreamState(0).String())
-	require.Equal(t, "unknown", StreamState(200).String())
+	inBubble(t, func(t *testing.T) {
+		require.Equal(t, "opening", StreamOpening.String())
+		require.Equal(t, "open", StreamOpen.String())
+		require.Equal(t, "closing", StreamClosing.String())
+		require.Equal(t, "terminal", StreamTerminal.String())
+		require.Equal(t, "unknown", StreamState(0).String())
+		require.Equal(t, "unknown", StreamState(200).String())
+	})
 }
 
 // TestStreamEngineOpenAdmission is the admission table: complete references,
@@ -71,62 +75,68 @@ func TestStreamStateStrings(t *testing.T) {
 // pending-plus-live ceiling.
 func TestStreamEngineOpenAdmission(t *testing.T) {
 	t.Run("incomplete identities refused", func(t *testing.T) {
-		e := testEngine()
-		cases := []struct {
-			name string
-			ref  StreamRef
-		}{
-			{"zero ref", StreamRef{}},
-			{"zero physical", StreamRef{Physical: 0, Epoch: 7, Connection: testConnectionID(0x11), Client: 3}},
-			{"zero epoch", StreamRef{Physical: 1, Epoch: 0, Connection: testConnectionID(0x11), Client: 3}},
-			{"zero connection", StreamRef{Physical: 1, Epoch: 7, Client: 3}},
-			{"zero client", StreamRef{Physical: 1, Epoch: 7, Connection: testConnectionID(0x11), Client: 0}},
-		}
-		for _, tc := range cases {
-			require.ErrorIs(t, e.Open(Open{Ref: tc.ref}), ErrInvalidStream, tc.name)
-		}
-		require.Zero(t, e.Live())
-		_, ok := e.Status(1)
-		require.False(t, ok)
+		inBubble(t, func(t *testing.T) {
+			e := testEngine()
+			cases := []struct {
+				name string
+				ref  StreamRef
+			}{
+				{"zero ref", StreamRef{}},
+				{"zero physical", StreamRef{Physical: 0, Epoch: 7, Connection: testConnectionID(0x11), Client: 3}},
+				{"zero epoch", StreamRef{Physical: 1, Epoch: 0, Connection: testConnectionID(0x11), Client: 3}},
+				{"zero connection", StreamRef{Physical: 1, Epoch: 7, Client: 3}},
+				{"zero client", StreamRef{Physical: 1, Epoch: 7, Connection: testConnectionID(0x11), Client: 0}},
+			}
+			for _, tc := range cases {
+				require.ErrorIs(t, e.Open(Open{Ref: tc.ref}), ErrInvalidStream, tc.name)
+			}
+			require.Zero(t, e.Live())
+			_, ok := e.Status(1)
+			require.False(t, ok)
+		})
 	})
 
 	t.Run("strictly increasing and never reused", func(t *testing.T) {
-		e := testEngine()
-		admitTestStream(t, e, 5)
-		require.ErrorIs(t, e.Open(Open{Ref: testRef(5)}), ErrStreamIDReused)
-		require.ErrorIs(t, e.Open(Open{Ref: testRef(1)}), ErrStreamIDReused)
-		require.NoError(t, e.Opened(Opened{Ref: testRef(5)}))
-		admitTestStream(t, e, 6)
+		inBubble(t, func(t *testing.T) {
+			e := testEngine()
+			admitTestStream(t, e, 5)
+			require.ErrorIs(t, e.Open(Open{Ref: testRef(5)}), ErrStreamIDReused)
+			require.ErrorIs(t, e.Open(Open{Ref: testRef(1)}), ErrStreamIDReused)
+			require.NoError(t, e.Opened(Opened{Ref: testRef(5)}))
+			admitTestStream(t, e, 6)
 
-		disposition, err := e.Close(Close{Physical: 5})
-		require.NoError(t, err)
-		require.Equal(t, StreamAccepted, disposition)
-		require.ErrorIs(t, e.Open(Open{Ref: testRef(5)}), ErrStreamIDReused, "a settled ID is never reused")
-		require.ErrorIs(t, e.Open(Open{Ref: testRef(6)}), ErrStreamIDReused)
-		require.NoError(t, e.Open(Open{Ref: testRef(7)}))
-		require.Equal(t, 2, e.Live())
+			disposition, err := e.Close(Close{Physical: 5})
+			require.NoError(t, err)
+			require.Equal(t, StreamAccepted, disposition)
+			require.ErrorIs(t, e.Open(Open{Ref: testRef(5)}), ErrStreamIDReused, "a settled ID is never reused")
+			require.ErrorIs(t, e.Open(Open{Ref: testRef(6)}), ErrStreamIDReused)
+			require.NoError(t, e.Open(Open{Ref: testRef(7)}))
+			require.Equal(t, 2, e.Live())
+		})
 	})
 
 	t.Run("pending and live share the ceiling", func(t *testing.T) {
-		e := testEngine()
-		for i := 1; i <= int(MaxMuxStreams); i++ {
-			require.NoError(t, e.Open(Open{Ref: testRef(PhysicalStreamID(i))}))
-		}
-		require.Equal(t, int(MaxMuxStreams), e.Live())
-		require.ErrorIs(t, e.Open(Open{Ref: testRef(PhysicalStreamID(MaxMuxStreams + 1))}), ErrTooManyStreams)
+		inBubble(t, func(t *testing.T) {
+			e := testEngine()
+			for i := 1; i <= int(MaxMuxStreams); i++ {
+				require.NoError(t, e.Open(Open{Ref: testRef(PhysicalStreamID(i))}))
+			}
+			require.Equal(t, int(MaxMuxStreams), e.Live())
+			require.ErrorIs(t, e.Open(Open{Ref: testRef(PhysicalStreamID(MaxMuxStreams + 1))}), ErrTooManyStreams)
 
-		// Confirming a pending stream does not free a slot: pending and live
-		// share the one ceiling.
-		require.NoError(t, e.Opened(Opened{Ref: testRef(1)}))
-		require.ErrorIs(t, e.Open(Open{Ref: testRef(PhysicalStreamID(MaxMuxStreams + 2))}), ErrTooManyStreams)
+			// Confirming a pending stream does not free a slot: pending and live
+			// share the one ceiling.
+			require.NoError(t, e.Opened(Opened{Ref: testRef(1)}))
+			require.ErrorIs(t, e.Open(Open{Ref: testRef(PhysicalStreamID(MaxMuxStreams + 2))}), ErrTooManyStreams)
 
-		// Settling one stream frees exactly one slot for a fresh higher ID.
-		disposition, err := e.Reset(Reset{Physical: 1})
-		require.NoError(t, err)
-		require.Equal(t, StreamAccepted, disposition)
-		require.Equal(t, int(MaxMuxStreams)-1, e.Live())
-		require.NoError(t, e.Open(Open{Ref: testRef(PhysicalStreamID(MaxMuxStreams + 2))}))
-		require.ErrorIs(t, e.Open(Open{Ref: testRef(PhysicalStreamID(MaxMuxStreams + 3))}), ErrTooManyStreams)
+			// Settling one stream frees exactly one slot for a fresh higher ID.
+			disposition, err := e.Reset(Reset{Physical: 1})
+			require.NoError(t, err)
+			require.Equal(t, StreamAccepted, disposition)
+			require.Equal(t, int(MaxMuxStreams)-1, e.Live())
+			require.NoError(t, e.Open(Open{Ref: testRef(PhysicalStreamID(MaxMuxStreams + 2))}))
+			require.ErrorIs(t, e.Open(Open{Ref: testRef(PhysicalStreamID(MaxMuxStreams + 3))}), ErrTooManyStreams)
+		})
 	})
 }
 
@@ -135,50 +145,54 @@ func TestStreamEngineOpenAdmission(t *testing.T) {
 // is no longer live belongs to a retired stream and is ignored.
 func TestStreamEngineFutureAndRetired(t *testing.T) {
 	t.Run("future identity refused", func(t *testing.T) {
-		e := testEngine()
-		openTestStream(t, e, 2)
-		future := PhysicalStreamID(3)
-		require.ErrorIs(t, e.Opened(Opened{Ref: testRef(future)}), ErrFutureStream)
-		require.ErrorIs(t, e.Refused(Refused{Ref: testRef(future)}), ErrFutureStream)
-		disposition, err := e.Data(Data{Physical: future, Data: []byte{'x'}})
-		require.ErrorIs(t, err, ErrFutureStream)
-		require.Zero(t, disposition)
-		disposition, err = e.Close(Close{Physical: future})
-		require.ErrorIs(t, err, ErrFutureStream)
-		require.Zero(t, disposition)
-		disposition, err = e.Reset(Reset{Physical: future})
-		require.ErrorIs(t, err, ErrFutureStream)
-		require.Zero(t, disposition)
-		require.Equal(t, 1, e.Live())
+		inBubble(t, func(t *testing.T) {
+			e := testEngine()
+			openTestStream(t, e, 2)
+			future := PhysicalStreamID(3)
+			require.ErrorIs(t, e.Opened(Opened{Ref: testRef(future)}), ErrFutureStream)
+			require.ErrorIs(t, e.Refused(Refused{Ref: testRef(future)}), ErrFutureStream)
+			disposition, err := e.Data(Data{Physical: future, Data: []byte{'x'}})
+			require.ErrorIs(t, err, ErrFutureStream)
+			require.Zero(t, disposition)
+			disposition, err = e.Close(Close{Physical: future})
+			require.ErrorIs(t, err, ErrFutureStream)
+			require.Zero(t, disposition)
+			disposition, err = e.Reset(Reset{Physical: future})
+			require.ErrorIs(t, err, ErrFutureStream)
+			require.Zero(t, disposition)
+			require.Equal(t, 1, e.Live())
+		})
 	})
 
 	t.Run("retired traffic ignored including gaps", func(t *testing.T) {
-		e := testEngine()
-		openTestStream(t, e, 5)
-		disposition, err := e.Reset(Reset{Physical: 5})
-		require.NoError(t, err)
-		require.Equal(t, StreamAccepted, disposition)
-		openTestStream(t, e, 9)
+		inBubble(t, func(t *testing.T) {
+			e := testEngine()
+			openTestStream(t, e, 5)
+			disposition, err := e.Reset(Reset{Physical: 5})
+			require.NoError(t, err)
+			require.Equal(t, StreamAccepted, disposition)
+			openTestStream(t, e, 9)
 
-		// 6 and 8 were never admitted but sit below the high-water mark: they
-		// are retired traffic, not future streams.
-		for _, id := range []PhysicalStreamID{5, 6, 8} {
-			disposition, err := e.Data(Data{Physical: id, Data: []byte{'x'}})
-			require.NoError(t, err)
-			require.Equal(t, StreamDiscarded, disposition)
-			disposition, err = e.Close(Close{Physical: id})
-			require.NoError(t, err)
-			require.Equal(t, StreamDiscarded, disposition)
-			disposition, err = e.Reset(Reset{Physical: id})
-			require.NoError(t, err)
-			require.Equal(t, StreamDiscarded, disposition)
-		}
+			// 6 and 8 were never admitted but sit below the high-water mark: they
+			// are retired traffic, not future streams.
+			for _, id := range []PhysicalStreamID{5, 6, 8} {
+				disposition, err := e.Data(Data{Physical: id, Data: []byte{'x'}})
+				require.NoError(t, err)
+				require.Equal(t, StreamDiscarded, disposition)
+				disposition, err = e.Close(Close{Physical: id})
+				require.NoError(t, err)
+				require.Equal(t, StreamDiscarded, disposition)
+				disposition, err = e.Reset(Reset{Physical: id})
+				require.NoError(t, err)
+				require.Equal(t, StreamDiscarded, disposition)
+			}
 
-		// A retired identity can never be confirmed or refused again.
-		require.ErrorIs(t, e.Opened(Opened{Ref: testRef(5)}), ErrStreamState)
-		require.ErrorIs(t, e.Refused(Refused{Ref: testRef(5)}), ErrStreamState)
-		require.ErrorIs(t, e.Opened(Opened{Ref: testRef(6)}), ErrStreamState)
-		require.Equal(t, 1, e.Live())
+			// A retired identity can never be confirmed or refused again.
+			require.ErrorIs(t, e.Opened(Opened{Ref: testRef(5)}), ErrStreamState)
+			require.ErrorIs(t, e.Refused(Refused{Ref: testRef(5)}), ErrStreamState)
+			require.ErrorIs(t, e.Opened(Opened{Ref: testRef(6)}), ErrStreamState)
+			require.Equal(t, 1, e.Live())
+		})
 	})
 }
 
@@ -304,20 +318,22 @@ func TestStreamEngineLifecycle(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			e := testEngine()
-			id := PhysicalStreamID(4)
-			for _, s := range tc.steps {
-				disposition, err := s.run(e, id)
-				if s.wantErr != nil {
-					require.ErrorIs(t, err, s.wantErr, s.name)
-					require.Zero(t, disposition, s.name)
-					continue
+			inBubble(t, func(t *testing.T) {
+				e := testEngine()
+				id := PhysicalStreamID(4)
+				for _, s := range tc.steps {
+					disposition, err := s.run(e, id)
+					if s.wantErr != nil {
+						require.ErrorIs(t, err, s.wantErr, s.name)
+						require.Zero(t, disposition, s.name)
+						continue
+					}
+					require.NoError(t, err, s.name)
+					require.Equal(t, s.want, disposition, s.name)
 				}
-				require.NoError(t, err, s.name)
-				require.Equal(t, s.want, disposition, s.name)
-			}
-			require.Zero(t, e.Live())
-			require.Equal(t, StreamTerminal, mustStatus(t, e, id).State)
+				require.Zero(t, e.Live())
+				require.Equal(t, StreamTerminal, mustStatus(t, e, id).State)
+			})
 		})
 	}
 }
@@ -325,58 +341,64 @@ func TestStreamEngineLifecycle(t *testing.T) {
 // TestStreamEngineRejectedAdmissionLeavesNothing proves a refused admission
 // records nothing and cannot resurrect a settled identity.
 func TestStreamEngineRejectedAdmissionLeavesNothing(t *testing.T) {
-	e := testEngine()
-	require.ErrorIs(t, e.Open(Open{}), ErrInvalidStream)
-	require.Zero(t, e.Live())
-	_, ok := e.Status(1)
-	require.False(t, ok)
+	inBubble(t, func(t *testing.T) {
+		e := testEngine()
+		require.ErrorIs(t, e.Open(Open{}), ErrInvalidStream)
+		require.Zero(t, e.Live())
+		_, ok := e.Status(1)
+		require.False(t, ok)
 
-	admitTestStream(t, e, 1)
-	require.ErrorIs(t, e.Open(Open{Ref: testRef(1)}), ErrStreamIDReused)
-	require.Equal(t, 1, e.Live())
-	require.Equal(t, StreamOpening, mustStatus(t, e, 1).State)
-	_, ok = e.Status(2)
-	require.False(t, ok)
+		admitTestStream(t, e, 1)
+		require.ErrorIs(t, e.Open(Open{Ref: testRef(1)}), ErrStreamIDReused)
+		require.Equal(t, 1, e.Live())
+		require.Equal(t, StreamOpening, mustStatus(t, e, 1).State)
+		_, ok = e.Status(2)
+		require.False(t, ok)
+	})
 }
 
 // TestStreamEngineRefFence proves Opened and Refused are legal only for the
 // opening stream whose full reference was recorded at admission.
 func TestStreamEngineRefFence(t *testing.T) {
-	e := testEngine()
-	ref := admitTestStream(t, e, 4)
+	inBubble(t, func(t *testing.T) {
+		e := testEngine()
+		ref := admitTestStream(t, e, 4)
 
-	mismatched := ref
-	mismatched.Epoch++
-	require.ErrorIs(t, e.Opened(Opened{Ref: mismatched}), ErrStreamRefMismatch)
-	require.Equal(t, StreamOpening, mustStatus(t, e, 4).State)
-	require.ErrorIs(t, e.Refused(Refused{Ref: mismatched}), ErrStreamRefMismatch)
-	require.Equal(t, StreamOpening, mustStatus(t, e, 4).State)
+		mismatched := ref
+		mismatched.Epoch++
+		require.ErrorIs(t, e.Opened(Opened{Ref: mismatched}), ErrStreamRefMismatch)
+		require.Equal(t, StreamOpening, mustStatus(t, e, 4).State)
+		require.ErrorIs(t, e.Refused(Refused{Ref: mismatched}), ErrStreamRefMismatch)
+		require.Equal(t, StreamOpening, mustStatus(t, e, 4).State)
 
-	require.NoError(t, e.Opened(Opened{Ref: ref}))
-	require.Equal(t, StreamOpen, mustStatus(t, e, 4).State)
+		require.NoError(t, e.Opened(Opened{Ref: ref}))
+		require.Equal(t, StreamOpen, mustStatus(t, e, 4).State)
 
-	// Legality is checked before reference identity: a settled stream refuses
-	// both a matching and a mismatched confirmation.
-	require.ErrorIs(t, e.Opened(Opened{Ref: ref}), ErrStreamState)
-	require.ErrorIs(t, e.Opened(Opened{Ref: mismatched}), ErrStreamState)
+		// Legality is checked before reference identity: a settled stream refuses
+		// both a matching and a mismatched confirmation.
+		require.ErrorIs(t, e.Opened(Opened{Ref: ref}), ErrStreamState)
+		require.ErrorIs(t, e.Opened(Opened{Ref: mismatched}), ErrStreamState)
+	})
 }
 
 // TestStreamEngineRefusalRetained proves a refusal settles the stream
 // orderly and retains the typed refusal for the caller.
 func TestStreamEngineRefusalRetained(t *testing.T) {
-	e := testEngine()
-	admitTestStream(t, e, 2)
-	detail := testErrorDetail()
-	require.NoError(t, e.Refused(Refused{Ref: testRef(2), Error: detail}))
+	inBubble(t, func(t *testing.T) {
+		e := testEngine()
+		admitTestStream(t, e, 2)
+		detail := testErrorDetail()
+		require.NoError(t, e.Refused(Refused{Ref: testRef(2), Error: detail}))
 
-	status := mustStatus(t, e, 2)
-	require.Equal(t, StreamTerminal, status.State)
-	require.True(t, status.Refused)
-	require.Equal(t, detail, status.Refusal)
-	require.True(t, channelClosed(status.Done))
-	require.NoError(t, status.Err)
-	require.Equal(t, domain.RemoteFailureNone, status.FailureKind)
-	require.Zero(t, e.Live())
+		status := mustStatus(t, e, 2)
+		require.Equal(t, StreamTerminal, status.State)
+		require.True(t, status.Refused)
+		require.Equal(t, detail, status.Refusal)
+		require.True(t, channelClosed(status.Done))
+		require.NoError(t, status.Err)
+		require.Equal(t, domain.RemoteFailureNone, status.FailureKind)
+		require.Zero(t, e.Live())
+	})
 }
 
 // TestStreamEngineTwoAndHundredStreams proves admission, confirmation, data,
@@ -387,62 +409,64 @@ func TestStreamEngineRefusalRetained(t *testing.T) {
 func TestStreamEngineTwoAndHundredStreams(t *testing.T) {
 	for _, count := range []int{2, 100} {
 		t.Run(fmt.Sprintf("%d streams", count), func(t *testing.T) {
-			e := testEngine()
-			for i := 1; i <= count; i++ {
-				ref := openTestStream(t, e, PhysicalStreamID(i))
-				require.Equal(t, ref, mustStatus(t, e, PhysicalStreamID(i)).Ref)
-			}
-			require.Equal(t, count, e.Live())
+			inBubble(t, func(t *testing.T) {
+				e := testEngine()
+				for i := 1; i <= count; i++ {
+					ref := openTestStream(t, e, PhysicalStreamID(i))
+					require.Equal(t, ref, mustStatus(t, e, PhysicalStreamID(i)).Ref)
+				}
+				require.Equal(t, count, e.Live())
 
-			for i := 1; i <= count; i++ {
-				disposition, err := e.Data(Data{Physical: PhysicalStreamID(i), Data: []byte{byte(i)}})
-				require.NoError(t, err)
-				require.Equal(t, StreamAccepted, disposition)
-			}
-			require.Equal(t, count, e.AggregateBytes())
+				for i := 1; i <= count; i++ {
+					disposition, err := e.Data(Data{Physical: PhysicalStreamID(i), Data: []byte{byte(i)}})
+					require.NoError(t, err)
+					require.Equal(t, StreamAccepted, disposition)
+				}
+				require.Equal(t, count, e.AggregateBytes())
 
-			taken, ok := e.Take(PhysicalStreamID(1))
-			require.True(t, ok)
-			require.Equal(t, []byte{1}, taken)
-			require.Equal(t, count-1, e.AggregateBytes())
-			require.Zero(t, mustStatus(t, e, 1).QueuedChunks)
+				taken, ok := e.Take(PhysicalStreamID(1))
+				require.True(t, ok)
+				require.Equal(t, []byte{1}, taken)
+				require.Equal(t, count-1, e.AggregateBytes())
+				require.Zero(t, mustStatus(t, e, 1).QueuedChunks)
 
-			for i := 1; i <= count; i++ {
-				disposition, err := e.Close(Close{Physical: PhysicalStreamID(i)})
-				require.NoError(t, err)
-				require.Equal(t, StreamAccepted, disposition)
-			}
-			// The drained stream is terminal; every other stream is closing and
-			// still holds exactly its one unread, charged chunk.
-			require.Equal(t, count-1, e.Live())
-			require.Equal(t, count-1, e.AggregateBytes())
-			require.False(t, e.Closed(), "closing every stream never terminalizes the physical connection")
-			terminal := mustStatus(t, e, 1)
-			require.Equal(t, StreamTerminal, terminal.State)
-			require.True(t, channelClosed(terminal.Done))
-			for i := 2; i <= count; i++ {
-				status := mustStatus(t, e, PhysicalStreamID(i))
-				require.Equal(t, StreamClosing, status.State, "stream %d", i)
-				require.False(t, channelClosed(status.Done), "stream %d", i)
-				require.Equal(t, 1, status.QueuedChunks, "stream %d", i)
-			}
+				for i := 1; i <= count; i++ {
+					disposition, err := e.Close(Close{Physical: PhysicalStreamID(i)})
+					require.NoError(t, err)
+					require.Equal(t, StreamAccepted, disposition)
+				}
+				// The drained stream is terminal; every other stream is closing and
+				// still holds exactly its one unread, charged chunk.
+				require.Equal(t, count-1, e.Live())
+				require.Equal(t, count-1, e.AggregateBytes())
+				require.False(t, e.Closed(), "closing every stream never terminalizes the physical connection")
+				terminal := mustStatus(t, e, 1)
+				require.Equal(t, StreamTerminal, terminal.State)
+				require.True(t, channelClosed(terminal.Done))
+				for i := 2; i <= count; i++ {
+					status := mustStatus(t, e, PhysicalStreamID(i))
+					require.Equal(t, StreamClosing, status.State, "stream %d", i)
+					require.False(t, channelClosed(status.Done), "stream %d", i)
+					require.Equal(t, 1, status.QueuedChunks, "stream %d", i)
+				}
 
-			// Draining every preserved chunk releases its bytes and terminalizes
-			// the stream.
-			for i := 2; i <= count; i++ {
-				chunk, ok := e.Take(PhysicalStreamID(i))
-				require.True(t, ok, "stream %d", i)
-				require.Equal(t, []byte{byte(i)}, chunk, "stream %d", i)
-			}
-			require.Zero(t, e.Live())
-			require.Zero(t, e.AggregateBytes())
-			require.False(t, e.Closed(), "closing every stream never terminalizes the physical connection")
-			for i := 1; i <= count; i++ {
-				status := mustStatus(t, e, PhysicalStreamID(i))
-				require.Equal(t, StreamTerminal, status.State)
-				require.True(t, channelClosed(status.Done))
-				require.NoError(t, status.Err)
-			}
+				// Draining every preserved chunk releases its bytes and terminalizes
+				// the stream.
+				for i := 2; i <= count; i++ {
+					chunk, ok := e.Take(PhysicalStreamID(i))
+					require.True(t, ok, "stream %d", i)
+					require.Equal(t, []byte{byte(i)}, chunk, "stream %d", i)
+				}
+				require.Zero(t, e.Live())
+				require.Zero(t, e.AggregateBytes())
+				require.False(t, e.Closed(), "closing every stream never terminalizes the physical connection")
+				for i := 1; i <= count; i++ {
+					status := mustStatus(t, e, PhysicalStreamID(i))
+					require.Equal(t, StreamTerminal, status.State)
+					require.True(t, channelClosed(status.Done))
+					require.NoError(t, status.Err)
+				}
+			})
 		})
 	}
 }
@@ -450,34 +474,36 @@ func TestStreamEngineTwoAndHundredStreams(t *testing.T) {
 // TestStreamEngineIsolation proves one stream's close or reset terminalizes
 // neither the physical connection nor a sibling.
 func TestStreamEngineIsolation(t *testing.T) {
-	e := testEngine()
-	openTestStream(t, e, 1)
-	openTestStream(t, e, 2)
-	openTestStream(t, e, 3)
-	_, err := e.Data(Data{Physical: 1, Data: []byte("a")})
-	require.NoError(t, err)
+	inBubble(t, func(t *testing.T) {
+		e := testEngine()
+		openTestStream(t, e, 1)
+		openTestStream(t, e, 2)
+		openTestStream(t, e, 3)
+		_, err := e.Data(Data{Physical: 1, Data: []byte("a")})
+		require.NoError(t, err)
 
-	disposition, err := e.Close(Close{Physical: 2})
-	require.NoError(t, err)
-	require.Equal(t, StreamAccepted, disposition)
-	require.False(t, e.Closed())
-	require.NoError(t, e.Err())
-	require.Equal(t, StreamOpen, mustStatus(t, e, 1).State)
-	require.Equal(t, StreamOpen, mustStatus(t, e, 3).State)
-	require.Equal(t, 2, e.Live())
-	require.Equal(t, 1, e.AggregateBytes())
+		disposition, err := e.Close(Close{Physical: 2})
+		require.NoError(t, err)
+		require.Equal(t, StreamAccepted, disposition)
+		require.False(t, e.Closed())
+		require.NoError(t, e.Err())
+		require.Equal(t, StreamOpen, mustStatus(t, e, 1).State)
+		require.Equal(t, StreamOpen, mustStatus(t, e, 3).State)
+		require.Equal(t, 2, e.Live())
+		require.Equal(t, 1, e.AggregateBytes())
 
-	disposition, err = e.Reset(Reset{Physical: 3})
-	require.NoError(t, err)
-	require.Equal(t, StreamAccepted, disposition)
-	require.False(t, e.Closed())
-	require.Equal(t, StreamOpen, mustStatus(t, e, 1).State)
-	require.Equal(t, 1, e.Live())
+		disposition, err = e.Reset(Reset{Physical: 3})
+		require.NoError(t, err)
+		require.Equal(t, StreamAccepted, disposition)
+		require.False(t, e.Closed())
+		require.Equal(t, StreamOpen, mustStatus(t, e, 1).State)
+		require.Equal(t, 1, e.Live())
 
-	disposition, err = e.Data(Data{Physical: 1, Data: []byte("b")})
-	require.NoError(t, err)
-	require.Equal(t, StreamAccepted, disposition)
-	require.Equal(t, 2, e.AggregateBytes())
+		disposition, err = e.Data(Data{Physical: 1, Data: []byte("b")})
+		require.NoError(t, err)
+		require.Equal(t, StreamAccepted, disposition)
+		require.Equal(t, 2, e.AggregateBytes())
+	})
 }
 
 // floodWindow returns a maximum chunk and how many of them exactly fill one
@@ -492,148 +518,158 @@ func floodWindow(ceilings MuxCeilings) ([]byte, int) {
 // window resets exactly its own stream, frees that stream's budget, and leaves
 // a sibling progressing.
 func TestStreamEngineQueueOverflow(t *testing.T) {
-	e := testEngine()
-	openTestStream(t, e, 1)
-	openTestStream(t, e, 2)
-	_, err := e.Data(Data{Physical: 2, Data: []byte("sibling")})
-	require.NoError(t, err)
+	inBubble(t, func(t *testing.T) {
+		e := testEngine()
+		openTestStream(t, e, 1)
+		openTestStream(t, e, 2)
+		_, err := e.Data(Data{Physical: 2, Data: []byte("sibling")})
+		require.NoError(t, err)
 
-	chunk, full := floodWindow(DefaultMuxCeilings())
-	for i := 0; i < full; i++ {
+		chunk, full := floodWindow(DefaultMuxCeilings())
+		for i := 0; i < full; i++ {
+			disposition, err := e.Data(Data{Physical: 1, Data: chunk})
+			require.NoError(t, err)
+			require.Equal(t, StreamAccepted, disposition)
+		}
+		require.Equal(t, full, mustStatus(t, e, 1).QueuedChunks)
+
 		disposition, err := e.Data(Data{Physical: 1, Data: chunk})
+		require.ErrorIs(t, err, ErrStreamQueueFull)
+		require.Zero(t, disposition)
+
+		status := mustStatus(t, e, 1)
+		require.Equal(t, StreamTerminal, status.State)
+		require.True(t, channelClosed(status.Done))
+		require.ErrorIs(t, status.Err, ErrStreamQueueFull)
+		require.Equal(t, domain.RemoteFailureInvalidResponse, status.FailureKind)
+		require.Zero(t, status.QueuedChunks)
+		require.Zero(t, status.QueuedBytes)
+		require.Equal(t, len("sibling"), e.AggregateBytes(), "the overflowed stream released its budget")
+		require.Equal(t, 1, e.Live())
+		require.False(t, e.Closed())
+
+		sibling := mustStatus(t, e, 2)
+		require.Equal(t, StreamOpen, sibling.State)
+		require.False(t, channelClosed(sibling.Done))
+		disposition, err = e.Data(Data{Physical: 2, Data: []byte("more")})
 		require.NoError(t, err)
 		require.Equal(t, StreamAccepted, disposition)
-	}
-	require.Equal(t, full, mustStatus(t, e, 1).QueuedChunks)
+		require.Equal(t, len("sibling")+len("more"), e.AggregateBytes())
 
-	disposition, err := e.Data(Data{Physical: 1, Data: chunk})
-	require.ErrorIs(t, err, ErrStreamQueueFull)
-	require.Zero(t, disposition)
-
-	status := mustStatus(t, e, 1)
-	require.Equal(t, StreamTerminal, status.State)
-	require.True(t, channelClosed(status.Done))
-	require.ErrorIs(t, status.Err, ErrStreamQueueFull)
-	require.Equal(t, domain.RemoteFailureInvalidResponse, status.FailureKind)
-	require.Zero(t, status.QueuedChunks)
-	require.Zero(t, status.QueuedBytes)
-	require.Equal(t, len("sibling"), e.AggregateBytes(), "the overflowed stream released its budget")
-	require.Equal(t, 1, e.Live())
-	require.False(t, e.Closed())
-
-	sibling := mustStatus(t, e, 2)
-	require.Equal(t, StreamOpen, sibling.State)
-	require.False(t, channelClosed(sibling.Done))
-	disposition, err = e.Data(Data{Physical: 2, Data: []byte("more")})
-	require.NoError(t, err)
-	require.Equal(t, StreamAccepted, disposition)
-	require.Equal(t, len("sibling")+len("more"), e.AggregateBytes())
-
-	// Cancellation of an already terminal stream stays idempotent and never
-	// rewrites its cause.
-	disposition, err = e.Reset(Reset{Physical: 1})
-	require.NoError(t, err)
-	require.Equal(t, StreamDiscarded, disposition)
-	require.ErrorIs(t, mustStatus(t, e, 1).Err, ErrStreamQueueFull)
+		// Cancellation of an already terminal stream stays idempotent and never
+		// rewrites its cause.
+		disposition, err = e.Reset(Reset{Physical: 1})
+		require.NoError(t, err)
+		require.Equal(t, StreamDiscarded, disposition)
+		require.ErrorIs(t, mustStatus(t, e, 1).Err, ErrStreamQueueFull)
+	})
 }
 
 // TestStreamEngineQueueByteBounds proves the aggregate byte ceiling resets
 // only the offending stream.
 func TestStreamEngineQueueByteBounds(t *testing.T) {
 	t.Run("aggregate byte bound", func(t *testing.T) {
-		e := testEngine()
-		// Bypass the codec-level chunk ceiling and widen the window so this
-		// test reaches the defensive aggregate byte bound with oversized
-		// chunks.
-		e.maxChunkBytes = 16 << 20
-		e.window = 32 << 20
-		chunk := make([]byte, 16<<20)
-		for i := 1; i <= 4; i++ {
-			openTestStream(t, e, PhysicalStreamID(i))
-			disposition, err := e.Data(Data{Physical: PhysicalStreamID(i), Data: chunk})
+		inBubble(t, func(t *testing.T) {
+			e := testEngine()
+			// Bypass the codec-level chunk ceiling and widen the window so this
+			// test reaches the defensive aggregate byte bound with oversized
+			// chunks.
+			e.maxChunkBytes = 16 << 20
+			e.window = 32 << 20
+			chunk := make([]byte, 16<<20)
+			for i := 1; i <= 4; i++ {
+				openTestStream(t, e, PhysicalStreamID(i))
+				disposition, err := e.Data(Data{Physical: PhysicalStreamID(i), Data: chunk})
+				require.NoError(t, err)
+				require.Equal(t, StreamAccepted, disposition)
+			}
+			require.Equal(t, int(MaxMuxAggregateBytes), e.AggregateBytes())
+
+			openTestStream(t, e, 5)
+			disposition, err := e.Data(Data{Physical: 5, Data: chunk})
+			require.ErrorIs(t, err, ErrStreamQueueFull)
+			require.Zero(t, disposition)
+			require.Equal(t, StreamTerminal, mustStatus(t, e, 5).State)
+			require.Equal(t, int(MaxMuxAggregateBytes), e.AggregateBytes(), "siblings keep their budget")
+			for i := 1; i <= 4; i++ {
+				require.Equal(t, StreamOpen, mustStatus(t, e, PhysicalStreamID(i)).State)
+			}
+			require.Equal(t, 4, e.Live())
+
+			// Taking one sibling chunk releases exactly its bytes, so a fresh
+			// stream takes the freed capacity.
+			_, ok := e.Take(PhysicalStreamID(1))
+			require.True(t, ok)
+			require.Equal(t, int(MaxMuxAggregateBytes)-len(chunk), e.AggregateBytes())
+			openTestStream(t, e, 6)
+			disposition, err = e.Data(Data{Physical: 6, Data: chunk})
 			require.NoError(t, err)
 			require.Equal(t, StreamAccepted, disposition)
-		}
-		require.Equal(t, int(MaxMuxAggregateBytes), e.AggregateBytes())
-
-		openTestStream(t, e, 5)
-		disposition, err := e.Data(Data{Physical: 5, Data: chunk})
-		require.ErrorIs(t, err, ErrStreamQueueFull)
-		require.Zero(t, disposition)
-		require.Equal(t, StreamTerminal, mustStatus(t, e, 5).State)
-		require.Equal(t, int(MaxMuxAggregateBytes), e.AggregateBytes(), "siblings keep their budget")
-		for i := 1; i <= 4; i++ {
-			require.Equal(t, StreamOpen, mustStatus(t, e, PhysicalStreamID(i)).State)
-		}
-		require.Equal(t, 4, e.Live())
-
-		// Taking one sibling chunk releases exactly its bytes, so a fresh
-		// stream takes the freed capacity.
-		_, ok := e.Take(PhysicalStreamID(1))
-		require.True(t, ok)
-		require.Equal(t, int(MaxMuxAggregateBytes)-len(chunk), e.AggregateBytes())
-		openTestStream(t, e, 6)
-		disposition, err = e.Data(Data{Physical: 6, Data: chunk})
-		require.NoError(t, err)
-		require.Equal(t, StreamAccepted, disposition)
-		require.Equal(t, int(MaxMuxAggregateBytes), e.AggregateBytes())
+			require.Equal(t, int(MaxMuxAggregateBytes), e.AggregateBytes())
+		})
 	})
 }
 
 // TestStreamEngineTake proves the FIFO pop returns an engine-owned copy and
 // releases the chunk's bytes.
 func TestStreamEngineTake(t *testing.T) {
-	e := testEngine()
-	openTestStream(t, e, 1)
-	chunk := []byte("payload")
-	_, err := e.Data(Data{Physical: 1, Data: chunk})
-	require.NoError(t, err)
+	inBubble(t, func(t *testing.T) {
+		e := testEngine()
+		openTestStream(t, e, 1)
+		chunk := []byte("payload")
+		_, err := e.Data(Data{Physical: 1, Data: chunk})
+		require.NoError(t, err)
 
-	chunk[0] = 'P' // mutating the caller's slice must not change the queue
-	taken, ok := e.Take(PhysicalStreamID(1))
-	require.True(t, ok)
-	require.Equal(t, []byte("payload"), taken)
-	require.Zero(t, e.AggregateBytes())
+		chunk[0] = 'P' // mutating the caller's slice must not change the queue
+		taken, ok := e.Take(PhysicalStreamID(1))
+		require.True(t, ok)
+		require.Equal(t, []byte("payload"), taken)
+		require.Zero(t, e.AggregateBytes())
 
-	_, ok = e.Take(PhysicalStreamID(1))
-	require.False(t, ok)
-	_, ok = e.Take(PhysicalStreamID(9))
-	require.False(t, ok)
+		_, ok = e.Take(PhysicalStreamID(1))
+		require.False(t, ok)
+		_, ok = e.Take(PhysicalStreamID(9))
+		require.False(t, ok)
+	})
 }
 
 // TestStreamEngineResetCause proves a reset is abnormal: it carries the typed
 // cause when present and the terminal sentinel otherwise.
 func TestStreamEngineResetCause(t *testing.T) {
 	t.Run("typed detail", func(t *testing.T) {
-		e := testEngine()
-		openTestStream(t, e, 1)
-		detail := ErrorDetail{
-			Code: ports.BrokerErrorUnavailable, Text: "reset by peer",
-			AdmissionCode: 3, FailureKind: domain.RemoteFailureTimeout,
-		}
-		disposition, err := e.Reset(Reset{Physical: 1, HasError: true, Error: detail})
-		require.NoError(t, err)
-		require.Equal(t, StreamAccepted, disposition)
+		inBubble(t, func(t *testing.T) {
+			e := testEngine()
+			openTestStream(t, e, 1)
+			detail := ErrorDetail{
+				Code: ports.BrokerErrorUnavailable, Text: "reset by peer",
+				AdmissionCode: 3, FailureKind: domain.RemoteFailureTimeout,
+			}
+			disposition, err := e.Reset(Reset{Physical: 1, HasError: true, Error: detail})
+			require.NoError(t, err)
+			require.Equal(t, StreamAccepted, disposition)
 
-		status := mustStatus(t, e, 1)
-		require.Error(t, status.Err)
-		require.Equal(t, domain.RemoteFailureTimeout, status.FailureKind)
-		var brokerErr ports.BrokerError
-		require.ErrorAs(t, status.Err, &brokerErr)
-		require.Equal(t, ports.BrokerErrorUnavailable, brokerErr.Code)
-		require.Equal(t, "reset by peer", brokerErr.Text)
+			status := mustStatus(t, e, 1)
+			require.Error(t, status.Err)
+			require.Equal(t, domain.RemoteFailureTimeout, status.FailureKind)
+			var brokerErr ports.BrokerError
+			require.ErrorAs(t, status.Err, &brokerErr)
+			require.Equal(t, ports.BrokerErrorUnavailable, brokerErr.Code)
+			require.Equal(t, "reset by peer", brokerErr.Text)
+		})
 	})
 
 	t.Run("no detail", func(t *testing.T) {
-		e := testEngine()
-		openTestStream(t, e, 1)
-		disposition, err := e.Reset(Reset{Physical: 1})
-		require.NoError(t, err)
-		require.Equal(t, StreamAccepted, disposition)
+		inBubble(t, func(t *testing.T) {
+			e := testEngine()
+			openTestStream(t, e, 1)
+			disposition, err := e.Reset(Reset{Physical: 1})
+			require.NoError(t, err)
+			require.Equal(t, StreamAccepted, disposition)
 
-		status := mustStatus(t, e, 1)
-		require.ErrorIs(t, status.Err, ErrTerminalFailure)
-		require.Equal(t, domain.RemoteFailureTransport, status.FailureKind)
+			status := mustStatus(t, e, 1)
+			require.ErrorIs(t, status.Err, ErrTerminalFailure)
+			require.Equal(t, domain.RemoteFailureTransport, status.FailureKind)
+		})
 	})
 }
 
@@ -641,249 +677,261 @@ func TestStreamEngineResetCause(t *testing.T) {
 // Done before terminalizing every live stream, that every stream observes the
 // physical outcome, and that a stream settled beforehand keeps its own cause.
 func TestStreamEnginePhysicalFailureOrdering(t *testing.T) {
-	e := testEngine()
-	const live = 5
-	for i := 1; i <= live; i++ {
-		openTestStream(t, e, PhysicalStreamID(i))
-	}
-	_, err := e.Reset(Reset{Physical: 5, HasError: true, Error: testErrorDetail()})
-	require.NoError(t, err)
-	siblingCause := mustStatus(t, e, 5).Err
-	require.Error(t, siblingCause)
+	inBubble(t, func(t *testing.T) {
+		e := testEngine()
+		const live = 5
+		for i := 1; i <= live; i++ {
+			openTestStream(t, e, PhysicalStreamID(i))
+		}
+		_, err := e.Reset(Reset{Physical: 5, HasError: true, Error: testErrorDetail()})
+		require.NoError(t, err)
+		siblingCause := mustStatus(t, e, 5).Err
+		require.Error(t, siblingCause)
 
-	cause := fmt.Errorf("physical loss: %w", errTerminalSentinel)
-	observed := make([]bool, live-1)
-	var wg sync.WaitGroup
-	for i := 1; i < live; i++ {
-		status := mustStatus(t, e, PhysicalStreamID(i))
-		wg.Add(1)
-		go func(i int, done <-chan struct{}) {
-			defer wg.Done()
-			<-done
-			// A reader woken by a stream must observe the physical
-			// connection already terminal.
-			observed[i-1] = e.Closed()
-		}(i, status.Done)
-	}
-	e.Fail(domain.RemoteFailureTimeout, cause)
-	wg.Wait()
+		cause := fmt.Errorf("physical loss: %w", errTerminalSentinel)
+		observed := make([]bool, live-1)
+		var wg sync.WaitGroup
+		for i := 1; i < live; i++ {
+			status := mustStatus(t, e, PhysicalStreamID(i))
+			wg.Add(1)
+			go func(i int, done <-chan struct{}) {
+				defer wg.Done()
+				<-done
+				// A reader woken by a stream must observe the physical
+				// connection already terminal.
+				observed[i-1] = e.Closed()
+			}(i, status.Done)
+		}
+		e.Fail(domain.RemoteFailureTimeout, cause)
+		wg.Wait()
 
-	require.True(t, e.Closed())
-	require.Equal(t, cause, e.Err())
-	require.ErrorIs(t, e.Err(), errTerminalSentinel)
-	require.Equal(t, domain.RemoteFailureTimeout, e.FailureKind())
-	require.Zero(t, e.Live())
-	require.Zero(t, e.AggregateBytes())
+		require.True(t, e.Closed())
+		require.Equal(t, cause, e.Err())
+		require.ErrorIs(t, e.Err(), errTerminalSentinel)
+		require.Equal(t, domain.RemoteFailureTimeout, e.FailureKind())
+		require.Zero(t, e.Live())
+		require.Zero(t, e.AggregateBytes())
 
-	for i := 1; i < live; i++ {
-		status := mustStatus(t, e, PhysicalStreamID(i))
-		require.Equal(t, StreamTerminal, status.State)
-		require.True(t, channelClosed(status.Done))
-		require.Equal(t, cause, status.Err)
-		require.Equal(t, domain.RemoteFailureTimeout, status.FailureKind)
-		require.True(t, observed[i-1], "stream %d was terminalized before the physical Done", i)
-	}
+		for i := 1; i < live; i++ {
+			status := mustStatus(t, e, PhysicalStreamID(i))
+			require.Equal(t, StreamTerminal, status.State)
+			require.True(t, channelClosed(status.Done))
+			require.Equal(t, cause, status.Err)
+			require.Equal(t, domain.RemoteFailureTimeout, status.FailureKind)
+			require.True(t, observed[i-1], "stream %d was terminalized before the physical Done", i)
+		}
 
-	// The stream settled before the loss keeps its own, independent cause.
-	settled := mustStatus(t, e, 5)
-	require.Equal(t, StreamTerminal, settled.State)
-	require.Equal(t, siblingCause, settled.Err)
+		// The stream settled before the loss keeps its own, independent cause.
+		settled := mustStatus(t, e, 5)
+		require.Equal(t, StreamTerminal, settled.State)
+		require.Equal(t, siblingCause, settled.Err)
+	})
 }
 
 // TestStreamEngineTerminate proves an orderly physical close terminalizes
 // every stream with a nil error and refuses further admission.
 func TestStreamEngineTerminate(t *testing.T) {
-	e := testEngine()
-	for i := 1; i <= 3; i++ {
-		openTestStream(t, e, PhysicalStreamID(i))
-	}
-	_, err := e.Data(Data{Physical: 1, Data: []byte("queued")})
-	require.NoError(t, err)
+	inBubble(t, func(t *testing.T) {
+		e := testEngine()
+		for i := 1; i <= 3; i++ {
+			openTestStream(t, e, PhysicalStreamID(i))
+		}
+		_, err := e.Data(Data{Physical: 1, Data: []byte("queued")})
+		require.NoError(t, err)
 
-	e.Terminate()
-	require.True(t, e.Closed())
-	require.NoError(t, e.Err())
-	require.Equal(t, domain.RemoteFailureNone, e.FailureKind())
-	require.Zero(t, e.Live())
-	require.Zero(t, e.AggregateBytes())
-	for i := 1; i <= 3; i++ {
-		status := mustStatus(t, e, PhysicalStreamID(i))
-		require.Equal(t, StreamTerminal, status.State)
-		require.True(t, channelClosed(status.Done))
-		require.NoError(t, status.Err)
-	}
+		e.Terminate()
+		require.True(t, e.Closed())
+		require.NoError(t, e.Err())
+		require.Equal(t, domain.RemoteFailureNone, e.FailureKind())
+		require.Zero(t, e.Live())
+		require.Zero(t, e.AggregateBytes())
+		for i := 1; i <= 3; i++ {
+			status := mustStatus(t, e, PhysicalStreamID(i))
+			require.Equal(t, StreamTerminal, status.State)
+			require.True(t, channelClosed(status.Done))
+			require.NoError(t, status.Err)
+		}
 
-	require.ErrorIs(t, e.Open(Open{Ref: testRef(9)}), ErrPhysicalClosed)
-	e.Terminate()
-	require.True(t, e.Closed())
+		require.ErrorIs(t, e.Open(Open{Ref: testRef(9)}), ErrPhysicalClosed)
+		e.Terminate()
+		require.True(t, e.Closed())
+	})
 }
 
 // TestStreamEnginePhysicalClosedFrames proves frames after a physical terminal
 // outcome stay classified: settled streams discard traffic, admission is
 // closed, and a future identity is still refused.
 func TestStreamEnginePhysicalClosedFrames(t *testing.T) {
-	e := testEngine()
-	openTestStream(t, e, 1)
-	e.Fail(domain.RemoteFailureTransport, errors.New("gone"))
+	inBubble(t, func(t *testing.T) {
+		e := testEngine()
+		openTestStream(t, e, 1)
+		e.Fail(domain.RemoteFailureTransport, errors.New("gone"))
 
-	for _, run := range []struct {
-		name string
-		run  func() (StreamDisposition, error)
-	}{
-		{"data", func() (StreamDisposition, error) { return e.Data(Data{Physical: 1, Data: []byte{'x'}}) }},
-		{"close", func() (StreamDisposition, error) { return e.Close(Close{Physical: 1}) }},
-		{"reset", func() (StreamDisposition, error) { return e.Reset(Reset{Physical: 1}) }},
-	} {
-		disposition, err := run.run()
-		require.NoError(t, err, run.name)
-		require.Equal(t, StreamDiscarded, disposition, run.name)
-	}
+		for _, run := range []struct {
+			name string
+			run  func() (StreamDisposition, error)
+		}{
+			{"data", func() (StreamDisposition, error) { return e.Data(Data{Physical: 1, Data: []byte{'x'}}) }},
+			{"close", func() (StreamDisposition, error) { return e.Close(Close{Physical: 1}) }},
+			{"reset", func() (StreamDisposition, error) { return e.Reset(Reset{Physical: 1}) }},
+		} {
+			disposition, err := run.run()
+			require.NoError(t, err, run.name)
+			require.Equal(t, StreamDiscarded, disposition, run.name)
+		}
 
-	require.ErrorIs(t, e.Open(Open{Ref: testRef(2)}), ErrPhysicalClosed)
-	_, err := e.Data(Data{Physical: 3, Data: []byte{'x'}})
-	require.ErrorIs(t, err, ErrFutureStream)
+		require.ErrorIs(t, e.Open(Open{Ref: testRef(2)}), ErrPhysicalClosed)
+		_, err := e.Data(Data{Physical: 3, Data: []byte{'x'}})
+		require.ErrorIs(t, err, ErrFutureStream)
+	})
 }
 
 // TestStreamEngineConcurrentStreams exercises concurrent confirmation, data,
 // orderly close, abnormal reset, and admission over one engine.
 func TestStreamEngineConcurrentStreams(t *testing.T) {
-	const streams = 64
-	const admitted = 32
-	e := testEngine()
-	for i := 1; i <= streams; i++ {
-		admitTestStream(t, e, PhysicalStreamID(i))
-	}
+	inBubble(t, func(t *testing.T) {
+		const streams = 64
+		const admitted = 32
+		e := testEngine()
+		for i := 1; i <= streams; i++ {
+			admitTestStream(t, e, PhysicalStreamID(i))
+		}
 
-	var wg sync.WaitGroup
-	start := make(chan struct{})
-	for i := 1; i <= streams; i++ {
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for i := 1; i <= streams; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				<-start
+				id := PhysicalStreamID(i)
+				assert.NoError(t, e.Opened(Opened{Ref: testRef(id)}))
+				disposition, err := e.Data(Data{Physical: id, Data: []byte{byte(i)}})
+				assert.NoError(t, err)
+				assert.Equal(t, StreamAccepted, disposition)
+				if i%2 == 0 {
+					disposition, err = e.Close(Close{Physical: id})
+				} else {
+					disposition, err = e.Reset(Reset{Physical: id})
+				}
+				assert.NoError(t, err)
+				assert.Equal(t, StreamAccepted, disposition)
+			}(i)
+		}
+		// One goroutine keeps admitting fresh, strictly increasing identities
+		// while the others settle theirs.
 		wg.Add(1)
-		go func(i int) {
+		go func() {
 			defer wg.Done()
 			<-start
-			id := PhysicalStreamID(i)
-			assert.NoError(t, e.Opened(Opened{Ref: testRef(id)}))
-			disposition, err := e.Data(Data{Physical: id, Data: []byte{byte(i)}})
-			assert.NoError(t, err)
-			assert.Equal(t, StreamAccepted, disposition)
-			if i%2 == 0 {
-				disposition, err = e.Close(Close{Physical: id})
-			} else {
-				disposition, err = e.Reset(Reset{Physical: id})
+			for i := 1; i <= admitted; i++ {
+				id := PhysicalStreamID(streams + i)
+				assert.NoError(t, e.Open(Open{Ref: testRef(id)}))
+				assert.NoError(t, e.Opened(Opened{Ref: testRef(id)}))
+				disposition, err := e.Close(Close{Physical: id})
+				assert.NoError(t, err)
+				assert.Equal(t, StreamAccepted, disposition)
 			}
-			assert.NoError(t, err)
-			assert.Equal(t, StreamAccepted, disposition)
-		}(i)
-	}
-	// One goroutine keeps admitting fresh, strictly increasing identities
-	// while the others settle theirs.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		<-start
-		for i := 1; i <= admitted; i++ {
-			id := PhysicalStreamID(streams + i)
-			assert.NoError(t, e.Open(Open{Ref: testRef(id)}))
-			assert.NoError(t, e.Opened(Opened{Ref: testRef(id)}))
-			disposition, err := e.Close(Close{Physical: id})
-			assert.NoError(t, err)
-			assert.Equal(t, StreamAccepted, disposition)
-		}
-	}()
-	close(start)
-	wg.Wait()
+		}()
+		close(start)
+		wg.Wait()
 
-	// The even streams were closed with one chunk still unread, so they are
-	// closing and still charged; draining each queue terminalizes it. Odd
-	// streams and the admitted-only goroutine are already terminal.
-	for i := 1; i <= streams+admitted; i++ {
-		for {
-			if _, ok := e.Take(PhysicalStreamID(i)); !ok {
-				break
+		// The even streams were closed with one chunk still unread, so they are
+		// closing and still charged; draining each queue terminalizes it. Odd
+		// streams and the admitted-only goroutine are already terminal.
+		for i := 1; i <= streams+admitted; i++ {
+			for {
+				if _, ok := e.Take(PhysicalStreamID(i)); !ok {
+					break
+				}
 			}
 		}
-	}
 
-	require.Zero(t, e.Live())
-	require.Zero(t, e.AggregateBytes())
-	require.False(t, e.Closed())
-	for i := 1; i <= streams+admitted; i++ {
-		require.Equal(t, StreamTerminal, mustStatus(t, e, PhysicalStreamID(i)).State)
-	}
+		require.Zero(t, e.Live())
+		require.Zero(t, e.AggregateBytes())
+		require.False(t, e.Closed())
+		for i := 1; i <= streams+admitted; i++ {
+			require.Equal(t, StreamTerminal, mustStatus(t, e, PhysicalStreamID(i)).State)
+		}
+	})
 }
 
 // TestStreamEngineConcurrentPhysicalFailure races stream work against a
 // physical failure and proves the engine settles consistently.
 func TestStreamEngineConcurrentPhysicalFailure(t *testing.T) {
-	const streams = 64
-	e := testEngine()
-	for i := 1; i <= streams; i++ {
-		openTestStream(t, e, PhysicalStreamID(i))
-	}
-	cause := errors.New("physical loss")
+	inBubble(t, func(t *testing.T) {
+		const streams = 64
+		e := testEngine()
+		for i := 1; i <= streams; i++ {
+			openTestStream(t, e, PhysicalStreamID(i))
+		}
+		cause := errors.New("physical loss")
 
-	var wg sync.WaitGroup
-	start := make(chan struct{})
-	for i := 1; i <= streams; i++ {
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for i := 1; i <= streams; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				<-start
+				id := PhysicalStreamID(i)
+				switch i % 3 {
+				case 0:
+					_, _ = e.Data(Data{Physical: id, Data: []byte{byte(i)}})
+				case 1:
+					_, _ = e.Close(Close{Physical: id})
+				default:
+					_, _ = e.Reset(Reset{Physical: id})
+				}
+			}(i)
+		}
 		wg.Add(1)
-		go func(i int) {
+		go func() {
 			defer wg.Done()
 			<-start
-			id := PhysicalStreamID(i)
-			switch i % 3 {
-			case 0:
-				_, _ = e.Data(Data{Physical: id, Data: []byte{byte(i)}})
-			case 1:
-				_, _ = e.Close(Close{Physical: id})
-			default:
-				_, _ = e.Reset(Reset{Physical: id})
-			}
-		}(i)
-	}
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		<-start
-		e.Fail(domain.RemoteFailureTimeout, cause)
-	}()
-	close(start)
-	wg.Wait()
+			e.Fail(domain.RemoteFailureTimeout, cause)
+		}()
+		close(start)
+		wg.Wait()
 
-	require.True(t, e.Closed())
-	require.Equal(t, cause, e.Err())
-	require.Zero(t, e.Live())
-	require.Zero(t, e.AggregateBytes())
-	for i := 1; i <= streams; i++ {
-		status := mustStatus(t, e, PhysicalStreamID(i))
-		require.Equal(t, StreamTerminal, status.State)
-		require.True(t, channelClosed(status.Done))
-	}
+		require.True(t, e.Closed())
+		require.Equal(t, cause, e.Err())
+		require.Zero(t, e.Live())
+		require.Zero(t, e.AggregateBytes())
+		for i := 1; i <= streams; i++ {
+			status := mustStatus(t, e, PhysicalStreamID(i))
+			require.Equal(t, StreamTerminal, status.State)
+			require.True(t, channelClosed(status.Done))
+		}
+	})
 }
 
 // TestStreamEngineNilSafety proves the nil-receiver paths.
 func TestStreamEngineNilSafety(t *testing.T) {
-	var e *StreamEngine
-	require.ErrorIs(t, e.Open(Open{Ref: testRef(1)}), ErrPhysicalClosed)
-	require.ErrorIs(t, e.Opened(Opened{Ref: testRef(1)}), ErrPhysicalClosed)
-	require.ErrorIs(t, e.Refused(Refused{Ref: testRef(1)}), ErrPhysicalClosed)
-	_, err := e.Data(Data{Physical: 1, Data: []byte{'x'}})
-	require.ErrorIs(t, err, ErrPhysicalClosed)
-	_, err = e.Close(Close{Physical: 1})
-	require.ErrorIs(t, err, ErrPhysicalClosed)
-	_, err = e.Reset(Reset{Physical: 1})
-	require.ErrorIs(t, err, ErrPhysicalClosed)
-	require.Zero(t, e.Live())
-	require.Zero(t, e.AggregateBytes())
-	require.True(t, e.Closed())
-	require.Nil(t, e.Done())
-	require.NoError(t, e.Err())
-	require.Equal(t, domain.RemoteFailureNone, e.FailureKind())
-	_, ok := e.Status(1)
-	require.False(t, ok)
-	_, ok = e.Take(1)
-	require.False(t, ok)
-	e.Fail(domain.RemoteFailureTransport, errors.New("ignored"))
-	e.Terminate()
+	inBubble(t, func(t *testing.T) {
+		var e *StreamEngine
+		require.ErrorIs(t, e.Open(Open{Ref: testRef(1)}), ErrPhysicalClosed)
+		require.ErrorIs(t, e.Opened(Opened{Ref: testRef(1)}), ErrPhysicalClosed)
+		require.ErrorIs(t, e.Refused(Refused{Ref: testRef(1)}), ErrPhysicalClosed)
+		_, err := e.Data(Data{Physical: 1, Data: []byte{'x'}})
+		require.ErrorIs(t, err, ErrPhysicalClosed)
+		_, err = e.Close(Close{Physical: 1})
+		require.ErrorIs(t, err, ErrPhysicalClosed)
+		_, err = e.Reset(Reset{Physical: 1})
+		require.ErrorIs(t, err, ErrPhysicalClosed)
+		require.Zero(t, e.Live())
+		require.Zero(t, e.AggregateBytes())
+		require.True(t, e.Closed())
+		require.Nil(t, e.Done())
+		require.NoError(t, e.Err())
+		require.Equal(t, domain.RemoteFailureNone, e.FailureKind())
+		_, ok := e.Status(1)
+		require.False(t, ok)
+		_, ok = e.Take(1)
+		require.False(t, ok)
+		e.Fail(domain.RemoteFailureTransport, errors.New("ignored"))
+		e.Terminate()
+	})
 }
 
 // TestNewStreamEngineWithCeilings proves the constructor validates the
@@ -891,65 +939,71 @@ func TestStreamEngineNilSafety(t *testing.T) {
 // value so a caller cannot mutate live enforcement.
 func TestNewStreamEngineWithCeilings(t *testing.T) {
 	t.Run("invalid advertisement refused", func(t *testing.T) {
-		bad := DefaultMuxCeilings()
-		bad.MaxStreams = 0
-		engine, err := NewStreamEngineWithCeilings(bad)
-		require.ErrorIs(t, err, ErrInvalidCeilings)
-		require.Nil(t, engine)
+		inBubble(t, func(t *testing.T) {
+			bad := DefaultMuxCeilings()
+			bad.MaxStreams = 0
+			engine, err := NewStreamEngineWithCeilings(bad)
+			require.ErrorIs(t, err, ErrInvalidCeilings)
+			require.Nil(t, engine)
 
-		bad = DefaultMuxCeilings()
-		bad.StreamChunkLimit = MaxMuxChunkBytes + 1
-		_, err = NewStreamEngineWithCeilings(bad)
-		require.ErrorIs(t, err, ErrInvalidCeilings)
+			bad = DefaultMuxCeilings()
+			bad.StreamChunkLimit = MaxMuxChunkBytes + 1
+			_, err = NewStreamEngineWithCeilings(bad)
+			require.ErrorIs(t, err, ErrInvalidCeilings)
 
-		_, err = NewStreamEngineWithCeilings(MuxCeilings{})
-		require.ErrorIs(t, err, ErrInvalidCeilings)
+			_, err = NewStreamEngineWithCeilings(MuxCeilings{})
+			require.ErrorIs(t, err, ErrInvalidCeilings)
+		})
 	})
 
 	t.Run("negotiated small limits enforced", func(t *testing.T) {
-		ceilings := MuxCeilings{
-			MaxReceiveEnvelopeBytes: MinMuxEnvelopeBytes,
-			StreamChunkLimit:        32768,
-			MaxStreams:              2,
-			MaxAggregateBytes:       MinMuxAggregateBytes,
-		}
-		e, err := NewStreamEngineWithCeilings(ceilings)
-		require.NoError(t, err)
-		openTestStream(t, e, 1)
-		openTestStream(t, e, 2)
-		require.ErrorIs(t, e.Open(Open{Ref: testRef(3)}), ErrTooManyStreams)
+		inBubble(t, func(t *testing.T) {
+			ceilings := MuxCeilings{
+				MaxReceiveEnvelopeBytes: MinMuxEnvelopeBytes,
+				StreamChunkLimit:        32768,
+				MaxStreams:              2,
+				MaxAggregateBytes:       MinMuxAggregateBytes,
+			}
+			e, err := NewStreamEngineWithCeilings(ceilings)
+			require.NoError(t, err)
+			openTestStream(t, e, 1)
+			openTestStream(t, e, 2)
+			require.ErrorIs(t, e.Open(Open{Ref: testRef(3)}), ErrTooManyStreams)
 
-		// The negotiated chunk ceiling is refused statelessly, mutating
-		// nothing.
-		_, err = e.Data(Data{Physical: 1, Data: make([]byte, 32769)})
-		require.ErrorIs(t, err, ErrTooLarge)
-		require.Equal(t, StreamOpen, mustStatus(t, e, 1).State)
-		require.Zero(t, e.AggregateBytes())
+			// The negotiated chunk ceiling is refused statelessly, mutating
+			// nothing.
+			_, err = e.Data(Data{Physical: 1, Data: make([]byte, 32769)})
+			require.ErrorIs(t, err, ErrTooLarge)
+			require.Equal(t, StreamOpen, mustStatus(t, e, 1).State)
+			require.Zero(t, e.AggregateBytes())
 
-		// Two full chunks fit the aggregate floor; a third would exceed it and
-		// resets exactly the offending stream.
-		_, err = e.Data(Data{Physical: 1, Data: make([]byte, 32768)})
-		require.NoError(t, err)
-		require.Equal(t, 32768, e.AggregateBytes())
-		_, err = e.Data(Data{Physical: 2, Data: make([]byte, 32768)})
-		require.NoError(t, err)
-		require.Equal(t, 65536, e.AggregateBytes())
-		_, err = e.Data(Data{Physical: 1, Data: make([]byte, 32768)})
-		require.ErrorIs(t, err, ErrStreamQueueFull)
-		require.Equal(t, StreamTerminal, mustStatus(t, e, 1).State)
-		require.Equal(t, 32768, e.AggregateBytes(), "the reset stream released its bytes")
-		require.Equal(t, StreamOpen, mustStatus(t, e, 2).State)
+			// Two full chunks fit the aggregate floor; a third would exceed it and
+			// resets exactly the offending stream.
+			_, err = e.Data(Data{Physical: 1, Data: make([]byte, 32768)})
+			require.NoError(t, err)
+			require.Equal(t, 32768, e.AggregateBytes())
+			_, err = e.Data(Data{Physical: 2, Data: make([]byte, 32768)})
+			require.NoError(t, err)
+			require.Equal(t, 65536, e.AggregateBytes())
+			_, err = e.Data(Data{Physical: 1, Data: make([]byte, 32768)})
+			require.ErrorIs(t, err, ErrStreamQueueFull)
+			require.Equal(t, StreamTerminal, mustStatus(t, e, 1).State)
+			require.Equal(t, 32768, e.AggregateBytes(), "the reset stream released its bytes")
+			require.Equal(t, StreamOpen, mustStatus(t, e, 2).State)
+		})
 	})
 
 	t.Run("ceilings are copied", func(t *testing.T) {
-		ceilings := DefaultMuxCeilings()
-		ceilings.MaxStreams = 1
-		e, err := NewStreamEngineWithCeilings(ceilings)
-		require.NoError(t, err)
-		// A caller mutating its own copy must not raise the engine's ceiling.
-		ceilings.MaxStreams = MaxMuxStreams
-		openTestStream(t, e, 1)
-		require.ErrorIs(t, e.Open(Open{Ref: testRef(2)}), ErrTooManyStreams)
+		inBubble(t, func(t *testing.T) {
+			ceilings := DefaultMuxCeilings()
+			ceilings.MaxStreams = 1
+			e, err := NewStreamEngineWithCeilings(ceilings)
+			require.NoError(t, err)
+			// A caller mutating its own copy must not raise the engine's ceiling.
+			ceilings.MaxStreams = MaxMuxStreams
+			openTestStream(t, e, 1)
+			require.ErrorIs(t, e.Open(Open{Ref: testRef(2)}), ErrTooManyStreams)
+		})
 	})
 }
 
@@ -957,29 +1011,31 @@ func TestNewStreamEngineWithCeilings(t *testing.T) {
 // keeps a bounded table: the oldest retired records are evicted, while the
 // high-water mark still classifies them as retired rather than future.
 func TestStreamEngineBoundedRetiredRecords(t *testing.T) {
-	e := testEngine()
-	const churn = 4000
-	for i := 1; i <= churn; i++ {
-		id := PhysicalStreamID(i)
-		openTestStream(t, e, id)
-		_, err := e.Close(Close{Physical: id})
+	inBubble(t, func(t *testing.T) {
+		e := testEngine()
+		const churn = 4000
+		for i := 1; i <= churn; i++ {
+			id := PhysicalStreamID(i)
+			openTestStream(t, e, id)
+			_, err := e.Close(Close{Physical: id})
+			require.NoError(t, err)
+		}
+		require.LessOrEqual(t, len(e.streams), MaxRetiredStreamRecords)
+		require.Len(t, e.retired, MaxRetiredStreamRecords)
+
+		// The newest identity is retained; the oldest record was evicted but its
+		// high-water mark still classifies late traffic as retired.
+		require.Equal(t, StreamTerminal, mustStatus(t, e, PhysicalStreamID(churn)).State)
+		_, ok := e.Status(PhysicalStreamID(1))
+		require.False(t, ok)
+		disposition, err := e.Data(Data{Physical: PhysicalStreamID(1), Data: []byte{'x'}})
 		require.NoError(t, err)
-	}
-	require.LessOrEqual(t, len(e.streams), MaxRetiredStreamRecords)
-	require.Len(t, e.retired, MaxRetiredStreamRecords)
+		require.Equal(t, StreamDiscarded, disposition)
 
-	// The newest identity is retained; the oldest record was evicted but its
-	// high-water mark still classifies late traffic as retired.
-	require.Equal(t, StreamTerminal, mustStatus(t, e, PhysicalStreamID(churn)).State)
-	_, ok := e.Status(PhysicalStreamID(1))
-	require.False(t, ok)
-	disposition, err := e.Data(Data{Physical: PhysicalStreamID(1), Data: []byte{'x'}})
-	require.NoError(t, err)
-	require.Equal(t, StreamDiscarded, disposition)
-
-	// An identity above the high-water mark is still refused, not discarded.
-	_, err = e.Data(Data{Physical: PhysicalStreamID(churn + 1), Data: []byte{'x'}})
-	require.ErrorIs(t, err, ErrFutureStream)
+		// An identity above the high-water mark is still refused, not discarded.
+		_, err = e.Data(Data{Physical: PhysicalStreamID(churn + 1), Data: []byte{'x'}})
+		require.ErrorIs(t, err, ErrFutureStream)
+	})
 }
 
 // TestStreamEnginePhysicalFirstWins proves the physical terminal publication
@@ -987,30 +1043,34 @@ func TestStreamEngineBoundedRetiredRecords(t *testing.T) {
 // connection and every live stream's outcome.
 func TestStreamEnginePhysicalFirstWins(t *testing.T) {
 	t.Run("failure wins an orderly close", func(t *testing.T) {
-		e := testEngine()
-		openTestStream(t, e, 1)
-		cause := errors.New("physical loss")
-		e.Fail(domain.RemoteFailureTimeout, cause)
-		e.Terminate()
-		require.True(t, e.Closed())
-		require.Equal(t, cause, e.Err())
-		require.Equal(t, domain.RemoteFailureTimeout, e.FailureKind())
-		status := mustStatus(t, e, 1)
-		require.Equal(t, cause, status.Err)
-		require.Equal(t, domain.RemoteFailureTimeout, status.FailureKind)
+		inBubble(t, func(t *testing.T) {
+			e := testEngine()
+			openTestStream(t, e, 1)
+			cause := errors.New("physical loss")
+			e.Fail(domain.RemoteFailureTimeout, cause)
+			e.Terminate()
+			require.True(t, e.Closed())
+			require.Equal(t, cause, e.Err())
+			require.Equal(t, domain.RemoteFailureTimeout, e.FailureKind())
+			status := mustStatus(t, e, 1)
+			require.Equal(t, cause, status.Err)
+			require.Equal(t, domain.RemoteFailureTimeout, status.FailureKind)
+		})
 	})
 
 	t.Run("orderly close wins a failure", func(t *testing.T) {
-		e := testEngine()
-		openTestStream(t, e, 1)
-		e.Terminate()
-		e.Fail(domain.RemoteFailureTimeout, errors.New("late"))
-		require.True(t, e.Closed())
-		require.NoError(t, e.Err())
-		require.Equal(t, domain.RemoteFailureNone, e.FailureKind())
-		status := mustStatus(t, e, 1)
-		require.NoError(t, status.Err)
-		require.Equal(t, domain.RemoteFailureNone, status.FailureKind)
+		inBubble(t, func(t *testing.T) {
+			e := testEngine()
+			openTestStream(t, e, 1)
+			e.Terminate()
+			e.Fail(domain.RemoteFailureTimeout, errors.New("late"))
+			require.True(t, e.Closed())
+			require.NoError(t, e.Err())
+			require.Equal(t, domain.RemoteFailureNone, e.FailureKind())
+			status := mustStatus(t, e, 1)
+			require.NoError(t, status.Err)
+			require.Equal(t, domain.RemoteFailureNone, status.FailureKind)
+		})
 	})
 }
 
@@ -1020,103 +1080,107 @@ func TestStreamEnginePhysicalFirstWins(t *testing.T) {
 // in order, and the first Take that empties the queue terminalizes the stream
 // and releases its slot and bytes. A sibling is untouched throughout.
 func TestStreamEngineClosingPreservesQueuedData(t *testing.T) {
-	e := testEngine()
-	closingRef := openTestStream(t, e, 1)
-	siblingRef := openTestStream(t, e, 2)
+	inBubble(t, func(t *testing.T) {
+		e := testEngine()
+		closingRef := openTestStream(t, e, 1)
+		siblingRef := openTestStream(t, e, 2)
 
-	for _, chunk := range []struct {
-		physical PhysicalStreamID
-		data     string
-	}{{1, "first"}, {1, "second"}, {2, "sibling"}} {
-		disposition, err := e.Data(Data{Physical: chunk.physical, Data: []byte(chunk.data)})
+		for _, chunk := range []struct {
+			physical PhysicalStreamID
+			data     string
+		}{{1, "first"}, {1, "second"}, {2, "sibling"}} {
+			disposition, err := e.Data(Data{Physical: chunk.physical, Data: []byte(chunk.data)})
+			require.NoError(t, err)
+			require.Equal(t, StreamAccepted, disposition)
+		}
+		require.Equal(t, len("first")+len("second")+len("sibling"), e.AggregateBytes())
+
+		// The orderly Close preserves both accepted chunks.
+		disposition, err := e.Close(Close{Physical: 1})
 		require.NoError(t, err)
 		require.Equal(t, StreamAccepted, disposition)
-	}
-	require.Equal(t, len("first")+len("second")+len("sibling"), e.AggregateBytes())
+		status := mustStatus(t, e, 1)
+		require.Equal(t, StreamClosing, status.State)
+		require.Equal(t, closingRef, status.Ref)
+		require.False(t, channelClosed(status.Done), "a closing stream is not terminal yet")
+		require.Equal(t, 2, status.QueuedChunks)
+		require.Equal(t, len("first")+len("second"), status.QueuedBytes)
+		require.Equal(t, 2, e.Live(), "the closing stream still holds its admission slot")
+		require.Equal(t, len("first")+len("second")+len("sibling"), e.AggregateBytes())
 
-	// The orderly Close preserves both accepted chunks.
-	disposition, err := e.Close(Close{Physical: 1})
-	require.NoError(t, err)
-	require.Equal(t, StreamAccepted, disposition)
-	status := mustStatus(t, e, 1)
-	require.Equal(t, StreamClosing, status.State)
-	require.Equal(t, closingRef, status.Ref)
-	require.False(t, channelClosed(status.Done), "a closing stream is not terminal yet")
-	require.Equal(t, 2, status.QueuedChunks)
-	require.Equal(t, len("first")+len("second"), status.QueuedBytes)
-	require.Equal(t, 2, e.Live(), "the closing stream still holds its admission slot")
-	require.Equal(t, len("first")+len("second")+len("sibling"), e.AggregateBytes())
+		// No new data is accepted while closing, and a second Close changes nothing.
+		_, err = e.Data(Data{Physical: 1, Data: []byte("late")})
+		require.ErrorIs(t, err, ErrStreamState)
+		disposition, err = e.Close(Close{Physical: 1})
+		require.NoError(t, err)
+		require.Equal(t, StreamDiscarded, disposition)
+		require.Equal(t, 2, mustStatus(t, e, 1).QueuedChunks, "a duplicate close preserved the queue")
 
-	// No new data is accepted while closing, and a second Close changes nothing.
-	_, err = e.Data(Data{Physical: 1, Data: []byte("late")})
-	require.ErrorIs(t, err, ErrStreamState)
-	disposition, err = e.Close(Close{Physical: 1})
-	require.NoError(t, err)
-	require.Equal(t, StreamDiscarded, disposition)
-	require.Equal(t, 2, mustStatus(t, e, 1).QueuedChunks, "a duplicate close preserved the queue")
+		// Draining preserves order and releases bytes chunk by chunk; only the last
+		// take terminalizes the stream.
+		chunk, ok := e.Take(1)
+		require.True(t, ok)
+		require.Equal(t, []byte("first"), chunk)
+		require.Equal(t, StreamClosing, mustStatus(t, e, 1).State, "still closing with one chunk left")
+		require.Equal(t, 2, e.Live())
+		require.Equal(t, len("second")+len("sibling"), e.AggregateBytes())
 
-	// Draining preserves order and releases bytes chunk by chunk; only the last
-	// take terminalizes the stream.
-	chunk, ok := e.Take(1)
-	require.True(t, ok)
-	require.Equal(t, []byte("first"), chunk)
-	require.Equal(t, StreamClosing, mustStatus(t, e, 1).State, "still closing with one chunk left")
-	require.Equal(t, 2, e.Live())
-	require.Equal(t, len("second")+len("sibling"), e.AggregateBytes())
+		chunk, ok = e.Take(1)
+		require.True(t, ok)
+		require.Equal(t, []byte("second"), chunk)
+		status = mustStatus(t, e, 1)
+		require.Equal(t, StreamTerminal, status.State)
+		require.True(t, channelClosed(status.Done))
+		require.Zero(t, status.QueuedChunks)
+		require.NoError(t, status.Err)
+		require.Equal(t, 1, e.Live(), "the drained stream released its slot")
+		require.Equal(t, len("sibling"), e.AggregateBytes(), "only the sibling's bytes remain")
 
-	chunk, ok = e.Take(1)
-	require.True(t, ok)
-	require.Equal(t, []byte("second"), chunk)
-	status = mustStatus(t, e, 1)
-	require.Equal(t, StreamTerminal, status.State)
-	require.True(t, channelClosed(status.Done))
-	require.Zero(t, status.QueuedChunks)
-	require.NoError(t, status.Err)
-	require.Equal(t, 1, e.Live(), "the drained stream released its slot")
-	require.Equal(t, len("sibling"), e.AggregateBytes(), "only the sibling's bytes remain")
+		// A drained closing stream accepts no second drain and no new frame.
+		_, ok = e.Take(1)
+		require.False(t, ok)
+		disposition, err = e.Close(Close{Physical: 1})
+		require.NoError(t, err)
+		require.Equal(t, StreamDiscarded, disposition)
 
-	// A drained closing stream accepts no second drain and no new frame.
-	_, ok = e.Take(1)
-	require.False(t, ok)
-	disposition, err = e.Close(Close{Physical: 1})
-	require.NoError(t, err)
-	require.Equal(t, StreamDiscarded, disposition)
-
-	// The sibling is untouched and still holds its own queued chunk.
-	siblingStatus := mustStatus(t, e, 2)
-	require.Equal(t, StreamOpen, siblingStatus.State)
-	require.Equal(t, siblingRef, siblingStatus.Ref)
-	require.Equal(t, 1, siblingStatus.QueuedChunks)
-	chunk, ok = e.Take(2)
-	require.True(t, ok)
-	require.Equal(t, []byte("sibling"), chunk)
+		// The sibling is untouched and still holds its own queued chunk.
+		siblingStatus := mustStatus(t, e, 2)
+		require.Equal(t, StreamOpen, siblingStatus.State)
+		require.Equal(t, siblingRef, siblingStatus.Ref)
+		require.Equal(t, 1, siblingStatus.QueuedChunks)
+		chunk, ok = e.Take(2)
+		require.True(t, ok)
+		require.Equal(t, []byte("sibling"), chunk)
+	})
 }
 
 // TestStreamEngineClosingResetDiscardsImmediately proves a Reset abandons a
 // closing stream's preserved queue at once: the bytes, the admission slot, and
 // the terminal outcome are released without waiting for a consumer.
 func TestStreamEngineClosingResetDiscardsImmediately(t *testing.T) {
-	e := testEngine()
-	openTestStream(t, e, 1)
-	_, err := e.Data(Data{Physical: 1, Data: []byte("queued")})
-	require.NoError(t, err)
-	disposition, err := e.Close(Close{Physical: 1})
-	require.NoError(t, err)
-	require.Equal(t, StreamAccepted, disposition)
-	require.Equal(t, StreamClosing, mustStatus(t, e, 1).State)
+	inBubble(t, func(t *testing.T) {
+		e := testEngine()
+		openTestStream(t, e, 1)
+		_, err := e.Data(Data{Physical: 1, Data: []byte("queued")})
+		require.NoError(t, err)
+		disposition, err := e.Close(Close{Physical: 1})
+		require.NoError(t, err)
+		require.Equal(t, StreamAccepted, disposition)
+		require.Equal(t, StreamClosing, mustStatus(t, e, 1).State)
 
-	disposition, err = e.Reset(Reset{Physical: 1})
-	require.NoError(t, err)
-	require.Equal(t, StreamAccepted, disposition)
-	status := mustStatus(t, e, 1)
-	require.Equal(t, StreamTerminal, status.State)
-	require.True(t, channelClosed(status.Done))
-	require.Zero(t, status.QueuedChunks)
-	require.Zero(t, status.QueuedBytes)
-	require.Zero(t, e.AggregateBytes())
-	require.Zero(t, e.Live())
-	_, ok := e.Take(1)
-	require.False(t, ok, "a reset discarded the preserved queue")
+		disposition, err = e.Reset(Reset{Physical: 1})
+		require.NoError(t, err)
+		require.Equal(t, StreamAccepted, disposition)
+		status := mustStatus(t, e, 1)
+		require.Equal(t, StreamTerminal, status.State)
+		require.True(t, channelClosed(status.Done))
+		require.Zero(t, status.QueuedChunks)
+		require.Zero(t, status.QueuedBytes)
+		require.Zero(t, e.AggregateBytes())
+		require.Zero(t, e.Live())
+		_, ok := e.Take(1)
+		require.False(t, ok, "a reset discarded the preserved queue")
+	})
 }
 
 // TestStreamEngineClosingAccountingBounded proves the closing accounting is
@@ -1124,27 +1188,29 @@ func TestStreamEngineClosingResetDiscardsImmediately(t *testing.T) {
 // slot and bytes until the draining Take releases them, and the retired record
 // set never grows past its retention bound.
 func TestStreamEngineClosingAccountingBounded(t *testing.T) {
-	e := testEngine()
-	const churn = MaxRetiredStreamRecords * 3
-	for i := 1; i <= churn; i++ {
-		id := PhysicalStreamID(i)
-		openTestStream(t, e, id)
-		_, err := e.Data(Data{Physical: id, Data: []byte{byte(i)}})
-		require.NoError(t, err)
-		disposition, err := e.Close(Close{Physical: id})
-		require.NoError(t, err)
-		require.Equal(t, StreamAccepted, disposition)
-		require.Equal(t, StreamClosing, mustStatus(t, e, id).State)
-		require.Equal(t, 1, e.Live())
-		require.Equal(t, 1, e.AggregateBytes())
+	inBubble(t, func(t *testing.T) {
+		e := testEngine()
+		const churn = MaxRetiredStreamRecords * 3
+		for i := 1; i <= churn; i++ {
+			id := PhysicalStreamID(i)
+			openTestStream(t, e, id)
+			_, err := e.Data(Data{Physical: id, Data: []byte{byte(i)}})
+			require.NoError(t, err)
+			disposition, err := e.Close(Close{Physical: id})
+			require.NoError(t, err)
+			require.Equal(t, StreamAccepted, disposition)
+			require.Equal(t, StreamClosing, mustStatus(t, e, id).State)
+			require.Equal(t, 1, e.Live())
+			require.Equal(t, 1, e.AggregateBytes())
 
-		chunk, ok := e.Take(id)
-		require.True(t, ok)
-		require.Equal(t, []byte{byte(i)}, chunk)
-		require.Equal(t, StreamTerminal, mustStatus(t, e, id).State)
-		require.Zero(t, e.Live())
-		require.Zero(t, e.AggregateBytes())
-	}
-	require.Len(t, e.retired, MaxRetiredStreamRecords)
-	require.LessOrEqual(t, len(e.streams), MaxRetiredStreamRecords)
+			chunk, ok := e.Take(id)
+			require.True(t, ok)
+			require.Equal(t, []byte{byte(i)}, chunk)
+			require.Equal(t, StreamTerminal, mustStatus(t, e, id).State)
+			require.Zero(t, e.Live())
+			require.Zero(t, e.AggregateBytes())
+		}
+		require.Len(t, e.retired, MaxRetiredStreamRecords)
+		require.LessOrEqual(t, len(e.streams), MaxRetiredStreamRecords)
+	})
 }

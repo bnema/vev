@@ -112,14 +112,13 @@ func (s *superviseServer) serveQUICCapturing(t *testing.T, server *quic.Server) 
 // awaitQUICAccepted waits for the aggregate to deliver count typed admissions.
 func (s *superviseServer) awaitQUICAccepted(t *testing.T, count int) {
 	t.Helper()
-	require.Eventually(t, func() bool { return s.acceptedCount() >= count }, quicCarriageDeadline, time.Millisecond,
-		"server accepted %d of %d streams", s.acceptedCount(), count)
+	s.awaitAccepted(t, count)
 }
 
 // quicDaemonPump builds a daemon-side pump over the daemon end of a real QUIC
 // mux carriage and returns the raw broker end for direct frame injection, so a
 // test can drive deterministic inbound traffic over the actual QUIC stream.
-func quicDaemonPump(t *testing.T) (*Pump, RawFramedTransport) {
+func quicDaemonPump(t *testing.T) (*Pump, RawFramedTransport, admissions) {
 	t.Helper()
 	server, readiness, addr := quicCarriageEndpoint(t)
 	ctx, cancel := context.WithTimeout(context.Background(), quicCarriageDeadline)
@@ -151,11 +150,8 @@ func quicDaemonPump(t *testing.T) (*Pump, RawFramedTransport) {
 	carrier, err := NewPreambleCarrier(daemon)
 	require.NoError(t, err)
 	require.NoError(t, carrier.Negotiate(DefaultMuxCeilings()))
-	pump, err := NewPump(carrier, DirectionClient, DefaultMuxCeilings())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = pump.Close() })
-	pump.Start(context.Background())
-	return pump, client
+	pump, admitted := newObservedPump(t, carrier)
+	return pump, client, admitted
 }
 
 // injectQUICClientFrame writes one client frame over the real QUIC carriage.
@@ -178,6 +174,7 @@ func nextQUICServerFrame(t *testing.T, client RawFramedTransport) []byte {
 // delivers independent typed daemon admissions, and every stream's traffic is
 // isolated. Only one physical connection, one physical child, and one QUIC
 // stream exist for all 102 streams.
+// real I/O: UDP sockets and QUIC carriage
 func TestQUICCarriageSupervisorTwoThenHundredTypedAdmissions(t *testing.T) {
 	binding := mustServerBinding(t)
 	policy := binding.Policy()
@@ -195,10 +192,10 @@ func TestQUICCarriageSupervisorTwoThenHundredTypedAdmissions(t *testing.T) {
 	require.NoError(t, daemon.awaitAdoption(t))
 
 	// Two independent typed admissions over the one physical carriage.
-	first, err := openTyped(physical, context.Background(), muxOpenRequest(1, policy))
+	first, err := openTyped(t, physical, context.Background(), muxOpenRequest(1, policy))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = first.Close() })
-	second, err := openTyped(physical, context.Background(), muxOpenRequest(2, policy))
+	second, err := openTyped(t, physical, context.Background(), muxOpenRequest(2, policy))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = second.Close() })
 	daemon.awaitQUICAccepted(t, 2)
@@ -219,7 +216,7 @@ func TestQUICCarriageSupervisorTwoThenHundredTypedAdmissions(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			connections[i], openErrs[i] = openTyped(physical, context.Background(), muxOpenRequest(uint64(3+i), policy))
+			connections[i], openErrs[i] = openTyped(t, physical, context.Background(), muxOpenRequest(uint64(3+i), policy))
 		}(i)
 	}
 	wg.Wait()
@@ -243,8 +240,7 @@ func TestQUICCarriageSupervisorTwoThenHundredTypedAdmissions(t *testing.T) {
 	// connection, and the daemon engine accounts for every admitted stream.
 	require.Equal(t, 1, daemon.supervisor.Children(), "all streams must share one physical QUIC connection")
 	pump := daemon.soleChildPump(t)
-	require.Eventually(t, func() bool { return pump.Engine().Live() == 2+extra }, quicCarriageDeadline, time.Millisecond,
-		"daemon engine admitted %d of %d streams", pump.Engine().Live(), 2+extra)
+	require.Equal(t, 2+extra, pump.Engine().Live(), "daemon engine must account for every round-tripped stream")
 
 	all := make([]ports.BrokerLogicalConnection, 0, 2+extra)
 	all = append(all, first, second)
@@ -252,8 +248,10 @@ func TestQUICCarriageSupervisorTwoThenHundredTypedAdmissions(t *testing.T) {
 	for _, connection := range all {
 		require.NoError(t, connection.Close())
 	}
-	require.Eventually(t, func() bool { return pump.Engine().Live() == 0 }, quicCarriageDeadline, time.Millisecond,
-		"daemon engine still holds %d live streams after close", pump.Engine().Live())
+	for id := PhysicalStreamID(1); id <= PhysicalStreamID(2+extra); id++ {
+		requireStreamState(t, pump, id, StreamTerminal)
+	}
+	require.Zero(t, pump.Engine().Live())
 	require.False(t, channelClosed(physical.Done()), "closing every stream must leave the physical carriage open")
 }
 
@@ -261,14 +259,15 @@ func TestQUICCarriageSupervisorTwoThenHundredTypedAdmissions(t *testing.T) {
 // carriage, that a logical consumer which never drains one stream's inbound
 // queue neither blocks the reader nor a sibling: the stalled stream is reset by
 // its own bound while the sibling keeps receiving.
+// real I/O: UDP sockets and QUIC carriage
 func TestQUICCarriageBlockedConsumerSiblingProgress(t *testing.T) {
-	pump, client := quicDaemonPump(t)
+	pump, client, admitted := quicDaemonPump(t)
 
 	const siblings = 2
 	for i := 1; i <= siblings; i++ {
 		injectQUICClientFrame(t, client, openFor(PhysicalStreamID(i)))
 	}
-	requireEngineEventually(t, pump, func(e *StreamEngine) bool { return e.Live() == siblings })
+	awaitAdmitted(t, admitted, siblings)
 	for i := 1; i <= siblings; i++ {
 		require.NoError(t, pump.Engine().Opened(Opened{Ref: testRef(PhysicalStreamID(i))}))
 	}
@@ -279,18 +278,14 @@ func TestQUICCarriageBlockedConsumerSiblingProgress(t *testing.T) {
 	for i := 0; i < full; i++ {
 		injectQUICClientFrame(t, client, Data{Physical: 1, Data: chunk})
 	}
-	requireEngineEventually(t, pump, func(e *StreamEngine) bool {
-		status, ok := e.Status(1)
-		return ok && status.QueuedChunks == full
-	})
+	awaitStatus(t, pump, 1, func(status StreamStatus) bool { return status.QueuedChunks == full }, "inbound window never filled")
 
 	// One more chunk exceeds the granted window; a sibling chunk still lands,
 	// so neither the reader nor the sibling was blocked.
 	injectQUICClientFrame(t, client, Data{Physical: 1, Data: chunk})
 	injectQUICClientFrame(t, client, Data{Physical: 2, Data: []byte("sibling")})
 
-	taken, ok := takeEventually(t, pump, 2)
-	require.True(t, ok)
+	taken := awaitTake(t, pump, 2)
 	require.Equal(t, []byte("sibling"), taken)
 
 	stalled := mustStatus(t, pump.Engine(), 1)
@@ -309,30 +304,27 @@ func TestQUICCarriageBlockedConsumerSiblingProgress(t *testing.T) {
 // TestQUICCarriageResetIsolation proves, over a real QUIC carriage, that one
 // stream-local refusal schedules exactly one Reset for its own stream and
 // leaves the physical connection and every sibling healthy.
+// real I/O: UDP sockets and QUIC carriage
 func TestQUICCarriageResetIsolation(t *testing.T) {
-	pump, client := quicDaemonPump(t)
+	pump, client, admitted := quicDaemonPump(t)
 
 	for _, id := range []PhysicalStreamID{1, 2, 3} {
 		injectQUICClientFrame(t, client, openFor(id))
 	}
-	requireEngineEventually(t, pump, func(e *StreamEngine) bool { return e.Live() == 3 })
+	awaitAdmitted(t, admitted, 3)
 	for _, id := range []PhysicalStreamID{2, 3} {
 		require.NoError(t, pump.Engine().Opened(Opened{Ref: testRef(id)}))
 	}
 
 	// Stream 1 is still opening: inbound data is a stream-local state refusal.
 	injectQUICClientFrame(t, client, Data{Physical: 1, Data: []byte("early")})
-	requireEngineEventually(t, pump, func(e *StreamEngine) bool {
-		status, ok := e.Status(1)
-		return ok && status.State == StreamTerminal
-	})
+	awaitStatus(t, pump, 1, func(status StreamStatus) bool { return status.State == StreamTerminal }, "early data never terminalized the stream")
 	settled := mustStatus(t, pump.Engine(), 1)
 	require.ErrorContains(t, settled.Err, "invalid stream state")
 	require.Equal(t, domain.RemoteFailureInvalidResponse, settled.FailureKind)
 
 	injectQUICClientFrame(t, client, Data{Physical: 2, Data: []byte("sibling")})
-	taken, ok := takeEventually(t, pump, 2)
-	require.True(t, ok)
+	taken := awaitTake(t, pump, 2)
 	require.Equal(t, []byte("sibling"), taken)
 
 	reset := decodeReset(t, nextQUICServerFrame(t, client), DirectionServer)
@@ -348,6 +340,7 @@ func TestQUICCarriageResetIsolation(t *testing.T) {
 // logical stream it carried, while a sibling physical QUIC connection on the
 // same supervisor is untouched and a fresh stream on the lost physical is
 // refused.
+// real I/O: UDP sockets and QUIC carriage
 func TestQUICCarriagePhysicalFailureFansOutAndIsIsolated(t *testing.T) {
 	binding := mustServerBinding(t)
 	policy := binding.Policy()
@@ -355,6 +348,7 @@ func TestQUICCarriagePhysicalFailureFansOutAndIsIsolated(t *testing.T) {
 	serverB, readinessB, addrB := quicCarriageEndpoint(t)
 
 	daemon := newSuperviseServer(t, binding, DefaultMuxCeilings(), 0, nil)
+	reaped := daemon.notifyReaped()
 	daemon.serve()
 	carriageA := daemon.serveQUICCapturing(t, serverA)
 	daemon.serveQUIC(t, serverB)
@@ -377,11 +371,11 @@ func TestQUICCarriagePhysicalFailureFansOutAndIsIsolated(t *testing.T) {
 
 	lost := make([]ports.BrokerLogicalConnection, 3)
 	for i := range lost {
-		lost[i], err = openTyped(physicalA, context.Background(), muxOpenRequest(uint64(i+1), policy))
+		lost[i], err = openTyped(t, physicalA, context.Background(), muxOpenRequest(uint64(i+1), policy))
 		require.NoError(t, err, "stream %d", i+1)
 		t.Cleanup(func() { _ = lost[i].Close() })
 	}
-	survivor, err := openTyped(physicalB, context.Background(), muxOpenRequest(1, policy))
+	survivor, err := openTyped(t, physicalB, context.Background(), muxOpenRequest(1, policy))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = survivor.Close() })
 	daemon.awaitQUICAccepted(t, 4)
@@ -415,9 +409,8 @@ func TestQUICCarriagePhysicalFailureFansOutAndIsIsolated(t *testing.T) {
 	// stream publishes on its own watcher goroutine, so the fan-out is
 	// asynchronous even though it can never precede the physical Done.
 	for i, stream := range lost {
-		require.Eventually(t, func() bool {
-			return channelClosed(stream.Done()) && stream.Err() != nil
-		}, quicCarriageDeadline, time.Millisecond, "lost stream %d never received the physical failure", i+1)
+		awaitClosed(t, stream.Done(), quicCarriageDeadline, "lost stream %d never received the physical failure", i+1)
+		require.Error(t, stream.Err(), "lost stream %d", i+1)
 	}
 
 	// The sibling physical QUIC connection is unaffected.
@@ -427,11 +420,11 @@ func TestQUICCarriagePhysicalFailureFansOutAndIsIsolated(t *testing.T) {
 	message, err := survivor.ReceiveServer()
 	require.NoError(t, err)
 	require.Equal(t, protocol.Pong{}, message)
-	require.Eventually(t, func() bool { return daemon.supervisor.Children() == 1 }, quicCarriageDeadline, time.Millisecond,
-		"the lost QUIC physical child was never reaped")
+	awaitClosed(t, reaped, quicCarriageDeadline, "the lost QUIC physical child was never reaped")
+	require.Equal(t, 1, daemon.supervisor.Children())
 
 	// The lost physical refuses a fresh stream.
-	_, err = openTyped(physicalA, context.Background(), muxOpenRequest(9, policy))
+	_, err = openTyped(t, physicalA, context.Background(), muxOpenRequest(9, policy))
 	require.Error(t, err)
 }
 
@@ -439,6 +432,7 @@ func TestQUICCarriagePhysicalFailureFansOutAndIsIsolated(t *testing.T) {
 // context covers only setup: once EndpointConnector.Connect returned over a real
 // QUIC carriage, cancelling the setup context never stops the pooled physical
 // connection, which Close alone owns.
+// real I/O: UDP sockets and QUIC carriage
 func TestQUICCarriageSetupContextDetachedFromPhysicalLifetime(t *testing.T) {
 	binding := mustServerBinding(t)
 	server, readiness, addr := quicCarriageEndpoint(t)
@@ -457,7 +451,7 @@ func TestQUICCarriageSetupContextDetachedFromPhysicalLifetime(t *testing.T) {
 
 	cancel()
 	require.False(t, channelClosed(physical.Done()))
-	logical, err := openTyped(physical, context.Background(), muxOpenRequest(1, binding.Policy()))
+	logical, err := openTyped(t, physical, context.Background(), muxOpenRequest(1, binding.Policy()))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = logical.Close() })
 	daemon.awaitQUICAccepted(t, 1)
@@ -471,6 +465,7 @@ func TestQUICCarriageSetupContextDetachedFromPhysicalLifetime(t *testing.T) {
 // TestQUICCarriageCanceledSetupAdmitsNothing proves one setup context covers
 // bootstrap, dial, auth, and the mux handshake: a canceled setup admits no
 // physical connection, no child, and no stream.
+// real I/O: UDP sockets and QUIC carriage
 func TestQUICCarriageCanceledSetupAdmitsNothing(t *testing.T) {
 	binding := mustServerBinding(t)
 	server, readiness, addr := quicCarriageEndpoint(t)
@@ -493,6 +488,7 @@ func TestQUICCarriageCanceledSetupAdmitsNothing(t *testing.T) {
 // covers the daemonmux physical handshake over a real QUIC carriage: a daemon
 // that never answers the preamble fails the whole Connect within the setup
 // deadline and publishes no physical connection.
+// real I/O: UDP sockets and QUIC carriage
 func TestQUICCarriageSetupDeadlineBoundsTheMuxHandshake(t *testing.T) {
 	binding := mustServerBinding(t)
 	_, readiness, addr := quicCarriageEndpoint(t)

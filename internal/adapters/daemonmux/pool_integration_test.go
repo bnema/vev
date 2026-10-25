@@ -5,28 +5,36 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/broker"
 )
 
-// p3cResolver is a test BrokerRouteAuthority: it returns one authenticated
-// endpoint per request, keyed on the request's registration endpoint so two
-// compatible aliases resolve to the same (identity, policy) physical key with
-// distinct adapter routes.
-type p3cResolver func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerDialTarget, error)
-
-func (f p3cResolver) ResolveDialTarget(ctx context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerDialTarget, error) {
-	return f(ctx, request)
+// p3cRouteAuthority returns a generated BrokerRouteAuthority mock that
+// resolves each request through resolve, so two compatible aliases resolve to
+// the same (identity, policy) physical key with distinct adapter routes.
+func p3cRouteAuthority(t *testing.T, resolve func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerDialTarget, error)) *portsmocks.MockBrokerRouteAuthority {
+	t.Helper()
+	authority := portsmocks.NewMockBrokerRouteAuthority(t)
+	authority.EXPECT().ResolveDialTarget(mock.Anything, mock.Anything).RunAndReturn(resolve).Maybe()
+	return authority
 }
 
-type p3cBinder struct{}
-
-func (p3cBinder) BindAuthenticatedIdentity(_ context.Context, request ports.BrokerIdentityBindingRequest) (ports.BrokerDaemonIdentity, error) {
-	return request.Identity, nil
+// p3cIdentityBinder returns a generated BrokerIdentityBinder mock that adopts
+// the authenticated identity verbatim.
+func p3cIdentityBinder(t *testing.T) *portsmocks.MockBrokerIdentityBinder {
+	t.Helper()
+	binder := portsmocks.NewMockBrokerIdentityBinder(t)
+	binder.EXPECT().BindAuthenticatedIdentity(mock.Anything, mock.Anything).RunAndReturn(
+		func(_ context.Context, request ports.BrokerIdentityBindingRequest) (ports.BrokerDaemonIdentity, error) {
+			return request.Identity, nil
+		}).Maybe()
+	return binder
 }
 
 // p3cRemoteRequest builds one valid remote control-purpose request.
@@ -57,30 +65,31 @@ func p3cPoolLimits() broker.PoolLimits {
 // TestPoolSharesCompatibleAliasesOverOnePhysical proves the pool pools two
 // compatible aliases over exactly one daemonmux physical connection: only one
 // carriage is dialed, and both logical streams flow over it.
+// real I/O: Unix-domain socket-backed pooled carriage
 func TestPoolSharesCompatibleAliasesOverOnePhysical(t *testing.T) {
 	binding := mustRemoteServerBinding(t)
 	policy := binding.Policy()
 	server := newSuperviseServer(t, binding, DefaultMuxCeilings(), 0, nil)
 	server.serve()
-	resolver := p3cResolver(func(_ context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerDialTarget, error) {
+	resolver := p3cRouteAuthority(t, func(_ context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerDialTarget, error) {
 		return muxEndpoint(binding.Identity(), policy, "raw://"+request.Endpoint), nil
 	})
 
 	connector, err := NewEndpointConnector(server.dial(), DefaultMuxCeilings())
 	require.NoError(t, err)
-	pool, err := broker.NewPool(1, resolver, p3cBinder{}, connector, newListenerClock(time.Now()), p3cPoolLimits())
+	pool, err := broker.NewPool(1, resolver, p3cIdentityBinder(t), connector, newListenerClock(t, time.Now()).mock, p3cPoolLimits())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = pool.Close() })
 
 	client, err := pool.RegisterClient()
 	require.NoError(t, err)
 
-	first, err := openTyped(pool, context.Background(), p3cRemoteRequest(client, "aliasA@host:22", 1, policy))
+	first, err := openTyped(t, pool, context.Background(), p3cRemoteRequest(client, "aliasA@host:22", 1, policy))
 	require.NoError(t, err)
 	require.NotNil(t, first)
 	t.Cleanup(func() { _ = first.Close() })
 
-	second, err := openTyped(pool, context.Background(), p3cRemoteRequest(client, "aliasB@host:22", 2, policy))
+	second, err := openTyped(t, pool, context.Background(), p3cRemoteRequest(client, "aliasB@host:22", 2, policy))
 	require.NoError(t, err)
 	require.NotNil(t, second)
 	t.Cleanup(func() { _ = second.Close() })
@@ -99,22 +108,23 @@ func TestPoolSharesCompatibleAliasesOverOnePhysical(t *testing.T) {
 // TestPoolRefusesConflictingPolicyWithoutDial proves the pool rejects a request
 // whose policy conflicts with the resolved endpoint policy before any carriage
 // is dialed.
+// real I/O: Unix-domain socket-backed pooled carriage
 func TestPoolRefusesConflictingPolicyWithoutDial(t *testing.T) {
 	binding := mustServerBinding(t)
 	server := newSuperviseServer(t, binding, DefaultMuxCeilings(), 0, nil)
-	resolver := p3cResolver(func(_ context.Context, _ ports.BrokerOpenStreamRequest) (ports.BrokerDialTarget, error) {
+	resolver := p3cRouteAuthority(t, func(_ context.Context, _ ports.BrokerOpenStreamRequest) (ports.BrokerDialTarget, error) {
 		return muxEndpoint(binding.Identity(), binding.Policy(), "raw://conflict"), nil
 	})
 
 	connector, err := NewEndpointConnector(server.dial(), DefaultMuxCeilings())
 	require.NoError(t, err)
-	pool, err := broker.NewPool(1, resolver, p3cBinder{}, connector, newListenerClock(time.Now()), p3cPoolLimits())
+	pool, err := broker.NewPool(1, resolver, p3cIdentityBinder(t), connector, newListenerClock(t, time.Now()).mock, p3cPoolLimits())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = pool.Close() })
 
 	client, err := pool.RegisterClient()
 	require.NoError(t, err)
-	_, err = openTyped(pool, context.Background(), p3cRemoteRequest(client, "aliasA@host:22", 1, alternatePolicy(binding.Policy())))
+	_, err = openTyped(t, pool, context.Background(), p3cRemoteRequest(client, "aliasA@host:22", 1, alternatePolicy(binding.Policy())))
 	require.Error(t, err)
 	var typed ports.BrokerError
 	require.ErrorAs(t, err, &typed)
@@ -125,24 +135,25 @@ func TestPoolRefusesConflictingPolicyWithoutDial(t *testing.T) {
 // TestPoolSurfacesPhysicalLossPerStream proves a carriage loss is published
 // per affected logical stream through the pool: the pooled stream terminates
 // with a broker stream-lost error once the accepted physical carriage dies.
+// real I/O: Unix-domain socket-backed pooled carriage
 func TestPoolSurfacesPhysicalLossPerStream(t *testing.T) {
 	binding := mustRemoteServerBinding(t)
 	policy := binding.Policy()
 	server := newSuperviseServer(t, binding, DefaultMuxCeilings(), 0, nil)
 	server.serve()
-	resolver := p3cResolver(func(_ context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerDialTarget, error) {
+	resolver := p3cRouteAuthority(t, func(_ context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerDialTarget, error) {
 		return muxEndpoint(binding.Identity(), policy, "raw://"+request.Endpoint), nil
 	})
 
 	connector, err := NewEndpointConnector(server.dial(), DefaultMuxCeilings())
 	require.NoError(t, err)
-	pool, err := broker.NewPool(1, resolver, p3cBinder{}, connector, newListenerClock(time.Now()), p3cPoolLimits())
+	pool, err := broker.NewPool(1, resolver, p3cIdentityBinder(t), connector, newListenerClock(t, time.Now()).mock, p3cPoolLimits())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = pool.Close() })
 
 	client, err := pool.RegisterClient()
 	require.NoError(t, err)
-	stream, err := openTyped(pool, context.Background(), p3cRemoteRequest(client, "aliasA@host:22", 1, policy))
+	stream, err := openTyped(t, pool, context.Background(), p3cRemoteRequest(client, "aliasA@host:22", 1, policy))
 	require.NoError(t, err)
 	server.awaitAccepted(t, 1)
 

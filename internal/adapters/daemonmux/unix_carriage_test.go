@@ -16,7 +16,6 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -127,6 +126,7 @@ func (s *superviseServer) soleChildPump(t *testing.T) *Pump {
 // delivers independent typed daemon admissions, and every stream's traffic is
 // isolated. Only one physical connection and one physical child exist for all
 // 102 streams.
+// real I/O: Unix-domain socket carriage
 func TestUnixCarriageSupervisorTwoThenHundredTypedAdmissions(t *testing.T) {
 	binding := mustServerBinding(t)
 	policy := binding.Policy()
@@ -148,10 +148,10 @@ func TestUnixCarriageSupervisorTwoThenHundredTypedAdmissions(t *testing.T) {
 	require.NoError(t, server.awaitAdoption(t))
 
 	// Two independent typed admissions over the one physical carriage.
-	first, err := openTyped(physical, context.Background(), muxOpenRequest(1, policy))
+	first, err := openTyped(t, physical, context.Background(), muxOpenRequest(1, policy))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = first.Close() })
-	second, err := openTyped(physical, context.Background(), muxOpenRequest(2, policy))
+	second, err := openTyped(t, physical, context.Background(), muxOpenRequest(2, policy))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = second.Close() })
 	server.awaitAccepted(t, 2)
@@ -172,7 +172,7 @@ func TestUnixCarriageSupervisorTwoThenHundredTypedAdmissions(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			connections[i], openErrs[i] = openTyped(physical, context.Background(), muxOpenRequest(uint64(3+i), policy))
+			connections[i], openErrs[i] = openTyped(t, physical, context.Background(), muxOpenRequest(uint64(3+i), policy))
 		}(i)
 	}
 	wg.Wait()
@@ -196,8 +196,7 @@ func TestUnixCarriageSupervisorTwoThenHundredTypedAdmissions(t *testing.T) {
 	// connection, and the daemon engine accounts for every admitted stream.
 	require.Equal(t, 1, server.supervisor.Children(), "all streams must share one physical Unix connection")
 	pump := server.soleChildPump(t)
-	require.Eventually(t, func() bool { return pump.Engine().Live() == 2+extra }, p3cTestDeadline, time.Millisecond,
-		"daemon engine admitted %d of %d streams", pump.Engine().Live(), 2+extra)
+	require.Equal(t, 2+extra, pump.Engine().Live(), "daemon engine must account for every round-tripped stream")
 
 	all := make([]ports.BrokerLogicalConnection, 0, 2+extra)
 	all = append(all, first, second)
@@ -205,25 +204,24 @@ func TestUnixCarriageSupervisorTwoThenHundredTypedAdmissions(t *testing.T) {
 	for _, connection := range all {
 		require.NoError(t, connection.Close())
 	}
-	require.Eventually(t, func() bool { return pump.Engine().Live() == 0 }, p3cTestDeadline, time.Millisecond,
-		"daemon engine still holds %d live streams after close", pump.Engine().Live())
+	for id := PhysicalStreamID(1); id <= PhysicalStreamID(2+extra); id++ {
+		requireStreamState(t, pump, id, StreamTerminal)
+	}
+	require.Zero(t, pump.Engine().Live())
 	require.False(t, channelClosed(physical.Done()), "closing every stream must leave the physical carriage open")
 }
 
 // unixDaemonPump builds a daemon-side pump over the server end of a real mux
 // carriage and returns the raw client end for direct frame injection, so a test
 // can drive deterministic inbound traffic over the actual socket.
-func unixDaemonPump(t *testing.T) (*Pump, RawFramedTransport) {
+func unixDaemonPump(t *testing.T) (*Pump, RawFramedTransport, admissions) {
 	t.Helper()
 	client, server := unixRawCarriagePair(t)
 	carrier, err := NewPreambleCarrier(server)
 	require.NoError(t, err)
 	require.NoError(t, carrier.Negotiate(DefaultMuxCeilings()))
-	pump, err := NewPump(carrier, DirectionClient, DefaultMuxCeilings())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = pump.Close() })
-	pump.Start(context.Background())
-	return pump, client
+	pump, admitted := newObservedPump(t, carrier)
+	return pump, client, admitted
 }
 
 // injectUnixClientFrame writes one client frame over the real Unix carriage.
@@ -244,14 +242,15 @@ func nextUnixServerFrame(t *testing.T, client RawFramedTransport) []byte {
 // carriage, that a logical consumer which never drains one stream's inbound
 // queue neither blocks the reader nor a sibling: the stalled stream is reset by
 // its own bound while the sibling keeps receiving.
+// real I/O: Unix-domain socket carriage
 func TestUnixCarriageBlockedConsumerSiblingProgress(t *testing.T) {
-	pump, client := unixDaemonPump(t)
+	pump, client, admitted := unixDaemonPump(t)
 
 	const siblings = 2
 	for i := 1; i <= siblings; i++ {
 		injectUnixClientFrame(t, client, openFor(PhysicalStreamID(i)))
 	}
-	requireEngineEventually(t, pump, func(e *StreamEngine) bool { return e.Live() == siblings })
+	awaitAdmitted(t, admitted, siblings)
 	for i := 1; i <= siblings; i++ {
 		require.NoError(t, pump.Engine().Opened(Opened{Ref: testRef(PhysicalStreamID(i))}))
 	}
@@ -262,18 +261,14 @@ func TestUnixCarriageBlockedConsumerSiblingProgress(t *testing.T) {
 	for i := 0; i < full; i++ {
 		injectUnixClientFrame(t, client, Data{Physical: 1, Data: chunk})
 	}
-	requireEngineEventually(t, pump, func(e *StreamEngine) bool {
-		status, ok := e.Status(1)
-		return ok && status.QueuedChunks == full
-	})
+	awaitStatus(t, pump, 1, func(status StreamStatus) bool { return status.QueuedChunks == full }, "inbound window never filled")
 
 	// One more chunk exceeds the granted window; a sibling chunk still lands,
 	// so neither the reader nor the sibling was blocked.
 	injectUnixClientFrame(t, client, Data{Physical: 1, Data: chunk})
 	injectUnixClientFrame(t, client, Data{Physical: 2, Data: []byte("sibling")})
 
-	taken, ok := takeEventually(t, pump, 2)
-	require.True(t, ok)
+	taken := awaitTake(t, pump, 2)
 	require.Equal(t, []byte("sibling"), taken)
 
 	stalled := mustStatus(t, pump.Engine(), 1)
@@ -292,30 +287,27 @@ func TestUnixCarriageBlockedConsumerSiblingProgress(t *testing.T) {
 // TestUnixCarriageResetIsolation proves, over a real Unix carriage, that one
 // stream-local refusal schedules exactly one Reset for its own stream and
 // leaves the physical connection and every sibling healthy.
+// real I/O: Unix-domain socket carriage
 func TestUnixCarriageResetIsolation(t *testing.T) {
-	pump, client := unixDaemonPump(t)
+	pump, client, admitted := unixDaemonPump(t)
 
 	for _, id := range []PhysicalStreamID{1, 2, 3} {
 		injectUnixClientFrame(t, client, openFor(id))
 	}
-	requireEngineEventually(t, pump, func(e *StreamEngine) bool { return e.Live() == 3 })
+	awaitAdmitted(t, admitted, 3)
 	for _, id := range []PhysicalStreamID{2, 3} {
 		require.NoError(t, pump.Engine().Opened(Opened{Ref: testRef(id)}))
 	}
 
 	// Stream 1 is still opening: inbound data is a stream-local state refusal.
 	injectUnixClientFrame(t, client, Data{Physical: 1, Data: []byte("early")})
-	requireEngineEventually(t, pump, func(e *StreamEngine) bool {
-		status, ok := e.Status(1)
-		return ok && status.State == StreamTerminal
-	})
+	awaitStatus(t, pump, 1, func(status StreamStatus) bool { return status.State == StreamTerminal }, "early data never terminalized the stream")
 	settled := mustStatus(t, pump.Engine(), 1)
 	require.ErrorContains(t, settled.Err, "invalid stream state")
 	require.Equal(t, domain.RemoteFailureInvalidResponse, settled.FailureKind)
 
 	injectUnixClientFrame(t, client, Data{Physical: 2, Data: []byte("sibling")})
-	taken, ok := takeEventually(t, pump, 2)
-	require.True(t, ok)
+	taken := awaitTake(t, pump, 2)
 	require.Equal(t, []byte("sibling"), taken)
 
 	reset := decodeReset(t, nextUnixServerFrame(t, client), DirectionServer)
