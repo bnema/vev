@@ -52,6 +52,9 @@ func dialMuxAsync(t *testing.T, ctx context.Context, path string) <-chan struct 
 	return out
 }
 
+// awaitMuxDial uses real I/O; its waits are wall-clock bounded.
+//
+//testpolicy:realtime real AF_UNIX socket transport
 func awaitMuxDial(t *testing.T, out <-chan struct {
 	transport wire.BoundedTransport
 	err       error
