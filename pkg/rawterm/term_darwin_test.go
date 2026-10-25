@@ -29,6 +29,7 @@ func openPTYPair(t *testing.T) (master, slave *os.File) {
 	return master, slave
 }
 
+// real I/O: opens a real PTY.
 func TestPreparePtyOpensSlave(t *testing.T) {
 	master, slave := openPTYPair(t)
 	defer func() { _ = master.Close() }()
@@ -39,6 +40,7 @@ func TestPreparePtyOpensSlave(t *testing.T) {
 	}
 }
 
+// real I/O: opens a real PTY.
 func TestMakeRawRestore(t *testing.T) {
 	master, slave := openPTYPair(t)
 	defer func() { _ = master.Close() }()
@@ -76,6 +78,7 @@ func TestMakeRawRestore(t *testing.T) {
 	}
 }
 
+// real I/O: opens a real PTY.
 func TestSetWinsizeGetSizeRoundTrip(t *testing.T) {
 	master, slave := openPTYPair(t)
 	defer func() { _ = master.Close() }()
