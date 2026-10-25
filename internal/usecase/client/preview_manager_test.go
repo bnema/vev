@@ -80,9 +80,10 @@ func (h *previewHarness) settle() bool {
 
 func (h *previewHarness) awaitWake() {
 	h.t.Helper()
+	synctest.Wait()
 	select {
 	case <-h.manager.changed():
-	case <-time.After(5 * time.Second):
+	default:
 		h.t.Fatal("the preview manager did not wake")
 	}
 }

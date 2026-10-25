@@ -69,10 +69,11 @@ func (c *supervisorTestClock) newTimer(delay time.Duration) ports.Timer {
 
 func (c *supervisorTestClock) awaitTimer(t *testing.T) *supervisorTestTimer {
 	t.Helper()
+	synctest.Wait()
 	select {
 	case timer := <-c.created:
 		return timer
-	case <-time.After(5 * time.Second):
+	default:
 		t.Fatal("supervisor did not schedule a retry timer")
 		return nil
 	}
@@ -259,10 +260,11 @@ func (c *supervisorTestConnector) inFlightCount() int {
 
 func (c *supervisorTestConnector) awaitStart(t *testing.T) int {
 	t.Helper()
+	synctest.Wait()
 	select {
 	case call := <-c.started:
 		return call
-	case <-time.After(5 * time.Second):
+	default:
 		t.Fatal("supervisor did not start a connection attempt")
 		return 0
 	}

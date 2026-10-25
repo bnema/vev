@@ -312,23 +312,17 @@ func sessionTestRun(t *testing.T, stream ports.BrokerLogicalConnection, terminal
 	return events
 }
 
-// awaitHello blocks until the worker sent its Hello.
+// awaitHello returns the Hello the worker sent once the bubble is quiescent.
 func awaitHello(t *testing.T, stream *streamLog) protocol.Hello {
 	t.Helper()
-	deadline := time.After(5 * time.Second)
-	for {
-		for _, message := range stream.messages() {
-			if hello, ok := message.(protocol.Hello); ok {
-				return hello
-			}
-		}
-		select {
-		case <-deadline:
-			t.Fatal("the worker never sent Hello")
-			return protocol.Hello{}
-		case <-time.After(time.Millisecond):
+	synctest.Wait()
+	for _, message := range stream.messages() {
+		if hello, ok := message.(protocol.Hello); ok {
+			return hello
 		}
 	}
+	t.Fatal("the worker never sent Hello")
+	return protocol.Hello{}
 }
 
 // TestSessionAttachmentWorkerStaysConnectingUntilPublication proves Welcome is
