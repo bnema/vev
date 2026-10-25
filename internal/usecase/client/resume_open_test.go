@@ -21,8 +21,8 @@ func TestResumeCancelDuringStreamOpen(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				picker := newAttachTestPicker()
-				h := startAttachHarnessConfig(t, picker, func(cfg *SupervisorConfig) { cfg.Jitter = resumeTestJitter })
+				pickerMock, picker := newAttachTestPicker(t)
+				h := startAttachHarnessConfig(t, pickerMock, func(cfg *SupervisorConfig) { cfg.Jitter = resumeTestJitter })
 				first := newSessionStream(t)
 				opened := make(chan struct{})
 				cancelled := make(chan struct{})
@@ -91,8 +91,8 @@ func TestResumeHeldKeysNeverReachThePicker(t *testing.T) {
 }
 
 func assertHeldKeysDroppedAtPicker(t *testing.T, cancel bool) {
-	picker := newAttachTestPicker()
-	h := startAttachHarnessConfig(t, picker, func(cfg *SupervisorConfig) { cfg.Jitter = resumeTestJitter })
+	pickerMock, picker := newAttachTestPicker(t)
+	h := startAttachHarnessConfig(t, pickerMock, func(cfg *SupervisorConfig) { cfg.Jitter = resumeTestJitter })
 	first := newSessionStream(t)
 	opened := make(chan struct{}, 1)
 	refuse := make(chan struct{})

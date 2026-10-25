@@ -17,9 +17,9 @@ import (
 // cannot pass while the attachment still owns terminal input.
 func TestSessionPickerDetachRevokesForegroundBeforePicker(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		picker := newAttachTestPicker()
+		pickerMock, picker := newAttachTestPicker(t)
 		notices := make(chan LifecycleNotice, 4)
-		harness := startAttachHarnessConfig(t, picker, func(cfg *SupervisorConfig) {
+		harness := startAttachHarnessConfig(t, pickerMock, func(cfg *SupervisorConfig) {
 			cfg.NotifyLifecycle = func(notice LifecycleNotice) { notices <- notice }
 		})
 		stream := newSessionStream(t)

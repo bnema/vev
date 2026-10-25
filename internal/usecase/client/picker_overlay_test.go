@@ -22,7 +22,7 @@ import (
 
 // recordOp records one picker decision on the scripted picker, exactly like
 // the controller's coalesced wake.
-func (p *attachTestPicker) recordOp(op pickerOp, key string, request ports.BrokerOpenStreamRequest) {
+func (p *attachTestPickerState) recordOp(op pickerOp, key string, request ports.BrokerOpenStreamRequest) {
 	p.mu.Lock()
 	p.op = op
 	p.key = key
@@ -35,7 +35,7 @@ func (p *attachTestPicker) recordOp(op pickerOp, key string, request ports.Broke
 }
 
 // opTaken reports whether the supervisor consumed the recorded decision.
-func (p *attachTestPicker) opTaken() bool {
+func (p *attachTestPickerState) opTaken() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.op == (pickerOp{})
@@ -43,7 +43,7 @@ func (p *attachTestPicker) opTaken() bool {
 
 // attachLiveSession commits one attachment on the harness and returns its
 // stream once the attachment is presented.
-func attachLiveSession(t *testing.T, harness *attachTestHarness, picker *attachTestPicker) *streamLog {
+func attachLiveSession(t *testing.T, harness *attachTestHarness, picker *attachTestPickerState) *streamLog {
 	t.Helper()
 	stream := newSessionStream(t)
 	harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
@@ -129,8 +129,8 @@ func TestPickerOverlayReturnsToLiveAttachment(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				picker := newAttachTestPicker()
-				harness := startAttachHarness(t, picker)
+				pickerMock, picker := newAttachTestPicker(t)
+				harness := startAttachHarness(t, pickerMock)
 				stream := attachLiveSession(t, harness, picker)
 				foreground := harness.sup.attachments.authority.foreground()
 				require.NotNil(t, foreground)
@@ -201,9 +201,9 @@ func TestPickerOverlayCommitElsewhereSwitchesAttachment(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				picker := newAttachTestPicker()
+				pickerMock, picker := newAttachTestPicker(t)
 				notices := make(chan LifecycleNotice, 8)
-				harness := startAttachHarnessConfig(t, picker, func(cfg *SupervisorConfig) {
+				harness := startAttachHarnessConfig(t, pickerMock, func(cfg *SupervisorConfig) {
 					cfg.NotifyLifecycle = func(notice LifecycleNotice) { notices <- notice }
 				})
 				if tt.stopped {
@@ -303,9 +303,9 @@ func TestPickerOverlaySettlesUIActions(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				picker := newAttachTestPicker()
+				pickerMock, picker := newAttachTestPicker(t)
 				var ui *UI
-				harness := startAttachHarnessConfig(t, picker, func(cfg *SupervisorConfig) {
+				harness := startAttachHarnessConfig(t, pickerMock, func(cfg *SupervisorConfig) {
 					ui = NewUI(cfg.Terminal.(ports.UIState), cfg.Clock)
 					cfg.UI = ui
 				})
@@ -432,8 +432,8 @@ func TestPickerCloseWithoutAttachment(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				picker := newAttachTestPicker()
-				harness := startAttachHarness(t, picker)
+				pickerMock, picker := newAttachTestPicker(t)
+				harness := startAttachHarness(t, pickerMock)
 				picker.recordOp(tt.op, "", ports.BrokerOpenStreamRequest{})
 				if tt.wantExit {
 					require.NoError(t, harness.waitRun(t))
@@ -559,8 +559,8 @@ func TestMovePickerOfferIsPresentedAndAnswered(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				picker := newAttachTestPicker()
-				harness := startAttachHarness(t, picker)
+				pickerMock, picker := newAttachTestPicker(t)
+				harness := startAttachHarness(t, pickerMock)
 				stream := attachLiveSession(t, harness, picker)
 				openMovePicker(t, harness, stream, 7)
 
@@ -593,8 +593,8 @@ func TestMovePickerOfferIsPresentedAndAnswered(t *testing.T) {
 // instead of swallowing input with nothing on screen.
 func TestMovePickerOfferDeclinedUnderSessionPicker(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		picker := newAttachTestPicker()
-		harness := startAttachHarness(t, picker)
+		pickerMock, picker := newAttachTestPicker(t)
+		harness := startAttachHarness(t, pickerMock)
 		stream := attachLiveSession(t, harness, picker)
 		stream.deliver(navigationOffer(1))
 		awaitPresentation(t, harness.sup, PresentAttachedPicker)
@@ -643,8 +643,8 @@ func TestSupervisorReducerPickerOverlay(t *testing.T) {
 // a full-screen takeover, so it neither clears the screen nor spans it.
 func TestMovePickerDrawsAFloatingModalOverTheSession(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		picker := newAttachTestPicker()
-		harness := startAttachHarness(t, picker)
+		pickerMock, picker := newAttachTestPicker(t)
+		harness := startAttachHarness(t, pickerMock)
 		stream := attachLiveSession(t, harness, picker)
 		before := len(harness.terminal.written())
 		openMovePicker(t, harness, stream, 7)
@@ -718,8 +718,8 @@ func TestPickerOverlayInPlaceSupersededByDaemonOffer(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				picker := newAttachTestPicker()
-				harness := startAttachHarness(t, picker)
+				pickerMock, picker := newAttachTestPicker(t)
+				harness := startAttachHarness(t, pickerMock)
 				publishLiveLocal(harness, beta)
 				first := attachLiveSession(t, harness, picker)
 				first.deliver(navigationOffer(1))
@@ -768,8 +768,8 @@ func TestPickerOverlayInPlaceSupersededByDaemonOffer(t *testing.T) {
 func TestPickerOverlayRepeatInPlaceChoice(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		beta := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{2}, SessionName: "beta"}
-		picker := newAttachTestPicker()
-		harness := startAttachHarness(t, picker)
+		pickerMock, picker := newAttachTestPicker(t)
+		harness := startAttachHarness(t, pickerMock)
 		publishLiveLocal(harness, beta)
 		first := attachLiveSession(t, harness, picker)
 		other := sessionTestRequest(true)

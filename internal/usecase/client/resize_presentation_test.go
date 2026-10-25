@@ -374,8 +374,8 @@ func awaitStreamResizes(t *testing.T, stream *streamLog, want int) []protocol.Re
 // observe an intermediate size.
 func TestSupervisorResizeBurstCoalescesAndRenderObservesLatestGeometry(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		picker := newAttachTestPicker()
-		harness := startResizeHarness(t, resizeHarnessOptions{picker: picker})
+		pickerMock, _ := newAttachTestPicker(t)
+		harness := startResizeHarness(t, resizeHarnessOptions{picker: pickerMock})
 		synctest.Wait()
 		require.True(t, harness.sup.State().Connectivity == ConnectivityReady)
 		harness.recorder.drain()
@@ -423,8 +423,8 @@ func TestSupervisorResizeBurstCoalescesAndRenderObservesLatestGeometry(t *testin
 // snapshot was published.
 func TestSupervisorIdlePickerRepaintsOnResizeWithoutInputOrPublication(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		picker := newAttachTestPicker()
-		harness := startResizeHarness(t, resizeHarnessOptions{picker: picker})
+		pickerMock, picker := newAttachTestPicker(t)
+		harness := startResizeHarness(t, resizeHarnessOptions{picker: pickerMock})
 		synctest.Wait()
 		require.True(t, harness.sup.State().Connectivity == ConnectivityReady)
 
@@ -602,8 +602,8 @@ func TestAttachmentHostResizeBurstCoalescesAndKeepsGeometryWakeupsIndependent(t 
 // picker.
 func TestSupervisorResizeDuringAttachmentSettlementPreservesSessionOutput(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		picker := newAttachTestPicker()
-		harness := startResizeHarness(t, resizeHarnessOptions{picker: picker})
+		pickerMock, picker := newAttachTestPicker(t)
+		harness := startResizeHarness(t, resizeHarnessOptions{picker: pickerMock})
 		registry := &resizeStreamRegistry{t: t}
 		harness.service.setOpenStream(registry.open)
 
@@ -661,8 +661,8 @@ func TestSupervisorResizeDuringAttachmentSettlementPreservesSessionOutput(t *tes
 // wait after the attachment ends without any intermediate repaint.
 func TestSupervisorResizeConnectingBurstStaysCoalescedAndBuffered(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		picker := newAttachTestPicker()
-		harness := startResizeHarness(t, resizeHarnessOptions{picker: picker})
+		pickerMock, picker := newAttachTestPicker(t)
+		harness := startResizeHarness(t, resizeHarnessOptions{picker: pickerMock})
 		registry := &resizeStreamRegistry{t: t}
 		harness.service.setOpenStream(registry.open)
 
@@ -728,8 +728,8 @@ func awaitAttachedSettlement(t *testing.T, harness *resizeSupervisorHarness) {
 // by the supervisor's next picker wait.
 func TestSupervisorAttachedResizeKeepsGeometryWakeupAndPreservesRepaint(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		picker := newAttachTestPicker()
-		harness := startResizeHarness(t, resizeHarnessOptions{picker: picker})
+		pickerMock, picker := newAttachTestPicker(t)
+		harness := startResizeHarness(t, resizeHarnessOptions{picker: pickerMock})
 		registry := &resizeStreamRegistry{t: t}
 		harness.service.setOpenStream(registry.open)
 
@@ -775,8 +775,8 @@ func TestSupervisorAttachedResizeKeepsGeometryWakeupAndPreservesRepaint(t *testi
 // resize under its own (generation, attempt) identity.
 func TestSupervisorResizeAfterDetachReachesOnlyReplacementAttachment(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		picker := newAttachTestPicker()
-		harness := startResizeHarness(t, resizeHarnessOptions{picker: picker})
+		pickerMock, picker := newAttachTestPicker(t)
+		harness := startResizeHarness(t, resizeHarnessOptions{picker: pickerMock})
 		registry := &resizeStreamRegistry{t: t}
 		harness.service.setOpenStream(registry.open)
 

@@ -11,7 +11,6 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 )
@@ -21,38 +20,26 @@ import (
 // They drive the real supervisor, host, foreground, and worker with bounded
 // waits and no sleeps.
 
-// parityTestPicker adds the optional kill and notice seams of the real picker
-// to the scripted picker. The fields are guarded by attachTestPicker.mu.
+// parityTestPicker composes the generated picker mocks with the emulator
+// state. It has no behaviour of its own except the optional pickerKillResolver
+// method, which has no generated mock and so delegates to the state.
 type parityTestPicker struct {
+	*mockpickerHost
 	*mockpickerPresentationHost
-	*attachTestPicker
-	kill    pickerKillTarget
-	notices []string
+	*attachTestPickerState
 }
 
 func newParityTestPicker(t *testing.T) *parityTestPicker {
-	p := &parityTestPicker{attachTestPicker: newAttachTestPicker(), mockpickerPresentationHost: newMockpickerPresentationHost(t)}
-	p.EXPECT().Notify(mock.Anything).Run(p.recordNotice).Maybe()
-	p.EXPECT().invalidatePresentation().Return().Maybe()
+	host, state := newAttachTestPicker(t)
+	p := &parityTestPicker{mockpickerHost: host, mockpickerPresentationHost: newMockpickerPresentationHost(t), attachTestPickerState: state}
+	p.mockpickerPresentationHost.EXPECT().Notify(mock.Anything).Run(state.recordNotice).Maybe()
+	p.mockpickerPresentationHost.EXPECT().invalidatePresentation().Return().Maybe()
 	return p
 }
 
-func (p *parityTestPicker) ResolveKill(string) (pickerKillTarget, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.kill, nil
-}
-
-func (p *parityTestPicker) recordNotice(n domain.Notification) {
-	p.mu.Lock()
-	p.notices = append(p.notices, n.Message)
-	p.mu.Unlock()
-}
-
-func (p *parityTestPicker) noticeList() []string {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return append([]string(nil), p.notices...)
+// ResolveKill satisfies the optional pickerKillResolver seam.
+func (p *parityTestPicker) ResolveKill(key string) (pickerKillTarget, error) {
+	return p.attachTestPickerState.resolveKill(key)
 }
 
 // TestPickerOverlayCommitAnotherTabSwitchesInPlace pins the tab-aware same
@@ -74,7 +61,7 @@ func TestPickerOverlayCommitAnotherTabSwitchesInPlace(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				picker := newParityTestPicker(t)
 				harness := startAttachHarness(t, picker)
-				stream := attachLiveSession(t, harness, picker.attachTestPicker)
+				stream := attachLiveSession(t, harness, picker.attachTestPickerState)
 				foreground := harness.sup.attachments.authority.foreground()
 				stream.deliver(navigationOffer(1))
 				awaitPresentation(t, harness.sup, PresentAttachedPicker)

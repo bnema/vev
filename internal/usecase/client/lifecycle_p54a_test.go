@@ -28,8 +28,8 @@ func TestP54LifecycleActionsAreDistinct(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				actions := make(chan AttachmentLifecycleAction, 1)
 				notices := make(chan LifecycleNotice, 4)
-				picker := newAttachTestPicker()
-				harness := startAttachHarnessConfig(t, picker, func(cfg *SupervisorConfig) {
+				pickerMock, picker := newAttachTestPicker(t)
+				harness := startAttachHarnessConfig(t, pickerMock, func(cfg *SupervisorConfig) {
 					cfg.LifecycleActions = actions
 					cfg.NotifyLifecycle = func(notice LifecycleNotice) { notices <- notice }
 				})
@@ -71,9 +71,9 @@ func TestP54AttachmentOutcomesReturnToPicker(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				picker := newAttachTestPicker()
+				pickerMock, picker := newAttachTestPicker(t)
 				notices := make(chan LifecycleNotice, 4)
-				harness := startAttachHarness(t, picker)
+				harness := startAttachHarness(t, pickerMock)
 				harness.sup.cfg.NotifyLifecycle = func(notice LifecycleNotice) { notices <- notice }
 				stream := newSessionStream(t)
 				harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
@@ -95,9 +95,9 @@ func TestP54AttachmentOutcomesReturnToPicker(t *testing.T) {
 
 func TestP54LocalRefusalIsNotReportedAsDestinationFailure(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		picker := newAttachTestPicker()
+		pickerMock, picker := newAttachTestPicker(t)
 		notices := make(chan LifecycleNotice, 4)
-		harness := startAttachHarness(t, picker)
+		harness := startAttachHarness(t, pickerMock)
 		harness.sup.cfg.NotifyLifecycle = func(notice LifecycleNotice) { notices <- notice }
 
 		// The committed selection is refused locally, before any destination exists:
@@ -134,7 +134,7 @@ func TestP54ResolveInitialUsesRealInitialNavigationResolve(t *testing.T) {
 
 func TestP54InitialNavigationCreatesEphemeralThroughBroker(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		picker := newAttachTestPicker()
+		pickerMock, picker := newAttachTestPicker(t)
 		navigation := InitialNavigation{Kind: InitialNavigationCreateEphemeral, Destination: ports.BrokerEndpointFence{Local: true}}
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -147,7 +147,7 @@ func TestP54InitialNavigationCreatesEphemeralThroughBroker(t *testing.T) {
 		service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 			return stream.conn, nil
 		})
-		sup := mustSupervisor(t, SupervisorConfig{Connector: newSupervisorTestConnector(t, func(context.Context, int) (ports.BrokerNavigator, error) { return service.port, nil }).port, Terminal: terminal.port, Clock: clock.port, Jitter: func() float64 { return 0 }, Picker: picker, InitialNavigation: navigation})
+		sup := mustSupervisor(t, SupervisorConfig{Connector: newSupervisorTestConnector(t, func(context.Context, int) (ports.BrokerNavigator, error) { return service.port, nil }).port, Terminal: terminal.port, Clock: clock.port, Jitter: func() float64 { return 0 }, Picker: pickerMock, InitialNavigation: navigation})
 		done := make(chan error, 1)
 		go func() { done <- sup.Run(ctx) }()
 		synctest.Wait()
@@ -171,7 +171,7 @@ func TestP54InitialNavigationIsNotReplayedAfterReconnect(t *testing.T) {
 		clock := newSupervisorTestClock(t)
 		reader := newAttachTestReader(t)
 		terminal := newAttachTerminal(t, reader, false)
-		picker := newAttachTestPicker()
+		pickerMock, _ := newAttachTestPicker(t)
 		navigation := InitialNavigation{Kind: InitialNavigationCreateEphemeral, Destination: ports.BrokerEndpointFence{Local: true}}
 		first := newSupervisorTestService(t, ports.BrokerConnectionID{1})
 		first.publishSnapshot(localDaemonSnapshot(1, 1))
@@ -186,7 +186,7 @@ func TestP54InitialNavigationIsNotReplayedAfterReconnect(t *testing.T) {
 			}
 			return second.port, nil
 		})
-		sup := mustSupervisor(t, SupervisorConfig{Connector: connector.port, Terminal: terminal.port, Clock: clock.port, Jitter: func() float64 { return 0 }, Picker: picker, InitialNavigation: navigation})
+		sup := mustSupervisor(t, SupervisorConfig{Connector: connector.port, Terminal: terminal.port, Clock: clock.port, Jitter: func() float64 { return 0 }, Picker: pickerMock, InitialNavigation: navigation})
 		done := make(chan error, 1)
 		go func() { done <- sup.Run(ctx) }()
 		require.Equal(t, 1, connector.awaitStart(t))
@@ -214,8 +214,8 @@ func TestP54InitialNavigationIsNotReplayedAfterReconnect(t *testing.T) {
 
 func TestP54SingleReaderDeliversAttachedByteAfterRealSupervisorHandoff(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		picker := newAttachTestPicker()
-		harness := startAttachHarness(t, picker)
+		pickerMock, picker := newAttachTestPicker(t)
+		harness := startAttachHarness(t, pickerMock)
 		stream := newSessionStream(t)
 		harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 			return stream.conn, nil

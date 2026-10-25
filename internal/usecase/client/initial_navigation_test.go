@@ -343,7 +343,7 @@ func TestInitialNavigationResolverIsConsultedAtMostOnce(t *testing.T) {
 		clock := newSupervisorTestClock(t)
 		reader := newAttachTestReader(t)
 		terminal := newAttachTerminal(t, reader, false)
-		picker := newAttachTestPicker()
+		pickerMock, _ := newAttachTestPicker(t)
 
 		first := newSupervisorTestService(t, ports.BrokerConnectionID{1})
 		first.publishSnapshot(localDaemonSnapshot(7, 1))
@@ -367,7 +367,7 @@ func TestInitialNavigationResolverIsConsultedAtMostOnce(t *testing.T) {
 			Terminal:  terminal.port,
 			Clock:     clock.port,
 			Jitter:    func() float64 { return 0 },
-			Picker:    picker,
+			Picker:    pickerMock,
 			ResolveInitialNavigation: func(snapshot ports.BrokerSnapshot) (InitialNavigation, error) {
 				calls.Add(1)
 				resolvedEpoch.Store(uint64(snapshot.Epoch))
@@ -429,8 +429,8 @@ func TestInitialNavigationPickerIntentOpensNothing(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				picker := newAttachTestPicker()
-				harness := startAttachHarnessConfig(t, picker, tc.configure)
+				pickerMock, picker := newAttachTestPicker(t)
+				harness := startAttachHarnessConfig(t, pickerMock, tc.configure)
 				require.Equal(t, PresentPicker, harness.sup.State().Presentation)
 				require.Empty(t, harness.service.openedRequests(), "a picker intent opens no stream")
 				require.Zero(t, picker.resolveCount())
@@ -484,7 +484,7 @@ func TestInitialNavigationResolverFailureIsSelectionUnavailable(t *testing.T) {
 		clock := newSupervisorTestClock(t)
 		reader := newAttachTestReader(t)
 		terminal := newAttachTerminal(t, reader, false)
-		picker := newAttachTestPicker()
+		pickerMock, _ := newAttachTestPicker(t)
 		service := newSupervisorTestService(t, ports.BrokerConnectionID{1})
 		service.publishSnapshot(localDaemonSnapshot(3, 1))
 		opened := false
@@ -497,7 +497,7 @@ func TestInitialNavigationResolverFailureIsSelectionUnavailable(t *testing.T) {
 		resolverErr := errors.New("no such target")
 		sup := mustSupervisor(t, SupervisorConfig{
 			Connector: newSupervisorTestConnector(t, func(context.Context, int) (ports.BrokerNavigator, error) { return service.port, nil }).port,
-			Terminal:  terminal.port, Clock: clock.port, Jitter: func() float64 { return 0 }, Picker: picker,
+			Terminal:  terminal.port, Clock: clock.port, Jitter: func() float64 { return 0 }, Picker: pickerMock,
 			NotifyLifecycle: func(notice LifecycleNotice) { notices <- notice },
 			ResolveInitialNavigation: func(ports.BrokerSnapshot) (InitialNavigation, error) {
 				calls.Add(1)
@@ -541,7 +541,7 @@ func TestInitialNavigationWaitsForTargetObservation(t *testing.T) {
 				clock := newSupervisorTestClock(t)
 				reader := newAttachTestReader(t)
 				terminal := newAttachTerminal(t, reader, false)
-				picker := newAttachTestPicker()
+				pickerMock, _ := newAttachTestPicker(t)
 				service := newSupervisorTestService(t, ports.BrokerConnectionID{1})
 				service.publishSnapshot(localDaemonSnapshot(3, 1))
 				var opened atomic.Int64
@@ -553,7 +553,7 @@ func TestInitialNavigationWaitsForTargetObservation(t *testing.T) {
 				var calls atomic.Int64
 				sup := mustSupervisor(t, SupervisorConfig{
 					Connector: newSupervisorTestConnector(t, func(context.Context, int) (ports.BrokerNavigator, error) { return service.port, nil }).port,
-					Terminal:  terminal.port, Clock: clock.port, Jitter: func() float64 { return 0 }, Picker: picker,
+					Terminal:  terminal.port, Clock: clock.port, Jitter: func() float64 { return 0 }, Picker: pickerMock,
 					NotifyLifecycle: func(notice LifecycleNotice) { notices <- notice },
 					ResolveInitialNavigation: func(snapshot ports.BrokerSnapshot) (InitialNavigation, error) {
 						calls.Add(1)
@@ -639,7 +639,7 @@ func TestInitialNavigationDropsDecisionsTakenWhileHidden(t *testing.T) {
 		clock := newSupervisorTestClock(t)
 		reader := newAttachTestReader(t)
 		terminal := newAttachTerminal(t, reader, false)
-		picker := newAttachTestPicker()
+		pickerMock, picker := newAttachTestPicker(t)
 
 		service := newSupervisorTestService(t, ports.BrokerConnectionID{1})
 		stream := newSessionStream(t)
@@ -653,7 +653,7 @@ func TestInitialNavigationDropsDecisionsTakenWhileHidden(t *testing.T) {
 
 		sup := mustSupervisor(t, SupervisorConfig{
 			Connector: connector.port, Terminal: terminal.port, Clock: clock.port,
-			Jitter: func() float64 { return 0 }, Picker: picker,
+			Jitter: func() float64 { return 0 }, Picker: pickerMock,
 			InitialNavigation: InitialNavigation{Kind: InitialNavigationCreateEphemeral, Destination: ports.BrokerEndpointFence{Local: true}},
 		})
 		done := make(chan error, 1)

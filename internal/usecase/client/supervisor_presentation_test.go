@@ -17,9 +17,9 @@ import (
 // published by the supervisor: it belongs to the admitted foreground.
 func TestSupervisorPublishesConnectingBeforeGrantAndPickerAfterDrain(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		picker := newAttachTestPicker()
+		pickerMock, picker := newAttachTestPicker(t)
 		var ui *UI
-		harness := startAttachHarnessConfig(t, picker, func(cfg *SupervisorConfig) {
+		harness := startAttachHarnessConfig(t, pickerMock, func(cfg *SupervisorConfig) {
 			ui = NewUI(cfg.Terminal.(ports.UIState), cfg.Clock)
 			cfg.UI = ui
 		})

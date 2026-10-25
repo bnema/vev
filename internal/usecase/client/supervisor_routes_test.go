@@ -73,8 +73,8 @@ func routeEntryNamed(snapshot protocol.RecentRouteSnapshot, name string) (protoc
 // the other daemon's bell.
 func TestSupervisorPublishesRoutesWhileAttached(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		picker := newAttachTestPicker()
-		harness := startAttachHarness(t, picker)
+		pickerMock, picker := newAttachTestPicker(t)
+		harness := startAttachHarness(t, pickerMock)
 		harness.service.publishSnapshot(routeTestCatalogue(2, false))
 		stream := attachLiveSession(t, harness, picker)
 
@@ -217,8 +217,8 @@ func TestSupervisorSettlesDaemonNavigation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				picker := newAttachTestPicker()
-				harness := startAttachHarness(t, picker)
+				pickerMock, picker := newAttachTestPicker(t)
+				harness := startAttachHarness(t, pickerMock)
 				harness.service.publishSnapshot(routeTestCatalogue(2, false))
 				stream := attachLiveSession(t, harness, picker)
 				snapshot := awaitRouteSnapshot(t, stream, "the route snapshot", func(s protocol.RecentRouteSnapshot) bool {
@@ -276,8 +276,8 @@ func TestSupervisorSettlesDaemonNavigation(t *testing.T) {
 // itself.
 func TestSupervisorRouteSnapshotExcludesServingHost(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		picker := newAttachTestPicker()
-		harness := startAttachHarness(t, picker)
+		pickerMock, picker := newAttachTestPicker(t)
+		harness := startAttachHarness(t, pickerMock)
 		remote := routeTestRemoteHost(catalogue.RemoteCatalogSession{LifecycleID: domain.SessionLifecycleID{1}, Name: "alpha", State: catalogue.RemoteCatalogSessionUp})
 		remote.Registration = sessionTestRequest(false).Registration
 		remote.Endpoint = sessionTestRequest(false).Endpoint
@@ -350,9 +350,9 @@ func TestSupervisorSamePeerSwitchSettlesUIAction(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				picker := newAttachTestPicker()
+				pickerMock, picker := newAttachTestPicker(t)
 				var ui *UI
-				harness := startAttachHarnessConfig(t, picker, func(cfg *SupervisorConfig) {
+				harness := startAttachHarnessConfig(t, pickerMock, func(cfg *SupervisorConfig) {
 					ui = NewUI(cfg.Terminal.(ports.UIState), cfg.Clock)
 					cfg.UI = ui
 				})

@@ -278,10 +278,10 @@ func (r *attachTestReader) push(data []byte) { r.chunks <- data }
 
 func (r *attachTestReader) close() { r.closeOnce.Do(func() { close(r.chunks) }) }
 
-// attachTestPicker is the supervisor's picker seam double. It records input
+// attachTestPickerState is the emulator state behind the generated pickerHost mock. It records input
 // ownership transitions, resolves exactly the committed key to one canned
 // request, and coalesces commit wakeups exactly like the real controller.
-type attachTestPicker struct {
+type attachTestPickerState struct {
 	mu        sync.Mutex
 	opsReady  chan struct{}
 	ownsInput bool
@@ -303,15 +303,56 @@ type attachTestPicker struct {
 	resolvedStream ports.BrokerStreamID
 	// tab is the tab every resolution names.
 	tab attachmentTab
+	// kill is the target every kill resolution names; notices records the
+	// presentation notices the supervisor surfaced.
+	kill    pickerKillTarget
+	notices []string
 }
 
-func newAttachTestPicker() *attachTestPicker {
-	return &attachTestPicker{opsReady: make(chan struct{}, 1), ownsInput: true}
+func (p *attachTestPickerState) resolveKill(string) (pickerKillTarget, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.kill, nil
 }
 
-func (p *attachTestPicker) ApplySnapshot(ports.BrokerSnapshot) {}
+func (p *attachTestPickerState) recordNotice(n domain.Notification) {
+	p.mu.Lock()
+	p.notices = append(p.notices, n.Message)
+	p.mu.Unlock()
+}
 
-func (p *attachTestPicker) ConsumeTerminalRead(data []byte) bool {
+func (p *attachTestPickerState) noticeList() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.notices...)
+}
+
+// newAttachTestPicker returns the generated pickerHost mock and the emulator
+// state its RunAndReturn closures delegate to. Tests drive and inspect the
+// state; the supervisor only sees the mock.
+func newAttachTestPicker(t *testing.T) (*mockpickerHost, *attachTestPickerState) {
+	state := newAttachTestPickerState()
+	return newAttachTestPickerMock(t, state), state
+}
+
+func newAttachTestPickerState() *attachTestPickerState {
+	return &attachTestPickerState{opsReady: make(chan struct{}, 1), ownsInput: true}
+}
+
+func newAttachTestPickerMock(t *testing.T, state *attachTestPickerState) *mockpickerHost {
+	m := newMockpickerHost(t)
+	m.EXPECT().ApplySnapshot(mock.Anything).Run(state.applySnapshot).Maybe()
+	m.EXPECT().ConsumeTerminalRead(mock.Anything).RunAndReturn(state.consumeTerminalRead).Maybe()
+	m.EXPECT().TakeOp().RunAndReturn(state.takeOp).Maybe()
+	m.EXPECT().ResolveCommit(mock.Anything, mock.Anything).RunAndReturn(state.resolveCommit).Maybe()
+	m.EXPECT().SetOwnsInput(mock.Anything).Run(state.setOwnsInput).Maybe()
+	m.EXPECT().OpsReady().RunAndReturn(state.opsReadyCh).Maybe()
+	return m
+}
+
+func (p *attachTestPickerState) applySnapshot(ports.BrokerSnapshot) {}
+
+func (p *attachTestPickerState) consumeTerminalRead(data []byte) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if !p.ownsInput {
@@ -331,13 +372,13 @@ func (p *attachTestPicker) ConsumeTerminalRead(data []byte) bool {
 }
 
 // decideOnConsume scripts the decision the next consumed read records.
-func (p *attachTestPicker) decideOnConsume(op pickerOp, request ports.BrokerOpenStreamRequest) {
+func (p *attachTestPickerState) decideOnConsume(op pickerOp, request ports.BrokerOpenStreamRequest) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.consumeOp, p.consumeRequest = op, request
 }
 
-func (p *attachTestPicker) TakeOp() (pickerOp, string) {
+func (p *attachTestPickerState) takeOp() (pickerOp, string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	op, key := p.op, p.key
@@ -345,7 +386,7 @@ func (p *attachTestPicker) TakeOp() (pickerOp, string) {
 	return op, key
 }
 
-func (p *attachTestPicker) ResolveCommit(key string, base pickerResolveBase) (ports.BrokerOpenStreamRequest, attachmentTab, error) {
+func (p *attachTestPickerState) resolveCommit(key string, base pickerResolveBase) (ports.BrokerOpenStreamRequest, attachmentTab, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.resolved++
@@ -359,15 +400,15 @@ func (p *attachTestPicker) ResolveCommit(key string, base pickerResolveBase) (po
 	return request, p.tab, nil
 }
 
-func (p *attachTestPicker) SetOwnsInput(owns bool) {
+func (p *attachTestPickerState) setOwnsInput(owns bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.ownsInput = owns
 }
 
-func (p *attachTestPicker) OpsReady() <-chan struct{} { return p.opsReady }
+func (p *attachTestPickerState) opsReadyCh() <-chan struct{} { return p.opsReady }
 
-func (p *attachTestPicker) commit(request ports.BrokerOpenStreamRequest) {
+func (p *attachTestPickerState) commit(request ports.BrokerOpenStreamRequest) {
 	p.mu.Lock()
 	p.op.commit = true
 	p.key = "row"
@@ -379,25 +420,25 @@ func (p *attachTestPicker) commit(request ports.BrokerOpenStreamRequest) {
 	}
 }
 
-func (p *attachTestPicker) owns() bool {
+func (p *attachTestPickerState) owns() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.ownsInput
 }
 
-func (p *attachTestPicker) lastResolvedStream() ports.BrokerStreamID {
+func (p *attachTestPickerState) lastResolvedStream() ports.BrokerStreamID {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.resolvedStream
 }
 
-func (p *attachTestPicker) consumedCount() int {
+func (p *attachTestPickerState) consumedCount() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.consumed
 }
 
-func (p *attachTestPicker) resolveCount() int {
+func (p *attachTestPickerState) resolveCount() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.resolved
@@ -561,9 +602,9 @@ func TestSupervisorDetachedReasonDeterminesExitOrPicker(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				picker := newAttachTestPicker()
+				pickerMock, picker := newAttachTestPicker(t)
 				notices := make(chan LifecycleNotice, 8)
-				harness := startAttachHarnessConfig(t, picker, func(cfg *SupervisorConfig) {
+				harness := startAttachHarnessConfig(t, pickerMock, func(cfg *SupervisorConfig) {
 					cfg.NotifyLifecycle = func(notice LifecycleNotice) { notices <- notice }
 				})
 				stream := attachLiveSession(t, harness, picker)
@@ -593,9 +634,9 @@ func TestSupervisorDetachedReasonDeterminesExitOrPicker(t *testing.T) {
 // exiting or surfacing any lifecycle notice.
 func TestSupervisorPendingSwapContinuesRatherThanExiting(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		picker := newAttachTestPicker()
+		pickerMock, picker := newAttachTestPicker(t)
 		notices := make(chan LifecycleNotice, 8)
-		harness := startAttachHarnessConfig(t, picker, func(cfg *SupervisorConfig) {
+		harness := startAttachHarnessConfig(t, pickerMock, func(cfg *SupervisorConfig) {
 			cfg.NotifyLifecycle = func(notice LifecycleNotice) { notices <- notice }
 		})
 		first := attachLiveSession(t, harness, picker)
@@ -638,8 +679,8 @@ func TestSupervisorPendingSwapContinuesRatherThanExiting(t *testing.T) {
 // the first session and must never run in the second.
 func TestSupervisorSwapDropsKeysKeptForPreviousSession(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		picker := newAttachTestPicker()
-		harness := startAttachHarness(t, picker)
+		pickerMock, picker := newAttachTestPicker(t)
+		harness := startAttachHarness(t, pickerMock)
 		base := newSessionStream(t)
 		first := newStallingSessionStream(t, base)
 		harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
@@ -758,11 +799,11 @@ func TestSupervisorReducerSlowConnecting(t *testing.T) {
 // dialer choice in the client.
 func TestSupervisorUIActionBindingUsesSingleAttachmentPump(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		picker := newAttachTestPicker()
+		pickerMock, picker := newAttachTestPicker(t)
 		var stream *streamLog
 		var streamMu sync.Mutex
 		var ui *UI
-		harness := startAttachHarnessConfig(t, picker, func(cfg *SupervisorConfig) {
+		harness := startAttachHarnessConfig(t, pickerMock, func(cfg *SupervisorConfig) {
 			ui = NewUI(cfg.Terminal.(ports.UIState), cfg.Clock)
 			cfg.UI = ui
 		})
@@ -906,13 +947,13 @@ func TestSupervisorUIActionBindingUsesSingleAttachmentPump(t *testing.T) {
 func TestSupervisorUIActionReleaseWaitsForInFlightOutput(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		const inFlightState = 2
-		picker := newAttachTestPicker()
+		pickerMock, picker := newAttachTestPicker(t)
 		var (
 			streamMu sync.Mutex
 			stream   *streamLog
 			ui       *UI
 		)
-		harness := startAttachHarnessConfig(t, picker, func(cfg *SupervisorConfig) {
+		harness := startAttachHarnessConfig(t, pickerMock, func(cfg *SupervisorConfig) {
 			ui = NewUI(cfg.Terminal.(ports.UIState), cfg.Clock)
 			cfg.UI = ui
 		})
@@ -1024,9 +1065,9 @@ func TestSupervisorUIActionReleaseWaitsForInFlightOutput(t *testing.T) {
 
 func TestSupervisorUIViewUpdateCommitsActionBoundaryWithoutBytes(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		picker := newAttachTestPicker()
+		pickerMock, picker := newAttachTestPicker(t)
 		var ui *UI
-		harness := startAttachHarnessConfig(t, picker, func(cfg *SupervisorConfig) {
+		harness := startAttachHarnessConfig(t, pickerMock, func(cfg *SupervisorConfig) {
 			ui = NewUI(cfg.Terminal.(ports.UIState), cfg.Clock)
 			cfg.UI = ui
 		})
@@ -1088,8 +1129,8 @@ func TestSupervisorUIViewUpdateCommitsActionBoundaryWithoutBytes(t *testing.T) {
 
 func TestSupervisorUIViewUpdateRequestsOneCoalescedReset(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		picker := newAttachTestPicker()
-		harness := startAttachHarness(t, picker)
+		pickerMock, picker := newAttachTestPicker(t)
+		harness := startAttachHarness(t, pickerMock)
 		stream := newSessionStream(t)
 		harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 			return stream.conn, nil
@@ -1116,8 +1157,8 @@ func TestSupervisorUIViewUpdateRequestsOneCoalescedReset(t *testing.T) {
 
 func TestSupervisorWithoutUIDoesNotBindActions(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		picker := newAttachTestPicker()
-		harness := startAttachHarness(t, picker)
+		pickerMock, _ := newAttachTestPicker(t)
+		harness := startAttachHarness(t, pickerMock)
 		require.Nil(t, harness.sup.cfg.UI, "the optional seam must preserve publication-only composition")
 		require.Nil(t, harness.sup.attachments.actionUI, "mutation that binds an implicit UI changes no-UI behavior")
 	})
@@ -1141,8 +1182,8 @@ func TestSupervisorAttachmentLocalRemoteParity(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				picker := newAttachTestPicker()
-				harness := startAttachHarness(t, picker)
+				pickerMock, picker := newAttachTestPicker(t)
+				harness := startAttachHarness(t, pickerMock)
 				var (
 					streamMu sync.Mutex
 					stream   *streamLog
@@ -1200,12 +1241,12 @@ func TestSupervisorAttachmentLocalRemoteParity(t *testing.T) {
 // instead of starting a second budget.
 func TestSupervisorAttachmentDeadlineElapsedDuringOpenFailsWithoutRestart(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		picker := newAttachTestPicker()
+		pickerMock, picker := newAttachTestPicker(t)
 		var (
 			streamMu sync.Mutex
 			stream   *streamLog
 		)
-		harness := startAttachHarness(t, picker)
+		harness := startAttachHarness(t, pickerMock)
 		clock := harness.clock
 		harness.service.setOpenStream(func(_ context.Context, _ ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 			// The accepted absolute deadline elapsed before this client saw it.
@@ -1242,12 +1283,12 @@ func TestSupervisorAttachmentDeadlineElapsedDuringOpenFailsWithoutRestart(t *tes
 // exactly its remaining time, and crossing Welcome never restarts it.
 func TestSupervisorAttachmentDeadlineNotExtendedAcrossStages(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		picker := newAttachTestPicker()
+		pickerMock, picker := newAttachTestPicker(t)
 		var (
 			streamMu sync.Mutex
 			stream   *streamLog
 		)
-		harness := startAttachHarness(t, picker)
+		harness := startAttachHarness(t, pickerMock)
 		clock := harness.clock
 		harness.service.setOpenStream(func(_ context.Context, _ ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 			log := newSessionStream(t)
@@ -1300,12 +1341,12 @@ func TestSupervisorAttachmentDeadlineNotExtendedAcrossStages(t *testing.T) {
 // the attachment outlive the deadline.
 func TestSupervisorAttachmentLaterAcceptedDeadlineNeverExtendsBudget(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		picker := newAttachTestPicker()
+		pickerMock, picker := newAttachTestPicker(t)
 		var (
 			streamMu sync.Mutex
 			stream   *streamLog
 		)
-		harness := startAttachHarness(t, picker)
+		harness := startAttachHarness(t, pickerMock)
 		clock := harness.clock
 		harness.service.setOpenStream(func(_ context.Context, _ ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 			log := newSessionStream(t)
@@ -1345,12 +1386,12 @@ func TestSupervisorAttachmentLaterAcceptedDeadlineNeverExtendsBudget(t *testing.
 // the optional seam keeps the one pre-open budget: no second timer, no restart.
 func TestSupervisorAttachmentPreOpenBudgetWithoutProvider(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		picker := newAttachTestPicker()
+		pickerMock, picker := newAttachTestPicker(t)
 		var (
 			streamMu sync.Mutex
 			stream   *streamLog
 		)
-		harness := startAttachHarness(t, picker)
+		harness := startAttachHarness(t, pickerMock)
 		harness.service.setOpenStream(func(_ context.Context, _ ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 			admitted := newSessionStream(t)
 			streamMu.Lock()
@@ -1383,10 +1424,10 @@ func TestSupervisorAttachmentPreOpenBudgetWithoutProvider(t *testing.T) {
 
 func TestSupervisorAttachmentDeadlineDisarmedAfterPublication(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		picker := newAttachTestPicker()
+		pickerMock, picker := newAttachTestPicker(t)
 		var stream *streamLog
 		var streamMu sync.Mutex
-		harness := startAttachHarness(t, picker)
+		harness := startAttachHarness(t, pickerMock)
 		harness.service.setOpenStream(func(_ context.Context, _ ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 			admitted := newSessionStream(t)
 			streamMu.Lock()
@@ -1581,9 +1622,9 @@ func TestSupervisorAttachmentLossResumesSameSession(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				picker := newAttachTestPicker()
+				pickerMock, picker := newAttachTestPicker(t)
 				notices := make(chan LifecycleNotice, 64)
-				harness := startAttachHarnessConfig(t, picker, func(cfg *SupervisorConfig) {
+				harness := startAttachHarnessConfig(t, pickerMock, func(cfg *SupervisorConfig) {
 					cfg.NotifyLifecycle = func(notice LifecycleNotice) { notices <- notice }
 					cfg.Jitter = resumeTestJitter
 				})
@@ -1693,12 +1734,12 @@ func TestSupervisorAttachmentLossResumesSameSession(t *testing.T) {
 // mid-attach closes the stream, ends the run, and never reports attachment.
 func TestSupervisorAttachmentCancellationRetiresGeneration(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		picker := newAttachTestPicker()
+		pickerMock, picker := newAttachTestPicker(t)
 		var (
 			streamMu sync.Mutex
 			stream   *streamLog
 		)
-		harness := startAttachHarness(t, picker)
+		harness := startAttachHarness(t, pickerMock)
 		harness.service.setOpenStream(func(_ context.Context, _ ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 			admitted := newSessionStream(t)
 			streamMu.Lock()
@@ -1728,12 +1769,12 @@ func TestSupervisorAttachmentCancellationRetiresGeneration(t *testing.T) {
 // usable in that state.
 func TestSupervisorConnectingWhileAcquisitionBlockedPublishesNoSessionMetadata(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		picker := newAttachTestPicker()
+		pickerMock, picker := newAttachTestPicker(t)
 		release := make(chan struct{})
 		var releaseOnce sync.Once
 		defer releaseOnce.Do(func() { close(release) })
 		var ui *UI
-		harness := startAttachHarnessConfig(t, picker, func(cfg *SupervisorConfig) {
+		harness := startAttachHarnessConfig(t, pickerMock, func(cfg *SupervisorConfig) {
 			ui = NewUI(cfg.Terminal.(ports.UIState), cfg.Clock)
 			cfg.UI = ui
 		})
@@ -1780,8 +1821,8 @@ func TestSupervisorConnectingWhileAcquisitionBlockedPublishesNoSessionMetadata(t
 // stream open, no session write, and no terminal write.
 func TestSupervisorPickerInputNeverReachesSession(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		picker := newAttachTestPicker()
-		harness := startAttachHarness(t, picker)
+		pickerMock, picker := newAttachTestPicker(t)
+		harness := startAttachHarness(t, pickerMock)
 		opened := false
 		harness.service.setOpenStream(func(_ context.Context, _ ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 			opened = true
@@ -1868,9 +1909,9 @@ func TestSupervisorAttachmentReachableFromRealPicker(t *testing.T) {
 func TestSupervisorAttachmentConcurrentCommitAndCancellation(t *testing.T) {
 	tests := []struct {
 		name string
-		run  func(*testing.T, *attachTestHarness, *attachTestPicker) *streamLog
+		run  func(*testing.T, *attachTestHarness, *attachTestPickerState) *streamLog
 	}{
-		{name: "open in flight", run: func(t *testing.T, harness *attachTestHarness, picker *attachTestPicker) *streamLog {
+		{name: "open in flight", run: func(t *testing.T, harness *attachTestHarness, picker *attachTestPickerState) *streamLog {
 			entered := make(chan struct{})
 			release := make(chan struct{})
 			stream := newSessionStream(t)
@@ -1885,7 +1926,7 @@ func TestSupervisorAttachmentConcurrentCommitAndCancellation(t *testing.T) {
 			close(release)
 			return stream
 		}},
-		{name: "publication commit in flight", run: func(t *testing.T, harness *attachTestHarness, picker *attachTestPicker) *streamLog {
+		{name: "publication commit in flight", run: func(t *testing.T, harness *attachTestHarness, picker *attachTestPickerState) *streamLog {
 			stream := newSessionStream(t)
 			harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 				return stream.conn, nil
@@ -1907,8 +1948,8 @@ func TestSupervisorAttachmentConcurrentCommitAndCancellation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				picker := newAttachTestPicker()
-				harness := startAttachHarness(t, picker)
+				pickerMock, picker := newAttachTestPicker(t)
+				harness := startAttachHarness(t, pickerMock)
 				stream := tt.run(t, harness, picker)
 				// Cancellation revokes picker authority immediately, before teardown
 				// completes. Inject work in that teardown window and prove neither path

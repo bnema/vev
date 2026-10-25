@@ -53,8 +53,8 @@ func TestResumeReplaysKeysHeldWhileConnecting(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				picker := newAttachTestPicker()
-				h := startAttachHarnessConfig(t, picker, func(cfg *SupervisorConfig) { cfg.Jitter = resumeTestJitter })
+				pickerMock, picker := newAttachTestPicker(t)
+				h := startAttachHarnessConfig(t, pickerMock, func(cfg *SupervisorConfig) { cfg.Jitter = resumeTestJitter })
 				first := newSessionStream(t)
 				second := newSessionStream(t)
 				opened := make(chan int, 4)
