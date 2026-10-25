@@ -5,7 +5,7 @@ import (
 	"errors"
 	"io"
 	"testing"
-	"time"
+	"testing/synctest"
 
 	"github.com/bnema/vev/internal/adapters/brokerwire"
 	"github.com/bnema/vev/internal/protocol"
@@ -167,45 +167,53 @@ func TestStreamPipeCredit(t *testing.T) {
 	})
 
 	t.Run("a sender waits for credit and resumes on a grant", func(t *testing.T) {
-		p := newTestPipe()
-		for range perWindow {
-			require.NoError(t, p.reserve(chunk))
-		}
-		reserved := make(chan error, 1)
-		go func() { reserved <- p.reserve(chunk) }()
-		select {
-		case err := <-reserved:
-			t.Fatalf("reserve returned %v without credit", err)
-		case <-time.After(20 * time.Millisecond):
-		}
-		require.NoError(t, p.granted(cost))
-		select {
-		case err := <-reserved:
-			require.NoError(t, err)
-		case <-time.After(5 * time.Second):
-			t.Fatal("a grant must release a sender waiting for credit")
-		}
+		synctest.Test(t, func(t *testing.T) {
+			p := newTestPipe()
+			for range perWindow {
+				require.NoError(t, p.reserve(chunk))
+			}
+			reserved := make(chan error, 1)
+			go func() { reserved <- p.reserve(chunk) }()
+			synctest.Wait()
+			select {
+			case err := <-reserved:
+				t.Fatalf("reserve returned %v without credit", err)
+			default:
+			}
+			require.NoError(t, p.granted(cost))
+			synctest.Wait()
+			select {
+			case err := <-reserved:
+				require.NoError(t, err)
+			default:
+				t.Fatal("a grant must release a sender waiting for credit")
+			}
+		})
 	})
 
 	t.Run("close releases a sender waiting for credit", func(t *testing.T) {
-		p := newTestPipe()
-		for range perWindow {
-			require.NoError(t, p.reserve(chunk))
-		}
-		reserved := make(chan error, 1)
-		go func() { reserved <- p.reserve(chunk) }()
-		select {
-		case err := <-reserved:
-			t.Fatalf("reserve returned %v without credit", err)
-		case <-time.After(20 * time.Millisecond):
-		}
-		p.closeWith(ErrStreamGone)
-		select {
-		case err := <-reserved:
-			require.ErrorIs(t, err, ErrStreamGone)
-		case <-time.After(5 * time.Second):
-			t.Fatal("close must release a sender waiting for credit")
-		}
+		synctest.Test(t, func(t *testing.T) {
+			p := newTestPipe()
+			for range perWindow {
+				require.NoError(t, p.reserve(chunk))
+			}
+			reserved := make(chan error, 1)
+			go func() { reserved <- p.reserve(chunk) }()
+			synctest.Wait()
+			select {
+			case err := <-reserved:
+				t.Fatalf("reserve returned %v without credit", err)
+			default:
+			}
+			p.closeWith(ErrStreamGone)
+			synctest.Wait()
+			select {
+			case err := <-reserved:
+				require.ErrorIs(t, err, ErrStreamGone)
+			default:
+				t.Fatal("close must release a sender waiting for credit")
+			}
+		})
 	})
 
 	t.Run("a grant beyond the window is a violation", func(t *testing.T) {

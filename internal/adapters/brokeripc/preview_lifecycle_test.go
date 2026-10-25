@@ -65,75 +65,132 @@ func serverPreviewOf(session ports.BrokerCoreService) ports.BrokerPreviewSubscri
 	return server.preview
 }
 
+// awaitPreview waits for the core to hand out its next preview subscription,
+// under a single bounded failure guard.
+func awaitPreview(t *testing.T, core *coreState) *previewState {
+	t.Helper()
+	select {
+	case state := <-core.previews:
+		return state
+	case <-time.After(5 * time.Second):
+		t.Fatal("the preview subscription never reached the core")
+		return nil
+	}
+}
+
+// awaitPreviewClosed waits for the server to retire one preview subscription.
+func awaitPreviewClosed(t *testing.T, state *previewState, why string) {
+	t.Helper()
+	select {
+	case <-state.closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal(why)
+	}
+}
+
 // TestPreviewReplacementClosesPrevious proves GO-001/GO-003 on the wire: a
 // second SubscribePreview with a newer generation replaces the first on both
 // ends. The client retires the first subscription, and the server keeps only
 // the newest generation as its current preview.
+//
+// real I/O: the broker IPC listener runs on a real AF_UNIX socket.
 func TestPreviewReplacementClosesPrevious(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	client, session := e.pair()
+	core := e.authority.last()
 
 	_, err := client.SubscribePreview(previewRequest(t, e.epoch, client, 1))
 	require.NoError(t, err)
-	require.Eventually(t, func() bool { return serverPreviewOf(session) != nil }, 5*time.Second, 10*time.Millisecond, "the first generation must register server-side")
+	first := awaitPreview(t, core)
 
 	second, err := client.SubscribePreview(previewRequest(t, e.epoch, client, 2))
 	require.NoError(t, err)
 	require.NotNil(t, second)
 
-	require.Eventually(t, func() bool { return serverPreviewGeneration(session) == 2 }, 5*time.Second, 10*time.Millisecond, "the second generation must replace the first server-side")
+	awaitPreviewClosed(t, first, "the second generation must replace the first server-side")
+	require.Equal(t, ports.BrokerPreviewGeneration(2), serverPreviewGeneration(session))
+	require.NotNil(t, serverPreviewOf(session))
 }
 
 // TestPreviewCancelGenerationFencesStaleCancel proves the CancelPreview
 // generation match: cancelling a superseded generation leaves the current
 // preview registered, while cancelling the current generation clears it.
+//
+// real I/O: the broker IPC listener runs on a real AF_UNIX socket.
 func TestPreviewCancelGenerationFencesStaleCancel(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	client, session := e.pair()
+	core := e.authority.last()
 
 	first, err := client.SubscribePreview(previewRequest(t, e.epoch, client, 1))
 	require.NoError(t, err)
+	firstState := awaitPreview(t, core)
 	second, err := client.SubscribePreview(previewRequest(t, e.epoch, client, 2))
 	require.NoError(t, err)
+	secondState := awaitPreview(t, core)
 
-	require.Eventually(t, func() bool { return serverPreviewGeneration(session) == 2 }, 5*time.Second, 10*time.Millisecond, "the second generation must register server-side")
+	awaitPreviewClosed(t, firstState, "the second generation must replace the first server-side")
+	require.Equal(t, ports.BrokerPreviewGeneration(2), serverPreviewGeneration(session))
 
 	// A stale cancel for the superseded first generation must not disturb the
-	// current second generation.
+	// current second generation. Frames on one connection are processed in
+	// order, so the membership round trip below proves any cancel was handled.
 	first.Close()
-	require.Never(t, func() bool { return serverPreviewOf(session) == nil }, 200*time.Millisecond, 10*time.Millisecond, "a stale cancel must not clear the current preview")
+	requireConnectionDelegates(t, client)
+	require.NotNil(t, serverPreviewOf(session), "a stale cancel must not clear the current preview")
+	select {
+	case <-secondState.closed:
+		t.Fatal("a stale cancel must not close the current preview")
+	default:
+	}
 
 	second.Close()
-	require.Eventually(t, func() bool { return serverPreviewOf(session) == nil }, 5*time.Second, 10*time.Millisecond, "cancelling the current generation must clear the preview")
+	awaitPreviewClosed(t, secondState, "cancelling the current generation must clear the preview")
+	require.Nil(t, serverPreviewOf(session))
 }
 
 // TestPreviewCloseClearsCurrent proves GO-004: closing the client connection
 // retires its current preview subscription instead of relying on transport
 // EOF for server teardown.
+//
+// real I/O: the broker IPC listener runs on a real AF_UNIX socket.
 func TestPreviewCloseClearsCurrent(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	client, session := e.pair()
+	core := e.authority.last()
 
-	sub, err := client.SubscribePreview(previewRequest(t, e.epoch, client, 1))
+	_, err := client.SubscribePreview(previewRequest(t, e.epoch, client, 1))
 	require.NoError(t, err)
-	_ = sub
-	require.Eventually(t, func() bool { return serverPreviewOf(session) != nil }, 5*time.Second, 10*time.Millisecond, "the preview must register server-side")
+	state := awaitPreview(t, core)
+	// Frames on one connection are handled in order, so the round trip proves
+	// StartPreview finished registering the subscription.
+	requireConnectionDelegates(t, client)
+	require.NotNil(t, serverPreviewOf(session), "the preview must register server-side")
 
 	require.NoError(t, client.Close())
-	require.Eventually(t, func() bool { return serverPreviewOf(session) == nil }, 5*time.Second, 10*time.Millisecond, "closing the client must retire its preview server-side")
+	awaitPreviewClosed(t, state, "closing the client must retire its preview server-side")
+	require.Nil(t, serverPreviewOf(session))
 }
 
 // TestPreviewShutdownClearsServerState proves the server shutdown path stops
 // the replaced forwarder bookkeeping: a session that held a preview releases
 // it when the session shuts down.
+//
+// real I/O: the broker IPC listener runs on a real AF_UNIX socket.
 func TestPreviewShutdownClearsServerState(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	client, session := e.pair()
+	core := e.authority.last()
 
 	_, err := client.SubscribePreview(previewRequest(t, e.epoch, client, 1))
 	require.NoError(t, err)
-	require.Eventually(t, func() bool { return serverPreviewOf(session) != nil }, 5*time.Second, 10*time.Millisecond, "the preview must register server-side")
+	state := awaitPreview(t, core)
+	// Frames on one connection are handled in order, so the round trip proves
+	// StartPreview finished registering the subscription.
+	requireConnectionDelegates(t, client)
+	require.NotNil(t, serverPreviewOf(session), "the preview must register server-side")
 
 	require.NoError(t, session.Close())
-	require.Eventually(t, func() bool { return serverPreviewOf(session) == nil }, 5*time.Second, 10*time.Millisecond, "session shutdown must release the preview")
+	awaitPreviewClosed(t, state, "session shutdown must release the preview")
+	require.Nil(t, serverPreviewOf(session))
 }

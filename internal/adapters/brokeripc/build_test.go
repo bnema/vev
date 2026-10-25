@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestBuildRegistration(t *testing.T) {
 	for _, tc := range []struct {
 		name           string
@@ -57,23 +58,17 @@ func TestBuildRegistration(t *testing.T) {
 	}
 }
 
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestRetiringRefusesConcurrentAdmission(t *testing.T) {
 	const epoch = ports.BrokerEpoch(0x51)
 	path := testSocketPath(t)
-	gated := &gatedAuthority{
-		inner:   newFakeAuthority(epoch, ports.BrokerSnapshot{}),
-		entered: make(chan struct{}), gate: make(chan struct{}),
-	}
+	gated, gateState := newGatedAuthorityMock(t, epoch)
 	bound, err := listen(path, epoch, gated, Config{Build: "build-a"}, ipc.SameUserPeerVerifier())
 	require.NoError(t, err)
 	defer bound.Close()
 	l := bound.(*listener)
 	raw := rawDial(t, &endpoint{t: t, path: path, epoch: epoch}, brokerwire.DefaultCeilings())
-	select {
-	case <-gated.entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("admission not reached")
-	}
+	awaitClosed(t, gateState.entered, "admission not reached")
 	// The registration decision and the admission gate share l.mu. A pending
 	// carriage prevents retirement; once retiring, the in-flight admission
 	// cannot publish a new session even if its authority returns success.
@@ -85,7 +80,7 @@ func TestRetiringRefusesConcurrentAdmission(t *testing.T) {
 	l.mu.Lock()
 	l.retiring = true
 	l.mu.Unlock()
-	close(gated.gate)
+	close(gateState.gate)
 	result := make(chan error, 1)
 	go func() { _, err := raw.transport.RecvBounded(raw.ceilings.MaxReceiveEnvelopeBytes); result <- err }()
 	select {

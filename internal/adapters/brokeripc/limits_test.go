@@ -11,6 +11,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -20,7 +21,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol/catalogue"
-	"github.com/bnema/vev/internal/protocol/wire"
+	wiremocks "github.com/bnema/vev/internal/protocol/wire/mocks"
 )
 
 // TestSnapshotPartsLayoutRoundTrips proves the emitter produces exactly the
@@ -157,25 +158,29 @@ func TestConfigDefaultsAndValidation(t *testing.T) {
 // TestStreamPipeCloseReleasesParkedReader proves a reader parked on an empty
 // pipe is released by closeWith with its cause.
 func TestStreamPipeCloseReleasesParkedReader(t *testing.T) {
-	parked := newTestPipe()
-	done := make(chan error, 1)
-	go func() {
-		_, err := parked.Read(make([]byte, 3))
-		done <- err
-	}()
-	select {
-	case err := <-done:
-		t.Fatalf("Read returned %v on an empty pipe", err)
-	case <-time.After(20 * time.Millisecond):
-	}
-	parked.closeWith(ErrStreamCredit)
-	select {
-	case err := <-done:
-		require.ErrorIs(t, err, ErrStreamCredit)
-	case <-time.After(5 * time.Second):
-		t.Fatal("closeWith must release a parked reader")
-	}
-	require.ErrorIs(t, parked.deliver([]byte("late")), ErrStreamGone)
+	synctest.Test(t, func(t *testing.T) {
+		parked := newTestPipe()
+		done := make(chan error, 1)
+		go func() {
+			_, err := parked.Read(make([]byte, 3))
+			done <- err
+		}()
+		synctest.Wait()
+		select {
+		case err := <-done:
+			t.Fatalf("Read returned %v on an empty pipe", err)
+		default:
+		}
+		parked.closeWith(ErrStreamCredit)
+		synctest.Wait()
+		select {
+		case err := <-done:
+			require.ErrorIs(t, err, ErrStreamCredit)
+		default:
+			t.Fatal("closeWith must release a parked reader")
+		}
+		require.ErrorIs(t, parked.deliver([]byte("late")), ErrStreamGone)
+	})
 }
 
 // TestStreamPipeOutboundError proves a failing sendFrame hook surfaces instead of
@@ -336,24 +341,16 @@ func TestSocketPaths(t *testing.T) {
 // TestPreambleCarriageIgnoresUnboundedTransport proves a carriage that cannot be
 // bounded is refused rather than read without a bound.
 func TestPreambleCarriageIgnoresUnboundedTransport(t *testing.T) {
-	_, err := recvPreamble(unboundedTransport{})
+	// The plain Transport mock implements only wire.Transport, never RecvBounded.
+	_, err := recvPreamble(wiremocks.NewMockTransport(t))
 	require.ErrorIs(t, err, ErrConfig)
 }
-
-// unboundedTransport implements only wire.Transport.
-type unboundedTransport struct{}
-
-func (unboundedTransport) Send(wire.Envelope) error { return nil }
-func (unboundedTransport) Recv() (wire.Envelope, error) {
-	return wire.Envelope{}, io.EOF
-}
-func (unboundedTransport) Close() error { return nil }
 
 // TestServerSessionRejectsInvalidConstruction proves construction refuses a nil
 // carriage, a nil core, and a zero epoch instead of building a session that can
 // never serve.
 func TestServerSessionRejectsInvalidConstruction(t *testing.T) {
-	core := &fakeCore{id: ports.BrokerConnectionID{1}, hub: newSnapshotHub(ports.BrokerSnapshot{}), streams: map[ports.BrokerStreamID]*fakeLogicalConn{}, done: make(chan struct{})}
+	core, _ := newCoreMock(t, ports.BrokerConnectionID{1}, newSnapshotHub(ports.BrokerSnapshot{}))
 	_, err := newServerSession(0, nil, brokerwire.DefaultCeilings(), core, Config{}, nil, time.Time{})
 	require.ErrorIs(t, err, ErrConfig)
 	_, err = newServerSession(1, nil, brokerwire.DefaultCeilings(), nil, Config{}, nil, time.Time{})

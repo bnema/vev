@@ -3,6 +3,7 @@ package brokeripc
 import (
 	"net"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -21,15 +22,29 @@ func newRunningSession(t *testing.T, epoch ports.BrokerEpoch) (*serverSession, n
 	t.Cleanup(func() { _ = peerConn.Close() })
 	transport, ok := ipc.NewTransport(serverConn).(wire.BoundedTransport)
 	require.True(t, ok, "the IPC carriage must be a bounded transport")
-	session, err := newServerSession(epoch, transport, brokerwire.DefaultCeilings(), newTestCore(epoch), Config{}, func() {}, time.Time{})
+	coreMock, _ := newTestCore(t, epoch)
+	session, err := newServerSession(epoch, transport, brokerwire.DefaultCeilings(), coreMock, Config{}, func() {}, time.Time{})
 	require.NoError(t, err)
 	require.NoError(t, session.conn.Register())
 	go session.run()
 	return session, peerConn
 }
 
-// awaitSessionDone waits for one session to reach its terminal state.
+// awaitSessionDone asserts one session already reached its terminal state; the
+// caller is inside a synctest bubble.
 func awaitSessionDone(t *testing.T, session *serverSession) {
+	t.Helper()
+	synctest.Wait()
+	select {
+	case <-session.Done():
+	default:
+		t.Fatal("session did not become terminal")
+	}
+}
+
+// awaitSessionDoneReal waits for one session driven over a real socket to reach
+// its terminal state, under a single bounded failure guard.
+func awaitSessionDoneReal(t *testing.T, session *serverSession) {
 	t.Helper()
 	select {
 	case <-session.Done():
@@ -44,36 +59,42 @@ func awaitSessionDone(t *testing.T, session *serverSession) {
 // closed and Err stable in every case.
 func TestSessionErrReportsOrderlyEndAsNil(t *testing.T) {
 	t.Run("peer EOF is orderly", func(t *testing.T) {
-		session, peer := newRunningSession(t, 0x61)
-		require.NoError(t, peer.Close())
-		awaitSessionDone(t, session)
+		synctest.Test(t, func(t *testing.T) {
+			session, peer := newRunningSession(t, 0x61)
+			require.NoError(t, peer.Close())
+			awaitSessionDone(t, session)
 
-		// The underlying cause is the peer's EOF, but Err presents it as an
-		// orderly end so a watcher never mistakes a departure for a failure.
-		require.Error(t, session.terminalErr(), "the peer EOF remains the recorded internal cause")
-		require.True(t, orderlyDisconnect(session.terminalErr()))
-		require.NoError(t, session.Err())
-		require.NoError(t, session.Err(), "Err is stable after Done")
-		require.NoError(t, session.Close())
+			// The underlying cause is the peer's EOF, but Err presents it as an
+			// orderly end so a watcher never mistakes a departure for a failure.
+			require.Error(t, session.terminalErr(), "the peer EOF remains the recorded internal cause")
+			require.True(t, orderlyDisconnect(session.terminalErr()))
+			require.NoError(t, session.Err())
+			require.NoError(t, session.Err(), "Err is stable after Done")
+			require.NoError(t, session.Close())
+		})
 	})
 
 	t.Run("local Close is orderly", func(t *testing.T) {
-		session, _ := newRunningSession(t, 0x62)
-		require.NoError(t, session.Close())
-		awaitSessionDone(t, session)
-		require.NoError(t, session.Err())
+		synctest.Test(t, func(t *testing.T) {
+			session, _ := newRunningSession(t, 0x62)
+			require.NoError(t, session.Close())
+			awaitSessionDone(t, session)
+			require.NoError(t, session.Err())
+		})
 	})
 
 	t.Run("protocol failure is typed", func(t *testing.T) {
-		session, peer := newRunningSession(t, 0x63)
-		raw := &rawPeer{conn: peer, ceilings: brokerwire.DefaultCeilings()}
-		// A second Register is a protocol-order violation and settles the
-		// connection.
-		raw.send(t, brokerwire.Register{})
-		awaitSessionDone(t, session)
+		synctest.Test(t, func(t *testing.T) {
+			session, peer := newRunningSession(t, 0x63)
+			raw := &rawPeer{conn: peer, ceilings: brokerwire.DefaultCeilings()}
+			// A second Register is a protocol-order violation and settles the
+			// connection.
+			raw.send(t, brokerwire.Register{})
+			awaitSessionDone(t, session)
 
-		require.Error(t, session.Err())
-		require.ErrorIs(t, session.Err(), ErrProtocol)
-		require.Error(t, session.Close(), "a protocol failure is not an orderly end")
+			require.Error(t, session.Err())
+			require.ErrorIs(t, session.Err(), ErrProtocol)
+			require.Error(t, session.Close(), "a protocol failure is not an orderly end")
+		})
 	})
 }

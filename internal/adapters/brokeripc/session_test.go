@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -29,41 +30,44 @@ func TestResubscribePublishesCurrentSnapshotPerGeneration(t *testing.T) {
 		generations = 32
 		bursts      = 50
 	)
-	for burst := 0; burst < bursts; burst++ {
-		transport := newRecordingTransport()
-		core := newTestCore(epoch)
-		session, err := newServerSession(epoch, transport, brokerwire.DefaultCeilings(), core, Config{}, func() {}, time.Time{})
-		require.NoError(t, err)
-		require.NoError(t, session.conn.Register())
+	synctest.Test(t, func(t *testing.T) {
+		for burst := 0; burst < bursts; burst++ {
+			transport, recorded := newRecordingTransportMock(t)
+			coreMock, core := newTestCore(t, epoch)
+			session, err := newServerSession(epoch, transport, brokerwire.DefaultCeilings(), coreMock, Config{}, func() {}, time.Time{})
+			require.NoError(t, err)
+			require.NoError(t, session.conn.Register())
 
-		for index := 1; index <= generations; index++ {
-			generation := brokerwire.SubscriptionGeneration(index)
-			core.hub.publish(testSnapshot(epoch, ports.BrokerRevision(index)))
-			require.NoError(t, session.conn.Subscribe(generation))
-			require.NoError(t, session.retargetPublisher(generation, false))
+			for index := 1; index <= generations; index++ {
+				generation := brokerwire.SubscriptionGeneration(index)
+				core.hub.publish(testSnapshot(epoch, ports.BrokerRevision(index)))
+				require.NoError(t, session.conn.Subscribe(generation))
+				require.NoError(t, session.retargetPublisher(generation, false))
+			}
+
+			// Each publisher owns its wake, so a later generation can never be left
+			// waiting on a demand a superseded publisher consumed.
+			session.subMu.Lock()
+			active := session.pub
+			session.subMu.Unlock()
+			require.NotNil(t, active)
+			require.Equal(t, brokerwire.SubscriptionGeneration(generations), active.generation)
+			synctest.Wait()
+			final := brokerwire.SubscriptionGeneration(generations)
+			require.GreaterOrEqual(t, recorded.transferCount(final, ports.BrokerRevision(generations)), 1,
+				"the final generation must publish the current snapshot for itself")
+
+			// A resync republishes the current snapshot for the active generation.
+			before := recorded.transferCount(final, ports.BrokerRevision(generations))
+			require.NoError(t, session.conn.Resync(final))
+			session.wakePublisher()
+			synctest.Wait()
+			require.GreaterOrEqual(t, recorded.transferCount(final, ports.BrokerRevision(generations)), before+1,
+				"a resync must republish the current snapshot")
+
+			session.shutdown()
 		}
-
-		// Each publisher owns its wake, so a later generation can never be left
-		// waiting on a demand a superseded publisher consumed.
-		session.subMu.Lock()
-		active := session.pub
-		session.subMu.Unlock()
-		require.NotNil(t, active)
-		require.Equal(t, brokerwire.SubscriptionGeneration(generations), active.generation)
-		require.True(t,
-			transport.waitForTransfer(brokerwire.SubscriptionGeneration(generations), ports.BrokerRevision(generations), 5*time.Second),
-			"the final generation must publish the current snapshot for itself")
-
-		// A resync republishes the current snapshot for the active generation.
-		before := transport.transferCount(brokerwire.SubscriptionGeneration(generations), ports.BrokerRevision(generations))
-		require.NoError(t, session.conn.Resync(brokerwire.SubscriptionGeneration(generations)))
-		session.wakePublisher()
-		require.True(t,
-			transport.waitForTransferCount(brokerwire.SubscriptionGeneration(generations), ports.BrokerRevision(generations), before+1, 5*time.Second),
-			"a resync must republish the current snapshot")
-
-		session.shutdown()
-	}
+	})
 }
 
 // TestSupersededPublisherOwnsItsWake proves each subscription generation owns
@@ -71,9 +75,9 @@ func TestResubscribePublishesCurrentSnapshotPerGeneration(t *testing.T) {
 // intended for its successor.
 func TestSupersededPublisherOwnsItsWake(t *testing.T) {
 	const epoch = ports.BrokerEpoch(0x52)
-	transport := newRecordingTransport()
-	core := newTestCore(epoch)
-	session, err := newServerSession(epoch, transport, brokerwire.DefaultCeilings(), core, Config{}, func() {}, time.Time{})
+	transport, _ := newRecordingTransportMock(t)
+	coreMock, core := newTestCore(t, epoch)
+	session, err := newServerSession(epoch, transport, brokerwire.DefaultCeilings(), coreMock, Config{}, func() {}, time.Time{})
 	require.NoError(t, err)
 	require.NoError(t, session.conn.Register())
 	t.Cleanup(func() { session.shutdown() })
@@ -103,9 +107,9 @@ func TestSupersededPublisherOwnsItsWake(t *testing.T) {
 // identity is filled from the session and a foreign one is refused.
 func TestSessionCloseStreamFillsConnectionScope(t *testing.T) {
 	const epoch = ports.BrokerEpoch(0x53)
-	transport := newRecordingTransport()
-	core := newTestCore(epoch)
-	session, err := newServerSession(epoch, transport, brokerwire.DefaultCeilings(), core, Config{}, func() {}, time.Time{})
+	transport, _ := newRecordingTransportMock(t)
+	coreMock, core := newTestCore(t, epoch)
+	session, err := newServerSession(epoch, transport, brokerwire.DefaultCeilings(), coreMock, Config{}, func() {}, time.Time{})
 	require.NoError(t, err)
 	t.Cleanup(func() { session.shutdown() })
 
@@ -135,6 +139,8 @@ func TestSessionCloseStreamFillsConnectionScope(t *testing.T) {
 // TestOpenStreamAdmissionRoundTrips proves the attachment-admission contract
 // travels the IPC wire: a create-named request reaches the core with exactly
 // its admission and validated name.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestOpenStreamAdmissionRoundTrips(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	client, _ := e.pair()
@@ -161,6 +167,8 @@ func TestOpenStreamAdmissionRoundTrips(t *testing.T) {
 // travels the IPC wire: a control stream may carry start-if-needed, while an
 // observation must carry existing-only and a spawn-capable observation is
 // refused before any frame travels.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestObservationForcesExistingOnly(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	client, _ := e.pair()
@@ -186,6 +194,8 @@ func TestObservationForcesExistingOnly(t *testing.T) {
 
 // TestRegistrationAssignsScopeAtAccept proves the client adapter adopts exactly
 // the scope the listener assigned at accept.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestRegistrationAssignsScopeAtAccept(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	client, session := e.pair()
@@ -196,6 +206,8 @@ func TestRegistrationAssignsScopeAtAccept(t *testing.T) {
 // TestSubscribePublishesSnapshot proves subscription traffic: a committed
 // publication reaches the client, wakes its subscription, and round-trips host,
 // session, and tombstone state.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestSubscribePublishesSnapshot(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	client, _ := e.pair()
@@ -204,9 +216,8 @@ func TestSubscribePublishesSnapshot(t *testing.T) {
 	t.Cleanup(sub.Close)
 
 	snapshot := e.publish(e.epoch, 7)
-	require.Eventually(t, func() bool {
-		return client.Snapshot().Revision == snapshot.Revision
-	}, 5*time.Second, 10*time.Millisecond, "committed publication must reach the client")
+	awaitSignal(t, sub.Changed(), "subscription was not woken by a committed publication")
+	require.Equal(t, snapshot.Revision, client.Snapshot().Revision, "committed publication must reach the client")
 
 	got := client.Snapshot()
 	require.Equal(t, e.epoch, got.Epoch)
@@ -214,17 +225,13 @@ func TestSubscribePublishesSnapshot(t *testing.T) {
 	require.Equal(t, snapshot.Daemons[0].Endpoint, got.Daemons[0].Endpoint)
 	require.Len(t, got.Daemons[0].Sessions, 2)
 	require.Equal(t, snapshot.Daemons[0].Sessions[0].Name, got.Daemons[0].Sessions[0].Name)
-
-	select {
-	case <-sub.Changed():
-	case <-time.After(5 * time.Second):
-		t.Fatal("subscription was not woken by a committed publication")
-	}
 }
 
 // TestSubscribeCarriesPassiveReader proves a client configured as a passive
 // reader reaches the core's passive subscription, while a default client
 // subscribes as a watching client that records observation demand.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestSubscribeCarriesPassiveReader(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -242,7 +249,7 @@ func TestSubscribeCarriesPassiveReader(t *testing.T) {
 			require.NoError(t, err)
 			t.Cleanup(sub.Close)
 			core := e.authority.last()
-			require.Eventually(t, func() bool { return len(core.subscribeKinds()) == 1 }, 5*time.Second, 10*time.Millisecond)
+			require.Equal(t, tt.passive, awaitSignal(t, core.subscribed, "the core never saw the subscription"))
 			require.Equal(t, []bool{tt.passive}, core.subscribeKinds())
 		})
 	}
@@ -251,6 +258,8 @@ func TestSubscribeCarriesPassiveReader(t *testing.T) {
 // TestSubscribeGenerationAdvancesAndReplaces proves a second Subscribe advances
 // the generation series (refusing reuse) and replaces the previous
 // subscription.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestSubscribeGenerationAdvancesAndReplaces(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	client, _ := e.pair()
@@ -270,7 +279,8 @@ func TestSubscribeGenerationAdvancesAndReplaces(t *testing.T) {
 	}
 
 	e.publish(e.epoch, 3)
-	require.Eventually(t, func() bool { return client.Snapshot().Revision == 3 }, 5*time.Second, 10*time.Millisecond)
+	awaitSignal(t, second.Changed(), "the replacing subscription was not woken")
+	require.EqualValues(t, 3, client.Snapshot().Revision)
 }
 
 // subscribeResult is one Subscribe outcome.
@@ -291,10 +301,11 @@ func subscribeGenerationOf(t *testing.T, message brokerwire.ClientMessage) uint6
 // awaitSubscribe waits for one Subscribe call to return.
 func awaitSubscribe(t *testing.T, results <-chan subscribeResult) subscribeResult {
 	t.Helper()
+	synctest.Wait()
 	select {
 	case got := <-results:
 		return got
-	case <-time.After(5 * time.Second):
+	default:
 		t.Fatal("Subscribe did not return")
 		return subscribeResult{}
 	}
@@ -305,49 +316,54 @@ func awaitSubscribe(t *testing.T, results <-chan subscribeResult) subscribeResul
 // the superseded subscription is retired instead of being restored, so no stale
 // subscription is presented as the live one and none stays current.
 func TestSubscribeSendFailureRetiresPreviousSubscription(t *testing.T) {
-	c, carriage := newGatedClient(t, Config{})
+	synctest.Test(t, func(t *testing.T) {
+		c, carriage := newGatedClient(t, Config{})
 
-	first := make(chan subscribeResult, 1)
-	go func() {
-		sub, err := c.Subscribe()
-		first <- subscribeResult{sub, err}
-	}()
-	require.Equal(t, uint64(1), subscribeGenerationOf(t, awaitSend(t, carriage)))
-	carriage.releaseSend(nil)
-	previous := awaitSubscribe(t, first)
-	require.NoError(t, previous.err)
-	require.NotNil(t, previous.sub)
+		first := make(chan subscribeResult, 1)
+		go func() {
+			sub, err := c.Subscribe()
+			first <- subscribeResult{sub, err}
+		}()
+		require.Equal(t, uint64(1), subscribeGenerationOf(t, awaitSend(t, carriage)))
+		carriage.releaseSend(nil)
+		previous := awaitSubscribe(t, first)
+		require.NoError(t, previous.err)
+		require.NotNil(t, previous.sub)
 
-	// The second Subscribe consumes generation 2 on the connection's tracker
-	// before its carriage write fails.
-	second := make(chan subscribeResult, 1)
-	go func() {
-		sub, err := c.Subscribe()
-		second <- subscribeResult{sub, err}
-	}()
-	require.Equal(t, uint64(2), subscribeGenerationOf(t, awaitSend(t, carriage)))
-	carriage.releaseSend(errTestCarriage)
+		// The second Subscribe consumes generation 2 on the connection's tracker
+		// before its carriage write fails.
+		second := make(chan subscribeResult, 1)
+		go func() {
+			sub, err := c.Subscribe()
+			second <- subscribeResult{sub, err}
+		}()
+		require.Equal(t, uint64(2), subscribeGenerationOf(t, awaitSend(t, carriage)))
+		carriage.releaseSend(errTestCarriage)
 
-	failed := awaitSubscribe(t, second)
-	require.ErrorIs(t, failed.err, errTestCarriage)
-	require.Nil(t, failed.sub, "a failed Subscribe returns no subscription")
+		failed := awaitSubscribe(t, second)
+		require.ErrorIs(t, failed.err, errTestCarriage)
+		require.Nil(t, failed.sub, "a failed Subscribe returns no subscription")
 
-	select {
-	case _, open := <-previous.sub.Changed():
-		require.False(t, open, "the superseded subscription must be closed")
-	case <-time.After(time.Second):
-		t.Fatal("the previous subscription must be closed")
-	}
+		synctest.Wait()
+		select {
+		case _, open := <-previous.sub.Changed():
+			require.False(t, open, "the superseded subscription must be closed")
+		default:
+			t.Fatal("the previous subscription must be closed")
+		}
 
-	c.mu.Lock()
-	current, generation := c.sub, c.generation
-	c.mu.Unlock()
-	require.Nil(t, current, "a failed Subscribe must not leave a current subscription")
-	require.Equal(t, uint64(2), uint64(generation), "the consumed generation is not rolled back")
+		c.mu.Lock()
+		current, generation := c.sub, c.generation
+		c.mu.Unlock()
+		require.Nil(t, current, "a failed Subscribe must not leave a current subscription")
+		require.Equal(t, uint64(2), uint64(generation), "the consumed generation is not rolled back")
+	})
 }
 
 // TestOpenStreamCarriesTypedTraffic proves a logical stream carries the typed
 // session protocol in both directions through the broker.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestOpenStreamCarriesTypedTraffic(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	client, _ := e.pair()
@@ -406,6 +422,8 @@ func TestOpenStreamCarriesTypedTraffic(t *testing.T) {
 // before ReceiveServer): a reply pushed before the daemon has even received
 // the request races this fake's own SendClient/Done selection, which is a
 // harness artifact unrelated to the fix under test.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestReplyReachesClientBeforeOrderlyStreamClose(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	const iterations = 200
@@ -449,6 +467,8 @@ func TestReplyReachesClientBeforeOrderlyStreamClose(t *testing.T) {
 
 // TestOpenStreamRefusedByCoreReachesClient proves a core refusal settles only
 // that stream and reaches the caller as a typed failure.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestOpenStreamRefusedByCoreReachesClient(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	client, _ := e.pair()
@@ -474,6 +494,8 @@ func TestOpenStreamRefusedByCoreReachesClient(t *testing.T) {
 
 // TestTerminalStreamFailureFailsOnlyThatStream proves one stream's terminal
 // failure is reported to its owner and leaves a sibling stream usable.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestTerminalStreamFailureFailsOnlyThatStream(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	client, _ := e.pair()
@@ -514,6 +536,8 @@ func TestTerminalStreamFailureFailsOnlyThatStream(t *testing.T) {
 
 // TestCloseStreamRetiresBothSides proves a client close reaches the broker core
 // and retires the stream identity.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestCloseStreamRetiresBothSides(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	client, _ := e.pair()
@@ -525,16 +549,7 @@ func TestCloseStreamRetiresBothSides(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, client.CloseStream(client.ConnectionID(), 1))
 
-	require.Eventually(t, func() bool {
-		core.mu.Lock()
-		defer core.mu.Unlock()
-		for _, id := range core.closedIDs {
-			if id == 1 {
-				return true
-			}
-		}
-		return false
-	}, 5*time.Second, 10*time.Millisecond, "the broker core must retire the closed stream")
+	require.Equal(t, ports.BrokerStreamID(1), awaitSignal(t, core.closedStreams, "the broker core must retire the closed stream"))
 	require.NoError(t, stream.Close(), "closing an already retired stream is idempotent")
 }
 
@@ -545,6 +560,8 @@ func TestCloseStreamRetiresBothSides(t *testing.T) {
 // RemoveHost returns the core's exact bool. Each call delegates exactly once with
 // the caller's own endpoint, policy, and exact registration, so the adapter never
 // re-derives authority on the way.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestMembershipMutationsDelegateEndToEnd(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	client, _ := e.pair()
@@ -600,16 +617,18 @@ func TestMembershipMutationsDelegateEndToEnd(t *testing.T) {
 // as a typed ports.BrokerError carrying the exact code and the matching sentinel
 // as its cause, reports no authority, and never invents a registration or a
 // removal.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestMembershipRefusalCodesEndToEnd(t *testing.T) {
 	cases := []struct {
 		name      string
-		configure func(core *fakeCore)
+		configure func(core *coreState)
 		call      func(ctx context.Context, client ports.BrokerService) (domain.RemoteRegistration, bool, error)
 		wantCode  ports.BrokerErrorCode
 	}{
 		{
 			name:      "stale generation removal is host conflict 11",
-			configure: func(core *fakeCore) { core.refuseRemoveHost(ports.ErrBrokerHostConflict) },
+			configure: func(core *coreState) { core.refuseRemoveHost(ports.ErrBrokerHostConflict) },
 			call: func(ctx context.Context, client ports.BrokerService) (domain.RemoteRegistration, bool, error) {
 				removed, err := client.RemoveHost(ctx, mutationRegistration("known"))
 				return domain.RemoteRegistration{}, removed, err
@@ -618,7 +637,7 @@ func TestMembershipRefusalCodesEndToEnd(t *testing.T) {
 		},
 		{
 			name:      "immutable registry is membership immutable 12",
-			configure: func(core *fakeCore) { core.refuseAddHost(ports.ErrBrokerMembershipImmutable) },
+			configure: func(core *coreState) { core.refuseAddHost(ports.ErrBrokerMembershipImmutable) },
 			call: func(ctx context.Context, client ports.BrokerService) (domain.RemoteRegistration, bool, error) {
 				registration, err := client.AddHost(ctx, "new@host:22", testPolicy())
 				return registration, false, err
@@ -658,17 +677,19 @@ func TestMembershipRefusalCodesEndToEnd(t *testing.T) {
 // error and no authority, under the exact code, with the operation identity the
 // caller used. It drives the raw carriage so the frames are observed as a peer
 // would receive them.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestMembershipWireRefusalFraming(t *testing.T) {
 	cases := []struct {
 		name      string
-		configure func(core *fakeCore)
+		configure func(core *coreState)
 		send      func(scope brokerwire.Scope) brokerwire.ClientMessage
 		kind      brokerwire.RegisterMutationKind
 		wantCode  ports.BrokerErrorCode
 	}{
 		{
 			name:      "remove conflict",
-			configure: func(core *fakeCore) { core.refuseRemoveHost(ports.ErrBrokerHostConflict) },
+			configure: func(core *coreState) { core.refuseRemoveHost(ports.ErrBrokerHostConflict) },
 			send: func(scope brokerwire.Scope) brokerwire.ClientMessage {
 				return brokerwire.RemoveHost{
 					Epoch: scope.Epoch, Connection: scope.Connection,
@@ -680,7 +701,7 @@ func TestMembershipWireRefusalFraming(t *testing.T) {
 		},
 		{
 			name:      "immutable addition",
-			configure: func(core *fakeCore) { core.refuseAddHost(ports.ErrBrokerMembershipImmutable) },
+			configure: func(core *coreState) { core.refuseAddHost(ports.ErrBrokerMembershipImmutable) },
 			send: func(scope brokerwire.Scope) brokerwire.ClientMessage {
 				return brokerwire.AddHost{
 					Epoch: scope.Epoch, Connection: scope.Connection,
@@ -722,6 +743,8 @@ func TestMembershipWireRefusalFraming(t *testing.T) {
 // pointer form of the store's outcome-unknown error become an outcome-unknown
 // result carrying the outcome-unknown code and no authority, and the caller
 // observes ports.BrokerErrorOutcomeUnknown so it refreshes rather than retries.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestMembershipStoreOutcomeUnknownMapsToOutcomeUnknown(t *testing.T) {
 	cause := errors.New("torn write after the commit point")
 	cases := map[string]error{
@@ -772,6 +795,8 @@ func TestMembershipStoreOutcomeUnknownMapsToOutcomeUnknown(t *testing.T) {
 // admitted core that returns no registration for a successful AddHost is a
 // protocol violation, so the session settles without answering the caller
 // instead of sending a result the peer would refuse.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestServerAbortsResultMissingRequiredAuthority(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	raw := rawDial(t, e, brokerwire.DefaultCeilings())
@@ -788,7 +813,7 @@ func TestServerAbortsResultMissingRequiredAuthority(t *testing.T) {
 	// No result travels; the connection settles as a protocol violation.
 	err := raw.awaitReadError(t, 5*time.Second)
 	require.Error(t, err, "a success without its required authority must settle the connection")
-	awaitSessionDone(t, session.(*serverSession))
+	awaitSessionDoneReal(t, session.(*serverSession))
 	require.ErrorIs(t, session.(*serverSession).terminalErr(), ErrProtocol)
 	require.Error(t, session.Close(), "a protocol violation is not an orderly end")
 
@@ -800,9 +825,11 @@ func TestServerAbortsResultMissingRequiredAuthority(t *testing.T) {
 // TestDisconnectCleanupReleasesEveryOwnedResource proves a client disconnect
 // deterministically retires its streams, closes its admitted core service, and
 // releases its listener slot.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestDisconnectCleanupReleasesEveryOwnedResource(t *testing.T) {
 	e := startEndpoint(t, Config{MaxClients: 2, HandshakeTimeout: time.Second})
-	client, _ := e.pair()
+	client, accepted := e.pair()
 	core := e.authority.last()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -814,20 +841,10 @@ func TestDisconnectCleanupReleasesEveryOwnedResource(t *testing.T) {
 
 	require.NoError(t, client.Close())
 
-	select {
-	case <-core.done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the admitted core service must be closed on disconnect")
-	}
-	select {
-	case <-conn.done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the bridged core connection must be closed on disconnect")
-	}
-
-	require.Eventually(t, func() bool {
-		return e.listener.(*listener).liveSessions() == 0
-	}, 5*time.Second, 10*time.Millisecond, "a retired session must leave the listener's live set")
+	awaitClosed(t, core.done, "the admitted core service must be closed on disconnect")
+	awaitClosed(t, conn.done, "the bridged core connection must be closed on disconnect")
+	awaitClosed(t, accepted.(*serverSession).Done(), "the session must retire on disconnect")
+	require.Zero(t, e.listener.(*listener).liveSessions(), "a retired session must leave the listener's live set")
 
 	// The listener slot is reusable: a fresh client is admitted.
 	fresh := e.dial()
@@ -838,6 +855,8 @@ func TestDisconnectCleanupReleasesEveryOwnedResource(t *testing.T) {
 // TestStalledSubscriberDoesNotBlockOtherClients proves publications are
 // per-connection: a client that subscribes and never reads cannot delay another
 // client's publication or operations.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestStalledSubscriberDoesNotBlockOtherClients(t *testing.T) {
 	e := startEndpoint(t, Config{MaxClients: 4})
 	stalled, _ := e.pair()
@@ -849,10 +868,19 @@ func TestStalledSubscriberDoesNotBlockOtherClients(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(sub.Close)
 
+	// Publications coalesce, so wake on each change until the final revision
+	// lands; the single guard bounds the whole wait.
 	for revision := ports.BrokerRevision(1); revision <= 20; revision++ {
 		e.publish(e.epoch, revision)
 	}
-	require.Eventually(t, func() bool { return active.Snapshot().Revision == 20 }, 5*time.Second, 10*time.Millisecond)
+	guard := time.After(5 * time.Second)
+	for active.Snapshot().Revision != 20 {
+		select {
+		case <-sub.Changed():
+		case <-guard:
+			t.Fatal("the active client never received the final publication")
+		}
+	}
 
 	requireConnectionDelegates(t, active)
 }
@@ -862,6 +890,8 @@ func TestStalledSubscriberDoesNotBlockOtherClients(t *testing.T) {
 // messages beyond one stream window wait at the broker, every one is delivered
 // in order once the consumer reads again, and the connection stays usable
 // meanwhile.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestStalledClientStreamWaitsForCredit(t *testing.T) {
 	e := startEndpoint(t, Config{MaxClients: 2})
 	client := e.dial()
@@ -909,8 +939,16 @@ func TestStalledClientStreamWaitsForCredit(t *testing.T) {
 		defer local.pipe.mu.Unlock()
 		return local.pipe.recvUsed + local.pipe.recvReturn
 	}
-	require.Eventually(t, func() bool { return held() > full }, 5*time.Second, time.Millisecond,
-		"the relay must fill one stream window")
+	// Each inbound chunk wakes the pipe after it is queued; no reader runs yet,
+	// so the test consumes those wakes to follow the fill without polling.
+	fillGuard := time.After(5 * time.Second)
+	for held() <= full {
+		select {
+		case <-local.pipe.wake:
+		case <-fillGuard:
+			t.Fatal("the relay must fill one stream window")
+		}
+	}
 	// Data beyond the credit would settle the stream with ErrStreamCredit.
 	select {
 	case <-stream.Done():
@@ -931,6 +969,8 @@ func TestStalledClientStreamWaitsForCredit(t *testing.T) {
 
 // TestOrderlyStreamCloseReportsNoError proves a local close is an orderly end:
 // Done closes and Err stays nil, so a caller can distinguish it from a failure.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestOrderlyStreamCloseReportsNoError(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	client, _ := e.pair()
@@ -952,6 +992,8 @@ func TestOrderlyStreamCloseReportsNoError(t *testing.T) {
 // TestScopeIdentityFencing proves the client adapter refuses a caller-supplied
 // identity that belongs to another connection and stream identities that do not
 // advance.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestScopeIdentityFencing(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	client, _ := e.pair()
@@ -995,13 +1037,17 @@ func TestScopeIdentityFencing(t *testing.T) {
 // TestRequestReconcileIsBoundedHint proves the reconcile hint is sent only for an
 // endpoint the connection already holds a registration for, and that it is
 // otherwise a no-op.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestRequestReconcileIsBoundedHint(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	client, _ := e.pair()
 	core := e.authority.last()
 
 	client.RequestReconcile("unknown@host:22")
-	time.Sleep(50 * time.Millisecond)
+	// Frames on one connection are handled in order, so a completed round trip
+	// proves a reconcile frame, had one been sent, was already handled.
+	requireConnectionDelegates(t, client)
 	core.mu.Lock()
 	require.Empty(t, core.reconcile)
 	core.mu.Unlock()
@@ -1010,18 +1056,20 @@ func TestRequestReconcileIsBoundedHint(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(sub.Close)
 	snapshot := e.publish(e.epoch, 4)
-	require.Eventually(t, func() bool { return client.Snapshot().Revision == 4 }, 5*time.Second, 10*time.Millisecond)
+	awaitSignal(t, sub.Changed(), "the publication never reached the client")
+	require.EqualValues(t, 4, client.Snapshot().Revision)
 
 	client.RequestReconcile(snapshot.Daemons[0].Endpoint)
-	require.Eventually(t, func() bool {
-		core.mu.Lock()
-		defer core.mu.Unlock()
-		return len(core.reconcile) == 1 && core.reconcile[0] == snapshot.Daemons[0].Endpoint
-	}, 5*time.Second, 10*time.Millisecond)
+	require.Equal(t, snapshot.Daemons[0].Endpoint, awaitSignal(t, core.reconciled, "the reconcile hint never reached the core"))
+	core.mu.Lock()
+	require.Len(t, core.reconcile, 1)
+	core.mu.Unlock()
 }
 
 // TestCoreErrorSurfacesAsTypedFailure proves a typed core failure reaches the
 // client through the stream lifecycle.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestCoreErrorSurfacesAsTypedFailure(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	client, _ := e.pair()
@@ -1047,6 +1095,8 @@ func TestCoreErrorSurfacesAsTypedFailure(t *testing.T) {
 
 // TestSessionHandshakeFailureIsStreamLocal proves a malformed inner session
 // stream settles only that stream.
+//
+// real I/O: real AF_UNIX broker socket (listener, dial or raw carriage) cannot run durably inside a synctest bubble.
 func TestSessionHandshakeFailureIsStreamLocal(t *testing.T) {
 	e := startEndpoint(t, Config{})
 	client, _ := e.pair()
@@ -1072,9 +1122,8 @@ func TestSessionHandshakeFailureIsStreamLocal(t *testing.T) {
 	requireConnectionDelegates(t, client)
 
 	// The broker core sees the stream retired.
-	require.Eventually(t, func() bool {
-		return core.logicalConn(1) == nil
-	}, 5*time.Second, 10*time.Millisecond)
+	require.Equal(t, ports.BrokerStreamID(1), awaitSignal(t, core.closedStreams, "the broker core must see the stream retired"))
+	require.Nil(t, core.logicalConn(1))
 }
 
 // TestDomainFixturesAreValid guards the test fixtures against drifting from the
