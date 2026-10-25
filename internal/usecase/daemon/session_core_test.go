@@ -181,10 +181,11 @@ func requireQueuedFrame(t *testing.T, ch <-chan wire.Envelope, want string) wire
 	}
 }
 
-//testpolicy:realtime mutex-blocked goroutines are invisible to synctest
 // receiveBounded is for tests that cannot run in a synctest bubble (goroutines
 // blocked on sync.Mutex never become durably blocked): one bounded failure
 // guard, no polling.
+//
+//testpolicy:realtime mutex-blocked goroutines are invisible to synctest
 func receiveBounded[T any](t *testing.T, ch <-chan T, failure string) T {
 	t.Helper()
 	select {
