@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
@@ -22,6 +23,7 @@ func TestTransportSendRecvBothDirections(t *testing.T) {
 
 	client := NewTransport(c1)
 	server := NewTransport(c2)
+	defer func() { _ = server.Close() }()
 
 	clientToServer := wire.Envelope{Payload: mustEncodeClient(protocol.Hello{Version: 1, Intent: protocol.IntentNew, Name: "w0"})}
 	serverToClient := wire.Envelope{Payload: mustEncodeServer(protocol.Welcome{SessionID: "s1", SessionName: "main"})}
@@ -61,6 +63,7 @@ func TestTransportSendRecvBothDirections(t *testing.T) {
 func TestTransportEOFOnClose(t *testing.T) {
 	c1, c2 := net.Pipe()
 	server := NewTransport(c2)
+	defer func() { _ = server.Close() }()
 
 	if err := c1.Close(); err != nil {
 		t.Fatalf("c1.Close() error = %v", err)
@@ -94,6 +97,7 @@ func TestTransportLargeFrameNearCap(t *testing.T) {
 
 	client := NewTransport(c1)
 	server := NewTransport(c2)
+	defer func() { _ = server.Close() }()
 
 	// Largest payload accepted: the canonical envelope ceiling admits a
 	// payload of exactly wire.AbsoluteEnvelopeLimit, so one byte below stays near cap.
@@ -132,6 +136,7 @@ func TestTransportManySmallFramesBackToBack(t *testing.T) {
 
 	client := NewTransport(c1)
 	server := NewTransport(c2)
+	defer func() { _ = server.Close() }()
 
 	const count = 200
 	frames := make([]wire.Envelope, count)
@@ -169,56 +174,65 @@ func TestTransportManySmallFramesBackToBack(t *testing.T) {
 }
 
 func TestTransportRecvOversizeFrame(t *testing.T) {
-	c1, c2 := net.Pipe()
-	defer func() { _ = c1.Close() }()
-	defer func() { _ = c2.Close() }()
+	synctest.Test(t, func(t *testing.T) {
+		c1, c2 := net.Pipe()
+		defer func() { _ = c1.Close() }()
+		defer func() { _ = c2.Close() }()
 
-	server := NewTransport(c2)
+		server := NewTransport(c2)
+		defer func() { _ = server.Close() }()
 
-	go func() {
-		var hdr [4]byte
-		binary.BigEndian.PutUint32(hdr[:], wire.AbsoluteEnvelopeLimit+1)
-		_, _ = c1.Write(hdr[:])
-	}()
+		go func() {
+			var hdr [4]byte
+			binary.BigEndian.PutUint32(hdr[:], wire.AbsoluteEnvelopeLimit+1)
+			_, _ = c1.Write(hdr[:])
+		}()
 
-	_, err := server.Recv()
-	if !errors.Is(err, ErrFrameTooLarge) {
-		t.Fatalf("server.Recv() error = %v, want ErrFrameTooLarge", err)
-	}
+		_, err := server.Recv()
+		if !errors.Is(err, ErrFrameTooLarge) {
+			t.Fatalf("server.Recv() error = %v, want ErrFrameTooLarge", err)
+		}
+	})
 }
 
 func TestTransportRecvZeroLengthFrame(t *testing.T) {
-	c1, c2 := net.Pipe()
-	defer func() { _ = c1.Close() }()
-	defer func() { _ = c2.Close() }()
+	synctest.Test(t, func(t *testing.T) {
+		c1, c2 := net.Pipe()
+		defer func() { _ = c1.Close() }()
+		defer func() { _ = c2.Close() }()
 
-	server := NewTransport(c2)
+		server := NewTransport(c2)
+		defer func() { _ = server.Close() }()
 
-	go func() {
-		var hdr [4]byte
-		binary.BigEndian.PutUint32(hdr[:], 0)
-		_, _ = c1.Write(hdr[:])
-	}()
+		go func() {
+			var hdr [4]byte
+			binary.BigEndian.PutUint32(hdr[:], 0)
+			_, _ = c1.Write(hdr[:])
+		}()
 
-	_, err := server.Recv()
-	if !errors.Is(err, ErrZeroLengthFrame) {
-		t.Fatalf("server.Recv() error = %v, want ErrZeroLengthFrame", err)
-	}
+		_, err := server.Recv()
+		if !errors.Is(err, ErrZeroLengthFrame) {
+			t.Fatalf("server.Recv() error = %v, want ErrZeroLengthFrame", err)
+		}
+	})
 }
 
 func TestTransportRecvTruncatedHeader(t *testing.T) {
-	c1, c2 := net.Pipe()
-	server := NewTransport(c2)
+	synctest.Test(t, func(t *testing.T) {
+		c1, c2 := net.Pipe()
+		server := NewTransport(c2)
+		defer func() { _ = server.Close() }()
 
-	go func() {
-		_, _ = c1.Write([]byte{0x00, 0x01}) // only 2 of 4 header bytes
-		_ = c1.Close()
-	}()
+		go func() {
+			_, _ = c1.Write([]byte{0x00, 0x01}) // only 2 of 4 header bytes
+			_ = c1.Close()
+		}()
 
-	_, err := server.Recv()
-	if err == nil {
-		t.Fatalf("server.Recv() expected error on truncated header, got nil")
-	}
+		_, err := server.Recv()
+		if err == nil {
+			t.Fatalf("server.Recv() expected error on truncated header, got nil")
+		}
+	})
 }
 
 func TestTransportSendOversizePayloadRejected(t *testing.T) {
@@ -485,46 +499,55 @@ func TestTransportRecvBoundedEnforcesCallerLimit(t *testing.T) {
 	}
 
 	t.Run("over-limit prefix refused before body", func(t *testing.T) {
-		c1, c2 := net.Pipe()
-		defer func() { _ = c1.Close() }()
-		defer func() { _ = c2.Close() }()
-		server := NewTransport(c2).(wire.BoundedTransport)
-		writePrefix(c1, 8)
-		_, err := server.RecvBounded(4)
-		if !errors.Is(err, ErrFrameTooLarge) {
-			t.Fatalf("RecvBounded() error = %v, want ErrFrameTooLarge", err)
-		}
+		synctest.Test(t, func(t *testing.T) {
+			c1, c2 := net.Pipe()
+			defer func() { _ = c1.Close() }()
+			defer func() { _ = c2.Close() }()
+			server := NewTransport(c2).(wire.BoundedTransport)
+			defer func() { _ = server.Close() }()
+			writePrefix(c1, 8)
+			_, err := server.RecvBounded(4)
+			if !errors.Is(err, ErrFrameTooLarge) {
+				t.Fatalf("RecvBounded() error = %v, want ErrFrameTooLarge", err)
+			}
+		})
 	})
 
 	t.Run("zero limit refuses non-empty frame", func(t *testing.T) {
-		c1, c2 := net.Pipe()
-		defer func() { _ = c1.Close() }()
-		defer func() { _ = c2.Close() }()
-		server := NewTransport(c2).(wire.BoundedTransport)
-		writePrefix(c1, 1)
-		_, err := server.RecvBounded(0)
-		if !errors.Is(err, ErrFrameTooLarge) {
-			t.Fatalf("RecvBounded() error = %v, want ErrFrameTooLarge", err)
-		}
+		synctest.Test(t, func(t *testing.T) {
+			c1, c2 := net.Pipe()
+			defer func() { _ = c1.Close() }()
+			defer func() { _ = c2.Close() }()
+			server := NewTransport(c2).(wire.BoundedTransport)
+			defer func() { _ = server.Close() }()
+			writePrefix(c1, 1)
+			_, err := server.RecvBounded(0)
+			if !errors.Is(err, ErrFrameTooLarge) {
+				t.Fatalf("RecvBounded() error = %v, want ErrFrameTooLarge", err)
+			}
+		})
 	})
 
 	t.Run("in-limit frame round trips", func(t *testing.T) {
-		c1, c2 := net.Pipe()
-		defer func() { _ = c1.Close() }()
-		defer func() { _ = c2.Close() }()
-		server := NewTransport(c2).(wire.BoundedTransport)
-		payload := []byte("bounded ipc envelope")
-		go func() {
-			var header [4]byte
-			binary.BigEndian.PutUint32(header[:], uint32(len(payload)))
-			_, _ = c1.Write(append(header[:], payload...))
-		}()
-		envelope, err := server.RecvBounded(uint64(len(payload)))
-		if err != nil {
-			t.Fatalf("RecvBounded() error = %v", err)
-		}
-		if !reflect.DeepEqual(envelope.Payload, payload) {
-			t.Fatalf("RecvBounded() payload = %q, want %q", envelope.Payload, payload)
-		}
+		synctest.Test(t, func(t *testing.T) {
+			c1, c2 := net.Pipe()
+			defer func() { _ = c1.Close() }()
+			defer func() { _ = c2.Close() }()
+			server := NewTransport(c2).(wire.BoundedTransport)
+			defer func() { _ = server.Close() }()
+			payload := []byte("bounded ipc envelope")
+			go func() {
+				var header [4]byte
+				binary.BigEndian.PutUint32(header[:], uint32(len(payload)))
+				_, _ = c1.Write(append(header[:], payload...))
+			}()
+			envelope, err := server.RecvBounded(uint64(len(payload)))
+			if err != nil {
+				t.Fatalf("RecvBounded() error = %v", err)
+			}
+			if !reflect.DeepEqual(envelope.Payload, payload) {
+				t.Fatalf("RecvBounded() payload = %q, want %q", envelope.Payload, payload)
+			}
+		})
 	})
 }
