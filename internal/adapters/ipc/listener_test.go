@@ -168,6 +168,7 @@ func TestSocketDirUsesXDGRuntimeDir(t *testing.T) {
 	}
 }
 
+// real I/O: reads and writes real files in temp directories.
 func TestSocketDirFallsBackWithoutXDGRuntimeDir(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", "")
 

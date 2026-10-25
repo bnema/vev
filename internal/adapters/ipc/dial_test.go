@@ -58,6 +58,7 @@ func TestDialContextCanceledOrExpired(t *testing.T) {
 	}
 }
 
+// real I/O: uses real loopback sockets.
 func TestDialContextPreservesOptions(t *testing.T) {
 	dir := shortSocketDir(t, "vev")
 	listener, err := Listen(dir)
