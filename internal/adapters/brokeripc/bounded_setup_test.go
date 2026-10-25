@@ -2,10 +2,10 @@ package brokeripc
 
 import (
 	"context"
-	"errors"
 	"runtime"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -245,23 +245,27 @@ func TestRegistrationDeadlineBoundaryMarker(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			core := newTestCore(0x51)
-			session, err := newServerSession(0x51, newRecordingTransport(), brokerwire.DefaultCeilings(), core, Config{}, func() {}, time.Now().Add(-time.Second))
-			require.NoError(t, err)
-			session.registered.Store(tc.registered)
+			synctest.Test(t, func(t *testing.T) {
+				transport, _ := newRecordingTransportMock(t)
+				core := newTestCore(0x51)
+				session, err := newServerSession(0x51, transport, brokerwire.DefaultCeilings(), core, Config{}, func() {}, time.Now().Add(-time.Second))
+				require.NoError(t, err)
+				session.registered.Store(tc.registered)
 
-			stop := session.armRegistrationDeadline()
-			if tc.wantTimeout {
-				require.Eventually(t, func() bool { return errors.Is(session.terminalErr(), ErrRegistrationTimeout) }, time.Second, time.Millisecond)
-			}
-			stop()
+				stop := session.armRegistrationDeadline()
+				if tc.wantTimeout {
+					synctest.Wait()
+					require.ErrorIs(t, session.terminalErr(), ErrRegistrationTimeout)
+				}
+				stop()
 
-			if tc.wantTimeout {
-				require.ErrorIs(t, session.terminalErr(), ErrRegistrationTimeout)
-				require.ErrorIs(t, session.terminalErr(), context.DeadlineExceeded)
-				return
-			}
-			require.NoError(t, session.terminalErr(), "a Register already being handled must not be settled as a peer timeout")
+				if tc.wantTimeout {
+					require.ErrorIs(t, session.terminalErr(), ErrRegistrationTimeout)
+					require.ErrorIs(t, session.terminalErr(), context.DeadlineExceeded)
+					return
+				}
+				require.NoError(t, session.terminalErr(), "a Register already being handled must not be settled as a peer timeout")
+			})
 		})
 	}
 }

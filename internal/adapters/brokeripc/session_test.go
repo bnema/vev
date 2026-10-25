@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -29,41 +30,44 @@ func TestResubscribePublishesCurrentSnapshotPerGeneration(t *testing.T) {
 		generations = 32
 		bursts      = 50
 	)
-	for burst := 0; burst < bursts; burst++ {
-		transport := newRecordingTransport()
-		core := newTestCore(epoch)
-		session, err := newServerSession(epoch, transport, brokerwire.DefaultCeilings(), core, Config{}, func() {}, time.Time{})
-		require.NoError(t, err)
-		require.NoError(t, session.conn.Register())
+	synctest.Test(t, func(t *testing.T) {
+		for burst := 0; burst < bursts; burst++ {
+			transport, recorded := newRecordingTransportMock(t)
+			core := newTestCore(epoch)
+			session, err := newServerSession(epoch, transport, brokerwire.DefaultCeilings(), core, Config{}, func() {}, time.Time{})
+			require.NoError(t, err)
+			require.NoError(t, session.conn.Register())
 
-		for index := 1; index <= generations; index++ {
-			generation := brokerwire.SubscriptionGeneration(index)
-			core.hub.publish(testSnapshot(epoch, ports.BrokerRevision(index)))
-			require.NoError(t, session.conn.Subscribe(generation))
-			require.NoError(t, session.retargetPublisher(generation, false))
+			for index := 1; index <= generations; index++ {
+				generation := brokerwire.SubscriptionGeneration(index)
+				core.hub.publish(testSnapshot(epoch, ports.BrokerRevision(index)))
+				require.NoError(t, session.conn.Subscribe(generation))
+				require.NoError(t, session.retargetPublisher(generation, false))
+			}
+
+			// Each publisher owns its wake, so a later generation can never be left
+			// waiting on a demand a superseded publisher consumed.
+			session.subMu.Lock()
+			active := session.pub
+			session.subMu.Unlock()
+			require.NotNil(t, active)
+			require.Equal(t, brokerwire.SubscriptionGeneration(generations), active.generation)
+			synctest.Wait()
+			final := brokerwire.SubscriptionGeneration(generations)
+			require.GreaterOrEqual(t, recorded.transferCount(final, ports.BrokerRevision(generations)), 1,
+				"the final generation must publish the current snapshot for itself")
+
+			// A resync republishes the current snapshot for the active generation.
+			before := recorded.transferCount(final, ports.BrokerRevision(generations))
+			require.NoError(t, session.conn.Resync(final))
+			session.wakePublisher()
+			synctest.Wait()
+			require.GreaterOrEqual(t, recorded.transferCount(final, ports.BrokerRevision(generations)), before+1,
+				"a resync must republish the current snapshot")
+
+			session.shutdown()
 		}
-
-		// Each publisher owns its wake, so a later generation can never be left
-		// waiting on a demand a superseded publisher consumed.
-		session.subMu.Lock()
-		active := session.pub
-		session.subMu.Unlock()
-		require.NotNil(t, active)
-		require.Equal(t, brokerwire.SubscriptionGeneration(generations), active.generation)
-		require.True(t,
-			transport.waitForTransfer(brokerwire.SubscriptionGeneration(generations), ports.BrokerRevision(generations), 5*time.Second),
-			"the final generation must publish the current snapshot for itself")
-
-		// A resync republishes the current snapshot for the active generation.
-		before := transport.transferCount(brokerwire.SubscriptionGeneration(generations), ports.BrokerRevision(generations))
-		require.NoError(t, session.conn.Resync(brokerwire.SubscriptionGeneration(generations)))
-		session.wakePublisher()
-		require.True(t,
-			transport.waitForTransferCount(brokerwire.SubscriptionGeneration(generations), ports.BrokerRevision(generations), before+1, 5*time.Second),
-			"a resync must republish the current snapshot")
-
-		session.shutdown()
-	}
+	})
 }
 
 // TestSupersededPublisherOwnsItsWake proves each subscription generation owns
@@ -71,7 +75,7 @@ func TestResubscribePublishesCurrentSnapshotPerGeneration(t *testing.T) {
 // intended for its successor.
 func TestSupersededPublisherOwnsItsWake(t *testing.T) {
 	const epoch = ports.BrokerEpoch(0x52)
-	transport := newRecordingTransport()
+	transport, _ := newRecordingTransportMock(t)
 	core := newTestCore(epoch)
 	session, err := newServerSession(epoch, transport, brokerwire.DefaultCeilings(), core, Config{}, func() {}, time.Time{})
 	require.NoError(t, err)
@@ -103,7 +107,7 @@ func TestSupersededPublisherOwnsItsWake(t *testing.T) {
 // identity is filled from the session and a foreign one is refused.
 func TestSessionCloseStreamFillsConnectionScope(t *testing.T) {
 	const epoch = ports.BrokerEpoch(0x53)
-	transport := newRecordingTransport()
+	transport, _ := newRecordingTransportMock(t)
 	core := newTestCore(epoch)
 	session, err := newServerSession(epoch, transport, brokerwire.DefaultCeilings(), core, Config{}, func() {}, time.Time{})
 	require.NoError(t, err)

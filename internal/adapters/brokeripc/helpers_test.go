@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/adapters/brokerwire"
@@ -22,6 +23,7 @@ import (
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/bnema/vev/internal/protocol/wire"
+	wiremocks "github.com/bnema/vev/internal/protocol/wire/mocks"
 )
 
 // testSocketPath returns a short, owner-only parent directory and one broker
@@ -844,90 +846,69 @@ func (e *endpoint) publish(epoch ports.BrokerEpoch, revision ports.BrokerRevisio
 	return snapshot
 }
 
-// recordingTransport is one in-memory server carriage for a session: it decodes
-// and records every complete snapshot transfer the session writes and lets a
-// test wait for a generation to publish. It never yields an inbound frame, so
-// only the code under test drives publication.
-type recordingTransport struct {
+// recordingState is the plain state behind one recording server carriage: the
+// complete snapshot transfers the session wrote, keyed by generation and
+// revision. It implements no interface; the mock closures capture it.
+type recordingState struct {
 	mu      sync.Mutex
 	ends    map[brokerwire.SubscriptionGeneration]map[ports.BrokerRevision]int
-	changed chan struct{}
 	closedC chan struct{}
 	once    sync.Once
 }
 
-func newRecordingTransport() *recordingTransport {
-	return &recordingTransport{
+// newRecordingTransportMock builds one in-memory server carriage for a session.
+// It decodes and records every complete snapshot transfer the session writes and
+// never yields an inbound frame, so only the code under test drives publication.
+// Options register overrides before the defaults.
+func newRecordingTransportMock(t *testing.T, opts ...func(*wiremocks.MockBoundedTransport, *recordingState)) (*wiremocks.MockBoundedTransport, *recordingState) {
+	t.Helper()
+	state := &recordingState{
 		ends:    make(map[brokerwire.SubscriptionGeneration]map[ports.BrokerRevision]int),
-		changed: make(chan struct{}, 1),
 		closedC: make(chan struct{}),
 	}
-}
-
-// Send decodes one server frame and records a completed snapshot transfer.
-func (t *recordingTransport) Send(envelope wire.Envelope) error {
-	message, err := brokerwire.DecodeServer(envelope.Payload, brokerwire.MaxBrokerEnvelopeBytes, brokerwire.MaxStreamChunkBytes)
-	if err != nil {
-		return err
+	m := wiremocks.NewMockBoundedTransport(t)
+	for _, opt := range opts {
+		opt(m, state)
 	}
-	part, ok := message.(brokerwire.SnapshotPart)
-	if !ok {
+	m.EXPECT().Send(mock.Anything).RunAndReturn(func(envelope wire.Envelope) error {
+		message, err := brokerwire.DecodeServer(envelope.Payload, brokerwire.MaxBrokerEnvelopeBytes, brokerwire.MaxStreamChunkBytes)
+		if err != nil {
+			return err
+		}
+		part, ok := message.(brokerwire.SnapshotPart)
+		if !ok {
+			return nil
+		}
+		if _, ok := part.Part.(brokerwire.SnapshotEnd); !ok {
+			return nil
+		}
+		state.mu.Lock()
+		if state.ends[part.Generation] == nil {
+			state.ends[part.Generation] = make(map[ports.BrokerRevision]int)
+		}
+		state.ends[part.Generation][part.Revision]++
+		state.mu.Unlock()
 		return nil
-	}
-	if _, ok := part.Part.(brokerwire.SnapshotEnd); !ok {
+	}).Maybe()
+	m.EXPECT().RecvBounded(mock.Anything).RunAndReturn(func(uint64) (wire.Envelope, error) {
+		<-state.closedC
+		return wire.Envelope{}, io.EOF
+	}).Maybe()
+	m.EXPECT().Recv().RunAndReturn(func() (wire.Envelope, error) {
+		<-state.closedC
+		return wire.Envelope{}, io.EOF
+	}).Maybe()
+	m.EXPECT().Close().RunAndReturn(func() error {
+		state.once.Do(func() { close(state.closedC) })
 		return nil
-	}
-	t.mu.Lock()
-	if t.ends[part.Generation] == nil {
-		t.ends[part.Generation] = make(map[ports.BrokerRevision]int)
-	}
-	t.ends[part.Generation][part.Revision]++
-	t.mu.Unlock()
-	select {
-	case t.changed <- struct{}{}:
-	default:
-	}
-	return nil
-}
-
-func (t *recordingTransport) RecvBounded(uint64) (wire.Envelope, error) {
-	<-t.closedC
-	return wire.Envelope{}, io.EOF
-}
-
-func (t *recordingTransport) Recv() (wire.Envelope, error) { return t.RecvBounded(0) }
-
-func (t *recordingTransport) Close() error {
-	t.once.Do(func() { close(t.closedC) })
-	return nil
+	}).Maybe()
+	return m, state
 }
 
 // transferCount reports how many complete transfers of one generation committed
 // one revision.
-func (t *recordingTransport) transferCount(generation brokerwire.SubscriptionGeneration, revision ports.BrokerRevision) int {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.ends[generation][revision]
-}
-
-// waitForTransfer blocks until generation committed revision at least once.
-func (t *recordingTransport) waitForTransfer(generation brokerwire.SubscriptionGeneration, revision ports.BrokerRevision, timeout time.Duration) bool {
-	return t.waitForTransferCount(generation, revision, 1, timeout)
-}
-
-// waitForTransferCount blocks until generation committed revision at least
-// minimum times, or the timeout elapses.
-func (t *recordingTransport) waitForTransferCount(generation brokerwire.SubscriptionGeneration, revision ports.BrokerRevision, minimum int, timeout time.Duration) bool {
-	deadline := time.NewTimer(timeout)
-	defer deadline.Stop()
-	for {
-		if t.transferCount(generation, revision) >= minimum {
-			return true
-		}
-		select {
-		case <-t.changed:
-		case <-deadline.C:
-			return t.transferCount(generation, revision) >= minimum
-		}
-	}
+func (s *recordingState) transferCount(generation brokerwire.SubscriptionGeneration, revision ports.BrokerRevision) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ends[generation][revision]
 }
