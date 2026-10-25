@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// real I/O: reads and writes real files in temp directories.
 func TestPaneEnvironment(t *testing.T) {
 	for _, tt := range []struct {
 		name    string
@@ -58,6 +59,7 @@ func TestPaneEnvironment(t *testing.T) {
 	}
 }
 
+// real I/O: reads and writes real files in temp directories.
 func TestPaneEnvironmentNilInherits(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	t.Setenv("TERM", "outer")
@@ -68,6 +70,7 @@ func TestPaneEnvironmentNilInherits(t *testing.T) {
 	require.NotContains(t, env, "TERM=outer")
 }
 
+// real I/O: spawns real subprocesses or PTYs.
 func TestOpenCancelledDuringTerminfoProbe(t *testing.T) {
 	bin := t.TempDir()
 	t.Setenv("PATH", bin)

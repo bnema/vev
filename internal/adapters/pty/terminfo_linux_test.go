@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// real I/O: reads and writes real files in temp directories.
 func TestOpenSelectsPaneTerminal(t *testing.T) {
 	for _, tt := range []struct {
 		name string
