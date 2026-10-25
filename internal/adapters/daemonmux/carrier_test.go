@@ -285,75 +285,73 @@ func TestFramedCarrierBridgeCloseInterruptsBlockedReceiveAndIsConcurrentSafe(t *
 // framed transport: the shared framing round-trips through the bridge, the
 // preamble bound refuses an oversized frame before its body, and Negotiate
 // raises the bound for a larger negotiated frame.
+// Synctest exception: streamframe globally pools completion channels; using a
+// bubble here leaks bubble-owned channels into subsequent tests and -count runs.
 func TestFramedCarrierBridgeOverIPCFramer(t *testing.T) {
 	t.Run("preamble and negotiated frames round trip", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
-			left, right := net.Pipe()
-			t.Cleanup(func() {
-				_ = left.Close()
-				_ = right.Close()
-			})
-			raw, ok := ipc.NewTransport(left).(RawFramedTransport)
-			require.True(t, ok, "the IPC transport must satisfy the bounded raw capability")
-			bridge, err := NewPreambleCarrier(raw)
-			require.NoError(t, err)
-			peer := ipc.NewTransport(right)
-			defer func() {
-				_ = bridge.Close()
-				_ = peer.Close()
-			}()
-
-			small := []byte("small preamble frame")
-			go func() { _ = peer.Send(wire.Envelope{Payload: small}) }()
-			got, err := bridge.Receive(context.Background())
-			require.NoError(t, err)
-			require.Equal(t, small, got)
-
-			require.NoError(t, bridge.Negotiate(carrierTestCeilings()))
-			large := make([]byte, wire.PreambleLimit+4096)
-			for i := range large {
-				large[i] = byte('a' + i%26)
-			}
-			go func() { _ = peer.Send(wire.Envelope{Payload: large}) }()
-			got, err = bridge.Receive(context.Background())
-			require.NoError(t, err)
-			require.Equal(t, large, got)
-
-			outbound := []byte("exact outbound through the real framer")
-			type peerRecv struct {
-				envelope wire.Envelope
-				err      error
-			}
-			peerResult := make(chan peerRecv, 1)
-			go func() {
-				envelope, err := peer.Recv()
-				peerResult <- peerRecv{envelope: envelope, err: err}
-			}()
-			require.NoError(t, bridge.Send(context.Background(), outbound))
-			result := <-peerResult
-			require.NoError(t, result.err)
-			require.Equal(t, outbound, result.envelope.Payload)
+		left, right := net.Pipe()
+		t.Cleanup(func() {
+			_ = left.Close()
+			_ = right.Close()
 		})
+		raw, ok := ipc.NewTransport(left).(RawFramedTransport)
+		require.True(t, ok, "the IPC transport must satisfy the bounded raw capability")
+		bridge, err := NewPreambleCarrier(raw)
+		require.NoError(t, err)
+		peer := ipc.NewTransport(right)
+		defer func() {
+			_ = bridge.Close()
+			_ = peer.Close()
+		}()
+
+		small := []byte("small preamble frame")
+		go func() { _ = peer.Send(wire.Envelope{Payload: small}) }()
+		got, err := bridge.Receive(context.Background())
+		require.NoError(t, err)
+		require.Equal(t, small, got)
+
+		require.NoError(t, bridge.Negotiate(carrierTestCeilings()))
+		large := make([]byte, wire.PreambleLimit+4096)
+		for i := range large {
+			large[i] = byte('a' + i%26)
+		}
+		go func() { _ = peer.Send(wire.Envelope{Payload: large}) }()
+		got, err = bridge.Receive(context.Background())
+		require.NoError(t, err)
+		require.Equal(t, large, got)
+
+		outbound := []byte("exact outbound through the real framer")
+		type peerRecv struct {
+			envelope wire.Envelope
+			err      error
+		}
+		peerResult := make(chan peerRecv, 1)
+		go func() {
+			envelope, err := peer.Recv()
+			peerResult <- peerRecv{envelope: envelope, err: err}
+		}()
+		require.NoError(t, bridge.Send(context.Background(), outbound))
+		result := <-peerResult
+		require.NoError(t, result.err)
+		require.Equal(t, outbound, result.envelope.Payload)
 	})
 
 	t.Run("oversized preamble frame is refused before its body", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
-			left, right := net.Pipe()
-			t.Cleanup(func() {
-				_ = left.Close()
-				_ = right.Close()
-			})
-			raw, ok := ipc.NewTransport(left).(RawFramedTransport)
-			require.True(t, ok)
-			bridge, err := NewPreambleCarrier(raw)
-			require.NoError(t, err)
-			defer func() { _ = bridge.Close() }()
-
-			// Advertise a 1 MiB frame and never send its body: only the four-byte
-			// length prefix exists on the wire.
-			go func() { _, _ = right.Write(binary.BigEndian.AppendUint32(nil, 1<<20)) }()
-			_, err = bridge.Receive(context.Background())
-			require.ErrorIs(t, err, streamframe.ErrTooLarge)
+		left, right := net.Pipe()
+		t.Cleanup(func() {
+			_ = left.Close()
+			_ = right.Close()
 		})
+		raw, ok := ipc.NewTransport(left).(RawFramedTransport)
+		require.True(t, ok)
+		bridge, err := NewPreambleCarrier(raw)
+		require.NoError(t, err)
+		defer func() { _ = bridge.Close() }()
+
+		// Advertise a 1 MiB frame and never send its body: only the four-byte
+		// length prefix exists on the wire.
+		go func() { _, _ = right.Write(binary.BigEndian.AppendUint32(nil, 1<<20)) }()
+		_, err = bridge.Receive(context.Background())
+		require.ErrorIs(t, err, streamframe.ErrTooLarge)
 	})
 }
