@@ -7,6 +7,7 @@ import (
 	"testing"
 )
 
+// real I/O: reads and writes real files in temp directories.
 func TestLoadOrCreateStableAndIncarnationFresh(t *testing.T) {
 	root := t.TempDir()
 	first, err := LoadOrCreate(root)
@@ -33,6 +34,7 @@ func TestLoadOrCreateStableAndIncarnationFresh(t *testing.T) {
 	}
 }
 
+// real I/O: reads and writes real files in temp directories.
 func TestLoadFailsClosed(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -73,6 +75,7 @@ func TestLoadFailsClosed(t *testing.T) {
 	}
 }
 
+// real I/O: reads and writes real files in temp directories.
 func TestLoadAbsentDoesNotCreate(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "absent")
 	if _, err := Load(root); !errors.Is(err, os.ErrNotExist) {
