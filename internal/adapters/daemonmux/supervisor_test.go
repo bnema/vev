@@ -3,7 +3,7 @@ package daemonmux
 import (
 	"context"
 	"testing"
-	"time"
+	"testing/synctest"
 
 	"github.com/stretchr/testify/require"
 
@@ -167,8 +167,6 @@ func TestServerSupervisorDeliversFirstHelloDataFrame(t *testing.T) {
 		case server = <-accepted:
 		case err := <-acceptErr:
 			require.NoError(t, err)
-		case <-time.After(p3cTestDeadline):
-			t.Fatal("supervisor did not dispatch the admitted logical stream")
 		}
 
 		hello := protocol.Hello{Version: protocol.Version, Intent: protocol.IntentEphemeral, Size: domain.Size{Cols: 80, Rows: 24}, EnvironmentPolicy: protocol.EnvironmentPolicyClientOwned}
@@ -189,8 +187,6 @@ func TestServerSupervisorDeliversFirstHelloDataFrame(t *testing.T) {
 			require.Equal(t, hello, message)
 		case err := <-receiveErr:
 			require.NoError(t, err)
-		case <-time.After(p3cTestDeadline):
-			t.Fatal("first Hello Data frame did not reach sessionwire ReceiveClient")
 		}
 		require.NoError(t, <-sent)
 	})
@@ -239,8 +235,6 @@ func TestServerSupervisorStampsAcceptedOriginThroughAggregate(t *testing.T) {
 		case server = <-accepted:
 		case err := <-acceptErr:
 			require.NoError(t, err)
-		case <-time.After(p3cTestDeadline):
-			t.Fatal("supervisor did not dispatch the admitted logical stream")
 		}
 
 		provider, ok := server.(ports.SessionAdmissionProvider)
@@ -385,10 +379,11 @@ func TestServerSupervisorBoundsConcurrentAdmissions(t *testing.T) {
 		clientB, serverB := rawCarriagePair(t)
 		admittedB := make(chan error, 1)
 		go func() { admittedB <- server.supervisor.Adopt(context.Background(), serverB) }()
+		synctest.Wait()
 		select {
 		case err := <-admittedB:
 			t.Fatalf("the admission bound did not hold the second carriage: %v", err)
-		case <-time.After(150 * time.Millisecond):
+		default:
 		}
 
 		// Finish the first handshake; the slot is released and the second proceeds.
@@ -398,12 +393,8 @@ func TestServerSupervisorBoundsConcurrentAdmissions(t *testing.T) {
 
 		bridgeB, _ := awaitHandshakeBridge(t, clientB, endpoint)
 		t.Cleanup(func() { _ = bridgeB.Close() })
-		select {
-		case err := <-admittedB:
-			require.NoError(t, err)
-		case <-time.After(p3cTestDeadline):
-			t.Fatal("the second carriage never proceeded after the first released its slot")
-		}
+		err := <-admittedB
+		require.NoError(t, err)
 		require.Equal(t, 2, server.supervisor.Children())
 	})
 }

@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
@@ -234,7 +235,6 @@ func (h *listenerHarness) awaitPending(count int) {
 // awaitRegistry reads the condition and notification under the same lock.
 func (h *listenerHarness) awaitRegistry(condition func() bool) {
 	h.t.Helper()
-	guard := time.After(listenerTestDeadline)
 	for {
 		h.listener.mu.Lock()
 		ok, ch := condition(), h.listener.change
@@ -244,8 +244,6 @@ func (h *listenerHarness) awaitRegistry(condition func() bool) {
 		}
 		select {
 		case <-ch:
-		case <-guard:
-			h.t.Fatal("listener registry did not reach expected state")
 		}
 	}
 }
@@ -286,14 +284,9 @@ func (h *listenerHarness) acceptAsync() <-chan acceptOutcome {
 
 func (h *listenerHarness) awaitAccept(out <-chan acceptOutcome) *ListenerConnection {
 	h.t.Helper()
-	select {
-	case outcome := <-out:
-		require.NoError(h.t, outcome.err)
-		return outcome.conn
-	case <-time.After(listenerTestDeadline):
-		h.t.Fatal("listener: Accept did not return an admitted stream")
-		return nil
-	}
+	outcome := <-out
+	require.NoError(h.t, outcome.err)
+	return outcome.conn
 }
 
 // servePongs answers every typed Ping of one accepted connection with exactly
@@ -325,7 +318,6 @@ func listenerRoundTrip(t *testing.T, conn ports.ClientConnection) {
 // requireStreamState waits until one stream of the daemon pump reached state.
 func requireStreamState(t *testing.T, pump *Pump, id PhysicalStreamID, state StreamState) StreamStatus {
 	t.Helper()
-	guard := time.After(listenerTestDeadline)
 	for {
 		ch := pump.Watch(id)
 		status, ok := pump.Engine().Status(id)
@@ -335,8 +327,6 @@ func requireStreamState(t *testing.T, pump *Pump, id PhysicalStreamID, state Str
 		select {
 		case <-ch:
 		case <-status.Done:
-		case <-guard:
-			t.Fatalf("stream %d did not reach %s", id, state)
 		}
 	}
 }
@@ -379,7 +369,6 @@ func (d *listenerDaemon) connection(index int) *ListenerConnection {
 
 func (d *listenerDaemon) await(t *testing.T, count int) {
 	t.Helper()
-	guard := time.After(listenerTestDeadline)
 	for {
 		d.mu.Lock()
 		n, ch := len(d.conns), d.changed
@@ -389,8 +378,6 @@ func (d *listenerDaemon) await(t *testing.T, count int) {
 		}
 		select {
 		case <-ch:
-		case <-guard:
-			t.Fatalf("daemon accepted %d of %d", n, count)
 		}
 	}
 }
@@ -440,29 +427,22 @@ func TestPumpAdmittedObserver(t *testing.T) {
 		pump.Start(context.Background())
 
 		deliverClientFrame(t, carrier, openFor(1))
-		select {
-		case open := <-observed:
-			require.Equal(t, testRef(1), open.Ref)
-			require.Equal(t, openFor(1), open, "the observer receives the decoded admission request")
-		case <-time.After(listenerTestDeadline):
-			t.Fatal("admission observer did not run")
-		}
+		open := <-observed
+		require.Equal(t, testRef(1), open.Ref)
+		require.Equal(t, openFor(1), open, "the observer receives the decoded admission request")
 
 		// A refused admission (a reused physical identity) never notifies.
 		deliverClientFrame(t, carrier, openFor(1))
+		synctest.Wait()
 		select {
 		case open := <-observed:
 			t.Fatalf("refused admission notified the observer: %+v", open)
-		case <-time.After(50 * time.Millisecond):
+		default:
 		}
 
 		deliverClientFrame(t, carrier, openFor(2))
-		select {
-		case open := <-observed:
-			require.Equal(t, testRef(2), open.Ref)
-		case <-time.After(listenerTestDeadline):
-			t.Fatal("admission observer did not run for a fresh stream")
-		}
+		open = <-observed
+		require.Equal(t, testRef(2), open.Ref)
 	})
 }
 
@@ -597,12 +577,8 @@ func TestListenerBlockedAcceptAndReaderSiblingProgress(t *testing.T) {
 
 		// Closing the parked stream unblocks exactly its reader.
 		require.NoError(t, second.Close())
-		select {
-		case err := <-blockedReader:
-			require.Error(t, err)
-		case <-time.After(listenerTestDeadline):
-			t.Fatal("closing the stream did not unblock its reader")
-		}
+		err := <-blockedReader
+		require.Error(t, err)
 		awaitClosed(t, daemonSecond.Done(), listenerTestDeadline)
 		listenerRoundTrip(t, first)
 	})
@@ -650,8 +626,6 @@ func TestListenerQueueFullRefusesOnlyOffendingStream(t *testing.T) {
 			listenerRoundTrip(t, newTypedLogical(t, connection))
 		case err := <-openErrs:
 			t.Fatalf("queued stream did not open: %v", err)
-		case <-time.After(listenerTestDeadline):
-			t.Fatal("queued stream did not open")
 		}
 		require.Equal(t, PhysicalStreamID(1), first.Ref().Physical)
 	})
@@ -722,11 +696,7 @@ func TestListenerHandshakeCompletionCancelsWatchdog(t *testing.T) {
 
 		completed := make(chan struct{}, 1)
 		daemonConnection.OnHandshakeComplete(func() { completed <- struct{}{} })
-		select {
-		case <-completed:
-		case <-time.After(listenerTestDeadline):
-			t.Fatal("session handshake completion was not published")
-		}
+		<-completed
 
 		h.clock.Advance(2 * budget)
 
@@ -767,13 +737,9 @@ func TestListenerDeadlineConsumesQueueDelay(t *testing.T) {
 		require.True(t, daemonConnection.HandshakeDeadline().Before(h.clock.Now().Add(budget)),
 			"accepting late must not start a second full budget")
 
-		select {
-		case connection := <-opened:
-			go func() { _ = servePongs(daemonConnection) }()
-			listenerRoundTrip(t, newTypedLogical(t, connection))
-		case <-time.After(listenerTestDeadline):
-			t.Fatal("queued stream did not open")
-		}
+		connection := <-opened
+		go func() { _ = servePongs(daemonConnection) }()
+		listenerRoundTrip(t, newTypedLogical(t, connection))
 	})
 }
 
@@ -861,20 +827,12 @@ func TestListenerPhysicalLossUnblocksAll(t *testing.T) {
 		awaitClosed(t, h.daemonPump.Done(), listenerTestDeadline)
 		require.Error(t, h.daemonPump.Err(), "the daemon pump must publish the carrier failure")
 
-		select {
-		case outcome := <-blockedAccept:
-			require.ErrorIs(t, outcome.err, ErrListenerLost)
-			require.ErrorIs(t, outcome.err, h.daemonPump.Err(), "the fatal Accept outcome wraps the pump cause")
-		case <-time.After(listenerTestDeadline):
-			t.Fatal("physical loss did not unblock Accept")
-		}
+		outcome := <-blockedAccept
+		require.ErrorIs(t, outcome.err, ErrListenerLost)
+		require.ErrorIs(t, outcome.err, h.daemonPump.Err(), "the fatal Accept outcome wraps the pump cause")
 		for i, blocked := range readers {
-			select {
-			case err := <-blocked:
-				require.Error(t, err, "stream %d", i+1)
-			case <-time.After(listenerTestDeadline):
-				t.Fatalf("physical loss did not unblock stream %d", i+1)
-			}
+			err := <-blocked
+			require.Error(t, err, "stream %d", i+1)
 			awaitClosed(t, daemonConnections[i].Done(), listenerTestDeadline, "stream %d", i+1)
 			require.Error(t, daemonConnections[i].Err(), "stream %d", i+1)
 			require.Equal(t, domain.RemoteFailureTransport, daemonConnections[i].FailureKind(), "stream %d", i+1)
@@ -912,12 +870,8 @@ func TestListenerCloseUnblocksAcceptAndJoinsGoroutines(t *testing.T) {
 
 		require.NoError(t, h.listener.Close())
 		require.NoError(t, h.listener.Close(), "Close is idempotent")
-		select {
-		case outcome := <-blocked:
-			require.ErrorIs(t, outcome.err, ErrListenerClosed)
-		case <-time.After(listenerTestDeadline):
-			t.Fatal("Close did not unblock Accept")
-		}
+		outcome := <-blocked
+		require.ErrorIs(t, outcome.err, ErrListenerClosed)
 		_, err := h.listener.Accept()
 		require.ErrorIs(t, err, ErrListenerClosed)
 
@@ -1167,7 +1121,6 @@ func TestListenerDeliverSkipsExpiredAdmissionWithoutWatchdog(t *testing.T) {
 		// Wait until the watchdog is blocked on stream 1's timer, then move the
 		// clock past the deadline without firing that timer: only the consumer's own
 		// deadline check can settle the stream here.
-		guard := time.After(listenerTestDeadline)
 		for {
 			h.clock.mu.Lock()
 			n, ch := len(h.clock.timers), h.clock.changed
@@ -1177,8 +1130,6 @@ func TestListenerDeliverSkipsExpiredAdmissionWithoutWatchdog(t *testing.T) {
 			}
 			select {
 			case <-ch:
-			case <-guard:
-				t.Fatal("watchdog never armed admission deadline")
 			}
 		}
 
@@ -1187,12 +1138,8 @@ func TestListenerDeliverSkipsExpiredAdmissionWithoutWatchdog(t *testing.T) {
 		probe := h.acceptAsync()
 
 		requireStreamState(t, h.daemonPump, 1, StreamTerminal)
-		select {
-		case err := <-expired:
-			require.Error(t, err)
-		case <-time.After(listenerTestDeadline):
-			t.Fatal("an expired admission was never aborted")
-		}
+		err := <-expired
+		require.Error(t, err)
 		expiredStatus := mustStatus(t, h.daemonPump.Engine(), 1)
 		var detail ports.BrokerError
 		require.ErrorAs(t, expiredStatus.Err, &detail)
@@ -1231,12 +1178,8 @@ func TestListenerCloseDrainsQueuedAdmissions(t *testing.T) {
 		require.NoError(t, h.listener.Close())
 
 		for i := 0; i < queued; i++ {
-			select {
-			case err := <-opens[i]:
-				require.Error(t, err, "queued open %d must fail when the listener closes", i+1)
-			case <-time.After(listenerTestDeadline):
-				t.Fatalf("Close did not unblock queued open %d", i+1)
-			}
+			err := <-opens[i]
+			require.Error(t, err, "queued open %d must fail when the listener closes", i+1)
 		}
 		require.Equal(t, 0, h.daemonPump.Engine().Live(), "Close must release every admission slot")
 		require.Equal(t, 0, h.activeWatchdog(), "Close must clear the deadline watchdog")
@@ -1281,12 +1224,8 @@ func TestListenerConcurrentCloseDrainsOnce(t *testing.T) {
 			require.NoError(t, err, "closer %d", i)
 		}
 		for i := 0; i < queued; i++ {
-			select {
-			case err := <-opens[i]:
-				require.Error(t, err, "queued open %d must fail when the listener closes", i+1)
-			case <-time.After(listenerTestDeadline):
-				t.Fatalf("concurrent Close did not unblock queued open %d", i+1)
-			}
+			err := <-opens[i]
+			require.Error(t, err, "queued open %d must fail when the listener closes", i+1)
 		}
 		require.Equal(t, 0, h.daemonPump.Engine().Live())
 		require.Equal(t, 0, h.activeWatchdog())

@@ -231,8 +231,6 @@ func TestListenerConcurrentAdmissionsKeepDistinctMetadata(t *testing.T) {
 				expected, tracked := want[connection.Ref().Client]
 				require.True(t, tracked)
 				require.Equal(t, expected.admission, admission, "stream %d", connection.Ref().Client)
-			case <-time.After(p3cTestDeadline):
-				t.Fatal("concurrent admissions did not all complete")
 			}
 		}
 	})

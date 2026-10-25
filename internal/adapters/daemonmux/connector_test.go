@@ -183,13 +183,8 @@ func (s *superviseServer) adopt(ctx context.Context, server RawFramedTransport) 
 // awaitAdoption returns the next Adopt outcome.
 func (s *superviseServer) awaitAdoption(t *testing.T) error {
 	t.Helper()
-	select {
-	case err := <-s.adoptions:
-		return err
-	case <-time.After(p3cTestDeadline):
-		t.Fatal("supervisor: Adopt did not return")
-		return nil
-	}
+	err := <-s.adoptions
+	return err
 }
 
 // serve starts the accept loop: every delivered typed connection is recorded
@@ -231,7 +226,6 @@ func (s *superviseServer) acceptedCount() int {
 
 func (s *superviseServer) awaitAccepted(t *testing.T, count int) {
 	t.Helper()
-	guard := time.After(p3cTestDeadline)
 	for {
 		s.mu.Lock()
 		accepted, ch := len(s.accepted), s.acceptedChanged
@@ -241,8 +235,6 @@ func (s *superviseServer) awaitAccepted(t *testing.T, count int) {
 		}
 		select {
 		case <-ch:
-		case <-guard:
-			t.Fatalf("server accepted %d of %d streams", accepted, count)
 		}
 	}
 }
@@ -401,18 +393,9 @@ func TestPhysicalDoneBeforeLogicalLoss(t *testing.T) {
 
 		ordered := make(chan bool, 1)
 		go func() {
-			select {
-			case <-logical.Done():
-			case <-time.After(p3cTestDeadline):
-				ordered <- false
-				return
-			}
-			select {
-			case <-physical.Done():
-				ordered <- true
-			case <-time.After(p3cTestDeadline):
-				ordered <- false
-			}
+			<-logical.Done()
+			<-physical.Done()
+			ordered <- true
 		}()
 
 		// Kill the daemon's carriage: the broker pump observes the carrier error.

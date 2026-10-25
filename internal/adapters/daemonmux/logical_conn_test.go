@@ -164,11 +164,7 @@ func awaitStream(pump *Pump, id PhysicalStreamID, deadline time.Time) (StreamSta
 	signals.mu.Lock()
 	ch := signals.channel(id)
 	signals.mu.Unlock()
-	select {
-	case <-ch:
-	case <-time.After(time.Until(deadline)):
-		return StreamStatus{}, fmt.Errorf("stream %d was not admitted", id)
-	}
+	<-ch
 	status, ok := pump.Engine().Status(id)
 	if !ok || status.State == StreamTerminal {
 		return StreamStatus{}, fmt.Errorf("stream %d was not admitted", id)
@@ -327,7 +323,6 @@ func (a *daemonAcceptor) fail(err error) {
 }
 
 func (a *daemonAcceptor) wait(count int, deadline time.Time) error {
-	guard := time.After(time.Until(deadline))
 	for {
 		a.mu.Lock()
 		n, ch := a.count, a.changed
@@ -344,8 +339,6 @@ func (a *daemonAcceptor) wait(count int, deadline time.Time) error {
 		case err := <-a.errCh:
 			return err
 		case <-ch:
-		case <-guard:
-			return fmt.Errorf("accepted %d of %d streams", n, count)
 		}
 	}
 }
@@ -1023,18 +1016,14 @@ func TestLogicalPhysicalLossBlockedReadReturnsLoss(t *testing.T) {
 		// Fail the daemon side; the broker observes a physical loss.
 		require.NoError(t, daemonPump.Close())
 
-		select {
-		case got := <-blocked:
-			require.Nil(t, got.message)
-			require.Error(t, got.err)
-			require.NotErrorIs(t, got.err, io.EOF, "a physical failure must not surface as a clean EOF")
-			var loss ports.BrokerStreamLost
-			require.ErrorAs(t, got.err, &loss)
-			require.Equal(t, ports.BrokerStreamID(1), loss.Stream)
-			require.Equal(t, domain.RemoteFailureTransport, loss.Cause)
-		case <-time.After(5 * time.Second):
-			t.Fatal("blocked read did not return after the physical failure")
-		}
+		got := <-blocked
+		require.Nil(t, got.message)
+		require.Error(t, got.err)
+		require.NotErrorIs(t, got.err, io.EOF, "a physical failure must not surface as a clean EOF")
+		var loss ports.BrokerStreamLost
+		require.ErrorAs(t, got.err, &loss)
+		require.Equal(t, ports.BrokerStreamID(1), loss.Stream)
+		require.Equal(t, domain.RemoteFailureTransport, loss.Cause)
 		require.True(t, channelClosed(connection.Done()))
 	})
 }

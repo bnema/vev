@@ -10,7 +10,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
-	"time"
 
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -226,12 +225,8 @@ func TestFramedCarrierBridgeReceiveContextCancelReleasesRead(t *testing.T) {
 		}()
 		requireSettled(t, func() bool { return len(raw.recordedLimits()) == 1 })
 		cancel()
-		select {
-		case err := <-recvDone:
-			require.ErrorIs(t, err, context.Canceled)
-		case <-time.After(5 * time.Second):
-			t.Fatal("Receive did not return after context cancellation")
-		}
+		err = <-recvDone
+		require.ErrorIs(t, err, context.Canceled)
 		require.Equal(t, int64(1), raw.closes.Load(), "cancellation must release the blocked raw read")
 		require.NoError(t, bridge.Close())
 		requireSettled(t, func() bool { return runtime.NumGoroutine() <= before+1 }, "the bridge must not abandon its receive worker (before=%d now=%d)", before, runtime.NumGoroutine())
@@ -271,12 +266,8 @@ func TestFramedCarrierBridgeCloseInterruptsBlockedReceiveAndIsConcurrentSafe(t *
 		}
 		require.Equal(t, int64(1), raw.closes.Load(), "Close must close the raw carriage exactly once")
 
-		select {
-		case err := <-recvDone:
-			require.ErrorIs(t, err, ErrCarrierClosed)
-		case <-time.After(5 * time.Second):
-			t.Fatal("Close did not unblock the receive")
-		}
+		err = <-recvDone
+		require.ErrorIs(t, err, ErrCarrierClosed)
 		requireSettled(t, func() bool { return runtime.NumGoroutine() <= before+1 }, "Close must join every bridge worker (before=%d now=%d)", before, runtime.NumGoroutine())
 	})
 }
