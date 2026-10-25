@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -11,41 +12,45 @@ import (
 )
 
 func TestTimerLaneDetachRemovesCompleteToken(t *testing.T) {
-	lane := timerLane{generation: 1}
-	timer := portsmocks.NewMockTimer(t)
-	token := lane.publishLocked(1, timer)
-	require.NotNil(t, token)
-	detached := lane.detachLocked()
-	require.Same(t, token, detached)
-	require.Nil(t, lane.token)
-	select {
-	case <-token.cancel:
-	default:
-		t.Fatal("detach did not cancel token")
-	}
-	require.Nil(t, lane.publishLocked(0, timer), "stale generation reacquired detached lane")
+	synctest.Test(t, func(t *testing.T) {
+		lane := timerLane{generation: 1}
+		timer := portsmocks.NewMockTimer(t)
+		token := lane.publishLocked(1, timer)
+		require.NotNil(t, token)
+		detached := lane.detachLocked()
+		require.Same(t, token, detached)
+		require.Nil(t, lane.token)
+		select {
+		case <-token.cancel:
+		default:
+			t.Fatal("detach did not cancel token")
+		}
+		require.Nil(t, lane.publishLocked(0, timer), "stale generation reacquired detached lane")
+	})
 }
 
 func TestRenderDeadlineCallbackCanInvalidateAgainWithoutJoiningItself(t *testing.T) {
-	clock := newCoordinatorMockClock(t, 2)
-	ac := &attachedClient{}
-	wakeReturned := make(chan struct{})
-	var rc *renderCoordinator
-	rc = newRenderCoordinator(renderCoordinatorOptions{
-		clock: clock.clock,
-		wake: func(renderWake) {
-			require.True(t, rc.invalidateForAttachment(ac, renderInvalidation{class: invalidateUrgent, producer: "reentrant-wake-test"}))
-			close(wakeReturned)
-		},
+	synctest.Test(t, func(t *testing.T) {
+		clock := newCoordinatorMockClock(t, 2)
+		ac := &attachedClient{}
+		wakeReturned := make(chan struct{})
+		var rc *renderCoordinator
+		rc = newRenderCoordinator(renderCoordinatorOptions{
+			clock: clock.clock,
+			wake: func(renderWake) {
+				require.True(t, rc.invalidateForAttachment(ac, renderInvalidation{class: invalidateUrgent, producer: "reentrant-wake-test"}))
+				close(wakeReturned)
+			},
+		})
+		rc.attach(ac)
+		t.Cleanup(func() {
+			rc.beginSessionTeardown().finish()
+			rc.waitForTimerWorkers()
+		})
+		require.True(t, rc.invalidateForAttachment(ac, renderInvalidation{class: invalidateUrgent, producer: "initial-wake-test"}))
+		awaitCoordinatorScheduledTimer(t, clock).ch <- time.Time{}
+		requireReceived(t, wakeReturned, "timer callback deadlocked while publishing its next invalidation")
 	})
-	rc.attach(ac)
-	t.Cleanup(func() {
-		rc.beginSessionTeardown().finish()
-		rc.waitForTimerWorkers()
-	})
-	require.True(t, rc.invalidateForAttachment(ac, renderInvalidation{class: invalidateUrgent, producer: "initial-wake-test"}))
-	awaitCoordinatorScheduledTimer(t, clock).ch <- time.Time{}
-	awaitTestCompletion(t, wakeReturned, "timer callback deadlocked while publishing its next invalidation")
 }
 
 func TestRenderTimerCallbacksCanReplaceTheirOwnLane(t *testing.T) {
@@ -62,7 +67,7 @@ func TestRenderTimerCallbacksCanReplaceTheirOwnLane(t *testing.T) {
 				}
 				rc.invalidateForAttachment(ac, renderInvalidation{class: invalidateUrgent, producer: "table-normal"})
 				awaitCoordinatorScheduledTimer(t, clock).ch <- time.Time{}
-				awaitTestCompletion(t, woke, "normal callback did not reenter invalidation")
+				requireReceived(t, woke, "normal callback did not reenter invalidation")
 			},
 		},
 		{
@@ -74,8 +79,8 @@ func TestRenderTimerCallbacksCanReplaceTheirOwnLane(t *testing.T) {
 				timer := awaitCoordinatorScheduledTimer(t, clock)
 				done := captureResizeCallbackDone(t, rc)
 				timer.ch <- time.Time{}
-				_ = awaitTestValue(t, clock.timers, "resize callback did not schedule replacement")
-				awaitTestCompletion(t, done, "resize callback did not complete")
+				_ = requireReceived(t, clock.timers, "resize callback did not schedule replacement")
+				requireReceived(t, done, "resize callback did not complete")
 			},
 		},
 		{
@@ -85,7 +90,7 @@ func TestRenderTimerCallbacksCanReplaceTheirOwnLane(t *testing.T) {
 				require.True(t, rc.resizeCurrentForLease(epoch, ac, lease, true))
 				rc.scheduleResizeRetryForLease(epoch, ac, lease, func() { rc.scheduleResizeRetryForLease(epoch, ac, lease, func() {}) })
 				awaitCoordinatorScheduledTimer(t, clock).ch <- time.Time{}
-				_ = awaitTestValue(t, clock.timers, "retry callback did not schedule replacement")
+				_ = requireReceived(t, clock.timers, "retry callback did not schedule replacement")
 			},
 		},
 		{
@@ -93,52 +98,58 @@ func TestRenderTimerCallbacksCanReplaceTheirOwnLane(t *testing.T) {
 				p := &pane{}
 				rc.noteSyncBegin(p, 1, func() { rc.noteSyncBegin(p, 2) })
 				awaitCoordinatorScheduledTimer(t, clock).ch <- time.Time{}
-				_ = awaitTestValue(t, clock.timers, "sync force did not schedule replacement")
+				_ = requireReceived(t, clock.timers, "sync force did not schedule replacement")
 			},
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			clock := newCoordinatorMockClock(t, 4)
-			rc, ac := newRenderCoordinator(renderCoordinatorOptions{clock: clock.clock}), &attachedClient{}
-			rc.attach(ac)
-			tc.run(t, rc, clock, ac)
-			rc.beginSessionTeardown().finish()
-			rc.waitForTimerWorkers()
+			synctest.Test(t, func(t *testing.T) {
+				clock := newCoordinatorMockClock(t, 4)
+				rc, ac := newRenderCoordinator(renderCoordinatorOptions{clock: clock.clock}), &attachedClient{}
+				rc.attach(ac)
+				tc.run(t, rc, clock, ac)
+				rc.beginSessionTeardown().finish()
+				rc.waitForTimerWorkers()
+			})
 		})
 	}
 }
 
 func TestRenderTimerScheduleRacesTerminalTeardown(t *testing.T) {
-	for range 32 {
-		clock := newCoordinatorMockClock(t, 2)
-		rc, ac := newRenderCoordinator(renderCoordinatorOptions{clock: clock.clock}), &attachedClient{}
-		rc.attach(ac)
-		start := make(chan struct{})
-		scheduled := make(chan struct{})
-		go func() {
-			<-start
-			rc.invalidateForAttachment(ac, renderInvalidation{class: invalidateUrgent, producer: "race"})
-			close(scheduled)
-		}()
-		close(start)
-		cleanup := rc.beginSessionTeardown()
-		awaitTestCompletion(t, scheduled, "schedule raced terminal teardown")
-		cleanup.finish()
-		rc.waitForTimerWorkers()
-		rc.mu.Lock()
-		require.True(t, rc.torndown)
-		require.Nil(t, rc.normalLane.token)
-		rc.mu.Unlock()
-	}
+	synctest.Test(t, func(t *testing.T) {
+		for range 32 {
+			clock := newCoordinatorMockClock(t, 2)
+			rc, ac := newRenderCoordinator(renderCoordinatorOptions{clock: clock.clock}), &attachedClient{}
+			rc.attach(ac)
+			start := make(chan struct{})
+			scheduled := make(chan struct{})
+			go func() {
+				<-start
+				rc.invalidateForAttachment(ac, renderInvalidation{class: invalidateUrgent, producer: "race"})
+				close(scheduled)
+			}()
+			close(start)
+			cleanup := rc.beginSessionTeardown()
+			requireReceived(t, scheduled, "schedule raced terminal teardown")
+			cleanup.finish()
+			rc.waitForTimerWorkers()
+			rc.mu.Lock()
+			require.True(t, rc.torndown)
+			require.Nil(t, rc.normalLane.token)
+			rc.mu.Unlock()
+		}
+	})
 }
 
 func TestTimerSupervisorCancelsNeverFiringWorker(t *testing.T) {
-	var lane timerLane
-	generation, _ := lane.replaceLocked()
-	token := lane.publishLocked(generation, portsmocks.NewMockTimer(t))
-	var supervisor timerSupervisor
-	supervisor.startLocked(token, nil, func() { t.Fatal("cancelled worker fired") })
-	lane.detachLocked()
-	supervisor.wait()
+	synctest.Test(t, func(t *testing.T) {
+		var lane timerLane
+		generation, _ := lane.replaceLocked()
+		token := lane.publishLocked(generation, portsmocks.NewMockTimer(t))
+		var supervisor timerSupervisor
+		supervisor.startLocked(token, nil, func() { t.Fatal("cancelled worker fired") })
+		lane.detachLocked()
+		supervisor.wait()
+	})
 }

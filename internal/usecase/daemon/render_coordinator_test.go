@@ -6,6 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/mock"
@@ -85,65 +86,69 @@ func newCoordinatorMockClock(t *testing.T, capacity int) *coordinatorMockClock {
 // Detach cancels and stops a selected worker but never synchronously joins it;
 // the stale worker must be rejected when its external readiness probe returns.
 func TestRenderCoordinatorDetachDoesNotJoinSelectedDeadlineWorker(t *testing.T) {
-	clock := portsmocks.NewMockClock(t)
-	timer := portsmocks.NewMockTimer(t)
-	timerC := make(chan time.Time, 1)
-	stopCalled := make(chan struct{})
-	clock.EXPECT().NewTimer(minOutputRenderDeadline).Return(timer).Once()
-	timer.EXPECT().C().Return((<-chan time.Time)(timerC)).Once()
-	timer.EXPECT().Stop().Run(func() { close(stopCalled) }).Return(true).Once()
+	synctest.Test(t, func(t *testing.T) {
+		clock := portsmocks.NewMockClock(t)
+		timer := portsmocks.NewMockTimer(t)
+		timerC := make(chan time.Time, 1)
+		stopCalled := make(chan struct{})
+		clock.EXPECT().NewTimer(minOutputRenderDeadline).Return(timer).Once()
+		timer.EXPECT().C().Return((<-chan time.Time)(timerC)).Once()
+		timer.EXPECT().Stop().Run(func() { close(stopCalled) }).Return(true).Once()
 
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	rc := newRenderCoordinator(renderCoordinatorOptions{
-		clock: clock,
-		ackReadyFor: func(*attachedClient) bool {
-			close(entered)
-			<-release
-			return true
-		},
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		rc := newRenderCoordinator(renderCoordinatorOptions{
+			clock: clock,
+			ackReadyFor: func(*attachedClient) bool {
+				close(entered)
+				<-release
+				return true
+			},
+		})
+		ac := &attachedClient{}
+		rc.attach(ac)
+		rc.invalidate(renderInvalidation{class: invalidateOutput})
+		timerC <- time.Time{}
+		<-entered
+
+		detached := make(chan struct{})
+		go func() {
+			rc.noteDetach(ac)
+			close(detached)
+		}()
+		<-stopCalled
+		requireReceived(t, detached, "detach synchronously waited for a selected timer worker")
+		close(release)
 	})
-	ac := &attachedClient{}
-	rc.attach(ac)
-	rc.invalidate(renderInvalidation{class: invalidateOutput})
-	timerC <- time.Time{}
-	<-entered
-
-	detached := make(chan struct{})
-	go func() {
-		rc.noteDetach(ac)
-		close(detached)
-	}()
-	<-stopCalled
-	awaitTestCompletion(t, detached, "detach synchronously waited for a selected timer worker")
-	close(release)
 }
 
 func TestRenderCoordinatorTimerCallbacksReenterCoordinator(t *testing.T) {
-	clock := portsmocks.NewMockClock(t)
-	var rc *renderCoordinator
-	clock.EXPECT().NewTimer(mock.Anything).RunAndReturn(func(time.Duration) ports.Timer {
-		timer := portsmocks.NewMockTimer(t)
-		ch := make(chan time.Time)
-		timer.EXPECT().C().Run(func() {
-			_ = rc.resizeSnapshot()
-			_ = rc.burstMetricsSnapshot()
-		}).Return((<-chan time.Time)(ch)).Once()
-		timer.EXPECT().Stop().Run(func() {
-			_ = rc.resizeSnapshot()
-			_ = rc.burstMetricsSnapshot()
-		}).Return(true).Once()
-		return timer
-	}).Times(3)
-	rc = newRenderCoordinator(renderCoordinatorOptions{clock: clock})
-	ac := &attachedClient{}
-	rc.attach(ac)
+	synctest.Test(t, func(t *testing.T) {
+		clock := portsmocks.NewMockClock(t)
+		var rc *renderCoordinator
+		clock.EXPECT().NewTimer(mock.Anything).RunAndReturn(func(time.Duration) ports.Timer {
+			timer := portsmocks.NewMockTimer(t)
+			ch := make(chan time.Time)
+			timer.EXPECT().C().Run(func() {
+				_ = rc.resizeSnapshot()
+				_ = rc.burstMetricsSnapshot()
+			}).Return((<-chan time.Time)(ch)).Once()
+			timer.EXPECT().Stop().Run(func() {
+				_ = rc.resizeSnapshot()
+				_ = rc.burstMetricsSnapshot()
+			}).Return(true).Once()
+			return timer
+		}).Times(3)
+		rc = newRenderCoordinator(renderCoordinatorOptions{clock: clock})
+		ac := &attachedClient{}
+		rc.attach(ac)
 
-	rc.invalidate(renderInvalidation{class: invalidateOutput}) // normal arm
-	rc.invalidate(renderInvalidation{class: invalidateUrgent}) // urgent promotion
-	rc.noteSyncBegin(nil, 1)                                   // sync arm
-	rc.noteDetach(ac)                                          // cancel normal deadline only
-	rc.noteSyncPaneRemoved(nil)                                // pane destruction cancels sync watchdog
+		rc.invalidate(renderInvalidation{class: invalidateOutput}) // normal arm
+		rc.invalidate(renderInvalidation{class: invalidateUrgent}) // urgent promotion
+		rc.noteSyncBegin(nil, 1)                                   // sync arm
+		rc.noteDetach(ac)                                          // cancel normal deadline only
+		rc.noteSyncPaneRemoved(nil)                                // pane destruction cancels sync watchdog
+	})
 }
 
 // coordinatorHarness wires one coordinator to generated clock/timer mocks and
@@ -171,6 +176,8 @@ func newCoordinatorHarness(t *testing.T) *coordinatorHarness {
 		ackReadyFor: func(*attachedClient) bool { return h.ackReady.Load() },
 		syncActive:  func() bool { return h.syncActive.Load() },
 	})
+	// Stop armed timer workers so a synctest bubble can exit.
+	t.Cleanup(func() { h.rc.beginSessionTeardown().finish() })
 	return h
 }
 
@@ -195,7 +202,7 @@ func (h *coordinatorHarness) armedTimers(t *testing.T) []*coordinatorMockTimer {
 // deterministic contract failure, not a slow behavior to poll for.
 func awaitWake(t *testing.T, ch chan renderWake) renderWake {
 	t.Helper()
-	wake := awaitTestValue(t, ch, "coordinator did not publish a wake after fake-clock advancement")
+	wake := requireReceived(t, ch, "coordinator did not publish a wake after fake-clock advancement")
 	wake.attachmentLeases = nil
 	wake.generation = 0
 	return wake
@@ -212,7 +219,7 @@ func requireNoWake(t *testing.T, ch chan renderWake) {
 
 func awaitInvalidation(t *testing.T, ch chan renderInvalidation) renderInvalidation {
 	t.Helper()
-	return awaitTestValue(t, ch, "producer did not publish a coordinator invalidation")
+	return requireReceived(t, ch, "producer did not publish a coordinator invalidation")
 }
 
 func requireNoInvalidation(t *testing.T, ch chan renderInvalidation) {
@@ -338,502 +345,544 @@ func TestRenderCoordinatorCoalescesWakesUnderOneDeadline(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			h := newCoordinatorHarness(t)
-			for _, inv := range tc.invalidations {
-				h.rc.invalidate(inv)
-			}
-			timers := h.armedTimers(t)
-			require.Lenf(t, timers, tc.wantTimers,
-				"cap-1 coalescing must arm exactly %d deadline timer(s) for %d invalidations",
-				tc.wantTimers, len(tc.invalidations))
-			last := timers[len(timers)-1]
-			require.GreaterOrEqual(t, last.duration, tc.wantMin)
-			require.LessOrEqual(t, last.duration, tc.wantMax)
+			synctest.Test(t, func(t *testing.T) {
+				h := newCoordinatorHarness(t)
+				for _, inv := range tc.invalidations {
+					h.rc.invalidate(inv)
+				}
+				timers := h.armedTimers(t)
+				require.Lenf(t, timers, tc.wantTimers,
+					"cap-1 coalescing must arm exactly %d deadline timer(s) for %d invalidations",
+					tc.wantTimers, len(tc.invalidations))
+				last := timers[len(timers)-1]
+				require.GreaterOrEqual(t, last.duration, tc.wantMin)
+				require.LessOrEqual(t, last.duration, tc.wantMax)
 
-			last.ch <- time.Time{}
-			require.Equal(t, tc.wantWake, awaitWake(t, h.wakes),
-				"one wake must deliver the latest coalesced state")
-			requireNoWake(t, h.wakes)
+				last.ch <- time.Time{}
+				require.Equal(t, tc.wantWake, awaitWake(t, h.wakes),
+					"one wake must deliver the latest coalesced state")
+				requireNoWake(t, h.wakes)
+			})
 		})
 	}
 }
 
 func TestRenderCoordinatorAdaptsOutputDeadlineAfterBurstAndDecays(t *testing.T) {
-	h := newCoordinatorHarness(t)
+	synctest.Test(t, func(t *testing.T) {
+		h := newCoordinatorHarness(t)
 
-	// A burst establishes pressure without extending its already-armed first
-	// deadline; the following output deadline grows to the 16ms ceiling.
-	for range 9 {
-		h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
-	}
-	burst := h.armedTimers(t)
-	require.Len(t, burst, 1)
-	require.Equal(t, minOutputRenderDeadline, burst[0].duration)
-	burst[0].ch <- time.Time{}
-	awaitWake(t, h.wakes)
-
-	h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
-	atCap := h.armedTimers(t)
-	require.Len(t, atCap, 1)
-	require.Equal(t, maxOutputRenderDeadline, atCap[0].duration,
-		"burst pressure must be capped at the 16ms output deadline")
-	atCap[0].ch <- time.Time{}
-	awaitWake(t, h.wakes)
-
-	// Quiet singleton batches decay pressure toward the 8ms floor.
-	var previous = maxOutputRenderDeadline
-	for range 8 {
-		h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
-		timers := h.armedTimers(t)
-		require.Len(t, timers, 1)
-		require.LessOrEqual(t, timers[0].duration, previous)
-		require.GreaterOrEqual(t, timers[0].duration, minOutputRenderDeadline)
-		previous = timers[0].duration
-		timers[0].ch <- time.Time{}
+		// A burst establishes pressure without extending its already-armed first
+		// deadline; the following output deadline grows to the 16ms ceiling.
+		for range 9 {
+			h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
+		}
+		burst := h.armedTimers(t)
+		require.Len(t, burst, 1)
+		require.Equal(t, minOutputRenderDeadline, burst[0].duration)
+		burst[0].ch <- time.Time{}
 		awaitWake(t, h.wakes)
-	}
-	require.Equal(t, minOutputRenderDeadline, previous)
+
+		h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
+		atCap := h.armedTimers(t)
+		require.Len(t, atCap, 1)
+		require.Equal(t, maxOutputRenderDeadline, atCap[0].duration,
+			"burst pressure must be capped at the 16ms output deadline")
+		atCap[0].ch <- time.Time{}
+		awaitWake(t, h.wakes)
+
+		// Quiet singleton batches decay pressure toward the 8ms floor.
+		var previous = maxOutputRenderDeadline
+		for range 8 {
+			h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
+			timers := h.armedTimers(t)
+			require.Len(t, timers, 1)
+			require.LessOrEqual(t, timers[0].duration, previous)
+			require.GreaterOrEqual(t, timers[0].duration, minOutputRenderDeadline)
+			previous = timers[0].duration
+			timers[0].ch <- time.Time{}
+			awaitWake(t, h.wakes)
+		}
+		require.Equal(t, minOutputRenderDeadline, previous)
+	})
 }
 
 func TestRenderCoordinatorUrgentDeadlineCannotBeExtended(t *testing.T) {
-	h := newCoordinatorHarness(t)
-	h.rc.invalidate(renderInvalidation{class: invalidateOutput})
-	h.rc.invalidate(renderInvalidation{class: invalidateUrgent})
-	for range 32 {
+	synctest.Test(t, func(t *testing.T) {
+		h := newCoordinatorHarness(t)
 		h.rc.invalidate(renderInvalidation{class: invalidateOutput})
 		h.rc.invalidate(renderInvalidation{class: invalidateUrgent})
-	}
-	timers := h.armedTimers(t)
-	require.Len(t, timers, 2, "only the urgent promotion may replace the output timer")
-	require.Equal(t, urgentRenderDeadline, timers[len(timers)-1].duration)
+		for range 32 {
+			h.rc.invalidate(renderInvalidation{class: invalidateOutput})
+			h.rc.invalidate(renderInvalidation{class: invalidateUrgent})
+		}
+		timers := h.armedTimers(t)
+		require.Len(t, timers, 2, "only the urgent promotion may replace the output timer")
+		require.Equal(t, urgentRenderDeadline, timers[len(timers)-1].duration)
+	})
 }
 
 // --- ACK gating ----------------------------------------------------------------
 
 func TestRenderCoordinatorAckReadinessIsAttachmentScoped(t *testing.T) {
-	slow, healthy := &attachedClient{}, &attachedClient{}
-	var slowReady atomic.Bool
-	wakes := make(chan renderWake, 2)
-	rc := newRenderCoordinator(renderCoordinatorOptions{
-		ackReadyFor: func(ac *attachedClient) bool { return ac == healthy || slowReady.Load() },
-		wake:        func(w renderWake) { wakes <- w },
+	synctest.Test(t, func(t *testing.T) {
+		slow, healthy := &attachedClient{}, &attachedClient{}
+		var slowReady atomic.Bool
+		wakes := make(chan renderWake, 2)
+		rc := newRenderCoordinator(renderCoordinatorOptions{
+			ackReadyFor: func(ac *attachedClient) bool { return ac == healthy || slowReady.Load() },
+			wake:        func(w renderWake) { wakes <- w },
+		})
+		rc.attach(slow)
+		rc.attach(healthy)
+		rc.invalidate(renderInvalidation{class: invalidateUrgent, reset: true, producer: "test"})
+		rc.fireCurrent(false)
+
+		wake := requireReceived(t, wakes, "healthy attachment did not receive an independent wake")
+		require.Contains(t, wake.attachmentLeases, healthy)
+		_, slowSelected := wake.attachmentLeases[slow]
+		require.False(t, slowSelected)
+		rc.mu.Lock()
+		require.True(t, rc.pending, "slow attachment must retain the shared mutation until its ACK window opens")
+		rc.mu.Unlock()
+
+		slowReady.Store(true)
+		rc.notifyAckForLease(rc.attachmentLease(slow))
+		wake = requireReceived(t, wakes, "slow attachment did not receive its deferred wake")
+		require.Contains(t, wake.attachmentLeases, slow)
+		rc.mu.Lock()
+		require.False(t, rc.pending, "the shared mutation must clear after every attachment catches up")
+		rc.mu.Unlock()
 	})
-	rc.attach(slow)
-	rc.attach(healthy)
-	rc.invalidate(renderInvalidation{class: invalidateUrgent, reset: true, producer: "test"})
-	rc.fireCurrent(false)
-
-	wake := awaitTestValue(t, wakes, "healthy attachment did not receive an independent wake")
-	require.Contains(t, wake.attachmentLeases, healthy)
-	_, slowSelected := wake.attachmentLeases[slow]
-	require.False(t, slowSelected)
-	rc.mu.Lock()
-	require.True(t, rc.pending, "slow attachment must retain the shared mutation until its ACK window opens")
-	rc.mu.Unlock()
-
-	slowReady.Store(true)
-	rc.notifyAckForLease(rc.attachmentLease(slow))
-	wake = awaitTestValue(t, wakes, "slow attachment did not receive its deferred wake")
-	require.Contains(t, wake.attachmentLeases, slow)
-	rc.mu.Lock()
-	require.False(t, rc.pending, "the shared mutation must clear after every attachment catches up")
-	rc.mu.Unlock()
 }
 
 func TestRenderCoordinatorAckReadinessReentersWithoutBlockingResize(t *testing.T) {
-	owner := &attachedClient{}
-	wakes := make(chan renderWake, 1)
-	ackEntered := make(chan struct{})
-	resizeDone := make(chan uint64, 1)
-	fireDone := make(chan struct{})
+	synctest.Test(t, func(t *testing.T) {
+		owner := &attachedClient{}
+		wakes := make(chan renderWake, 1)
+		ackEntered := make(chan struct{})
+		resizeDone := make(chan uint64, 1)
+		fireDone := make(chan struct{})
 
-	var rc *renderCoordinator
-	rc = newRenderCoordinator(renderCoordinatorOptions{
-		ackReadyFor: func(*attachedClient) bool {
-			close(ackEntered)
-			// The readiness probe models the output send path reading coordinator
-			// metadata after sendMu is held. It must never run under c.mu.
-			_ = rc.resizeSnapshot()
-			return true
-		},
-		wake: func(w renderWake) { wakes <- w },
+		var rc *renderCoordinator
+		rc = newRenderCoordinator(renderCoordinatorOptions{
+			ackReadyFor: func(*attachedClient) bool {
+				close(ackEntered)
+				// The readiness probe models the output send path reading coordinator
+				// metadata after sendMu is held. It must never run under c.mu.
+				_ = rc.resizeSnapshot()
+				return true
+			},
+			wake: func(w renderWake) { wakes <- w },
+		})
+		rc.attach(owner)
+		rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
+
+		go func() {
+			rc.fire(1, false, true)
+			close(fireDone)
+		}()
+		requireReceived(t, ackEntered, "ack readiness was not evaluated")
+
+		go func() { resizeDone <- rc.recordResizeRequest(domain.Size{Cols: 120, Rows: 40}, owner) }()
+		epoch := requireReceived(t, resizeDone, "ack readiness re-entry blocked resize metadata")
+		require.Equal(t, uint64(1), epoch)
+		wake := awaitWake(t, wakes)
+		require.Nil(t, wake.lease, "shared wakes do not carry an attachment lease")
+		require.Equal(t, renderWake{coalesced: 1}, wake)
+		requireReceived(t, fireDone, "fire did not return after wake")
 	})
-	rc.attach(owner)
-	rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
-
-	go func() {
-		rc.fire(1, false, true)
-		close(fireDone)
-	}()
-	awaitTestCompletion(t, ackEntered, "ack readiness was not evaluated")
-
-	go func() { resizeDone <- rc.recordResizeRequest(domain.Size{Cols: 120, Rows: 40}, owner) }()
-	epoch := awaitTestValue(t, resizeDone, "ack readiness re-entry blocked resize metadata")
-	require.Equal(t, uint64(1), epoch)
-	wake := awaitWake(t, wakes)
-	require.Nil(t, wake.lease, "shared wakes do not carry an attachment lease")
-	require.Equal(t, renderWake{coalesced: 1}, wake)
-	awaitTestCompletion(t, fireDone, "fire did not return after wake")
 }
 
 func TestRenderCoordinatorAckDoesNotBypassAnUnexpiredDeadline(t *testing.T) {
-	h := newCoordinatorHarness(t)
-	h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
-	timer := awaitCoordinatorScheduledTimer(t, h.clk)
-	require.GreaterOrEqual(t, timer.duration, minOutputRenderDeadline)
+	synctest.Test(t, func(t *testing.T) {
+		h := newCoordinatorHarness(t)
+		h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
+		timer := awaitCoordinatorScheduledTimer(t, h.clk)
+		require.GreaterOrEqual(t, timer.duration, minOutputRenderDeadline)
 
-	// An unrelated ACK must not turn a normal output deadline into an
-	// immediate wake or cancel its timer.
-	h.rc.notifyAck()
-	requireNoWake(t, h.wakes)
-	timer.mock.AssertNotCalled(t, "Stop")
+		// An unrelated ACK must not turn a normal output deadline into an
+		// immediate wake or cancel its timer.
+		h.rc.notifyAck()
+		requireNoWake(t, h.wakes)
+		timer.mock.AssertNotCalled(t, "Stop")
 
-	timer.ch <- time.Time{}
-	awaitWake(t, h.wakes)
-	requireNoWake(t, h.wakes)
+		timer.ch <- time.Time{}
+		awaitWake(t, h.wakes)
+		requireNoWake(t, h.wakes)
+	})
 }
 
 func TestRenderCoordinatorAckFlushesOnlyExpiredAckDeferredWork(t *testing.T) {
 	t.Run("expired deadline flushes exactly once after readiness", func(t *testing.T) {
-		h := newCoordinatorHarness(t)
-		h.rc.attach(&attachedClient{})
-		h.ackReady.Store(false)
-		h.rc.invalidate(renderInvalidation{class: invalidateOutput, reset: true, producer: "render.go"})
-		timer := awaitCoordinatorScheduledTimer(t, h.clk)
-		timer.ch <- time.Time{}
-		requireNoWake(t, h.wakes)
+		synctest.Test(t, func(t *testing.T) {
+			h := newCoordinatorHarness(t)
+			h.rc.attach(&attachedClient{})
+			h.ackReady.Store(false)
+			h.rc.invalidate(renderInvalidation{class: invalidateOutput, reset: true, producer: "render.go"})
+			timer := awaitCoordinatorScheduledTimer(t, h.clk)
+			timer.ch <- time.Time{}
+			requireNoWake(t, h.wakes)
 
-		// Repeated ACKs while capacity remains unavailable are no-ops.
-		h.rc.notifyAck()
-		requireNoWake(t, h.wakes)
-		h.ackReady.Store(true)
-		h.rc.notifyAck()
-		w := awaitWake(t, h.wakes)
-		require.True(t, w.reset)
-		requireNoWake(t, h.wakes)
-		h.rc.notifyAck()
-		requireNoWake(t, h.wakes)
+			// Repeated ACKs while capacity remains unavailable are no-ops.
+			h.rc.notifyAck()
+			requireNoWake(t, h.wakes)
+			h.ackReady.Store(true)
+			h.rc.notifyAck()
+			w := awaitWake(t, h.wakes)
+			require.True(t, w.reset)
+			requireNoWake(t, h.wakes)
+			h.rc.notifyAck()
+			requireNoWake(t, h.wakes)
+		})
 	})
 
 	t.Run("lifecycle clears deferred work and urgent explicit fires stay immediate", func(t *testing.T) {
-		h := newCoordinatorHarness(t)
-		h.rc.attach(&attachedClient{})
-		h.ackReady.Store(false)
-		h.rc.invalidate(renderInvalidation{class: invalidateOutput})
-		timer := awaitCoordinatorScheduledTimer(t, h.clk)
-		timer.ch <- time.Time{}
-		requireNoWake(t, h.wakes)
-		h.rc.beginSessionTeardown().finish()
-		h.ackReady.Store(true)
-		h.rc.notifyAck()
-		requireNoWake(t, h.wakes)
+		synctest.Test(t, func(t *testing.T) {
+			h := newCoordinatorHarness(t)
+			h.rc.attach(&attachedClient{})
+			h.ackReady.Store(false)
+			h.rc.invalidate(renderInvalidation{class: invalidateOutput})
+			timer := awaitCoordinatorScheduledTimer(t, h.clk)
+			timer.ch <- time.Time{}
+			requireNoWake(t, h.wakes)
+			h.rc.beginSessionTeardown().finish()
+			h.ackReady.Store(true)
+			h.rc.notifyAck()
+			requireNoWake(t, h.wakes)
 
-		immediate := newCoordinatorHarness(t)
-		immediate.rc.invalidate(renderInvalidation{class: invalidateUrgent})
-		immediate.rc.fireCurrent(false)
-		w := awaitWake(t, immediate.wakes)
-		require.True(t, w.urgent)
+			immediate := newCoordinatorHarness(t)
+			immediate.rc.invalidate(renderInvalidation{class: invalidateUrgent})
+			immediate.rc.fireCurrent(false)
+			w := awaitWake(t, immediate.wakes)
+			require.True(t, w.urgent)
+		})
 	})
 }
 
 func TestRenderCoordinatorAckGateBlocksCompositionUntilAck(t *testing.T) {
-	h := newCoordinatorHarness(t)
-	h.rc.attach(&attachedClient{})
-	h.ackReady.Store(false)
+	synctest.Test(t, func(t *testing.T) {
+		h := newCoordinatorHarness(t)
+		h.rc.attach(&attachedClient{})
+		h.ackReady.Store(false)
 
-	h.rc.invalidate(renderInvalidation{class: invalidateOutput})
-	h.rc.invalidate(renderInvalidation{class: invalidateOutput, reset: true})
-	h.rc.invalidate(renderInvalidation{class: invalidateUrgent})
-	for _, timer := range h.armedTimers(t) {
-		timer.ch <- time.Time{}
-	}
-	requireNoWake(t, h.wakes)
+		h.rc.invalidate(renderInvalidation{class: invalidateOutput})
+		h.rc.invalidate(renderInvalidation{class: invalidateOutput, reset: true})
+		h.rc.invalidate(renderInvalidation{class: invalidateUrgent})
+		for _, timer := range h.armedTimers(t) {
+			timer.ch <- time.Time{}
+		}
+		requireNoWake(t, h.wakes)
 
-	h.ackReady.Store(true)
-	h.rc.notifyAck()
-	w := awaitWake(t, h.wakes)
-	require.True(t, w.reset, "the deferred full redraw must stay sticky through the ack gate")
-	require.Equal(t, 3, w.coalesced, "the post-ack wake must carry every deferred transition")
-	requireNoWake(t, h.wakes)
+		h.ackReady.Store(true)
+		h.rc.notifyAck()
+		w := awaitWake(t, h.wakes)
+		require.True(t, w.reset, "the deferred full redraw must stay sticky through the ack gate")
+		require.Equal(t, 3, w.coalesced, "the post-ack wake must carry every deferred transition")
+		requireNoWake(t, h.wakes)
 
-	h.rc.notifyAck()
-	requireNoWake(t, h.wakes)
+		h.rc.notifyAck()
+		requireNoWake(t, h.wakes)
+	})
 }
 
 // --- synchronized output ---------------------------------------------------------
 
 func TestRenderCoordinatorConcurrentSynchronizedPaneBatches(t *testing.T) {
 	t.Run("end orders, watchdogs, and stale callbacks are isolated per pane", func(t *testing.T) {
-		h := newCoordinatorHarness(t)
-		firstForced, secondForced := make(chan struct{}, 1), make(chan struct{}, 1)
-		firstPane, secondPane := &pane{}, &pane{}
+		synctest.Test(t, func(t *testing.T) {
+			h := newCoordinatorHarness(t)
+			firstForced, secondForced := make(chan struct{}, 1), make(chan struct{}, 1)
+			firstPane, secondPane := &pane{}, &pane{}
 
-		// Distinct stable pane owners must remain independent.
-		h.rc.noteSyncBegin(firstPane, 11, func() { firstForced <- struct{}{} })
-		firstWatchdog := h.armedTimers(t)[0]
-		h.rc.noteSyncBegin(secondPane, 22, func() { secondForced <- struct{}{} })
-		secondWatchdog := h.armedTimers(t)[0]
-		h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
+			// Distinct stable pane owners must remain independent.
+			h.rc.noteSyncBegin(firstPane, 11, func() { firstForced <- struct{}{} })
+			firstWatchdog := h.armedTimers(t)[0]
+			h.rc.noteSyncBegin(secondPane, 22, func() { secondForced <- struct{}{} })
+			secondWatchdog := h.armedTimers(t)[0]
+			h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
 
-		// Completing either pane leaves the aggregate gate closed.
-		h.rc.noteSyncEnd(firstPane, 11)
-		requireNoWake(t, h.wakes)
-		// A stale callback for the completed pane must not force it or wake.
-		firstWatchdog.ch <- time.Time{}
-		select {
-		case <-firstForced:
-			t.Fatal("stale watchdog forced a completed pane")
-		default:
-		}
-		requireNoWake(t, h.wakes)
+			// Completing either pane leaves the aggregate gate closed.
+			h.rc.noteSyncEnd(firstPane, 11)
+			requireNoWake(t, h.wakes)
+			// A stale callback for the completed pane must not force it or wake.
+			firstWatchdog.ch <- time.Time{}
+			select {
+			case <-firstForced:
+				t.Fatal("stale watchdog forced a completed pane")
+			default:
+			}
+			requireNoWake(t, h.wakes)
 
-		// The remaining pane's watchdog forces only its own batch, then the
-		// aggregate completion produces exactly one urgent wake.
-		secondWatchdog.ch <- time.Time{}
-		<-secondForced
-		w := awaitWake(t, h.wakes)
-		require.True(t, w.watchdog)
-		require.True(t, w.urgent, "aggregate completion must wake urgently")
-		requireNoWake(t, h.wakes)
+			// The remaining pane's watchdog forces only its own batch, then the
+			// aggregate completion produces exactly one urgent wake.
+			secondWatchdog.ch <- time.Time{}
+			<-secondForced
+			w := awaitWake(t, h.wakes)
+			require.True(t, w.watchdog)
+			require.True(t, w.urgent, "aggregate completion must wake urgently")
+			requireNoWake(t, h.wakes)
+		})
 	})
 
 	t.Run("later pane can end first without releasing an earlier pane", func(t *testing.T) {
-		h := newCoordinatorHarness(t)
-		firstForced := make(chan struct{}, 1)
-		firstPane, secondPane := &pane{}, &pane{}
-		h.rc.noteSyncBegin(firstPane, 11, func() { firstForced <- struct{}{} })
-		firstWatchdog := h.armedTimers(t)[0]
-		h.rc.noteSyncBegin(secondPane, 22)
-		h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
+		synctest.Test(t, func(t *testing.T) {
+			h := newCoordinatorHarness(t)
+			firstForced := make(chan struct{}, 1)
+			firstPane, secondPane := &pane{}, &pane{}
+			h.rc.noteSyncBegin(firstPane, 11, func() { firstForced <- struct{}{} })
+			firstWatchdog := h.armedTimers(t)[0]
+			h.rc.noteSyncBegin(secondPane, 22)
+			h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
 
-		h.rc.noteSyncEnd(secondPane, 22)
-		requireNoWake(t, h.wakes)
-		firstWatchdog.ch <- time.Time{}
-		<-firstForced
-		w := awaitWake(t, h.wakes)
-		require.True(t, w.watchdog)
-		require.True(t, w.urgent, "final pane completion must wake urgently")
-		requireNoWake(t, h.wakes)
+			h.rc.noteSyncEnd(secondPane, 22)
+			requireNoWake(t, h.wakes)
+			firstWatchdog.ch <- time.Time{}
+			<-firstForced
+			w := awaitWake(t, h.wakes)
+			require.True(t, w.watchdog)
+			require.True(t, w.urgent, "final pane completion must wake urgently")
+			requireNoWake(t, h.wakes)
+		})
 	})
 
 	t.Run("pane removal cancels only that pane watchdog", func(t *testing.T) {
-		h := newCoordinatorHarness(t)
-		firstPane, secondPane := &pane{}, &pane{}
-		firstForced, secondForced := make(chan struct{}, 1), make(chan struct{}, 1)
-		h.rc.noteSyncBegin(firstPane, 11, func() { firstForced <- struct{}{} })
-		firstWatchdog := h.armedTimers(t)[0]
-		h.rc.noteSyncBegin(secondPane, 22, func() { secondForced <- struct{}{} })
-		secondWatchdog := h.armedTimers(t)[0]
-		h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
+		synctest.Test(t, func(t *testing.T) {
+			h := newCoordinatorHarness(t)
+			firstPane, secondPane := &pane{}, &pane{}
+			firstForced, secondForced := make(chan struct{}, 1), make(chan struct{}, 1)
+			h.rc.noteSyncBegin(firstPane, 11, func() { firstForced <- struct{}{} })
+			firstWatchdog := h.armedTimers(t)[0]
+			h.rc.noteSyncBegin(secondPane, 22, func() { secondForced <- struct{}{} })
+			secondWatchdog := h.armedTimers(t)[0]
+			h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
 
-		h.rc.noteSyncPaneRemoved(firstPane)
-		firstWatchdog.ch <- time.Time{}
-		select {
-		case <-firstForced:
-			t.Fatal("removed pane watchdog forced output")
-		default:
-		}
-		requireNoWake(t, h.wakes)
-		secondWatchdog.ch <- time.Time{}
-		<-secondForced
-		require.True(t, awaitWake(t, h.wakes).watchdog)
+			h.rc.noteSyncPaneRemoved(firstPane)
+			firstWatchdog.ch <- time.Time{}
+			select {
+			case <-firstForced:
+				t.Fatal("removed pane watchdog forced output")
+			default:
+			}
+			requireNoWake(t, h.wakes)
+			secondWatchdog.ch <- time.Time{}
+			<-secondForced
+			require.True(t, awaitWake(t, h.wakes).watchdog)
+		})
 	})
 }
 
 func TestRenderCoordinatorSyncGateFollowsDynamicRenderability(t *testing.T) {
 	t.Run("inactive batch that becomes active gates activation output until end", func(t *testing.T) {
-		h := newCoordinatorHarness(t)
-		var visible atomic.Bool
-		p := &pane{}
-		h.rc.noteSyncBeginWithRenderability(p, 1, visible.Load)
-		visible.Store(true)
-		h.rc.invalidate(renderInvalidation{class: invalidateUrgent, producer: "activation"})
-		for _, timer := range h.armedTimers(t) {
-			timer.ch <- time.Time{}
-		}
-		requireNoWake(t, h.wakes)
+		synctest.Test(t, func(t *testing.T) {
+			h := newCoordinatorHarness(t)
+			var visible atomic.Bool
+			p := &pane{}
+			h.rc.noteSyncBeginWithRenderability(p, 1, visible.Load)
+			visible.Store(true)
+			h.rc.invalidate(renderInvalidation{class: invalidateUrgent, producer: "activation"})
+			for _, timer := range h.armedTimers(t) {
+				timer.ch <- time.Time{}
+			}
+			requireNoWake(t, h.wakes)
 
-		h.rc.noteSyncEnd(p, 1)
-		w := awaitWake(t, h.wakes)
-		require.True(t, w.urgent)
-		requireNoWake(t, h.wakes)
+			h.rc.noteSyncEnd(p, 1)
+			w := awaitWake(t, h.wakes)
+			require.True(t, w.urgent)
+			requireNoWake(t, h.wakes)
+		})
 	})
 
 	t.Run("hidden batch does not stall newly active output or wake on late end", func(t *testing.T) {
-		h := newCoordinatorHarness(t)
-		var visible atomic.Bool
-		visible.Store(true)
-		p := &pane{}
-		h.rc.noteSyncBeginWithRenderability(p, 1, visible.Load)
-		h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "batch"})
-		visible.Store(false)
-		h.rc.invalidate(renderInvalidation{class: invalidateUrgent, producer: "new-active-tab"})
-		timers := h.armedTimers(t)
-		require.NotEmpty(t, timers)
-		timers[len(timers)-1].ch <- time.Time{}
-		w := awaitWake(t, h.wakes)
-		require.False(t, w.watchdog)
-		h.rc.noteSyncEnd(p, 1)
-		requireNoWake(t, h.wakes)
+		synctest.Test(t, func(t *testing.T) {
+			h := newCoordinatorHarness(t)
+			var visible atomic.Bool
+			visible.Store(true)
+			p := &pane{}
+			h.rc.noteSyncBeginWithRenderability(p, 1, visible.Load)
+			h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "batch"})
+			visible.Store(false)
+			h.rc.invalidate(renderInvalidation{class: invalidateUrgent, producer: "new-active-tab"})
+			timers := h.armedTimers(t)
+			require.NotEmpty(t, timers)
+			timers[len(timers)-1].ch <- time.Time{}
+			w := awaitWake(t, h.wakes)
+			require.False(t, w.watchdog)
+			h.rc.noteSyncEnd(p, 1)
+			requireNoWake(t, h.wakes)
+		})
 	})
 }
 
 func TestRenderCoordinatorSyncGateRetriesWhenBatchPublishesDuringPredicate(t *testing.T) {
-	h := newCoordinatorHarness(t)
-	first, second := &pane{}, &pane{}
-	gateEvaluated := make(chan struct{})
-	releaseGate := make(chan struct{})
-	var hookOnce sync.Once
-	h.rc.opts.afterSyncGateEvaluated = func() {
-		hookOnce.Do(func() {
-			close(gateEvaluated)
-			<-releaseGate
-		})
-	}
-	h.rc.noteSyncBeginWithRenderability(first, 1, func() bool { return false })
-	h.rc.invalidate(renderInvalidation{class: invalidateUrgent, producer: "test"})
+	synctest.Test(t, func(t *testing.T) {
+		h := newCoordinatorHarness(t)
+		first, second := &pane{}, &pane{}
+		gateEvaluated := make(chan struct{})
+		releaseGate := make(chan struct{})
+		var hookOnce sync.Once
+		h.rc.opts.afterSyncGateEvaluated = func() {
+			hookOnce.Do(func() {
+				close(gateEvaluated)
+				<-releaseGate
+			})
+		}
+		h.rc.noteSyncBeginWithRenderability(first, 1, func() bool { return false })
+		h.rc.invalidate(renderInvalidation{class: invalidateUrgent, producer: "test"})
 
-	fireDone := make(chan struct{})
-	go func() {
-		h.rc.fireCurrent(false)
-		close(fireDone)
-	}()
-	<-gateEvaluated
-	// This publication is deliberately between an open predicate result and
-	// pending consumption. A stale gate result must be rejected and retried.
-	h.rc.noteSyncBeginWithRenderability(second, 2, func() bool { return true })
-	close(releaseGate)
-	awaitTestCompletion(t, fireDone, "fire did not finish after retrying the registry snapshot")
+		fireDone := make(chan struct{})
+		go func() {
+			h.rc.fireCurrent(false)
+			close(fireDone)
+		}()
+		<-gateEvaluated
+		// This publication is deliberately between an open predicate result and
+		// pending consumption. A stale gate result must be rejected and retried.
+		h.rc.noteSyncBeginWithRenderability(second, 2, func() bool { return true })
+		close(releaseGate)
+		requireReceived(t, fireDone, "fire did not finish after retrying the registry snapshot")
 
-	requireNoWake(t, h.wakes)
-	h.rc.noteSyncEnd(second, 2)
-	require.Equal(t, renderWake{urgent: true, coalesced: 1}, awaitWake(t, h.wakes))
+		requireNoWake(t, h.wakes)
+		h.rc.noteSyncEnd(second, 2)
+		require.Equal(t, renderWake{urgent: true, coalesced: 1}, awaitWake(t, h.wakes))
+	})
 }
 
 func TestRenderCoordinatorSynchronizedOutput(t *testing.T) {
 	t.Run("completion flushes pending state in one wake", func(t *testing.T) {
-		h := newCoordinatorHarness(t)
-		h.syncActive.Store(true)
-		h.rc.noteSyncBegin(nil, 1)
-		watchdogs := h.armedTimers(t)
-		require.NotEmpty(t, watchdogs, "sync begin must arm the completion watchdog")
-		require.Equal(t, maxSyncUpdateDuration, watchdogs[len(watchdogs)-1].duration)
+		synctest.Test(t, func(t *testing.T) {
+			h := newCoordinatorHarness(t)
+			h.syncActive.Store(true)
+			h.rc.noteSyncBegin(nil, 1)
+			watchdogs := h.armedTimers(t)
+			require.NotEmpty(t, watchdogs, "sync begin must arm the completion watchdog")
+			require.Equal(t, maxSyncUpdateDuration, watchdogs[len(watchdogs)-1].duration)
 
-		h.rc.invalidate(renderInvalidation{class: invalidateOutput, reset: true})
-		timers := h.armedTimers(t)
-		require.Len(t, timers, 1)
-		h.rc.mu.Lock()
-		normalWorkerDone := h.rc.normalLane.token.done
-		h.rc.mu.Unlock()
-		require.NotNil(t, normalWorkerDone)
-		timers[0].ch <- time.Time{}
-		requireWorkerExit(t, normalWorkerDone)
-		requireNoWake(t, h.wakes)
+			h.rc.invalidate(renderInvalidation{class: invalidateOutput, reset: true})
+			timers := h.armedTimers(t)
+			require.Len(t, timers, 1)
+			h.rc.mu.Lock()
+			normalWorkerDone := h.rc.normalLane.token.done
+			h.rc.mu.Unlock()
+			require.NotNil(t, normalWorkerDone)
+			timers[0].ch <- time.Time{}
+			requireWorkerExit(t, normalWorkerDone)
+			requireNoWake(t, h.wakes)
 
-		h.syncActive.Store(false)
-		h.rc.noteSyncEnd(nil, 1)
-		w := awaitWake(t, h.wakes)
-		require.True(t, w.reset)
-		requireNoWake(t, h.wakes)
+			h.syncActive.Store(false)
+			h.rc.noteSyncEnd(nil, 1)
+			w := awaitWake(t, h.wakes)
+			require.True(t, w.reset)
+			requireNoWake(t, h.wakes)
+		})
 	})
 
 	t.Run("watchdog ends a wedged batch before it flushes", func(t *testing.T) {
-		h := newCoordinatorHarness(t)
-		h.syncActive.Store(true)
-		forced := make(chan struct{}, 1)
-		h.rc.noteSyncBegin(nil, 7, func() { forced <- struct{}{} })
-		watchdogs := h.armedTimers(t)
-		require.NotEmpty(t, watchdogs, "sync begin must arm the completion watchdog")
-		h.rc.invalidate(renderInvalidation{class: invalidateOutput})
+		synctest.Test(t, func(t *testing.T) {
+			h := newCoordinatorHarness(t)
+			h.syncActive.Store(true)
+			forced := make(chan struct{}, 1)
+			h.rc.noteSyncBegin(nil, 7, func() { forced <- struct{}{} })
+			watchdogs := h.armedTimers(t)
+			require.NotEmpty(t, watchdogs, "sync begin must arm the completion watchdog")
+			h.rc.invalidate(renderInvalidation{class: invalidateOutput})
 
-		watchdogs[0].ch <- time.Time{}
-		<-forced
-		w := awaitWake(t, h.wakes)
-		require.True(t, w.watchdog, "a wedged synchronized batch must be force-flushed by the watchdog")
-		requireNoWake(t, h.wakes)
+			watchdogs[0].ch <- time.Time{}
+			<-forced
+			w := awaitWake(t, h.wakes)
+			require.True(t, w.watchdog, "a wedged synchronized batch must be force-flushed by the watchdog")
+			requireNoWake(t, h.wakes)
+		})
 	})
 
 	t.Run("watchdog retains gate while force closes the VT batch", func(t *testing.T) {
-		h := newCoordinatorHarness(t)
-		entered := make(chan struct{})
-		release := make(chan struct{})
-		h.rc.noteSyncBegin(nil, 1, func() {
-			close(entered)
-			<-release
-		})
-		watchdogs := h.armedTimers(t)
-		require.NotEmpty(t, watchdogs)
-		h.rc.invalidate(renderInvalidation{class: invalidateOutput})
-		watchdogs[0].ch <- time.Time{}
-		<-entered
+		synctest.Test(t, func(t *testing.T) {
+			h := newCoordinatorHarness(t)
+			entered := make(chan struct{})
+			release := make(chan struct{})
+			h.rc.noteSyncBegin(nil, 1, func() {
+				close(entered)
+				<-release
+			})
+			watchdogs := h.armedTimers(t)
+			require.NotEmpty(t, watchdogs)
+			h.rc.invalidate(renderInvalidation{class: invalidateOutput})
+			watchdogs[0].ch <- time.Time{}
+			<-entered
 
-		// A concurrent deadline/fire sees the retained batch gate and cannot
-		// publish the partial VT state while force is blocked.
-		h.rc.fireCurrent(false)
-		requireNoWake(t, h.wakes)
-		close(release)
-		w := awaitWake(t, h.wakes)
-		require.True(t, w.watchdog)
-		require.True(t, w.urgent)
-		requireNoWake(t, h.wakes)
+			// A concurrent deadline/fire sees the retained batch gate and cannot
+			// publish the partial VT state while force is blocked.
+			h.rc.fireCurrent(false)
+			requireNoWake(t, h.wakes)
+			close(release)
+			w := awaitWake(t, h.wakes)
+			require.True(t, w.watchdog)
+			require.True(t, w.urgent)
+			requireNoWake(t, h.wakes)
+		})
 	})
 
 	t.Run("watchdog flushes after the snapshotted generation is replaced", func(t *testing.T) {
-		h := newCoordinatorHarness(t)
-		h.rc.invalidate(renderInvalidation{class: invalidateOutput})
-		h.rc.mu.Lock()
-		staleGeneration := h.rc.normalLane.generation
-		h.rc.mu.Unlock()
+		synctest.Test(t, func(t *testing.T) {
+			h := newCoordinatorHarness(t)
+			h.rc.invalidate(renderInvalidation{class: invalidateOutput})
+			h.rc.mu.Lock()
+			staleGeneration := h.rc.normalLane.generation
+			h.rc.mu.Unlock()
 
-		// Simulate a new urgent publication after fireCurrent(true) snapshots its
-		// generation but before fire validates it.
-		h.rc.invalidate(renderInvalidation{class: invalidateUrgent})
-		h.rc.fire(staleGeneration, true, true)
+			// Simulate a new urgent publication after fireCurrent(true) snapshots its
+			// generation but before fire validates it.
+			h.rc.invalidate(renderInvalidation{class: invalidateUrgent})
+			h.rc.fire(staleGeneration, true, true)
 
-		w := awaitWake(t, h.wakes)
-		require.True(t, w.watchdog)
-		require.True(t, w.urgent)
-		require.Equal(t, 2, w.coalesced)
-		requireNoWake(t, h.wakes)
+			w := awaitWake(t, h.wakes)
+			require.True(t, w.watchdog)
+			require.True(t, w.urgent)
+			require.Equal(t, 2, w.coalesced)
+			requireNoWake(t, h.wakes)
+		})
 	})
 
 	t.Run("stale watchdog generation cannot wake a completed batch", func(t *testing.T) {
-		h := newCoordinatorHarness(t)
-		h.syncActive.Store(true)
-		h.rc.noteSyncBegin(nil, 1)
-		watchdogs := h.armedTimers(t)
-		require.NotEmpty(t, watchdogs, "sync begin must arm the completion watchdog")
-		h.syncActive.Store(false)
-		h.rc.noteSyncEnd(nil, 1)
+		synctest.Test(t, func(t *testing.T) {
+			h := newCoordinatorHarness(t)
+			h.syncActive.Store(true)
+			h.rc.noteSyncBegin(nil, 1)
+			watchdogs := h.armedTimers(t)
+			require.NotEmpty(t, watchdogs, "sync begin must arm the completion watchdog")
+			h.syncActive.Store(false)
+			h.rc.noteSyncEnd(nil, 1)
 
-		watchdogs[0].ch <- time.Time{}
-		requireNoWake(t, h.wakes)
+			watchdogs[0].ch <- time.Time{}
+			requireNoWake(t, h.wakes)
+		})
 	})
 }
 
 // --- preview subscription --------------------------------------------------------
 
 func TestRenderCoordinatorPreviewSubscription(t *testing.T) {
-	h := newCoordinatorHarness(t)
-	viewer := &attachedClient{}
-	h.rc.subscribePreviewFor(viewer, 1, func(w renderWake) { h.previews <- w })
+	synctest.Test(t, func(t *testing.T) {
+		h := newCoordinatorHarness(t)
+		viewer := &attachedClient{}
+		h.rc.subscribePreviewFor(viewer, 1, func(w renderWake) { h.previews <- w })
 
-	h.rc.invalidate(renderInvalidation{class: invalidateUrgent})
-	timers := h.armedTimers(t)
-	require.NotEmpty(t, timers, "invalidate must arm a deadline timer")
-	timers[len(timers)-1].ch <- time.Time{}
-	owner := awaitWake(t, h.wakes)
-	preview := awaitWake(t, h.previews)
-	require.Equal(t, owner, preview, "a subscribed preview observes the same coalesced wake")
-	requireNoWake(t, h.previews)
+		h.rc.invalidate(renderInvalidation{class: invalidateUrgent})
+		timers := h.armedTimers(t)
+		require.NotEmpty(t, timers, "invalidate must arm a deadline timer")
+		timers[len(timers)-1].ch <- time.Time{}
+		owner := awaitWake(t, h.wakes)
+		preview := awaitWake(t, h.previews)
+		require.Equal(t, owner, preview, "a subscribed preview observes the same coalesced wake")
+		requireNoWake(t, h.previews)
 
-	h.rc.teardownPreviewFor(viewer, 1)
-	h.rc.invalidate(renderInvalidation{class: invalidateUrgent})
-	timers = h.armedTimers(t)
-	require.NotEmpty(t, timers, "invalidate must arm a deadline timer")
-	timers[len(timers)-1].ch <- time.Time{}
-	awaitWake(t, h.wakes)
-	requireNoWake(t, h.previews)
+		h.rc.teardownPreviewFor(viewer, 1)
+		h.rc.invalidate(renderInvalidation{class: invalidateUrgent})
+		timers = h.armedTimers(t)
+		require.NotEmpty(t, timers, "invalidate must arm a deadline timer")
+		timers[len(timers)-1].ch <- time.Time{}
+		awaitWake(t, h.wakes)
+		requireNoWake(t, h.previews)
+	})
 }
 
 // --- lifecycle and stale callbacks -----------------------------------------------
@@ -848,88 +897,92 @@ func TestRenderCoordinatorPreviewWakesDoNotWaitForTargetAck(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			h := newCoordinatorHarness(t)
-			h.ackReady.Store(false)
-			if tc.attach {
-				h.rc.attach(&attachedClient{})
-			}
-			viewer := &attachedClient{}
-			h.rc.subscribePreviewFor(viewer, 1, func(w renderWake) { h.previews <- w })
+			synctest.Test(t, func(t *testing.T) {
+				h := newCoordinatorHarness(t)
+				h.ackReady.Store(false)
+				if tc.attach {
+					h.rc.attach(&attachedClient{})
+				}
+				viewer := &attachedClient{}
+				h.rc.subscribePreviewFor(viewer, 1, func(w renderWake) { h.previews <- w })
 
-			h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "target output"})
-			timers := h.armedTimers(t)
-			require.Len(t, timers, 1)
-			timers[0].ch <- time.Time{}
+				h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "target output"})
+				timers := h.armedTimers(t)
+				require.Len(t, timers, 1)
+				timers[0].ch <- time.Time{}
 
-			preview := awaitWake(t, h.previews)
-			require.Equal(t, renderWake{coalesced: 1}, preview,
-				"the viewer preview must receive target output without target ACK capacity")
-			requireNoWake(t, h.previews)
-			if tc.attach {
-				requireNoWake(t, h.wakes)
-			} else {
-				wake := awaitWake(t, h.wakes)
-				require.Equal(t, renderWake{coalesced: 1}, wake)
-				require.Nil(t, wake.lease, "shared wakes do not carry an attachment lease")
-			}
+				preview := awaitWake(t, h.previews)
+				require.Equal(t, renderWake{coalesced: 1}, preview,
+					"the viewer preview must receive target output without target ACK capacity")
+				requireNoWake(t, h.previews)
+				if tc.attach {
+					requireNoWake(t, h.wakes)
+				} else {
+					wake := awaitWake(t, h.wakes)
+					require.Equal(t, renderWake{coalesced: 1}, wake)
+					require.Nil(t, wake.lease, "shared wakes do not carry an attachment lease")
+				}
 
-			h.ackReady.Store(true)
-			h.rc.notifyAck()
-			if tc.attach {
-				wake := awaitWake(t, h.wakes)
-				require.Equal(t, renderWake{coalesced: 1}, wake,
-					"the target frame remains pending for its ACK")
-			}
-			requireNoWake(t, h.previews)
+				h.ackReady.Store(true)
+				h.rc.notifyAck()
+				if tc.attach {
+					wake := awaitWake(t, h.wakes)
+					require.Equal(t, renderWake{coalesced: 1}, wake,
+						"the target frame remains pending for its ACK")
+				}
+				requireNoWake(t, h.previews)
+			})
 		})
 	}
 }
 
 func TestRenderCoordinatorDetachedTargetPublishesPreviewOnlyInvalidations(t *testing.T) {
-	h := newCoordinatorHarness(t)
-	target, viewer := &attachedClient{}, &attachedClient{}
-	h.ackReady.Store(false)
-	h.rc.attach(target)
-	h.rc.subscribePreviewFor(viewer, 1, func(w renderWake) { h.previews <- w })
-	h.rc.noteDetach(target)
+	synctest.Test(t, func(t *testing.T) {
+		h := newCoordinatorHarness(t)
+		target, viewer := &attachedClient{}, &attachedClient{}
+		h.ackReady.Store(false)
+		h.rc.attach(target)
+		h.rc.subscribePreviewFor(viewer, 1, func(w renderWake) { h.previews <- w })
+		h.rc.noteDetach(target)
 
-	// A detached target only accepts PTY/session-owned invalidations. The old
-	// attachment remains stale and must not revive its render path.
-	h.rc.invalidateForAttachment(target, renderInvalidation{class: invalidateOutput, producer: "stale attachment"})
-	require.Empty(t, h.armedTimers(t))
+		// A detached target only accepts PTY/session-owned invalidations. The old
+		// attachment remains stale and must not revive its render path.
+		h.rc.invalidateForAttachment(target, renderInvalidation{class: invalidateOutput, producer: "stale attachment"})
+		require.Empty(t, h.armedTimers(t))
 
-	for _, producer := range []string{"first PTY output", "second PTY output"} {
-		h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: producer})
+		for _, producer := range []string{"first PTY output", "second PTY output"} {
+			h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: producer})
+			timers := h.armedTimers(t)
+			require.Len(t, timers, 1)
+			timers[0].ch <- time.Time{}
+			preview := awaitWake(t, h.previews)
+			require.Equal(t, renderWake{coalesced: 1}, preview)
+			wake := awaitWake(t, h.wakes)
+			require.Equal(t, renderWake{coalesced: 1}, wake)
+			require.Nil(t, wake.lease, "shared wakes do not carry an attachment lease")
+
+			h.rc.mu.Lock()
+			require.False(t, h.rc.pending)
+			require.False(t, h.rc.pendingPreview)
+			require.False(t, h.rc.ackDeferred)
+			require.False(t, h.rc.deadlineDue)
+			require.Zero(t, h.rc.coalesced)
+			require.Empty(t, h.rc.attachments)
+			h.rc.mu.Unlock()
+		}
+
+		// A later attach retains the normal first-paint reset path.
+		replacement := &attachedClient{}
+		h.ackReady.Store(true)
+		h.rc.attach(replacement)
+		h.rc.invalidateForAttachment(replacement, renderInvalidation{class: invalidateUrgent, reset: true, producer: "first paint"})
 		timers := h.armedTimers(t)
 		require.Len(t, timers, 1)
 		timers[0].ch <- time.Time{}
-		preview := awaitWake(t, h.previews)
-		require.Equal(t, renderWake{coalesced: 1}, preview)
 		wake := awaitWake(t, h.wakes)
-		require.Equal(t, renderWake{coalesced: 1}, wake)
+		require.True(t, wake.reset)
 		require.Nil(t, wake.lease, "shared wakes do not carry an attachment lease")
-
-		h.rc.mu.Lock()
-		require.False(t, h.rc.pending)
-		require.False(t, h.rc.pendingPreview)
-		require.False(t, h.rc.ackDeferred)
-		require.False(t, h.rc.deadlineDue)
-		require.Zero(t, h.rc.coalesced)
-		require.Empty(t, h.rc.attachments)
-		h.rc.mu.Unlock()
-	}
-
-	// A later attach retains the normal first-paint reset path.
-	replacement := &attachedClient{}
-	h.ackReady.Store(true)
-	h.rc.attach(replacement)
-	h.rc.invalidateForAttachment(replacement, renderInvalidation{class: invalidateUrgent, reset: true, producer: "first paint"})
-	timers := h.armedTimers(t)
-	require.Len(t, timers, 1)
-	timers[0].ch <- time.Time{}
-	wake := awaitWake(t, h.wakes)
-	require.True(t, wake.reset)
-	require.Nil(t, wake.lease, "shared wakes do not carry an attachment lease")
+	})
 }
 
 func TestRenderCoordinatorPreviewLifecycleDropsStaleTargetWakes(t *testing.T) {
@@ -950,22 +1003,24 @@ func TestRenderCoordinatorPreviewLifecycleDropsStaleTargetWakes(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			h := newCoordinatorHarness(t)
-			target, replacement, viewer := &attachedClient{}, &attachedClient{}, &attachedClient{}
-			h.rc.attach(target)
-			h.rc.subscribePreviewFor(viewer, 1, func(w renderWake) { h.previews <- w })
-			h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "target output"})
-			stale := h.armedTimers(t)
-			require.Len(t, stale, 1)
+			synctest.Test(t, func(t *testing.T) {
+				h := newCoordinatorHarness(t)
+				target, replacement, viewer := &attachedClient{}, &attachedClient{}, &attachedClient{}
+				h.rc.attach(target)
+				h.rc.subscribePreviewFor(viewer, 1, func(w renderWake) { h.previews <- w })
+				h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "target output"})
+				stale := h.armedTimers(t)
+				require.Len(t, stale, 1)
 
-			tc.transition(h.rc, target, replacement)
-			if tc.teardownWake {
-				require.Equal(t, renderWake{}, awaitWake(t, h.previews))
-				require.False(t, h.rc.hasPreviewSubscribers(), "teardown drops every preview subscription")
-			}
-			stale[0].ch <- time.Time{}
-			requireNoWake(t, h.wakes)
-			requireNoWake(t, h.previews)
+				tc.transition(h.rc, target, replacement)
+				if tc.teardownWake {
+					require.Equal(t, renderWake{}, awaitWake(t, h.previews))
+					require.False(t, h.rc.hasPreviewSubscribers(), "teardown drops every preview subscription")
+				}
+				stale[0].ch <- time.Time{}
+				requireNoWake(t, h.wakes)
+				requireNoWake(t, h.previews)
+			})
 		})
 	}
 }
@@ -992,45 +1047,51 @@ func TestRenderCoordinatorPreviewObserverGenerations(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			h := newCoordinatorHarness(t)
-			observer := &remotePreviewWatch{wake: make(chan struct{}, 1)}
-			for _, s := range tc.steps {
-				if s.subscribe {
-					require.Equal(t, s.wantOK, h.rc.subscribePreviewFor(observer, s.gen, observer.notify))
-				} else {
-					h.rc.teardownPreviewFor(observer, s.gen)
+			synctest.Test(t, func(t *testing.T) {
+				h := newCoordinatorHarness(t)
+				observer := &remotePreviewWatch{wake: make(chan struct{}, 1)}
+				for _, s := range tc.steps {
+					if s.subscribe {
+						require.Equal(t, s.wantOK, h.rc.subscribePreviewFor(observer, s.gen, observer.notify))
+					} else {
+						h.rc.teardownPreviewFor(observer, s.gen)
+					}
 				}
-			}
-			require.Equal(t, tc.wantPresent, h.rc.hasPreviewSubscribers())
+				require.Equal(t, tc.wantPresent, h.rc.hasPreviewSubscribers())
+			})
 		})
 	}
 	t.Run("torn down coordinator refuses", func(t *testing.T) {
-		h := newCoordinatorHarness(t)
-		h.rc.beginSessionTeardown().finish()
-		observer := &remotePreviewWatch{wake: make(chan struct{}, 1)}
-		require.False(t, h.rc.subscribePreviewFor(observer, 1, observer.notify))
+		synctest.Test(t, func(t *testing.T) {
+			h := newCoordinatorHarness(t)
+			h.rc.beginSessionTeardown().finish()
+			observer := &remotePreviewWatch{wake: make(chan struct{}, 1)}
+			require.False(t, h.rc.subscribePreviewFor(observer, 1, observer.notify))
+		})
 	})
 }
 
 func TestRenderCoordinatorPreviewSubscriptionsAreIndependent(t *testing.T) {
-	h := newCoordinatorHarness(t)
-	one, two := &attachedClient{}, &attachedClient{}
-	first, second := make(chan renderWake, 1), make(chan renderWake, 1)
-	h.rc.subscribePreviewFor(one, 1, func(w renderWake) { first <- w })
-	h.rc.subscribePreviewFor(two, 1, func(w renderWake) { second <- w })
-	h.rc.attach(&attachedClient{})
-	h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "preview"})
-	last := h.armedTimers(t)
-	last[len(last)-1].ch <- time.Time{}
-	awaitWake(t, first)
-	awaitWake(t, second)
+	synctest.Test(t, func(t *testing.T) {
+		h := newCoordinatorHarness(t)
+		one, two := &attachedClient{}, &attachedClient{}
+		first, second := make(chan renderWake, 1), make(chan renderWake, 1)
+		h.rc.subscribePreviewFor(one, 1, func(w renderWake) { first <- w })
+		h.rc.subscribePreviewFor(two, 1, func(w renderWake) { second <- w })
+		h.rc.attach(&attachedClient{})
+		h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "preview"})
+		last := h.armedTimers(t)
+		last[len(last)-1].ch <- time.Time{}
+		awaitWake(t, first)
+		awaitWake(t, second)
 
-	h.rc.teardownPreviewFor(one, 1)
-	h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "preview"})
-	last = h.armedTimers(t)
-	last[len(last)-1].ch <- time.Time{}
-	requireNoWake(t, first)
-	awaitWake(t, second)
+		h.rc.teardownPreviewFor(one, 1)
+		h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "preview"})
+		last = h.armedTimers(t)
+		last[len(last)-1].ch <- time.Time{}
+		requireNoWake(t, first)
+		awaitWake(t, second)
+	})
 }
 
 func TestRenderCoordinatorLifecycleDropsStaleWakes(t *testing.T) {
@@ -1043,50 +1104,54 @@ func TestRenderCoordinatorLifecycleDropsStaleWakes(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				h := newCoordinatorHarness(t)
+				owner := &attachedClient{}
+				h.rc.attach(owner)
+				h.rc.invalidate(renderInvalidation{class: invalidateOutput})
+				stale := h.armedTimers(t)
+				require.NotEmpty(t, stale, "invalidate must arm a deadline timer")
+
+				tc.teardown(h.rc, owner)
+				for _, timer := range stale {
+					timer.ch <- time.Time{}
+				}
+				requireNoWake(t, h.wakes)
+
+				h.rc.invalidate(renderInvalidation{class: invalidateUrgent})
+				for _, timer := range h.armedTimers(t) {
+					timer.ch <- time.Time{}
+				}
+				requireNoWake(t, h.wakes)
+			})
+		})
+	}
+
+	t.Run("replacement attachment wakes independently", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
 			h := newCoordinatorHarness(t)
 			owner := &attachedClient{}
+			replacement := &attachedClient{}
 			h.rc.attach(owner)
 			h.rc.invalidate(renderInvalidation{class: invalidateOutput})
 			stale := h.armedTimers(t)
 			require.NotEmpty(t, stale, "invalidate must arm a deadline timer")
 
-			tc.teardown(h.rc, owner)
+			h.rc.noteDetach(owner)
+			h.rc.attach(replacement)
 			for _, timer := range stale {
 				timer.ch <- time.Time{}
 			}
 			requireNoWake(t, h.wakes)
 
-			h.rc.invalidate(renderInvalidation{class: invalidateUrgent})
-			for _, timer := range h.armedTimers(t) {
-				timer.ch <- time.Time{}
-			}
+			h.rc.invalidate(renderInvalidation{class: invalidateUrgent, reset: true})
+			fresh := h.armedTimers(t)
+			require.NotEmpty(t, fresh, "a replacement attachment must arm its own deadline")
+			fresh[len(fresh)-1].ch <- time.Time{}
+			w := awaitWake(t, h.wakes)
+			require.True(t, w.reset, "the replacement starts from an independent full state")
 			requireNoWake(t, h.wakes)
 		})
-	}
-
-	t.Run("replacement attachment wakes independently", func(t *testing.T) {
-		h := newCoordinatorHarness(t)
-		owner := &attachedClient{}
-		replacement := &attachedClient{}
-		h.rc.attach(owner)
-		h.rc.invalidate(renderInvalidation{class: invalidateOutput})
-		stale := h.armedTimers(t)
-		require.NotEmpty(t, stale, "invalidate must arm a deadline timer")
-
-		h.rc.noteDetach(owner)
-		h.rc.attach(replacement)
-		for _, timer := range stale {
-			timer.ch <- time.Time{}
-		}
-		requireNoWake(t, h.wakes)
-
-		h.rc.invalidate(renderInvalidation{class: invalidateUrgent, reset: true})
-		fresh := h.armedTimers(t)
-		require.NotEmpty(t, fresh, "a replacement attachment must arm its own deadline")
-		fresh[len(fresh)-1].ch <- time.Time{}
-		w := awaitWake(t, h.wakes)
-		require.True(t, w.reset, "the replacement starts from an independent full state")
-		requireNoWake(t, h.wakes)
 	})
 }
 
@@ -1137,43 +1202,45 @@ func TestRenderCoordinatorResizeMetadata(t *testing.T) {
 					{name: "replacement", installNew: true},
 				} {
 					t.Run(tc.name, func(t *testing.T) {
-						h := newCoordinatorHarness(t)
-						staleOwner := &attachedClient{}
-						freshOwner := &attachedClient{}
-						h.rc.attach(staleOwner)
-						require.Equal(t, uint64(1), h.rc.recordResizeRequest(sz(120, 40), staleOwner))
+						synctest.Test(t, func(t *testing.T) {
+							h := newCoordinatorHarness(t)
+							staleOwner := &attachedClient{}
+							freshOwner := &attachedClient{}
+							h.rc.attach(staleOwner)
+							require.Equal(t, uint64(1), h.rc.recordResizeRequest(sz(120, 40), staleOwner))
 
-						// This models a stale callback which captured the old
-						// attachment before lifecycle ownership changed.
-						staleCallback := func() uint64 {
-							return h.rc.recordResizeRequest(sz(80, 20), staleOwner)
-						}
+							// This models a stale callback which captured the old
+							// attachment before lifecycle ownership changed.
+							staleCallback := func() uint64 {
+								return h.rc.recordResizeRequest(sz(80, 20), staleOwner)
+							}
 
-						switch tc.name {
-						case "detach":
-							h.rc.noteDetach(staleOwner)
-						case "park":
-							h.rc.noteDetach(staleOwner)
-						case "session teardown":
-							h.rc.beginSessionTeardown().finish()
-						case "replacement":
-							h.rc.noteDetach(staleOwner)
-							h.rc.attach(freshOwner)
-							require.Equal(t, uint64(2), h.rc.recordResizeRequest(sz(100, 50), freshOwner))
-						}
+							switch tc.name {
+							case "detach":
+								h.rc.noteDetach(staleOwner)
+							case "park":
+								h.rc.noteDetach(staleOwner)
+							case "session teardown":
+								h.rc.beginSessionTeardown().finish()
+							case "replacement":
+								h.rc.noteDetach(staleOwner)
+								h.rc.attach(freshOwner)
+								require.Equal(t, uint64(2), h.rc.recordResizeRequest(sz(100, 50), freshOwner))
+							}
 
-						require.Zero(t, staleCallback(), "stale callback must not advance the resize epoch")
-						snap := h.rc.resizeSnapshot()
-						if tc.installNew {
-							require.Equal(t, sz(100, 50), snap.size)
-							require.Equal(t, uint64(2), snap.epoch)
-							require.Same(t, freshOwner, snap.source)
-							return
-						}
-						require.Equal(t, sz(120, 40), snap.size)
-						require.Equal(t, uint64(1), snap.epoch)
-						require.Same(t, staleOwner, snap.source,
-							"the stale callback must not replace the recorded attachment identity")
+							require.Zero(t, staleCallback(), "stale callback must not advance the resize epoch")
+							snap := h.rc.resizeSnapshot()
+							if tc.installNew {
+								require.Equal(t, sz(100, 50), snap.size)
+								require.Equal(t, uint64(2), snap.epoch)
+								require.Same(t, freshOwner, snap.source)
+								return
+							}
+							require.Equal(t, sz(120, 40), snap.size)
+							require.Equal(t, uint64(1), snap.epoch)
+							require.Same(t, staleOwner, snap.source,
+								"the stale callback must not replace the recorded attachment identity")
+						})
 					})
 				}
 			},
@@ -1181,6 +1248,7 @@ func TestRenderCoordinatorResizeMetadata(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			// No timers are armed here; the lifecycle case opens its own bubbles.
 			h := newCoordinatorHarness(t)
 			owner := &attachedClient{}
 			replacement := &attachedClient{}
@@ -1302,7 +1370,7 @@ func TestProducerInvalidations(t *testing.T) {
 				timer := awaitCoordinatorScheduledTimer(t, clk)
 				done := captureResizeCallbackDone(t, sess.renderCoordinator())
 				timer.ch <- time.Time{}
-				awaitTestCompletion(t, done, "resize callback did not complete")
+				requireReceived(t, done, "resize callback did not complete")
 			},
 		},
 		{
@@ -1327,32 +1395,34 @@ func TestProducerInvalidations(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.file+"/"+tc.name, func(t *testing.T) {
-			tabs := tc.tabs
-			if tabs == 0 {
-				tabs = 1
-			}
-			d, sess, ac, sends, releases := newManualTabSession(t, tabs)
-			defer releaseAll(releases)
-			invs := make(chan renderInvalidation, 8)
-			sess.installRenderCoordinator(newRenderCoordinator(renderCoordinatorOptions{
-				clock:        d.clock,
-				wake:         func(renderWake) {},
-				onInvalidate: func(inv renderInvalidation) { invs <- inv },
-			}))
+			synctest.Test(t, func(t *testing.T) {
+				tabs := tc.tabs
+				if tabs == 0 {
+					tabs = 1
+				}
+				d, sess, ac, sends, releases := newManualTabSession(t, tabs)
+				defer releaseAll(releases)
+				invs := make(chan renderInvalidation, 8)
+				sess.installRenderCoordinator(newRenderCoordinator(renderCoordinatorOptions{
+					clock:        d.clock,
+					wake:         func(renderWake) {},
+					onInvalidate: func(inv renderInvalidation) { invs <- inv },
+				}))
 
-			tc.run(t, d, sess, ac)
+				tc.run(t, d, sess, ac)
 
-			inv := awaitInvalidation(t, invs)
-			if tc.producer != "" {
-				require.Equal(t, tc.producer, inv.producer)
-			}
-			requireNoInvalidation(t, invs)
-			if tc.interaction {
-				// The picker publishes offer/snapshot/restore frames of its own;
-				// drain them so the frame assertion below covers the repaint.
-				drainAllFrames(sends)
-			}
-			requireNoCoordinatorOutputFrame(t, sends)
+				inv := awaitInvalidation(t, invs)
+				if tc.producer != "" {
+					require.Equal(t, tc.producer, inv.producer)
+				}
+				requireNoInvalidation(t, invs)
+				if tc.interaction {
+					// The picker publishes offer/snapshot/restore frames of its own;
+					// drain them so the frame assertion below covers the repaint.
+					drainAllFrames(sends)
+				}
+				requireNoCoordinatorOutputFrame(t, sends)
+			})
 		})
 	}
 }
@@ -1371,100 +1441,110 @@ func TestProducerInvalidationInventory(t *testing.T) {
 // --- coordinator resize dispatch ----------------------------------------------
 
 func TestConcurrentPaintInitializesOverlayUnderSendOwnership(t *testing.T) {
-	p, release := newBlockingPTY(t)
-	defer release()
-	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
-	// Exercise the original seam: two fallback paints reach lazy initialization
-	// together before either can compose.
-	ac.overlays = nil
-	ac.overlayOnce = sync.Once{}
-	start := make(chan struct{})
-	var wg sync.WaitGroup
-	wg.Add(2)
-	for range 2 {
-		go func() {
-			defer wg.Done()
-			<-start
-			d.paint(sess, ac, true, nil)
-		}()
-	}
-	close(start)
-	wg.Wait()
-	require.NotNil(t, ac.overlays)
+	synctest.Test(t, func(t *testing.T) {
+		p, release := newBlockingPTY(t)
+		defer release()
+		d, sess, ac, _ := newManualSessionWithPTYs(t, p)
+		// Exercise the original seam: two fallback paints reach lazy initialization
+		// together before either can compose.
+		ac.overlays = nil
+		ac.overlayOnce = sync.Once{}
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(2)
+		for range 2 {
+			go func() {
+				defer wg.Done()
+				<-start
+				d.paint(sess, ac, true, nil)
+			}()
+		}
+		close(start)
+		wg.Wait()
+		require.NotNil(t, ac.overlays)
+	})
 }
 
 func TestStartPaneGoroutinesAccountsForOneReader(t *testing.T) {
-	p, release := newBlockingPTY(t)
-	d, sess, _, _ := newManualSessionWithPTYs(t, p)
-	tb := testAttachmentTab(sess)
-	require.NotNil(t, tb)
-	d.startPaneGoroutines(sess, tb, tb.focusedPane())
-	release()
-	select {
-	case <-waitGroupDone(&d.sessWg):
-	case <-time.After(time.Second):
-		t.Fatal("one reader must balance exactly one WaitGroup count")
-	}
+	synctest.Test(t, func(t *testing.T) {
+		p, release := newBlockingPTY(t)
+		d, sess, _, _ := newManualSessionWithPTYs(t, p)
+		tb := testAttachmentTab(sess)
+		require.NotNil(t, tb)
+		d.startPaneGoroutines(sess, tb, tb.focusedPane())
+		release()
+		select {
+		case <-waitGroupDone(&d.sessWg):
+		case <-time.After(time.Second):
+			t.Fatal("one reader must balance exactly one WaitGroup count")
+		}
+	})
 }
 
 func requireWorkerExit(t *testing.T, done <-chan struct{}) {
 	t.Helper()
-	awaitTestCompletion(t, done, "cancelled coordinator timer worker did not exit")
+	requireReceived(t, done, "cancelled coordinator timer worker did not exit")
 }
 
 func TestRenderCoordinatorResizeLaneRejectsStaleToken(t *testing.T) {
-	rc := newRenderCoordinator(renderCoordinatorOptions{})
-	newer := &timerToken{generation: 2, timer: &portsmocks.MockTimer{}, cancel: make(chan struct{}), done: make(chan struct{})}
-	stale := &timerToken{generation: 1}
+	synctest.Test(t, func(t *testing.T) {
+		rc := newRenderCoordinator(renderCoordinatorOptions{})
+		newer := &timerToken{generation: 2, timer: &portsmocks.MockTimer{}, cancel: make(chan struct{}), done: make(chan struct{})}
+		stale := &timerToken{generation: 1}
 
-	rc.mu.Lock()
-	rc.resizeLane.generation = 2
-	rc.resizeLane.token = newer
-	require.False(t, rc.resizeLane.clearLocked(stale))
-	require.Same(t, newer, rc.resizeLane.token)
-	require.True(t, rc.resizeLane.clearLocked(newer))
-	require.Nil(t, rc.resizeLane.token)
-	rc.mu.Unlock()
+		rc.mu.Lock()
+		rc.resizeLane.generation = 2
+		rc.resizeLane.token = newer
+		require.False(t, rc.resizeLane.clearLocked(stale))
+		require.Same(t, newer, rc.resizeLane.token)
+		require.True(t, rc.resizeLane.clearLocked(newer))
+		require.Nil(t, rc.resizeLane.token)
+		rc.mu.Unlock()
+	})
 }
 
 func TestRenderCoordinatorNilClockRetryRunsSynchronously(t *testing.T) {
-	rc := newRenderCoordinator(renderCoordinatorOptions{})
-	owner := &attachedClient{}
-	rc.attach(owner)
-	lease := rc.attachmentLease(owner)
-	epoch := rc.recordResizeRequestForLease(domain.Size{Cols: 120, Rows: 40}, owner, lease)
-	require.NotZero(t, epoch)
-	require.True(t, rc.resizeCurrentForLease(epoch, owner, lease, true))
+	synctest.Test(t, func(t *testing.T) {
+		rc := newRenderCoordinator(renderCoordinatorOptions{})
+		owner := &attachedClient{}
+		rc.attach(owner)
+		lease := rc.attachmentLease(owner)
+		epoch := rc.recordResizeRequestForLease(domain.Size{Cols: 120, Rows: 40}, owner, lease)
+		require.NotZero(t, epoch)
+		require.True(t, rc.resizeCurrentForLease(epoch, owner, lease, true))
 
-	called := false
-	rc.scheduleResizeRetryForLease(epoch, owner, lease, func() { called = true })
-	require.True(t, called, "a nil clock must run the retry without a timer")
-	rc.mu.Lock()
-	retryToken := rc.retryLane.token
-	rc.mu.Unlock()
-	require.Nil(t, retryToken, "a disabled retry lane must not retain stale completion ownership")
+		called := false
+		rc.scheduleResizeRetryForLease(epoch, owner, lease, func() { called = true })
+		require.True(t, called, "a nil clock must run the retry without a timer")
+		rc.mu.Lock()
+		retryToken := rc.retryLane.token
+		rc.mu.Unlock()
+		require.Nil(t, retryToken, "a disabled retry lane must not retain stale completion ownership")
+	})
 }
 
 func TestRenderCoordinatorInertTimerFiresSynchronouslyWithoutWorker(t *testing.T) {
-	clock := portsmocks.NewMockClock(t)
-	timer := portsmocks.NewMockTimer(t)
-	clock.EXPECT().NewTimer(minOutputRenderDeadline).Return(timer).Once()
-	timer.EXPECT().C().Return((<-chan time.Time)(nil)).Once()
-	timer.EXPECT().Stop().Return(true).Once()
+	synctest.Test(t, func(t *testing.T) {
+		clock := portsmocks.NewMockClock(t)
+		timer := portsmocks.NewMockTimer(t)
+		clock.EXPECT().NewTimer(minOutputRenderDeadline).Return(timer).Once()
+		timer.EXPECT().C().Return((<-chan time.Time)(nil)).Once()
+		timer.EXPECT().Stop().Return(true).Once()
 
-	wakes := make(chan renderWake, 1)
-	rc := newRenderCoordinator(renderCoordinatorOptions{
-		clock:       clock,
-		ackReadyFor: func(*attachedClient) bool { return true },
-		wake:        func(w renderWake) { wakes <- w },
+		wakes := make(chan renderWake, 1)
+		rc := newRenderCoordinator(renderCoordinatorOptions{
+			clock:       clock,
+			ackReadyFor: func(*attachedClient) bool { return true },
+			wake:        func(w renderWake) { wakes <- w },
+		})
+		rc.invalidate(renderInvalidation{class: invalidateOutput})
+
+		require.Equal(t, renderWake{coalesced: 1}, <-wakes)
+		require.Equal(t, renderCoordinatorBurstMetricsSnapshot{invalidations: 1, wakes: 1, coalesced: 1}, rc.burstMetricsSnapshot())
+		rc.mu.Lock()
+		require.Nil(t, rc.normalLane.token)
+		rc.mu.Unlock()
 	})
-	rc.invalidate(renderInvalidation{class: invalidateOutput})
-
-	require.Equal(t, renderWake{coalesced: 1}, <-wakes)
-	require.Equal(t, renderCoordinatorBurstMetricsSnapshot{invalidations: 1, wakes: 1, coalesced: 1}, rc.burstMetricsSnapshot())
-	rc.mu.Lock()
-	require.Nil(t, rc.normalLane.token)
-	rc.mu.Unlock()
 }
 
 func TestRenderCoordinatorSyncBatchSurvivesAttachmentLifecycle(t *testing.T) {
@@ -1476,74 +1556,78 @@ func TestRenderCoordinatorSyncBatchSurvivesAttachmentLifecycle(t *testing.T) {
 			{"detach", func(rc *renderCoordinator, ac *attachedClient) { rc.noteDetach(ac) }},
 		} {
 			t.Run(transition.name, func(t *testing.T) {
-				h := newCoordinatorHarness(t)
-				target, viewer, p := &attachedClient{}, &attachedClient{}, &pane{}
-				h.rc.attach(target)
-				h.rc.subscribePreviewFor(viewer, 1, func(w renderWake) { h.previews <- w })
-				h.rc.noteSyncBegin(p, 1)
-				watchdog := h.armedTimers(t)[0]
-				transition.run(h.rc, target)
+				synctest.Test(t, func(t *testing.T) {
+					h := newCoordinatorHarness(t)
+					target, viewer, p := &attachedClient{}, &attachedClient{}, &pane{}
+					h.rc.attach(target)
+					h.rc.subscribePreviewFor(viewer, 1, func(w renderWake) { h.previews <- w })
+					h.rc.noteSyncBegin(p, 1)
+					watchdog := h.armedTimers(t)[0]
+					transition.run(h.rc, target)
 
-				// PTY-owned output remains visible to picker observers while the
-				// target attachment is parked. Its deadline must retain the sync gate.
-				h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "complete preview"})
-				timers := h.armedTimers(t)
-				require.Len(t, timers, 1)
-				h.rc.mu.Lock()
-				normalWorkerDone := h.rc.normalLane.token.done
-				h.rc.mu.Unlock()
-				require.NotNil(t, normalWorkerDone)
-				timers[0].ch <- time.Time{}
-				requireWorkerExit(t, normalWorkerDone)
-				requireNoWake(t, h.previews)
+					// PTY-owned output remains visible to picker observers while the
+					// target attachment is parked. Its deadline must retain the sync gate.
+					h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "complete preview"})
+					timers := h.armedTimers(t)
+					require.Len(t, timers, 1)
+					h.rc.mu.Lock()
+					normalWorkerDone := h.rc.normalLane.token.done
+					h.rc.mu.Unlock()
+					require.NotNil(t, normalWorkerDone)
+					timers[0].ch <- time.Time{}
+					requireWorkerExit(t, normalWorkerDone)
+					requireNoWake(t, h.previews)
 
-				h.rc.mu.Lock()
-				require.Same(t, h.rc.syncBatches[p].lane.token.timer, watchdog.mock)
-				h.rc.mu.Unlock()
-				h.rc.noteSyncEnd(p, 1)
-				preview := awaitWake(t, h.previews)
-				require.Equal(t, renderWake{urgent: true, coalesced: 1}, preview)
-				requireNoWake(t, h.previews)
-				wake := awaitWake(t, h.wakes)
-				require.Equal(t, renderWake{urgent: true, coalesced: 1}, wake)
-				require.Nil(t, wake.lease, "shared wakes do not carry an attachment lease")
+					h.rc.mu.Lock()
+					require.Same(t, h.rc.syncBatches[p].lane.token.timer, watchdog.mock)
+					h.rc.mu.Unlock()
+					h.rc.noteSyncEnd(p, 1)
+					preview := awaitWake(t, h.previews)
+					require.Equal(t, renderWake{urgent: true, coalesced: 1}, preview)
+					requireNoWake(t, h.previews)
+					wake := awaitWake(t, h.wakes)
+					require.Equal(t, renderWake{urgent: true, coalesced: 1}, wake)
+					require.Nil(t, wake.lease, "shared wakes do not carry an attachment lease")
+				})
 			})
 		}
 	})
 
 	t.Run("replacement first paint waits for active batch and rejects stale owner", func(t *testing.T) {
-		h := newCoordinatorHarness(t)
-		old, replacement, p := &attachedClient{}, &attachedClient{}, &pane{}
-		h.rc.attach(old)
-		h.rc.noteSyncBegin(p, 1)
-		watchdog := h.armedTimers(t)[0]
-		h.rc.noteDetach(old)
-		h.rc.attachWithReadiness(replacement, false)
-		require.False(t, h.rc.markAttachmentReady(h.rc.attachmentLease(old)), "old attachment Welcome is stale")
-		require.True(t, h.rc.markAttachmentReady(h.rc.attachmentLease(replacement)))
+		synctest.Test(t, func(t *testing.T) {
+			h := newCoordinatorHarness(t)
+			old, replacement, p := &attachedClient{}, &attachedClient{}, &pane{}
+			h.rc.attach(old)
+			h.rc.noteSyncBegin(p, 1)
+			watchdog := h.armedTimers(t)[0]
+			h.rc.noteDetach(old)
+			h.rc.attachWithReadiness(replacement, false)
+			require.False(t, h.rc.markAttachmentReady(h.rc.attachmentLease(old)), "old attachment Welcome is stale")
+			require.True(t, h.rc.markAttachmentReady(h.rc.attachmentLease(replacement)))
 
-		h.rc.invalidateForAttachment(old, renderInvalidation{class: invalidateUrgent, producer: "stale old attachment"})
-		require.Empty(t, h.armedTimers(t))
-		h.rc.invalidateForAttachment(replacement, renderInvalidation{class: invalidateUrgent, reset: true, producer: "replacement first paint"})
-		timers := h.armedTimers(t)
-		require.Len(t, timers, 1)
-		h.rc.mu.Lock()
-		normalWorkerDone := h.rc.normalLane.token.done
-		h.rc.mu.Unlock()
-		require.NotNil(t, normalWorkerDone)
-		timers[0].ch <- time.Time{}
-		requireWorkerExit(t, normalWorkerDone)
-		requireNoWake(t, h.wakes)
+			h.rc.invalidateForAttachment(old, renderInvalidation{class: invalidateUrgent, producer: "stale old attachment"})
+			require.Empty(t, h.armedTimers(t))
+			h.rc.invalidateForAttachment(replacement, renderInvalidation{class: invalidateUrgent, reset: true, producer: "replacement first paint"})
+			timers := h.armedTimers(t)
+			require.Len(t, timers, 1)
+			h.rc.mu.Lock()
+			normalWorkerDone := h.rc.normalLane.token.done
+			h.rc.mu.Unlock()
+			require.NotNil(t, normalWorkerDone)
+			timers[0].ch <- time.Time{}
+			requireWorkerExit(t, normalWorkerDone)
+			requireNoWake(t, h.wakes)
 
-		h.rc.mu.Lock()
-		require.Same(t, h.rc.syncBatches[p].lane.token.timer, watchdog.mock)
-		h.rc.mu.Unlock()
-		h.rc.noteSyncEnd(p, 1)
-		wake := awaitWake(t, h.wakes)
-		require.True(t, wake.reset)
-		require.True(t, wake.urgent)
-		require.Nil(t, wake.lease, "shared wakes do not carry an attachment lease")
-		requireNoWake(t, h.wakes)
+			h.rc.mu.Lock()
+			require.Same(t, h.rc.syncBatches[p].lane.token.timer, watchdog.mock)
+			h.rc.mu.Unlock()
+			h.rc.noteSyncEnd(p, 1)
+			wake := awaitWake(t, h.wakes)
+			require.True(t, wake.reset)
+			require.True(t, wake.urgent)
+			require.Nil(t, wake.lease, "shared wakes do not carry an attachment lease")
+			requireNoWake(t, h.wakes)
+		})
 	})
 
 	t.Run("pane removal and session teardown cancel sync workers", func(t *testing.T) {
@@ -1555,20 +1639,22 @@ func TestRenderCoordinatorSyncBatchSurvivesAttachmentLifecycle(t *testing.T) {
 			{"session teardown", func(rc *renderCoordinator, _ *pane) { rc.beginSessionTeardown().finish() }},
 		} {
 			t.Run(lifecycle.name, func(t *testing.T) {
-				clk := newCoordinatorMockClock(t, 2)
-				rc := newRenderCoordinator(renderCoordinatorOptions{clock: clk.clock})
-				p := &pane{}
-				rc.noteSyncBegin(p, 1)
-				syncTimer := <-clk.timers
-				rc.mu.Lock()
-				syncDone := rc.syncBatches[p].lane.token.done
-				rc.mu.Unlock()
-				lifecycle.end(rc, p)
-				syncTimer.mock.AssertNumberOfCalls(t, "Stop", 1)
-				requireWorkerExit(t, syncDone)
-				if lifecycle.name == "session teardown" {
-					rc.waitForTimerWorkers()
-				}
+				synctest.Test(t, func(t *testing.T) {
+					clk := newCoordinatorMockClock(t, 2)
+					rc := newRenderCoordinator(renderCoordinatorOptions{clock: clk.clock})
+					p := &pane{}
+					rc.noteSyncBegin(p, 1)
+					syncTimer := <-clk.timers
+					rc.mu.Lock()
+					syncDone := rc.syncBatches[p].lane.token.done
+					rc.mu.Unlock()
+					lifecycle.end(rc, p)
+					syncTimer.mock.AssertNumberOfCalls(t, "Stop", 1)
+					requireWorkerExit(t, syncDone)
+					if lifecycle.name == "session teardown" {
+						rc.waitForTimerWorkers()
+					}
+				})
 			})
 		}
 	})
@@ -1594,115 +1680,127 @@ func TestRenderCoordinatorResizeEpochDispatch(t *testing.T) {
 	}
 
 	t.Run("bounded timer records metadata and dispatches through the coordinator", func(t *testing.T) {
-		d, sess, ac, sends, clk, invs := newResizeFixture(t)
+		synctest.Test(t, func(t *testing.T) {
+			d, sess, ac, sends, clk, invs := newResizeFixture(t)
 
-		d.resize(sess, ac, domain.Size{Cols: 120, Rows: 24})
-		timer := awaitCoordinatorScheduledTimer(t, clk)
-		require.GreaterOrEqual(t, timer.duration, minOutputRenderDeadline)
-		require.LessOrEqual(t, timer.duration, maxOutputRenderDeadline)
-		snap := sess.renderCoordinator().resizeSnapshot()
-		require.Equal(t, domain.Size{Cols: 120, Rows: 24}, snap.size,
-			"the coordinator must record the latest requested resize before delegating")
-		require.Same(t, ac, snap.source)
-		require.Equal(t, uint64(1), snap.epoch)
-		requireNoCoordinatorOutputFrame(t, sends)
+			d.resize(sess, ac, domain.Size{Cols: 120, Rows: 24})
+			timer := awaitCoordinatorScheduledTimer(t, clk)
+			require.GreaterOrEqual(t, timer.duration, minOutputRenderDeadline)
+			require.LessOrEqual(t, timer.duration, maxOutputRenderDeadline)
+			snap := sess.renderCoordinator().resizeSnapshot()
+			require.Equal(t, domain.Size{Cols: 120, Rows: 24}, snap.size,
+				"the coordinator must record the latest requested resize before delegating")
+			require.Same(t, ac, snap.source)
+			require.Equal(t, uint64(1), snap.epoch)
+			requireNoCoordinatorOutputFrame(t, sends)
 
-		done := captureResizeCallbackDone(t, sess.renderCoordinator())
-		timer.ch <- time.Time{}
-		awaitTestCompletion(t, done, "resize callback did not complete")
-		inv := awaitInvalidation(t, invs)
-		require.True(t, inv.reset, "the resize dispatch must request a full-redraw invalidation")
-		requireNoInvalidation(t, invs)
-		requireNoCoordinatorOutputFrame(t, sends)
+			done := captureResizeCallbackDone(t, sess.renderCoordinator())
+			timer.ch <- time.Time{}
+			requireReceived(t, done, "resize callback did not complete")
+			inv := awaitInvalidation(t, invs)
+			require.True(t, inv.reset, "the resize dispatch must request a full-redraw invalidation")
+			requireNoInvalidation(t, invs)
+			requireNoCoordinatorOutputFrame(t, sends)
+		})
 	})
 
 	t.Run("stale generations stay rejected", func(t *testing.T) {
-		d, sess, ac, sends, clk, invs := newResizeFixture(t)
+		synctest.Test(t, func(t *testing.T) {
+			d, sess, ac, sends, clk, invs := newResizeFixture(t)
 
-		d.resize(sess, ac, domain.Size{Cols: 100, Rows: 24})
-		first := awaitCoordinatorScheduledTimer(t, clk)
-		d.resize(sess, ac, domain.Size{Cols: 120, Rows: 24})
-		latest := awaitCoordinatorScheduledTimer(t, clk)
-		require.Equal(t, uint64(2), sess.renderCoordinator().resizeSnapshot().epoch,
-			"every resize request must advance the coordinator epoch")
+			d.resize(sess, ac, domain.Size{Cols: 100, Rows: 24})
+			first := awaitCoordinatorScheduledTimer(t, clk)
+			d.resize(sess, ac, domain.Size{Cols: 120, Rows: 24})
+			latest := awaitCoordinatorScheduledTimer(t, clk)
+			require.Equal(t, uint64(2), sess.renderCoordinator().resizeSnapshot().epoch,
+				"every resize request must advance the coordinator epoch")
 
-		done := captureResizeCallbackDone(t, sess.renderCoordinator())
-		first.ch <- time.Time{}
-		requireNoInvalidation(t, invs)
-		requireNoCoordinatorOutputFrame(t, sends)
+			done := captureResizeCallbackDone(t, sess.renderCoordinator())
+			first.ch <- time.Time{}
+			requireNoInvalidation(t, invs)
+			requireNoCoordinatorOutputFrame(t, sends)
 
-		latest.ch <- time.Time{}
-		awaitTestCompletion(t, done, "latest resize callback did not complete")
-		inv := awaitInvalidation(t, invs)
-		require.True(t, inv.reset)
-		requireNoInvalidation(t, invs)
-		requireNoCoordinatorOutputFrame(t, sends)
-		require.Equal(t, domain.Size{Cols: 120, Rows: 24}, sess.renderCoordinator().resizeSnapshot().size)
+			latest.ch <- time.Time{}
+			requireReceived(t, done, "latest resize callback did not complete")
+			inv := awaitInvalidation(t, invs)
+			require.True(t, inv.reset)
+			requireNoInvalidation(t, invs)
+			requireNoCoordinatorOutputFrame(t, sends)
+			require.Equal(t, domain.Size{Cols: 120, Rows: 24}, sess.renderCoordinator().resizeSnapshot().size)
+		})
 	})
 
 	t.Run("cancellation still drops the pending dispatch", func(t *testing.T) {
-		d, sess, ac, sends, clk, invs := newResizeFixture(t)
+		synctest.Test(t, func(t *testing.T) {
+			d, sess, ac, sends, clk, invs := newResizeFixture(t)
 
-		d.resize(sess, ac, domain.Size{Cols: 90, Rows: 30})
-		timer := awaitCoordinatorScheduledTimer(t, clk)
-		done := captureResizeCallbackDone(t, sess.renderCoordinator())
-		sess.renderCoordinator().noteDetach(ac)
+			d.resize(sess, ac, domain.Size{Cols: 90, Rows: 30})
+			timer := awaitCoordinatorScheduledTimer(t, clk)
+			done := captureResizeCallbackDone(t, sess.renderCoordinator())
+			sess.renderCoordinator().noteDetach(ac)
 
-		timer.ch <- time.Time{}
-		awaitTestCompletion(t, done, "cancelled resize callback did not complete")
-		requireNoInvalidation(t, invs)
-		requireNoCoordinatorOutputFrame(t, sends)
+			timer.ch <- time.Time{}
+			requireReceived(t, done, "cancelled resize callback did not complete")
+			requireNoInvalidation(t, invs)
+			requireNoCoordinatorOutputFrame(t, sends)
+		})
 	})
 
 	t.Run("request reports immediate completion and async schedule acceptance", func(t *testing.T) {
 		t.Run("immediate reset invalidation", func(t *testing.T) {
-			d, sess, ac, _, _, invs := newResizeFixture(t)
+			synctest.Test(t, func(t *testing.T) {
+				d, sess, ac, _, _, invs := newResizeFixture(t)
 
-			require.True(t, sess.geometry.requestResize(d, sess, ac, domain.Size{Cols: 120, Rows: 24}, true))
-			inv := awaitInvalidation(t, invs)
-			require.True(t, inv.reset)
+				require.True(t, sess.geometry.requestResize(d, sess, ac, domain.Size{Cols: 120, Rows: 24}, true))
+				inv := awaitInvalidation(t, invs)
+				require.True(t, inv.reset)
+			})
 		})
 
 		t.Run("superseded immediate transaction", func(t *testing.T) {
-			resizeStarted := make(chan struct{})
-			releaseResize := make(chan struct{})
-			pty := &transactionalResizePTY{onResize: func() {
-				close(resizeStarted)
-				<-releaseResize
-			}}
-			d, sess, ac, _ := newManualSessionWithPTYs(t, pty)
-			clk := newCoordinatorMockClock(t, 2)
-			d.clock = clk.clock
-			invs := make(chan renderInvalidation, 1)
-			rc := newRenderCoordinator(renderCoordinatorOptions{
-				clock:        clk.clock,
-				wake:         func(renderWake) {},
-				onInvalidate: func(inv renderInvalidation) { invs <- inv },
+			synctest.Test(t, func(t *testing.T) {
+				resizeStarted := make(chan struct{})
+				releaseResize := make(chan struct{})
+				pty := &transactionalResizePTY{onResize: func() {
+					close(resizeStarted)
+					<-releaseResize
+				}}
+				d, sess, ac, _ := newManualSessionWithPTYs(t, pty)
+				clk := newCoordinatorMockClock(t, 2)
+				d.clock = clk.clock
+				invs := make(chan renderInvalidation, 1)
+				rc := newRenderCoordinator(renderCoordinatorOptions{
+					clock:        clk.clock,
+					wake:         func(renderWake) {},
+					onInvalidate: func(inv renderInvalidation) { invs <- inv },
+				})
+				rc.attach(ac)
+				sess.installRenderCoordinator(rc)
+
+				result := make(chan bool, 1)
+				go func() {
+					result <- sess.geometry.requestResize(d, sess, ac, domain.Size{Cols: 120, Rows: 24}, true)
+				}()
+				<-resizeStarted
+				require.NotZero(t, rc.recordResizeRequest(domain.Size{Cols: 140, Rows: 30}, ac))
+				close(releaseResize)
+
+				require.False(t, <-result)
+				requireNoInvalidation(t, invs)
 			})
-			rc.attach(ac)
-			sess.installRenderCoordinator(rc)
-
-			result := make(chan bool, 1)
-			go func() {
-				result <- sess.geometry.requestResize(d, sess, ac, domain.Size{Cols: 120, Rows: 24}, true)
-			}()
-			<-resizeStarted
-			require.NotZero(t, rc.recordResizeRequest(domain.Size{Cols: 140, Rows: 30}, ac))
-			close(releaseResize)
-
-			require.False(t, <-result)
-			requireNoInvalidation(t, invs)
 		})
 
 		t.Run("async schedule and teardown rejection", func(t *testing.T) {
-			d, sess, ac, _, clk, _ := newResizeFixture(t)
+			synctest.Test(t, func(t *testing.T) {
+				d, sess, ac, _, clk, _ := newResizeFixture(t)
 
-			require.True(t, sess.geometry.requestResize(d, sess, ac, domain.Size{Cols: 120, Rows: 24}, false))
-			awaitCoordinatorScheduledTimer(t, clk)
+				require.True(t, sess.geometry.requestResize(d, sess, ac, domain.Size{Cols: 120, Rows: 24}, false))
+				awaitCoordinatorScheduledTimer(t, clk)
 
-			// A torn-down coordinator cannot accept a stale attachment's schedule.
-			sess.renderCoordinator().beginSessionTeardown().finish()
-			require.False(t, sess.geometry.requestResize(d, sess, ac, domain.Size{Cols: 140, Rows: 30}, false))
+				// A torn-down coordinator cannot accept a stale attachment's schedule.
+				sess.renderCoordinator().beginSessionTeardown().finish()
+				require.False(t, sess.geometry.requestResize(d, sess, ac, domain.Size{Cols: 140, Rows: 30}, false))
+			})
 		})
 	})
 }
