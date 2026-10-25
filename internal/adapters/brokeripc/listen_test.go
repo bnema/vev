@@ -53,8 +53,9 @@ func (a *ctxAuthority) AdmitClient(ctx context.Context) (ports.BrokerCoreService
 func TestCloseRacingBlockedAdmissionDoesNotHang(t *testing.T) {
 	const epoch = ports.BrokerEpoch(0x51)
 	path := testSocketPath(t)
+	innerAuthority, _ := newAuthorityMock(t, epoch, ports.BrokerSnapshot{})
 	gated := &gatedAuthority{
-		inner:   newFakeAuthority(epoch, ports.BrokerSnapshot{}),
+		inner:   innerAuthority,
 		entered: make(chan struct{}),
 		gate:    make(chan struct{}),
 	}
@@ -94,7 +95,7 @@ func TestCloseRacingBlockedAdmissionDoesNotHang(t *testing.T) {
 func TestCloseCancelsStalledPreamble(t *testing.T) {
 	const epoch = ports.BrokerEpoch(0x51)
 	path := testSocketPath(t)
-	authority := newFakeAuthority(epoch, ports.BrokerSnapshot{})
+	authority, _ := newAuthorityMock(t, epoch, ports.BrokerSnapshot{})
 	bound, err := Listen(path, epoch, authority, Config{MaxClients: 2, HandshakeTimeout: 30 * time.Second})
 	require.NoError(t, err)
 	l := bound.(*listener)
@@ -183,7 +184,7 @@ func TestCloseCancelsClientStalledInAdmission(t *testing.T) {
 func TestStalledPreambleKeepsHandshakeTimeout(t *testing.T) {
 	const epoch = ports.BrokerEpoch(0x51)
 	path := testSocketPath(t)
-	authority := newFakeAuthority(epoch, ports.BrokerSnapshot{})
+	authority, _ := newAuthorityMock(t, epoch, ports.BrokerSnapshot{})
 	bound, err := Listen(path, epoch, authority, Config{MaxClients: 2, HandshakeTimeout: 100 * time.Millisecond})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = bound.Close() })
@@ -245,7 +246,7 @@ func TestAcceptTerminalCauseSurvivesInFlightRefusal(t *testing.T) {
 // private carriage is never exposed through filesystem modes.
 func TestListenCreatesOwnerOnlyDirectoryAndSocket(t *testing.T) {
 	path := testSocketPath(t)
-	authority := newFakeAuthority(1, ports.BrokerSnapshot{})
+	authority, _ := newAuthorityMock(t, 1, ports.BrokerSnapshot{})
 	listener, err := Listen(path, 1, authority, Config{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = listener.Close() })
@@ -276,7 +277,7 @@ func TestListenRecoversStaleSocket(t *testing.T) {
 	_, err = os.Lstat(path)
 	require.NoError(t, err, "stale socket file must still exist")
 
-	authority := newFakeAuthority(1, ports.BrokerSnapshot{})
+	authority, _ := newAuthorityMock(t, 1, ports.BrokerSnapshot{})
 	listener, err := Listen(path, 1, authority, Config{})
 	require.NoError(t, err)
 	require.NoError(t, listener.Close())
@@ -285,7 +286,7 @@ func TestListenRecoversStaleSocket(t *testing.T) {
 // TestListenRefusesLiveOwner proves a listener never evicts a live endpoint.
 func TestListenRefusesLiveOwner(t *testing.T) {
 	running := startEndpoint(t, Config{})
-	authority := newFakeAuthority(1, ports.BrokerSnapshot{})
+	authority, _ := newAuthorityMock(t, 1, ports.BrokerSnapshot{})
 	_, err := Listen(running.path, 1, authority, Config{})
 	require.ErrorIs(t, err, ipc.ErrDaemonRunning)
 }
@@ -297,7 +298,7 @@ func TestListenRefusesForeignPathWithoutRemovingIt(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
 	require.NoError(t, os.WriteFile(path, []byte("foreign"), 0o600))
 
-	authority := newFakeAuthority(1, ports.BrokerSnapshot{})
+	authority, _ := newAuthorityMock(t, 1, ports.BrokerSnapshot{})
 	_, err := Listen(path, 1, authority, Config{})
 	require.ErrorIs(t, err, ipc.ErrMuxForeignPath)
 	content, readErr := os.ReadFile(path)
@@ -309,7 +310,7 @@ func TestListenRefusesForeignPathWithoutRemovingIt(t *testing.T) {
 // preserves a replacement at the same path.
 func TestCloseRemovesOnlyItsOwnSocket(t *testing.T) {
 	path := testSocketPath(t)
-	authority := newFakeAuthority(1, ports.BrokerSnapshot{})
+	authority, _ := newAuthorityMock(t, 1, ports.BrokerSnapshot{})
 	listener, err := Listen(path, 1, authority, Config{})
 	require.NoError(t, err)
 
@@ -327,7 +328,7 @@ func TestCloseRemovesOnlyItsOwnSocket(t *testing.T) {
 // TestListenRejectsInvalidConfig proves a missing epoch or authority is refused.
 func TestListenRejectsInvalidConfig(t *testing.T) {
 	path := testSocketPath(t)
-	authority := newFakeAuthority(1, ports.BrokerSnapshot{})
+	authority, _ := newAuthorityMock(t, 1, ports.BrokerSnapshot{})
 	_, err := Listen(path, 0, authority, Config{})
 	require.ErrorIs(t, err, ErrConfig)
 	_, err = Listen(path, 1, nil, Config{})
@@ -339,7 +340,7 @@ func TestListenRejectsInvalidConfig(t *testing.T) {
 // listener keeps admitting later same-user clients.
 func TestAcceptRefusesRejectedPeerAndKeepsServing(t *testing.T) {
 	path := testSocketPath(t)
-	authority := newFakeAuthority(1, ports.BrokerSnapshot{})
+	authority, _ := newAuthorityMock(t, 1, ports.BrokerSnapshot{})
 	var calls atomic.Int32
 	verify := func(conn *net.UnixConn) error {
 		if calls.Add(1) == 1 {

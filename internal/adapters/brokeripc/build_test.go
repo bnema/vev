@@ -60,8 +60,9 @@ func TestBuildRegistration(t *testing.T) {
 func TestRetiringRefusesConcurrentAdmission(t *testing.T) {
 	const epoch = ports.BrokerEpoch(0x51)
 	path := testSocketPath(t)
+	innerAuthority, _ := newAuthorityMock(t, epoch, ports.BrokerSnapshot{})
 	gated := &gatedAuthority{
-		inner:   newFakeAuthority(epoch, ports.BrokerSnapshot{}),
+		inner:   innerAuthority,
 		entered: make(chan struct{}), gate: make(chan struct{}),
 	}
 	bound, err := listen(path, epoch, gated, Config{Build: "build-a"}, ipc.SameUserPeerVerifier())

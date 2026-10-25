@@ -33,8 +33,8 @@ func TestResubscribePublishesCurrentSnapshotPerGeneration(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		for burst := 0; burst < bursts; burst++ {
 			transport, recorded := newRecordingTransportMock(t)
-			core := newTestCore(epoch)
-			session, err := newServerSession(epoch, transport, brokerwire.DefaultCeilings(), core, Config{}, func() {}, time.Time{})
+			coreMock, core := newTestCore(t, epoch)
+			session, err := newServerSession(epoch, transport, brokerwire.DefaultCeilings(), coreMock, Config{}, func() {}, time.Time{})
 			require.NoError(t, err)
 			require.NoError(t, session.conn.Register())
 
@@ -76,8 +76,8 @@ func TestResubscribePublishesCurrentSnapshotPerGeneration(t *testing.T) {
 func TestSupersededPublisherOwnsItsWake(t *testing.T) {
 	const epoch = ports.BrokerEpoch(0x52)
 	transport, _ := newRecordingTransportMock(t)
-	core := newTestCore(epoch)
-	session, err := newServerSession(epoch, transport, brokerwire.DefaultCeilings(), core, Config{}, func() {}, time.Time{})
+	coreMock, core := newTestCore(t, epoch)
+	session, err := newServerSession(epoch, transport, brokerwire.DefaultCeilings(), coreMock, Config{}, func() {}, time.Time{})
 	require.NoError(t, err)
 	require.NoError(t, session.conn.Register())
 	t.Cleanup(func() { session.shutdown() })
@@ -108,8 +108,8 @@ func TestSupersededPublisherOwnsItsWake(t *testing.T) {
 func TestSessionCloseStreamFillsConnectionScope(t *testing.T) {
 	const epoch = ports.BrokerEpoch(0x53)
 	transport, _ := newRecordingTransportMock(t)
-	core := newTestCore(epoch)
-	session, err := newServerSession(epoch, transport, brokerwire.DefaultCeilings(), core, Config{}, func() {}, time.Time{})
+	coreMock, core := newTestCore(t, epoch)
+	session, err := newServerSession(epoch, transport, brokerwire.DefaultCeilings(), coreMock, Config{}, func() {}, time.Time{})
 	require.NoError(t, err)
 	t.Cleanup(func() { session.shutdown() })
 
@@ -611,13 +611,13 @@ func TestMembershipMutationsDelegateEndToEnd(t *testing.T) {
 func TestMembershipRefusalCodesEndToEnd(t *testing.T) {
 	cases := []struct {
 		name      string
-		configure func(core *fakeCore)
+		configure func(core *coreState)
 		call      func(ctx context.Context, client ports.BrokerService) (domain.RemoteRegistration, bool, error)
 		wantCode  ports.BrokerErrorCode
 	}{
 		{
 			name:      "stale generation removal is host conflict 11",
-			configure: func(core *fakeCore) { core.refuseRemoveHost(ports.ErrBrokerHostConflict) },
+			configure: func(core *coreState) { core.refuseRemoveHost(ports.ErrBrokerHostConflict) },
 			call: func(ctx context.Context, client ports.BrokerService) (domain.RemoteRegistration, bool, error) {
 				removed, err := client.RemoveHost(ctx, mutationRegistration("known"))
 				return domain.RemoteRegistration{}, removed, err
@@ -626,7 +626,7 @@ func TestMembershipRefusalCodesEndToEnd(t *testing.T) {
 		},
 		{
 			name:      "immutable registry is membership immutable 12",
-			configure: func(core *fakeCore) { core.refuseAddHost(ports.ErrBrokerMembershipImmutable) },
+			configure: func(core *coreState) { core.refuseAddHost(ports.ErrBrokerMembershipImmutable) },
 			call: func(ctx context.Context, client ports.BrokerService) (domain.RemoteRegistration, bool, error) {
 				registration, err := client.AddHost(ctx, "new@host:22", testPolicy())
 				return registration, false, err
@@ -669,14 +669,14 @@ func TestMembershipRefusalCodesEndToEnd(t *testing.T) {
 func TestMembershipWireRefusalFraming(t *testing.T) {
 	cases := []struct {
 		name      string
-		configure func(core *fakeCore)
+		configure func(core *coreState)
 		send      func(scope brokerwire.Scope) brokerwire.ClientMessage
 		kind      brokerwire.RegisterMutationKind
 		wantCode  ports.BrokerErrorCode
 	}{
 		{
 			name:      "remove conflict",
-			configure: func(core *fakeCore) { core.refuseRemoveHost(ports.ErrBrokerHostConflict) },
+			configure: func(core *coreState) { core.refuseRemoveHost(ports.ErrBrokerHostConflict) },
 			send: func(scope brokerwire.Scope) brokerwire.ClientMessage {
 				return brokerwire.RemoveHost{
 					Epoch: scope.Epoch, Connection: scope.Connection,
@@ -688,7 +688,7 @@ func TestMembershipWireRefusalFraming(t *testing.T) {
 		},
 		{
 			name:      "immutable addition",
-			configure: func(core *fakeCore) { core.refuseAddHost(ports.ErrBrokerMembershipImmutable) },
+			configure: func(core *coreState) { core.refuseAddHost(ports.ErrBrokerMembershipImmutable) },
 			send: func(scope brokerwire.Scope) brokerwire.ClientMessage {
 				return brokerwire.AddHost{
 					Epoch: scope.Epoch, Connection: scope.Connection,

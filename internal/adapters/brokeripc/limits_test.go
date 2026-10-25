@@ -353,7 +353,7 @@ func (unboundedTransport) Close() error { return nil }
 // carriage, a nil core, and a zero epoch instead of building a session that can
 // never serve.
 func TestServerSessionRejectsInvalidConstruction(t *testing.T) {
-	core := &fakeCore{id: ports.BrokerConnectionID{1}, hub: newSnapshotHub(ports.BrokerSnapshot{}), streams: map[ports.BrokerStreamID]*fakeLogicalConn{}, done: make(chan struct{})}
+	core, _ := newCoreMock(t, ports.BrokerConnectionID{1}, newSnapshotHub(ports.BrokerSnapshot{}))
 	_, err := newServerSession(0, nil, brokerwire.DefaultCeilings(), core, Config{}, nil, time.Time{})
 	require.ErrorIs(t, err, ErrConfig)
 	_, err = newServerSession(1, nil, brokerwire.DefaultCeilings(), nil, Config{}, nil, time.Time{})

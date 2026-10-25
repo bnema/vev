@@ -247,8 +247,8 @@ func TestRegistrationDeadlineBoundaryMarker(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				transport, _ := newRecordingTransportMock(t)
-				core := newTestCore(0x51)
-				session, err := newServerSession(0x51, transport, brokerwire.DefaultCeilings(), core, Config{}, func() {}, time.Now().Add(-time.Second))
+				coreMock, _ := newTestCore(t, 0x51)
+				session, err := newServerSession(0x51, transport, brokerwire.DefaultCeilings(), coreMock, Config{}, func() {}, time.Now().Add(-time.Second))
 				require.NoError(t, err)
 				session.registered.Store(tc.registered)
 

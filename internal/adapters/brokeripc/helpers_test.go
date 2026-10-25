@@ -20,6 +20,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/bnema/vev/internal/protocol/wire"
@@ -208,14 +209,15 @@ func testLocalSnapshot(epoch ports.BrokerEpoch, revision ports.BrokerRevision) p
 
 // snapshotHub is a multi-subscriber publication hub standing in for the broker
 // registry: one immutable current snapshot, coalescing capacity-one subscribers.
+// It is plain state and implements no interface.
 type snapshotHub struct {
 	mu       sync.Mutex
 	snapshot ports.BrokerSnapshot
-	subs     map[*fakeSubscription]struct{}
+	subs     map[*subscriptionState]struct{}
 }
 
 func newSnapshotHub(snapshot ports.BrokerSnapshot) *snapshotHub {
-	return &snapshotHub{snapshot: snapshot, subs: make(map[*fakeSubscription]struct{})}
+	return &snapshotHub{snapshot: snapshot, subs: make(map[*subscriptionState]struct{})}
 }
 
 func (h *snapshotHub) current() ports.BrokerSnapshot {
@@ -224,18 +226,18 @@ func (h *snapshotHub) current() ports.BrokerSnapshot {
 	return h.snapshot.Clone()
 }
 
-func (h *snapshotHub) subscribe() *fakeSubscription {
-	sub := &fakeSubscription{hub: h, changed: make(chan struct{}, 1)}
-	h.mu.Lock()
-	h.subs[sub] = struct{}{}
-	h.mu.Unlock()
-	return sub
+// subscribe registers one coalescing capacity-one subscription and returns its
+// mock.
+func (h *snapshotHub) subscribe(t *testing.T) *portsmocks.MockBrokerSubscription {
+	m, state := newSubscriptionMock(t, h)
+	_ = state
+	return m
 }
 
 func (h *snapshotHub) publish(snapshot ports.BrokerSnapshot) {
 	h.mu.Lock()
 	h.snapshot = snapshot.Clone()
-	subs := make([]*fakeSubscription, 0, len(h.subs))
+	subs := make([]*subscriptionState, 0, len(h.subs))
 	for sub := range h.subs {
 		subs = append(subs, sub)
 	}
@@ -245,14 +247,14 @@ func (h *snapshotHub) publish(snapshot ports.BrokerSnapshot) {
 	}
 }
 
-func (h *snapshotHub) remove(sub *fakeSubscription) {
+func (h *snapshotHub) remove(sub *subscriptionState) {
 	h.mu.Lock()
 	delete(h.subs, sub)
 	h.mu.Unlock()
 }
 
-// fakeSubscription is one coalescing capacity-one subscription.
-type fakeSubscription struct {
+// subscriptionState is the plain state behind one hub subscription.
+type subscriptionState struct {
 	hub     *snapshotHub
 	changed chan struct{}
 	once    sync.Once
@@ -260,18 +262,30 @@ type fakeSubscription struct {
 	closed  bool
 }
 
-func (s *fakeSubscription) Changed() <-chan struct{} { return s.changed }
-
-func (s *fakeSubscription) Close() {
-	s.once.Do(func() {
-		s.mu.Lock()
-		s.closed = true
-		s.mu.Unlock()
-		s.hub.remove(s)
-	})
+// newSubscriptionMock builds one coalescing capacity-one subscription on hub.
+func newSubscriptionMock(t *testing.T, hub *snapshotHub, opts ...func(*portsmocks.MockBrokerSubscription, *subscriptionState)) (*portsmocks.MockBrokerSubscription, *subscriptionState) {
+	t.Helper()
+	state := &subscriptionState{hub: hub, changed: make(chan struct{}, 1)}
+	m := portsmocks.NewMockBrokerSubscription(t)
+	for _, opt := range opts {
+		opt(m, state)
+	}
+	m.EXPECT().Changed().RunAndReturn(func() <-chan struct{} { return state.changed }).Maybe()
+	m.EXPECT().Close().Run(func() {
+		state.once.Do(func() {
+			state.mu.Lock()
+			state.closed = true
+			state.mu.Unlock()
+			hub.remove(state)
+		})
+	}).Maybe()
+	hub.mu.Lock()
+	hub.subs[state] = struct{}{}
+	hub.mu.Unlock()
+	return m, state
 }
 
-func (s *fakeSubscription) notify() {
+func (s *subscriptionState) notify() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
@@ -283,9 +297,22 @@ func (s *fakeSubscription) notify() {
 	}
 }
 
-// fakeLogicalConn is one admitted core logical connection: it records messages
-// the broker relays toward the daemon and lets a test inject daemon replies.
-type fakeLogicalConn struct {
+// newPreviewSubscriptionMock builds one server-side preview subscription whose
+// Changed channel a test could drive explicitly; it never publishes by default.
+func newPreviewSubscriptionMock(t *testing.T) *portsmocks.MockBrokerPreviewSubscription {
+	t.Helper()
+	changed := make(chan struct{}, 1)
+	m := portsmocks.NewMockBrokerPreviewSubscription(t)
+	m.EXPECT().Changed().RunAndReturn(func() <-chan struct{} { return changed }).Maybe()
+	m.EXPECT().Latest().RunAndReturn(func() ports.BrokerPreviewPublication { return ports.BrokerPreviewPublication{} }).Maybe()
+	m.EXPECT().Close().Return().Maybe()
+	return m
+}
+
+// logicalState is the plain state behind one admitted core logical connection:
+// it records messages the broker relays toward the daemon and lets a test inject
+// daemon replies.
+type logicalState struct {
 	fromClient chan protocol.ClientMessage
 	toClient   chan protocol.ServerMessage
 	// preamble carries the canned session preamble acceptance: the raw relay
@@ -298,72 +325,72 @@ type fakeLogicalConn struct {
 	closed   bool
 }
 
-func newFakeLogicalConn() *fakeLogicalConn {
-	return &fakeLogicalConn{
+// newLogicalStreamMock builds one admitted core logical connection.
+func newLogicalStreamMock(t *testing.T, opts ...func(*portsmocks.MockBrokerEnvelopeStream, *logicalState)) (*portsmocks.MockBrokerEnvelopeStream, *logicalState) {
+	t.Helper()
+	c := &logicalState{
 		fromClient: make(chan protocol.ClientMessage, 64),
 		toClient:   make(chan protocol.ServerMessage, 64),
 		preamble:   make(chan []byte, 1),
 		done:       make(chan struct{}),
 	}
-}
-
-func (c *fakeLogicalConn) SendEnvelope(payload []byte) error {
-	if request, err := sessionwire.EncodePreambleRequestForTest(); err == nil && bytes.Equal(payload, request) {
-		response, err := sessionwire.EncodePreambleResponseForTest()
+	m := portsmocks.NewMockBrokerEnvelopeStream(t)
+	for _, opt := range opts {
+		opt(m, c)
+	}
+	m.EXPECT().SendEnvelope(mock.Anything).RunAndReturn(func(payload []byte) error {
+		if request, err := sessionwire.EncodePreambleRequestForTest(); err == nil && bytes.Equal(payload, request) {
+			response, err := sessionwire.EncodePreambleResponseForTest()
+			if err != nil {
+				return err
+			}
+			c.preamble <- response
+			return nil
+		}
+		message, err := sessionwire.DecodeClientEnvelope(payload)
 		if err != nil {
 			return err
 		}
-		c.preamble <- response
-		return nil
-	}
-	message, err := sessionwire.DecodeClientEnvelope(payload)
-	if err != nil {
-		return err
-	}
-	select {
-	case c.fromClient <- message:
-		return nil
-	case <-c.done:
-		return ports.BrokerAdmissionClosed
-	}
-}
-
-func (c *fakeLogicalConn) RecvEnvelope() ([]byte, error) {
-	// A message already queued when Close ran must still be observed first: a
-	// real carriage never reports the connection done before a message the peer
-	// sent ahead of an orderly close has been delivered. Draining non-blocking
-	// before the select keeps that ordering deterministic instead of racing a
-	// buffered send against an already-closed done channel.
-	select {
-	case response := <-c.preamble:
-		return response, nil
-	case message := <-c.toClient:
-		return sessionwire.EncodeServerMessage(message)
-	default:
-	}
-	select {
-	case response := <-c.preamble:
-		return response, nil
-	case message := <-c.toClient:
-		return sessionwire.EncodeServerMessage(message)
-	case <-c.done:
-		if err := c.Err(); err != nil {
-			return nil, err
+		select {
+		case c.fromClient <- message:
+			return nil
+		case <-c.done:
+			return ports.BrokerAdmissionClosed
 		}
-		return nil, io.EOF
-	}
+	}).Maybe()
+	m.EXPECT().RecvEnvelope().RunAndReturn(func() ([]byte, error) {
+		// A message already queued when Close ran must still be observed first: a
+		// real carriage never reports the connection done before a message the
+		// peer sent ahead of an orderly close has been delivered. Draining
+		// non-blocking before the select keeps that ordering deterministic.
+		select {
+		case response := <-c.preamble:
+			return response, nil
+		case message := <-c.toClient:
+			return sessionwire.EncodeServerMessage(message)
+		default:
+		}
+		select {
+		case response := <-c.preamble:
+			return response, nil
+		case message := <-c.toClient:
+			return sessionwire.EncodeServerMessage(message)
+		case <-c.done:
+			if err := c.Err(); err != nil {
+				return nil, err
+			}
+			return nil, io.EOF
+		}
+	}).Maybe()
+	m.EXPECT().Done().RunAndReturn(func() <-chan struct{} { return c.done }).Maybe()
+	m.EXPECT().Err().RunAndReturn(c.Err).Maybe()
+	m.EXPECT().Close().RunAndReturn(c.Close).Maybe()
+	return m, c
 }
 
-func (c *fakeLogicalConn) Capabilities() protocol.ConnectionCapabilities {
-	return protocol.ConnectionCapabilities{OutputDataLimit: protocol.MaxOutputDataLen}
-}
+func (c *logicalState) Err() error { c.mu.Lock(); defer c.mu.Unlock(); return c.err }
 
-func (c *fakeLogicalConn) LinkState() ports.LinkState         { return ports.LinkStateConnected }
-func (c *fakeLogicalConn) LinkEvents() <-chan ports.LinkEvent { return nil }
-func (c *fakeLogicalConn) Done() <-chan struct{}              { return c.done }
-func (c *fakeLogicalConn) Err() error                         { c.mu.Lock(); defer c.mu.Unlock(); return c.err }
-
-func (c *fakeLogicalConn) Close() error {
+func (c *logicalState) Close() error {
 	c.once.Do(func() {
 		c.mu.Lock()
 		c.closed = true
@@ -374,7 +401,7 @@ func (c *fakeLogicalConn) Close() error {
 }
 
 // fail publishes one terminal core failure.
-func (c *fakeLogicalConn) fail(err error) {
+func (c *logicalState) fail(err error) {
 	c.mu.Lock()
 	c.err = err
 	c.mu.Unlock()
@@ -407,12 +434,14 @@ type updateHostPolicyCall struct {
 	Err      error
 }
 
-// fakeCore is one admitted per-connection broker service.
-type fakeCore struct {
+// coreState is the plain state behind one admitted per-connection broker
+// service. It implements no interface; the core mock's closures capture it.
+type coreState struct {
+	t         *testing.T
 	mu        sync.Mutex
 	id        ports.BrokerConnectionID
 	hub       *snapshotHub
-	streams   map[ports.BrokerStreamID]*fakeLogicalConn
+	streams   map[ports.BrokerStreamID]*logicalState
 	opens     []ports.BrokerOpenStreamRequest
 	closedIDs []ports.BrokerStreamID
 	added     []addHostCall
@@ -440,78 +469,78 @@ type fakeCore struct {
 	nextStream ports.BrokerStreamID
 }
 
-func (c *fakeCore) ConnectionID() ports.BrokerConnectionID { return c.id }
-
-// NextStreamID is the admitted core connection's only stream allocator, exactly
-// like the production service: the listener delegates it unchanged.
-func (c *fakeCore) NextStreamID() (ports.BrokerStreamID, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.nextStream++
-	return c.nextStream, nil
+// passiveCore is the admitted core mock plus the optional passive-reader
+// capability the server probes for with a type assertion. The generated
+// BrokerCoreService mock cannot carry it because it is not part of that port, so
+// the one extra method delegates straight to the shared state.
+type passiveCore struct {
+	*portsmocks.MockBrokerCoreService
+	state *coreState
 }
 
-func (c *fakeCore) Done() <-chan struct{} { return c.done }
-
-func (c *fakeCore) Err() error { return nil }
-
-func (c *fakeCore) Snapshot() ports.BrokerSnapshot { return c.hub.current() }
-
-func (c *fakeCore) Subscribe() (ports.BrokerSubscription, error) {
-	return c.recordSubscribe(false), nil
+func (c passiveCore) SubscribePassive() (ports.BrokerSubscription, error) {
+	return c.state.recordSubscribe(true), nil
 }
 
-// SubscribePassive is the optional passive-reader capability the server uses
-// for a Subscribe flagged passive.
-func (c *fakeCore) SubscribePassive() (ports.BrokerSubscription, error) {
-	return c.recordSubscribe(true), nil
+// newCoreMock builds one admitted per-connection broker service on hub. Options
+// register overrides before the defaults.
+func newCoreMock(t *testing.T, id ports.BrokerConnectionID, hub *snapshotHub, opts ...func(*portsmocks.MockBrokerCoreService, *coreState)) (ports.BrokerCoreService, *coreState) {
+	t.Helper()
+	c := &coreState{
+		t:       t,
+		id:      id,
+		hub:     hub,
+		streams: make(map[ports.BrokerStreamID]*logicalState),
+		done:    make(chan struct{}),
+	}
+	m := portsmocks.NewMockBrokerCoreService(t)
+	for _, opt := range opts {
+		opt(m, c)
+	}
+	m.EXPECT().ConnectionID().RunAndReturn(func() ports.BrokerConnectionID { return c.id }).Maybe()
+	m.EXPECT().NextStreamID().RunAndReturn(func() (ports.BrokerStreamID, error) {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		c.nextStream++
+		return c.nextStream, nil
+	}).Maybe()
+	m.EXPECT().Done().RunAndReturn(func() <-chan struct{} { return c.done }).Maybe()
+	m.EXPECT().Err().Return(nil).Maybe()
+	m.EXPECT().Snapshot().RunAndReturn(func() ports.BrokerSnapshot { return c.hub.current() }).Maybe()
+	m.EXPECT().Subscribe().RunAndReturn(func() (ports.BrokerSubscription, error) {
+		return c.recordSubscribe(false), nil
+	}).Maybe()
+	m.EXPECT().SubscribePreview(mock.Anything).RunAndReturn(func(ports.BrokerPreviewRequest) (ports.BrokerPreviewSubscription, error) {
+		return newPreviewSubscriptionMock(t), nil
+	}).Maybe()
+	m.EXPECT().OpenEnvelopeStream(mock.Anything, mock.Anything).RunAndReturn(c.openStream).Maybe()
+	m.EXPECT().CloseStream(mock.Anything, mock.Anything).RunAndReturn(c.closeStream).Maybe()
+	m.EXPECT().AddHost(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(c.addHost).Maybe()
+	m.EXPECT().RemoveHost(mock.Anything, mock.Anything).RunAndReturn(c.removeHost).Maybe()
+	m.EXPECT().UpdateHostPolicy(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(c.updateHost).Maybe()
+	m.EXPECT().RequestReconcile(mock.Anything).Run(func(endpoint string) {
+		c.mu.Lock()
+		c.reconcile = append(c.reconcile, endpoint)
+		c.mu.Unlock()
+	}).Maybe()
+	m.EXPECT().Close().RunAndReturn(c.closeAll).Maybe()
+	return passiveCore{MockBrokerCoreService: m, state: c}, c
 }
 
-func (c *fakeCore) recordSubscribe(passive bool) *fakeSubscription {
+func (c *coreState) recordSubscribe(passive bool) ports.BrokerSubscription {
 	c.mu.Lock()
 	c.subscribes = append(c.subscribes, passive)
 	c.mu.Unlock()
-	return c.hub.subscribe()
+	return c.hub.subscribe(c.t)
 }
 
-func (c *fakeCore) subscribeKinds() []bool {
+func (c *coreState) subscribeKinds() []bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return append([]bool(nil), c.subscribes...)
 }
 
-// fakePreviewSubscription is one server-side preview subscription whose
-// Changed channel a test drives explicitly.
-type fakePreviewSubscription struct {
-	changed chan struct{}
-	once    sync.Once
-	mu      sync.Mutex
-	closed  bool
-}
-
-func newFakePreviewSubscription() *fakePreviewSubscription {
-	return &fakePreviewSubscription{changed: make(chan struct{}, 1)}
-}
-
-func (s *fakePreviewSubscription) Changed() <-chan struct{} { return s.changed }
-
-func (s *fakePreviewSubscription) Latest() ports.BrokerPreviewPublication {
-	return ports.BrokerPreviewPublication{}
-}
-
-func (s *fakePreviewSubscription) Close() {
-	s.once.Do(func() {
-		s.mu.Lock()
-		s.closed = true
-		s.mu.Unlock()
-	})
-}
-
-func (c *fakeCore) SubscribePreview(ports.BrokerPreviewRequest) (ports.BrokerPreviewSubscription, error) {
-	return newFakePreviewSubscription(), nil
-}
-
-func (c *fakeCore) OpenEnvelopeStream(_ context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerEnvelopeStream, error) {
+func (c *coreState) openStream(_ context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerEnvelopeStream, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.openErr != nil {
@@ -520,13 +549,13 @@ func (c *fakeCore) OpenEnvelopeStream(_ context.Context, request ports.BrokerOpe
 	if c.closed {
 		return nil, ports.BrokerAdmissionClosed
 	}
-	conn := newFakeLogicalConn()
+	m, conn := newLogicalStreamMock(c.t)
 	c.streams[request.Stream] = conn
 	c.opens = append(c.opens, request)
-	return conn, nil
+	return m, nil
 }
 
-func (c *fakeCore) CloseStream(connection ports.BrokerConnectionID, stream ports.BrokerStreamID) error {
+func (c *coreState) closeStream(connection ports.BrokerConnectionID, stream ports.BrokerStreamID) error {
 	if connection != c.id {
 		return ports.BrokerAdmissionStale
 	}
@@ -545,7 +574,7 @@ func (c *fakeCore) CloseStream(connection ports.BrokerConnectionID, stream ports
 
 // mapMembershipError mirrors the admitted core's own mapping of a registry
 // refusal onto the closed broker error taxonomy. The real broker.Service already
-// returns these typed codes, so the fake applies the same rule: a caller of the
+// returns these typed codes, so the mock applies the same rule: a caller of the
 // adapter must never see a bare registry sentinel as if it were an untyped
 // failure.
 func mapMembershipError(err error) error {
@@ -571,10 +600,10 @@ func mapMembershipError(err error) error {
 	return ports.BrokerError{Code: code, Cause: err}
 }
 
-// AddHost records one delegated membership addition and returns its exact
+// addHost records one delegated membership addition and returns its exact
 // result. The default is a fresh generation-1 registration for the requested
 // endpoint, exactly as the real registry mints one for a new endpoint.
-func (c *fakeCore) AddHost(ctx context.Context, endpoint string, policy ports.BrokerPolicy) (domain.RemoteRegistration, error) {
+func (c *coreState) addHost(ctx context.Context, endpoint string, policy ports.BrokerPolicy) (domain.RemoteRegistration, error) {
 	if err := ctx.Err(); err != nil {
 		return domain.RemoteRegistration{}, err
 	}
@@ -595,10 +624,10 @@ func (c *fakeCore) AddHost(ctx context.Context, endpoint string, policy ports.Br
 	return registration, err
 }
 
-// RemoveHost records one delegated exact-registration removal and reports
-// whether the host is present. The fake owns no membership state, so the
-// answer is the configured removeRemoved value for every exact registration.
-func (c *fakeCore) RemoveHost(ctx context.Context, expected domain.RemoteRegistration) (bool, error) {
+// removeHost records one delegated exact-registration removal and reports
+// whether the host is present. The state owns no membership, so the answer is
+// the configured removeRemoved value for every exact registration.
+func (c *coreState) removeHost(ctx context.Context, expected domain.RemoteRegistration) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
@@ -616,10 +645,10 @@ func (c *fakeCore) RemoveHost(ctx context.Context, expected domain.RemoteRegistr
 	return removed, err
 }
 
-// UpdateHostPolicy records one delegated exact-registration policy update. The
+// updateHost records one delegated exact-registration policy update. The
 // default advances the generation by exactly one, mirroring the real registry's
 // replacement-policy path, and preserves the expected incarnation.
-func (c *fakeCore) UpdateHostPolicy(ctx context.Context, expected domain.RemoteRegistration, policy ports.BrokerPolicy) (domain.RemoteRegistration, error) {
+func (c *coreState) updateHost(ctx context.Context, expected domain.RemoteRegistration, policy ports.BrokerPolicy) (domain.RemoteRegistration, error) {
 	if err := ctx.Err(); err != nil {
 		return domain.RemoteRegistration{}, err
 	}
@@ -644,62 +673,60 @@ func (c *fakeCore) UpdateHostPolicy(ctx context.Context, expected domain.RemoteR
 }
 
 // addCalls snapshots the delegated additions.
-func (c *fakeCore) addCalls() []addHostCall {
+func (c *coreState) addCalls() []addHostCall {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return append([]addHostCall(nil), c.added...)
 }
 
 // removeCalls snapshots the delegated removals.
-func (c *fakeCore) removeCalls() []removeHostCall {
+func (c *coreState) removeCalls() []removeHostCall {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return append([]removeHostCall(nil), c.removed...)
 }
 
 // updateCalls snapshots the delegated policy updates.
-func (c *fakeCore) updateCalls() []updateHostPolicyCall {
+func (c *coreState) updateCalls() []updateHostPolicyCall {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return append([]updateHostPolicyCall(nil), c.updated...)
 }
 
 // refuseAddHost makes the next delegated addition fail with err. The refusal is
-// one-shot: the fake owns no membership state, so a later call must be free to
-// succeed rather than pin the whole connection as immutable forever.
-func (c *fakeCore) refuseAddHost(err error) { c.mu.Lock(); c.addErr = err; c.mu.Unlock() }
+// one-shot, so a later call is free to succeed rather than pin the whole
+// connection as immutable forever.
+func (c *coreState) refuseAddHost(err error) { c.mu.Lock(); c.addErr = err; c.mu.Unlock() }
 
 // refuseRemoveHost makes the next delegated removal fail with err, one-shot.
-func (c *fakeCore) refuseRemoveHost(err error) { c.mu.Lock(); c.removeErr = err; c.mu.Unlock() }
+func (c *coreState) refuseRemoveHost(err error) { c.mu.Lock(); c.removeErr = err; c.mu.Unlock() }
 
 // reportRemoved configures the answer a delegated removal returns.
-func (c *fakeCore) reportRemoved(removed bool) { c.mu.Lock(); c.removeRemoved = removed; c.mu.Unlock() }
+func (c *coreState) reportRemoved(removed bool) {
+	c.mu.Lock()
+	c.removeRemoved = removed
+	c.mu.Unlock()
+}
 
 // zeroAddRegistration makes a delegated addition succeed without returning any
 // registration authority, so a test can prove the server never publishes an
 // addition success that cannot be fenced.
-func (c *fakeCore) zeroAddRegistration() {
+func (c *coreState) zeroAddRegistration() {
 	c.mu.Lock()
 	zero := domain.RemoteRegistration{}
 	c.addResult = &zero
 	c.mu.Unlock()
 }
 
-func (c *fakeCore) RequestReconcile(endpoint string) {
-	c.mu.Lock()
-	c.reconcile = append(c.reconcile, endpoint)
-	c.mu.Unlock()
-}
-
-func (c *fakeCore) Close() error {
+func (c *coreState) closeAll() error {
 	c.once.Do(func() {
 		c.mu.Lock()
 		c.closed = true
-		conns := make([]*fakeLogicalConn, 0, len(c.streams))
+		conns := make([]*logicalState, 0, len(c.streams))
 		for _, conn := range c.streams {
 			conns = append(conns, conn)
 		}
-		c.streams = make(map[ports.BrokerStreamID]*fakeLogicalConn)
+		c.streams = make(map[ports.BrokerStreamID]*logicalState)
 		c.mu.Unlock()
 		for _, conn := range conns {
 			_ = conn.Close()
@@ -710,7 +737,7 @@ func (c *fakeCore) Close() error {
 }
 
 // logicalConn returns one admitted core connection by stream identity.
-func (c *fakeCore) logicalConn(stream ports.BrokerStreamID) *fakeLogicalConn {
+func (c *coreState) logicalConn(stream ports.BrokerStreamID) *logicalState {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.streams[stream]
@@ -718,52 +745,55 @@ func (c *fakeCore) logicalConn(stream ports.BrokerStreamID) *fakeLogicalConn {
 
 // newTestCore builds one admitted core service for a session test: a fresh hub
 // and a connection identity bound to epoch.
-func newTestCore(epoch ports.BrokerEpoch) *fakeCore {
+func newTestCore(t *testing.T, epoch ports.BrokerEpoch) (ports.BrokerCoreService, *coreState) {
+	t.Helper()
 	var id ports.BrokerConnectionID
 	binary.BigEndian.PutUint64(id[:8], uint64(epoch))
 	id[15] = 1
-	return &fakeCore{
-		id:      id,
-		hub:     newSnapshotHub(ports.BrokerSnapshot{}),
-		streams: make(map[ports.BrokerStreamID]*fakeLogicalConn),
-		done:    make(chan struct{}),
-	}
+	return newCoreMock(t, id, newSnapshotHub(ports.BrokerSnapshot{}))
 }
 
-// fakeAuthority admits clients for one listener and hands out per-connection
-// core services.
-type fakeAuthority struct {
+// authorityState is the plain state behind one listener's authority: it hands
+// out per-connection core services over one shared hub.
+type authorityState struct {
 	mu       sync.Mutex
 	hub      *snapshotHub
 	epoch    ports.BrokerEpoch
 	next     uint64
-	clients  []*fakeCore
+	clients  []*coreState
 	admitErr error
 }
 
-func newFakeAuthority(epoch ports.BrokerEpoch, snapshot ports.BrokerSnapshot) *fakeAuthority {
-	return &fakeAuthority{hub: newSnapshotHub(snapshot), epoch: epoch}
+// newAuthorityMock builds an authority that admits clients for one listener.
+// Options register overrides before the defaults.
+func newAuthorityMock(t *testing.T, epoch ports.BrokerEpoch, snapshot ports.BrokerSnapshot, opts ...func(*portsmocks.MockBrokerAuthority, *authorityState)) (*portsmocks.MockBrokerAuthority, *authorityState) {
+	t.Helper()
+	a := &authorityState{hub: newSnapshotHub(snapshot), epoch: epoch}
+	m := portsmocks.NewMockBrokerAuthority(t)
+	for _, opt := range opts {
+		opt(m, a)
+	}
+	m.EXPECT().AdmitClient(mock.Anything).RunAndReturn(func(ctx context.Context) (ports.BrokerCoreService, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		if a.admitErr != nil {
+			return nil, a.admitErr
+		}
+		a.next++
+		var id ports.BrokerConnectionID
+		binary.BigEndian.PutUint64(id[:8], uint64(a.epoch))
+		binary.BigEndian.PutUint64(id[8:], a.next)
+		core, state := newCoreMock(t, id, a.hub)
+		a.clients = append(a.clients, state)
+		return core, nil
+	}).Maybe()
+	return m, a
 }
 
-func (a *fakeAuthority) AdmitClient(ctx context.Context) (ports.BrokerCoreService, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.admitErr != nil {
-		return nil, a.admitErr
-	}
-	a.next++
-	var id ports.BrokerConnectionID
-	binary.BigEndian.PutUint64(id[:8], uint64(a.epoch))
-	binary.BigEndian.PutUint64(id[8:], a.next)
-	core := &fakeCore{id: id, hub: a.hub, streams: make(map[ports.BrokerStreamID]*fakeLogicalConn), done: make(chan struct{})}
-	a.clients = append(a.clients, core)
-	return core, nil
-}
-
-func (a *fakeAuthority) last() *fakeCore {
+func (a *authorityState) last() *coreState {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if len(a.clients) == 0 {
@@ -772,22 +802,22 @@ func (a *fakeAuthority) last() *fakeCore {
 	return a.clients[len(a.clients)-1]
 }
 
-func (a *fakeAuthority) publish(snapshot ports.BrokerSnapshot) { a.hub.publish(snapshot) }
+func (a *authorityState) publish(snapshot ports.BrokerSnapshot) { a.hub.publish(snapshot) }
 
 // endpoint is one running broker IPC listener with its authority.
 type endpoint struct {
 	t         *testing.T
 	path      string
 	listener  ports.BrokerListener
-	authority *fakeAuthority
+	authority *authorityState
 	epoch     ports.BrokerEpoch
 }
 
 func startEndpoint(t *testing.T, cfg Config) *endpoint {
 	t.Helper()
 	epoch := ports.BrokerEpoch(0x51)
-	authority := newFakeAuthority(epoch, ports.BrokerSnapshot{})
-	listener, err := Listen(testSocketPath(t), epoch, authority, cfg)
+	authorityMock, authority := newAuthorityMock(t, epoch, ports.BrokerSnapshot{})
+	listener, err := Listen(testSocketPath(t), epoch, authorityMock, cfg)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = listener.Close() })
 	return &endpoint{t: t, path: listener.Addr(), listener: listener, authority: authority, epoch: epoch}
