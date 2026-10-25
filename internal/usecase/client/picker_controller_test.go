@@ -10,11 +10,13 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/bnema/vev/internal/usecase/ui"
 )
@@ -80,32 +82,30 @@ func (s *pickerInputSpy) await(t *testing.T) {
 // pickerRecordingTerminal records every byte written to the terminal output,
 // which is where a leaked picker key would surface if it reached a session.
 type pickerRecordingTerminal struct {
+	port   *portsmocks.MockTerminal
 	in     io.Reader
 	out    bytes.Buffer
 	mu     sync.Mutex
 	enters int
 }
 
-func (t *pickerRecordingTerminal) EnableKittyKeyboard(int) error { return nil }
-
-func (t *pickerRecordingTerminal) EnterRaw() (func() error, error) {
-	t.mu.Lock()
-	t.enters++
-	t.mu.Unlock()
-	return func() error { return nil }, nil
+func newPickerRecordingTerminal(t *testing.T, in io.Reader) *pickerRecordingTerminal {
+	r := &pickerRecordingTerminal{in: in}
+	r.port = portsmocks.NewMockTerminal(t)
+	r.port.EXPECT().EnableKittyKeyboard(mock.Anything).Return(nil).Maybe()
+	r.port.EXPECT().EnterRaw().RunAndReturn(func() (func() error, error) {
+		r.mu.Lock()
+		r.enters++
+		r.mu.Unlock()
+		return func() error { return nil }, nil
+	}).Maybe()
+	r.port.EXPECT().Geometry().Return(domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}, nil).Maybe()
+	r.port.EXPECT().ResizeEvents().Return(nil).Maybe()
+	r.port.EXPECT().In().RunAndReturn(func() io.Reader { return r.in }).Maybe()
+	r.port.EXPECT().Out().RunAndReturn(func() io.Writer { return &r.out }).Maybe()
+	r.port.EXPECT().Flush().Return(nil).Maybe()
+	return r
 }
-
-func (t *pickerRecordingTerminal) Geometry() (domain.Geometry, error) {
-	return domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}, nil
-}
-
-func (t *pickerRecordingTerminal) ResizeEvents() <-chan domain.Geometry { return nil }
-
-func (t *pickerRecordingTerminal) In() io.Reader { return t.in }
-
-func (t *pickerRecordingTerminal) Out() io.Writer { return &t.out }
-
-func (t *pickerRecordingTerminal) Flush() error { return nil }
 
 func pickerTestSnapshot(epoch ports.BrokerEpoch, revision ports.BrokerRevision, now time.Time, sessions ...string) ports.BrokerSnapshot {
 	catalogSessions := make([]catalogue.RemoteCatalogSession, 0, len(sessions))
@@ -218,8 +218,8 @@ func TestPickerControllerInputNeverReachesPTY(t *testing.T) {
 		spy := newPickerInputSpy(controller)
 		reader := newPickerChunkReader()
 		t.Cleanup(reader.close)
-		terminal := &pickerRecordingTerminal{in: reader}
-		_ = startTerminalInputLifetime(terminal.In(), spy)
+		terminal := newPickerRecordingTerminal(t, reader)
+		_ = startTerminalInputLifetime(terminal.port.In(), spy)
 
 		chunks := [][]byte{
 			[]byte("\x1b[B"),                     // Down -> beta
@@ -461,14 +461,14 @@ func TestSupervisorPickerFoldsPublicationsAndInput(t *testing.T) {
 		clock := newSupervisorTestClock(t)
 		reader := newPickerChunkReader()
 		t.Cleanup(reader.close)
-		terminal := &pickerRecordingTerminal{in: reader}
+		terminal := newPickerRecordingTerminal(t, reader)
 		connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) {
 			service := newSupervisorTestService(t, ports.BrokerConnectionID{1})
 			service.hub.publish(pickerTestSnapshot(3, 1, clock.port.Now(), "alpha", "beta"))
 			return service.port, nil
 		})
 		controller := newPickerController(clock.port, pickerTestFreshness, terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor})
-		sup := mustSupervisor(t, SupervisorConfig{Connector: connector, Terminal: terminal, Clock: clock.port, Picker: controller})
+		sup := mustSupervisor(t, SupervisorConfig{Connector: connector, Terminal: terminal.port, Clock: clock.port, Picker: controller})
 
 		runErr := make(chan error, 1)
 		go func() { runErr <- sup.Run(ctx) }()
@@ -507,7 +507,7 @@ func TestSupervisorPickerFoldsLaterPublication(t *testing.T) {
 		clock := newSupervisorTestClock(t)
 		reader := newPickerChunkReader()
 		t.Cleanup(reader.close)
-		terminal := &pickerRecordingTerminal{in: reader}
+		terminal := newPickerRecordingTerminal(t, reader)
 
 		service := newSupervisorTestService(t, ports.BrokerConnectionID{1})
 		connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) {
@@ -515,7 +515,7 @@ func TestSupervisorPickerFoldsLaterPublication(t *testing.T) {
 			return service.port, nil
 		})
 		controller := newPickerController(clock.port, pickerTestFreshness, terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor})
-		sup := mustSupervisor(t, SupervisorConfig{Connector: connector, Terminal: terminal, Clock: clock.port, Picker: controller})
+		sup := mustSupervisor(t, SupervisorConfig{Connector: connector, Terminal: terminal.port, Clock: clock.port, Picker: controller})
 
 		runErr := make(chan error, 1)
 		go func() { runErr <- sup.Run(ctx) }()

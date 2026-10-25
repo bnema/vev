@@ -361,7 +361,7 @@ func TestSupervisorRefreshPreviewWiresTerminalGeometryToPreviewManager(t *testin
 		h.service.EXPECT().SubscribePreview(expected).Return(sub, nil).Once()
 		sub.EXPECT().Close().Once()
 
-		supervisor := &Supervisor{cfg: SupervisorConfig{Picker: h.controller, Terminal: &pickerRecordingTerminal{}}, picker: pickerSession{preview: previewManager{clock: h.clock.port}}}
+		supervisor := &Supervisor{cfg: SupervisorConfig{Picker: h.controller, Terminal: newPickerRecordingTerminal(t, nil).port}, picker: pickerSession{preview: previewManager{clock: h.clock.port}}}
 		supervisor.refreshPreview(h.service)
 		h.clock.awaitTimer(t).fire()
 		select {
