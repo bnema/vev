@@ -142,7 +142,9 @@ func ValidateRemotePreview(preview RemotePreview) error {
 	return nil
 }
 
-func validPreviewCellStyle(style renderer.Style) bool {
+// ValidRemotePreviewStyle reports whether style is displayable in a remote
+// preview. Decoders apply it to every style-table entry, referenced or not.
+func ValidRemotePreviewStyle(style renderer.Style) bool {
 	return style.Attrs&^(renderer.AttrDim|renderer.AttrUnderline|renderer.AttrBlink|renderer.AttrStrikethrough) == 0 &&
 		style.UnderlineStyle <= renderer.UnderlineDashed &&
 		style.Foreground >= math.MinInt16 && style.Foreground <= math.MaxInt16 &&
@@ -170,7 +172,7 @@ func previewCellRunValid(width int, cells []renderer.Cell) bool {
 		return false
 	}
 	for i, cell := range cells {
-		if !utf8.ValidRune(cell.Rune) || (cell.Rune != 0 && unicode.IsControl(cell.Rune)) || !validPreviewCellStyle(cell.Style) {
+		if !utf8.ValidRune(cell.Rune) || (cell.Rune != 0 && unicode.IsControl(cell.Rune)) || !ValidRemotePreviewStyle(cell.Style) {
 			return false
 		}
 		rowStart := (i / width) * width

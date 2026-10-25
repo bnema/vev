@@ -65,6 +65,66 @@ func TestPackedPreviewRoundTrip(t *testing.T) {
 	}
 }
 
+// TestPackedPreviewBytes pins the packed layout independently of the
+// encoder: little-endian uint32 runes with 0xFFFFFFFF marking a
+// continuation, and little-endian uint16 style indexes.
+func TestPackedPreviewBytes(t *testing.T) {
+	styles := make([]renderer.Style, 300)
+	for i := range styles {
+		styles[i] = renderer.DefaultStyle()
+		styles[i].HasForegroundRGB = true
+		styles[i].ForegroundRGB = renderer.RGB{R: uint8(i), G: uint8(i >> 8)}
+	}
+	cells := make([]renderer.Cell, 0, 300)
+	for i := 0; i < 296; i++ {
+		cells = append(cells, renderer.Cell{Rune: 'a', Style: styles[i]})
+	}
+	cells = append(cells,
+		renderer.Cell{Rune: '界', Style: styles[296]},
+		renderer.Cell{Continuation: true, Style: styles[297]},
+		renderer.Cell{Rune: 0, Style: styles[298]},
+		renderer.Cell{Rune: 'é', Style: styles[299]},
+	)
+	preview := testRemotePreview()
+	preview.Width, preview.Height, preview.Cells = 150, 2, cells
+
+	w, err := RemotePreviewToWire(preview)
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name      string
+		cell      int
+		wantRune  []byte
+		wantStyle []byte
+	}{
+		{"ascii first", 0, []byte{'a', 0, 0, 0}, []byte{0, 0}},
+		{"wide", 296, []byte{0x4c, 0x75, 0, 0}, []byte{0x28, 0x01}},
+		{"continuation", 297, []byte{0xff, 0xff, 0xff, 0xff}, []byte{0x29, 0x01}},
+		{"zero rune", 298, []byte{0, 0, 0, 0}, []byte{0x2a, 0x01}},
+		{"non-ascii", 299, []byte{0xe9, 0, 0, 0}, []byte{0x2b, 0x01}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.wantRune, w.Runes[tc.cell*4:tc.cell*4+4])
+			require.Equal(t, tc.wantStyle, w.StyleIds[tc.cell*2:tc.cell*2+2])
+		})
+	}
+
+	// Decode a hand-built message to prove the layout is read the same way.
+	hand := &wire.RemotePreview{
+		Version: w.Version, Status: w.Status, LifecycleId: w.LifecycleId, TabId: w.TabId, Revision: w.Revision,
+		Width: 3, Height: 1,
+		Styles:   []*wire.CellStyle{CellStyleToWire(renderer.DefaultStyle()), CellStyleToWire(styles[1])},
+		Runes:    []byte{0x4c, 0x75, 0, 0, 0xff, 0xff, 0xff, 0xff, 'z', 0, 0, 0},
+		StyleIds: []byte{1, 0, 1, 0, 0, 0},
+	}
+	got, err := RemotePreviewFromWire(hand)
+	require.NoError(t, err)
+	require.Equal(t, []renderer.Cell{
+		{Rune: '界', Style: styles[1]},
+		{Continuation: true, Style: styles[1]},
+		{Rune: 'z', Style: renderer.DefaultStyle()},
+	}, got.Cells)
+}
+
 func TestPackedPreviewMalformed(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -82,6 +142,8 @@ func TestPackedPreviewMalformed(t *testing.T) {
 		{"invalid rune", func(w *wire.RemotePreview) { binary.LittleEndian.PutUint32(w.Runes, 0x110000) }},
 		{"surrogate", func(w *wire.RemotePreview) { binary.LittleEndian.PutUint32(w.Runes, 0xD800) }},
 		{"non OK styles", func(w *wire.RemotePreview) { w.Status = 1; w.Width = 0; w.Height = 0; w.Runes = nil; w.StyleIds = nil }},
+		{"unreferenced bad underline", func(w *wire.RemotePreview) { w.Styles = append(w.Styles, &wire.CellStyle{UnderlineStyle: 255}) }},
+		{"unreferenced bad attrs", func(w *wire.RemotePreview) { w.Styles = append(w.Styles, &wire.CellStyle{Attrs: 1 << 15}) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w, err := RemotePreviewToWire(testRemotePreview())

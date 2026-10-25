@@ -158,6 +158,9 @@ func RemotePreviewFromWire(message *wire.RemotePreview) (protocol.RemotePreview,
 		if err != nil {
 			return protocol.RemotePreview{}, err
 		}
+		if !protocol.ValidRemotePreviewStyle(converted) {
+			return protocol.RemotePreview{}, protocol.ErrInvalidRemotePreview
+		}
 		styles[i] = converted
 	}
 	if count > 0 {
