@@ -433,15 +433,36 @@ func (w *resizeOrderingWriter) Write(p []byte) (int, error) {
 	return w.Buffer.Write(p)
 }
 
-// resizeOrderingProcess also implements the anonymous Resize interface; no generated mock covers it.
+// resizeOrderingProcess adds the anonymous Resize seam (runner.go) to a generated
+// launchedProcess mock; no mock exists for that unnamed interface.
 type resizeOrderingProcess struct {
-	order    *[]string
-	inputs   [][]byte
-	resizes  int
-	measures int
+	*mocklaunchedProcess
+	order   *[]string
+	inputs  [][]byte
+	resizes int
 }
 
-func (*resizeOrderingProcess) Warmup([]byte) error { return nil }
+func newResizeOrderingProcess(t *testing.T, order *[]string) *resizeOrderingProcess {
+	p := &resizeOrderingProcess{mocklaunchedProcess: newMocklaunchedProcess(t), order: order}
+	measures := 0
+	p.EXPECT().Warmup(mock.Anything).Return(nil).Maybe()
+	p.EXPECT().Close().Return(nil).Maybe()
+	p.EXPECT().Measure(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(func(input []byte, injected, flushed func() error) error {
+		measures++
+		p.inputs = append(p.inputs, append([]byte(nil), input...))
+		if measures == 1 {
+			*p.order = append(*p.order, "workload_write")
+		}
+		if err := injected(); err != nil {
+			return err
+		}
+		if measures == 1 {
+			*p.order = append(*p.order, "workload_flush")
+		}
+		return flushed()
+	}).Maybe()
+	return p
+}
 
 func (p *resizeOrderingProcess) Resize(cols, rows uint16) error {
 	p.resizes++
@@ -450,23 +471,6 @@ func (p *resizeOrderingProcess) Resize(cols, rows uint16) error {
 	}
 	return nil
 }
-
-func (p *resizeOrderingProcess) Measure(input []byte, injected, flushed func() error) error {
-	p.measures++
-	p.inputs = append(p.inputs, append([]byte(nil), input...))
-	if p.measures == 1 {
-		*p.order = append(*p.order, "workload_write")
-	}
-	if err := injected(); err != nil {
-		return err
-	}
-	if p.measures == 1 {
-		*p.order = append(*p.order, "workload_flush")
-	}
-	return flushed()
-}
-
-func (*resizeOrderingProcess) Close() error { return nil }
 
 func resizeOrderingLauncher(t *testing.T, client *resizeOrderingProcess) *mocklauncher {
 	return newLauncherMock(t, &launcherState{}, func(l *mocklauncher) {
@@ -482,7 +486,7 @@ func resizeOrderingLauncher(t *testing.T, client *resizeOrderingProcess) *mockla
 func TestResizeBoundaryPrecedesWorkloadWriteAndMarker(t *testing.T) {
 	dir := t.TempDir()
 	order := []string{}
-	client := &resizeOrderingProcess{order: &order}
+	client := newResizeOrderingProcess(t, &order)
 	h := defaultHarness()
 	h.clock, h.launcher = newClockMock(t), resizeOrderingLauncher(t, client)
 	raw := &resizeOrderingWriter{order: &order}
