@@ -7,13 +7,17 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"testing/synctest"
+
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
-	"github.com/stretchr/testify/require"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 )
 
-type transactionCatalogue struct {
+type transactionCatalogueState struct {
 	mu             sync.Mutex
 	records        map[string]domain.CatalogueRecord
 	events         []string
@@ -21,91 +25,15 @@ type transactionCatalogue struct {
 	onCreate       func(domain.CatalogueRecord)
 }
 
-func newTransactionCatalogue(records ...domain.CatalogueRecord) *transactionCatalogue {
-	catalogue := &transactionCatalogue{records: make(map[string]domain.CatalogueRecord)}
+func newTransactionCatalogue(records ...domain.CatalogueRecord) *transactionCatalogueState {
+	catalogue := &transactionCatalogueState{records: make(map[string]domain.CatalogueRecord)}
 	for _, record := range records {
 		catalogue.records[record.Name] = record
 	}
 	return catalogue
 }
 
-func (c *transactionCatalogue) Records() ([]domain.CatalogueRecord, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	out := make([]domain.CatalogueRecord, 0, len(c.records))
-	for _, record := range c.records {
-		out = append(out, record)
-	}
-	return out, nil
-}
-
-func (c *transactionCatalogue) Record(name string) (domain.CatalogueRecord, bool, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	record, ok := c.records[name]
-	return record, ok, nil
-}
-
-func (c *transactionCatalogue) Create(record domain.CatalogueRecord) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if _, exists := c.records[record.Name]; exists {
-		return errors.New("record exists")
-	}
-	c.records[record.Name] = record
-	c.events = append(c.events, "create")
-	if c.onCreate != nil {
-		c.onCreate(record)
-	}
-	return nil
-}
-
-func (c *transactionCatalogue) UpdateMetadata(domain.CatalogueMetadataUpdate) error { return nil }
-func (c *transactionCatalogue) Sync() error                                         { return nil }
-
-func (c *transactionCatalogue) Replace(name string, record domain.CatalogueRecord) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.replaceErrOnce != nil {
-		err := c.replaceErrOnce
-		c.replaceErrOnce = nil
-		return err
-	}
-	if _, exists := c.records[name]; !exists {
-		return errors.New("record missing")
-	}
-	c.records[name] = record
-	c.events = append(c.events, "replace:"+name)
-	return nil
-}
-
-func (c *transactionCatalogue) Rename(oldName string, record domain.CatalogueRecord) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if _, exists := c.records[oldName]; !exists {
-		return errors.New("record missing")
-	}
-	if _, exists := c.records[record.Name]; exists && record.Name != oldName {
-		return errors.New("record exists")
-	}
-	delete(c.records, oldName)
-	c.records[record.Name] = record
-	c.events = append(c.events, "rename:"+oldName+":"+record.Name)
-	return nil
-}
-
-func (c *transactionCatalogue) Delete(name string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	delete(c.records, name)
-	c.events = append(c.events, "delete:"+name)
-	return nil
-}
-
-func (c *transactionCatalogue) Close() error { return nil }
-
-type transactionRepository struct {
-	ports.SnapshotRepository
+type transactionRepositoryState struct {
 	mu            sync.Mutex
 	deleteErrOnce error
 	deleteCalls   []domain.IncarnationID
@@ -114,11 +42,10 @@ type transactionRepository struct {
 	releaseDelete chan struct{}
 }
 
-// garbageCollectionFenceRepository models per-incarnation retention. The first
+// garbageCollectionState models per-incarnation retention. The first
 // CollectIncarnationGarbage call blocks until released, so a test can race a
 // mutation against a step that already read its keep decision.
-type garbageCollectionFenceRepository struct {
-	ports.SnapshotRepository
+type garbageCollectionState struct {
 	mu                sync.Mutex
 	events            []string
 	collectionEntered chan struct{}
@@ -128,73 +55,7 @@ type garbageCollectionFenceRepository struct {
 	generations       map[domain.IncarnationID]map[uint64]struct{}
 }
 
-func (r *garbageCollectionFenceRepository) SnapshotIncarnations(context.Context) ([]domain.IncarnationID, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	seen := make(map[domain.IncarnationID]struct{})
-	for id := range r.incarnations {
-		seen[id] = struct{}{}
-	}
-	for id := range r.generations {
-		seen[id] = struct{}{}
-	}
-	ids := make([]domain.IncarnationID, 0, len(seen))
-	for id := range seen {
-		ids = append(ids, id)
-	}
-	// Deterministic order lets tests pause between known steps.
-	slices.SortFunc(ids, func(a, b domain.IncarnationID) int { return bytes.Compare(a[:], b[:]) })
-	return ids, nil
-}
-
-func (r *garbageCollectionFenceRepository) CollectIncarnationGarbage(_ context.Context, id domain.IncarnationID, keep *domain.CheckpointRef) error {
-	r.mu.Lock()
-	block := !r.blocked
-	r.blocked = true
-	r.mu.Unlock()
-	if block {
-		close(r.collectionEntered)
-		<-r.releaseCollection
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if keep == nil {
-		delete(r.incarnations, id)
-		delete(r.generations, id)
-	} else {
-		for generation := range r.generations[id] {
-			if generation != keep.Generation && generation+1 != keep.Generation {
-				delete(r.generations[id], generation)
-			}
-		}
-	}
-	r.events = append(r.events, "collect")
-	return nil
-}
-
-func (r *garbageCollectionFenceRepository) DeleteIncarnation(_ context.Context, id domain.IncarnationID) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	delete(r.incarnations, id)
-	delete(r.generations, id)
-	return nil
-}
-
-func (r *garbageCollectionFenceRepository) Publish(_ context.Context, publication ports.SnapshotPublication) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.generations == nil {
-		r.generations = make(map[domain.IncarnationID]map[uint64]struct{})
-	}
-	if r.generations[publication.IncarnationID] == nil {
-		r.generations[publication.IncarnationID] = make(map[uint64]struct{})
-	}
-	r.generations[publication.IncarnationID][publication.Generation] = struct{}{}
-	r.events = append(r.events, "publish")
-	return nil
-}
-
-func (r *garbageCollectionFenceRepository) addIncarnation(record domain.CatalogueRecord) {
+func (r *garbageCollectionState) addIncarnation(record domain.CatalogueRecord) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.incarnations == nil {
@@ -203,41 +64,24 @@ func (r *garbageCollectionFenceRepository) addIncarnation(record domain.Catalogu
 	r.incarnations[record.IncarnationID] = struct{}{}
 }
 
-func (r *garbageCollectionFenceRepository) hasIncarnation(id domain.IncarnationID) bool {
+func (r *garbageCollectionState) hasIncarnation(id domain.IncarnationID) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	_, ok := r.incarnations[id]
 	return ok
 }
 
-func (r *garbageCollectionFenceRepository) hasGeneration(id domain.IncarnationID, generation uint64) bool {
+func (r *garbageCollectionState) hasGeneration(id domain.IncarnationID, generation uint64) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	_, ok := r.generations[id][generation]
 	return ok
 }
 
-func (r *garbageCollectionFenceRepository) eventLog() []string {
+func (r *garbageCollectionState) eventLog() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]string(nil), r.events...)
-}
-
-func (r *transactionRepository) DeleteIncarnation(_ context.Context, id domain.IncarnationID) error {
-	if r.deleteEntered != nil {
-		close(r.deleteEntered)
-		<-r.releaseDelete
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.deleteCalls = append(r.deleteCalls, id)
-	if r.deleteErrOnce != nil {
-		err := r.deleteErrOnce
-		r.deleteErrOnce = nil
-		return err
-	}
-	r.deletedIDs = append(r.deletedIDs, id)
-	return nil
 }
 
 func degradedTransactionRecord() domain.CatalogueRecord {
@@ -261,106 +105,123 @@ func healthyTransactionRecord() domain.CatalogueRecord {
 }
 
 func TestResetIncompatibleReplacesExactHealthyCheckpoint(t *testing.T) {
-	t.Parallel()
-	old := healthyTransactionRecord()
-	catalogue := newTransactionCatalogue(old)
-	repository := &transactionRepository{}
-	coordinator := NewCoordinator(catalogue, repository, bytes.NewReader(bytes.Repeat([]byte{2}, 16)))
+	synctest.Test(t, func(t *testing.T) {
+		old := healthyTransactionRecord()
+		catalogue := newTransactionCatalogue(old)
+		repository := &transactionRepositoryState{}
+		coordinator := testCoordinator(t, catalogue, repository, bytes.NewReader(bytes.Repeat([]byte{2}, 16)))
 
-	fresh, committed, err := coordinator.ResetIncompatible(context.Background(), old.Name, old.IncarnationID, *old.Committed)
+		fresh, committed, err := coordinator.ResetIncompatible(context.Background(), old.Name, old.IncarnationID, *old.Committed)
 
-	require.NoError(t, err)
-	require.True(t, committed)
-	require.NotZero(t, fresh.IncarnationID)
-	require.NotEqual(t, old.IncarnationID, fresh.IncarnationID)
-	require.Equal(t, old.Name, fresh.Name)
-	require.Equal(t, old.Cwd, fresh.Cwd)
-	require.Equal(t, old.CreatedAt, fresh.CreatedAt)
-	require.Equal(t, old.UpdatedAt, fresh.UpdatedAt)
-	require.Equal(t, old.LastUsedSeq, fresh.LastUsedSeq)
-	require.Empty(t, fresh.TabNames)
-	require.Nil(t, fresh.Committed)
-	require.Empty(t, fresh.DegradedReason)
-	stored, ok, recordErr := catalogue.Record(old.Name)
-	require.NoError(t, recordErr)
-	require.True(t, ok)
-	require.True(t, fresh.Equal(stored))
-	require.Equal(t, []domain.IncarnationID{old.IncarnationID}, repository.deleteCalls)
-	require.Equal(t, []domain.IncarnationID{old.IncarnationID}, repository.deletedIDs)
+		require.NoError(t, err)
+		require.True(t, committed)
+		require.NotZero(t, fresh.IncarnationID)
+		require.NotEqual(t, old.IncarnationID, fresh.IncarnationID)
+		require.Equal(t, old.Name, fresh.Name)
+		require.Equal(t, old.Cwd, fresh.Cwd)
+		require.Equal(t, old.CreatedAt, fresh.CreatedAt)
+		require.Equal(t, old.UpdatedAt, fresh.UpdatedAt)
+		require.Equal(t, old.LastUsedSeq, fresh.LastUsedSeq)
+		require.Empty(t, fresh.TabNames)
+		require.Nil(t, fresh.Committed)
+		require.Empty(t, fresh.DegradedReason)
+		stored, ok, recordErr := newTransactionCatalogueStateMock(t, catalogue).Record(old.Name)
+		require.NoError(t, recordErr)
+		require.True(t, ok)
+		require.True(t, fresh.Equal(stored))
+		require.Equal(t, []domain.IncarnationID{old.IncarnationID}, repository.deleteCalls)
+		require.Equal(t, []domain.IncarnationID{old.IncarnationID}, repository.deletedIDs)
+
+		synctest.Wait()
+	})
 }
 
 func TestDeleteExactDoesNotDeleteSameNameReplacement(t *testing.T) {
-	oldID := domain.IncarnationID{1}
-	newID := domain.IncarnationID{2}
-	catalogue := newTransactionCatalogue(domain.CatalogueRecord{Name: "work", IncarnationID: newID, Cwd: "/tmp", CreatedAt: 22, UpdatedAt: 22})
-	repository := &transactionRepository{}
-	coordinator := NewCoordinator(catalogue, repository, bytes.NewReader(nil))
+	synctest.Test(t, func(t *testing.T) {
+		oldID := domain.IncarnationID{1}
+		newID := domain.IncarnationID{2}
+		catalogue := newTransactionCatalogue(domain.CatalogueRecord{Name: "work", IncarnationID: newID, Cwd: "/tmp", CreatedAt: 22, UpdatedAt: 22})
+		repository := &transactionRepositoryState{}
+		coordinator := testCoordinator(t, catalogue, repository, bytes.NewReader(nil))
 
-	require.NoError(t, coordinator.DeleteExact(context.Background(), "work", oldID, 11))
-	record, ok, err := catalogue.Record("work")
-	require.NoError(t, err)
-	require.True(t, ok)
-	require.Equal(t, newID, record.IncarnationID)
-	require.Empty(t, repository.deleteCalls)
+		require.NoError(t, coordinator.DeleteExact(context.Background(), "work", oldID, 11))
+		record, ok, err := newTransactionCatalogueStateMock(t, catalogue).Record("work")
+		require.NoError(t, err)
+		require.True(t, ok)
+		require.Equal(t, newID, record.IncarnationID)
+		require.Empty(t, repository.deleteCalls)
+
+		synctest.Wait()
+	})
 }
 
 func TestDeleteExactDeletesMatchingLifecycle(t *testing.T) {
-	id := domain.IncarnationID{1}
-	catalogue := newTransactionCatalogue(domain.CatalogueRecord{Name: "work", IncarnationID: id, Cwd: "/tmp", CreatedAt: 11, UpdatedAt: 11})
-	repository := &transactionRepository{}
-	coordinator := NewCoordinator(catalogue, repository, bytes.NewReader(nil))
+	synctest.Test(t, func(t *testing.T) {
+		id := domain.IncarnationID{1}
+		catalogue := newTransactionCatalogue(domain.CatalogueRecord{Name: "work", IncarnationID: id, Cwd: "/tmp", CreatedAt: 11, UpdatedAt: 11})
+		repository := &transactionRepositoryState{}
+		coordinator := testCoordinator(t, catalogue, repository, bytes.NewReader(nil))
 
-	require.NoError(t, coordinator.DeleteExact(context.Background(), "work", id, 11))
-	_, ok, err := catalogue.Record("work")
-	require.NoError(t, err)
-	require.False(t, ok)
-	require.Equal(t, []domain.IncarnationID{id}, repository.deleteCalls)
+		require.NoError(t, coordinator.DeleteExact(context.Background(), "work", id, 11))
+		_, ok, err := newTransactionCatalogueStateMock(t, catalogue).Record("work")
+		require.NoError(t, err)
+		require.False(t, ok)
+		require.Equal(t, []domain.IncarnationID{id}, repository.deleteCalls)
+
+		synctest.Wait()
+	})
 }
 
 func TestResetIncompatibleDeleteFailureReturnsCommittedFreshAuthority(t *testing.T) {
-	t.Parallel()
-	old := healthyTransactionRecord()
-	cause := errors.New("repository delete failed")
-	catalogue := newTransactionCatalogue(old)
-	repository := &transactionRepository{deleteErrOnce: cause}
-	coordinator := NewCoordinator(catalogue, repository, bytes.NewReader(bytes.Repeat([]byte{2}, 16)))
+	synctest.Test(t, func(t *testing.T) {
+		old := healthyTransactionRecord()
+		cause := errors.New("repository delete failed")
+		catalogue := newTransactionCatalogue(old)
+		repository := &transactionRepositoryState{deleteErrOnce: cause}
+		coordinator := testCoordinator(t, catalogue, repository, bytes.NewReader(bytes.Repeat([]byte{2}, 16)))
 
-	fresh, committed, err := coordinator.ResetIncompatible(context.Background(), old.Name, old.IncarnationID, *old.Committed)
+		fresh, committed, err := coordinator.ResetIncompatible(context.Background(), old.Name, old.IncarnationID, *old.Committed)
 
-	require.ErrorIs(t, err, cause)
-	require.True(t, committed)
-	require.NotEqual(t, old.IncarnationID, fresh.IncarnationID)
-	stored, ok, recordErr := catalogue.Record(old.Name)
-	require.NoError(t, recordErr)
-	require.True(t, ok)
-	require.True(t, fresh.Equal(stored))
-	require.Equal(t, []domain.IncarnationID{old.IncarnationID}, repository.deleteCalls)
-	require.Empty(t, repository.deletedIDs)
+		require.ErrorIs(t, err, cause)
+		require.True(t, committed)
+		require.NotEqual(t, old.IncarnationID, fresh.IncarnationID)
+		stored, ok, recordErr := newTransactionCatalogueStateMock(t, catalogue).Record(old.Name)
+		require.NoError(t, recordErr)
+		require.True(t, ok)
+		require.True(t, fresh.Equal(stored))
+		require.Equal(t, []domain.IncarnationID{old.IncarnationID}, repository.deleteCalls)
+		require.Empty(t, repository.deletedIDs)
+
+		synctest.Wait()
+	})
 }
 
 func TestResetIncompatibleReplaceFailurePreservesOldAuthorityAndRepository(t *testing.T) {
-	t.Parallel()
-	old := healthyTransactionRecord()
-	cause := errors.New("catalogue replace failed")
-	catalogue := newTransactionCatalogue(old)
-	catalogue.replaceErrOnce = cause
-	repository := &transactionRepository{}
-	coordinator := NewCoordinator(catalogue, repository, bytes.NewReader(bytes.Repeat([]byte{2}, 16)))
+	synctest.Test(t, func(t *testing.T) {
+		old := healthyTransactionRecord()
+		cause := errors.New("catalogue replace failed")
+		catalogue := newTransactionCatalogue(old)
+		catalogue.replaceErrOnce = cause
+		repository := &transactionRepositoryState{}
+		coordinator := testCoordinator(t, catalogue, repository, bytes.NewReader(bytes.Repeat([]byte{2}, 16)))
 
-	fresh, committed, err := coordinator.ResetIncompatible(context.Background(), old.Name, old.IncarnationID, *old.Committed)
+		fresh, committed, err := coordinator.ResetIncompatible(context.Background(), old.Name, old.IncarnationID, *old.Committed)
 
-	require.ErrorIs(t, err, cause)
-	require.False(t, committed)
-	require.Equal(t, domain.CatalogueRecord{}, fresh)
-	stored, ok, recordErr := catalogue.Record(old.Name)
-	require.NoError(t, recordErr)
-	require.True(t, ok)
-	require.True(t, old.Equal(stored))
-	require.Empty(t, repository.deleteCalls)
+		require.ErrorIs(t, err, cause)
+		require.False(t, committed)
+		require.Equal(t, domain.CatalogueRecord{}, fresh)
+		stored, ok, recordErr := newTransactionCatalogueStateMock(t, catalogue).Record(old.Name)
+		require.NoError(t, recordErr)
+		require.True(t, ok)
+		require.True(t, old.Equal(stored))
+		require.Empty(t, repository.deleteCalls)
+
+		synctest.Wait()
+	})
 }
 
 func TestResetIncompatibleStaleAuthorityIsNoOp(t *testing.T) {
-	t.Parallel()
+
 	old := healthyTransactionRecord()
 	otherGeneration := *old.Committed
 	otherGeneration.Generation++
@@ -387,98 +248,106 @@ func TestResetIncompatibleStaleAuthorityIsNoOp(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			catalogue := newTransactionCatalogue()
-			if tt.record != nil {
-				catalogue.records[tt.record.Name] = *tt.record
-			}
-			repository := &transactionRepository{}
-			coordinator := NewCoordinator(catalogue, repository, bytes.NewReader(bytes.Repeat([]byte{2}, 16)))
+			synctest.Test(t, func(t *testing.T) {
+				catalogue := newTransactionCatalogue()
+				if tt.record != nil {
+					catalogue.records[tt.record.Name] = *tt.record
+				}
+				repository := &transactionRepositoryState{}
+				coordinator := testCoordinator(t, catalogue, repository, bytes.NewReader(bytes.Repeat([]byte{2}, 16)))
 
-			fresh, committed, err := coordinator.ResetIncompatible(context.Background(), old.Name, tt.expected, tt.ref)
+				fresh, committed, err := coordinator.ResetIncompatible(context.Background(), old.Name, tt.expected, tt.ref)
 
-			require.NoError(t, err)
-			require.False(t, committed)
-			require.Equal(t, domain.CatalogueRecord{}, fresh)
-			require.Empty(t, catalogue.events)
-			require.Empty(t, repository.deleteCalls)
+				require.NoError(t, err)
+				require.False(t, committed)
+				require.Equal(t, domain.CatalogueRecord{}, fresh)
+				require.Empty(t, catalogue.events)
+				require.Empty(t, repository.deleteCalls)
+
+				synctest.Wait()
+			})
 		})
 	}
 }
 
 func TestGarbageCollectionFencesNewIncarnationsAndCheckpointPublications(t *testing.T) {
-	t.Parallel()
 
 	t.Run("a keep decision is re-read under the fence for every incarnation", func(t *testing.T) {
-		t.Parallel()
-		// The pass lists incarnation 9 (an orphan) and pauses after step 1;
-		// "new" is then created with ID 9, so step 9 must re-read the catalogue
-		// and keep it. A keep decision read once per pass would remove it.
-		reused := domain.IncarnationID{9}
-		catalogue := newTransactionCatalogue()
-		repository := &garbageCollectionFenceRepository{
-			blocked:      true,
-			incarnations: map[domain.IncarnationID]struct{}{{1}: {}, reused: {}},
-		}
-		catalogue.onCreate = repository.addIncarnation
-		coordinator := NewCoordinator(catalogue, repository, bytes.NewReader(nil))
-		ctx := &betweenStepsContext{Context: context.Background(), repository: repository, reached: make(chan struct{}), release: make(chan struct{})}
+		synctest.Test(t, func(t *testing.T) {
+			// The pass lists incarnation 9 (an orphan) and pauses after step 1;
+			// "new" is then created with ID 9, so step 9 must re-read the catalogue
+			// and keep it. A keep decision read once per pass would remove it.
+			reused := domain.IncarnationID{9}
+			catalogue := newTransactionCatalogue()
+			repository := &garbageCollectionState{
+				blocked:      true,
+				incarnations: map[domain.IncarnationID]struct{}{{1}: {}, reused: {}},
+			}
+			catalogue.onCreate = repository.addIncarnation
+			coordinator := testCoordinator(t, catalogue, repository, bytes.NewReader(nil))
+			ctx := &betweenStepsContext{Context: context.Background(), repository: repository, reached: make(chan struct{}), release: make(chan struct{})}
 
-		collected := make(chan error, 1)
-		go func() {
-			_, err := coordinator.CollectGarbage(ctx)
-			collected <- err
-		}()
-		<-ctx.reached
-		require.False(t, repository.hasIncarnation(domain.IncarnationID{1}), "step 1 ran first")
+			collected := make(chan error, 1)
+			go func() {
+				_, err := coordinator.CollectGarbage(ctx)
+				collected <- err
+			}()
+			<-ctx.reached
+			require.False(t, repository.hasIncarnation(domain.IncarnationID{1}), "step 1 ran first")
 
-		_, err := coordinator.Create(context.Background(), domain.CatalogueRecord{Name: "new", IncarnationID: reused})
-		require.NoError(t, err)
-		close(ctx.release)
+			_, err := coordinator.Create(context.Background(), domain.CatalogueRecord{Name: "new", IncarnationID: reused})
+			require.NoError(t, err)
+			close(ctx.release)
 
-		require.NoError(t, <-collected)
-		require.True(t, repository.hasIncarnation(reused), "a step after the creation must keep the new incarnation")
-		require.False(t, repository.hasIncarnation(domain.IncarnationID{1}), "a true orphan is still removed")
+			require.NoError(t, <-collected)
+			require.True(t, repository.hasIncarnation(reused), "a step after the creation must keep the new incarnation")
+			require.False(t, repository.hasIncarnation(domain.IncarnationID{1}), "a true orphan is still removed")
+
+			synctest.Wait()
+		})
 	})
 
 	t.Run("a stale keep decision cannot prune a newly committed generation", func(t *testing.T) {
-		t.Parallel()
-		committed := domain.CheckpointRef{Generation: 1, ManifestDigest: [32]byte{1}}
-		record := domain.CatalogueRecord{Name: "work", IncarnationID: domain.IncarnationID{1}, Committed: &committed}
-		catalogue := newTransactionCatalogue(record)
-		repository := &garbageCollectionFenceRepository{
-			collectionEntered: make(chan struct{}),
-			releaseCollection: make(chan struct{}),
-			generations: map[domain.IncarnationID]map[uint64]struct{}{
-				record.IncarnationID: {1: {}},
-			},
-		}
-		coordinator := NewCoordinator(catalogue, repository, bytes.NewReader(nil))
+		synctest.Test(t, func(t *testing.T) {
+			committed := domain.CheckpointRef{Generation: 1, ManifestDigest: [32]byte{1}}
+			record := domain.CatalogueRecord{Name: "work", IncarnationID: domain.IncarnationID{1}, Committed: &committed}
+			catalogue := newTransactionCatalogue(record)
+			repository := &garbageCollectionState{
+				collectionEntered: make(chan struct{}),
+				releaseCollection: make(chan struct{}),
+				generations: map[domain.IncarnationID]map[uint64]struct{}{
+					record.IncarnationID: {1: {}},
+				},
+			}
+			coordinator := testCoordinator(t, catalogue, repository, bytes.NewReader(nil))
 
-		collected := make(chan error, 1)
-		go func() {
-			_, err := coordinator.CollectGarbage(context.Background())
-			collected <- err
-		}()
-		<-repository.collectionEntered
+			collected := make(chan error, 1)
+			go func() {
+				_, err := coordinator.CollectGarbage(context.Background())
+				collected <- err
+			}()
+			<-repository.collectionEntered
 
-		published := make(chan error, 1)
-		go func() {
-			_, err := coordinator.PublishCheckpoint(context.Background(), "work", ports.SnapshotPublication{
-				Name:             "work",
-				IncarnationID:    record.IncarnationID,
-				Generation:       2,
-				ParentCheckpoint: &committed,
-				Manifest:         []byte("generation two"),
-			})
-			published <- err
-		}()
-		close(repository.releaseCollection)
+			published := make(chan error, 1)
+			go func() {
+				_, err := coordinator.PublishCheckpoint(context.Background(), "work", ports.SnapshotPublication{
+					Name:             "work",
+					IncarnationID:    record.IncarnationID,
+					Generation:       2,
+					ParentCheckpoint: &committed,
+					Manifest:         []byte("generation two"),
+				})
+				published <- err
+			}()
+			close(repository.releaseCollection)
 
-		require.NoError(t, <-collected)
-		require.NoError(t, <-published)
-		require.Equal(t, []string{"collect", "publish"}, repository.eventLog())
-		require.True(t, repository.hasGeneration(record.IncarnationID, 2), "the fenced step must finish before generation two is published")
+			require.NoError(t, <-collected)
+			require.NoError(t, <-published)
+			require.Equal(t, []string{"collect", "publish"}, repository.eventLog())
+			require.True(t, repository.hasGeneration(record.IncarnationID, 2), "the fenced step must finish before generation two is published")
+
+			synctest.Wait()
+		})
 	})
 }
 
@@ -486,7 +355,7 @@ func TestGarbageCollectionFencesNewIncarnationsAndCheckpointPublications(t *test
 // one incarnation step has completed, outside any fenced step.
 type betweenStepsContext struct {
 	context.Context
-	repository *garbageCollectionFenceRepository
+	repository *garbageCollectionState
 	once       sync.Once
 	reached    chan struct{}
 	release    chan struct{}
@@ -506,7 +375,7 @@ func (c *betweenStepsContext) Err() error {
 // between incarnation steps, so every mutation entry point can run while a
 // pass is still in progress instead of waiting for the whole pass.
 func TestDurableMutationWaitsForAtMostOneIncarnation(t *testing.T) {
-	t.Parallel()
+
 	committed := domain.CheckpointRef{Generation: 1, ManifestDigest: [32]byte{1}}
 	work := domain.CatalogueRecord{Name: "work", IncarnationID: domain.IncarnationID{1}, Committed: &committed}
 	broken := degradedTransactionRecord()
@@ -546,80 +415,86 @@ func TestDurableMutationWaitsForAtMostOneIncarnation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			// Two orphan incarnations give the pass two fenced steps.
-			repository := &garbageCollectionFenceRepository{
-				blocked:      true,
-				incarnations: map[domain.IncarnationID]struct{}{{7}: {}, {8}: {}},
-			}
-			coordinator := NewCoordinator(newTransactionCatalogue(work, broken), repository, bytes.NewReader(bytes.Repeat([]byte{2}, 32)))
-			ctx := &betweenStepsContext{Context: context.Background(), repository: repository, reached: make(chan struct{}), release: make(chan struct{})}
-
-			collected := make(chan error, 1)
-			go func() {
-				_, err := coordinator.CollectGarbage(ctx)
-				collected <- err
-			}()
-			<-ctx.reached
-
-			// TryLock first so a regression that holds the fence across the pass
-			// fails here instead of deadlocking the mutation.
-			require.True(t, coordinator.mutationMu.TryLock(), "the fence must be free between incarnation steps")
-			coordinator.mutationMu.Unlock()
-			require.NoError(t, tt.mutate(coordinator))
-
-			close(ctx.release)
-			require.NoError(t, <-collected)
-			steps := 0
-			for _, event := range repository.eventLog() {
-				if event == "collect" {
-					steps++
+			synctest.Test(t, func(t *testing.T) {
+				// Two orphan incarnations give the pass two fenced steps.
+				repository := &garbageCollectionState{
+					blocked:      true,
+					incarnations: map[domain.IncarnationID]struct{}{{7}: {}, {8}: {}},
 				}
-			}
-			require.Equal(t, 2, steps, "both incarnation steps ran")
+				coordinator := testCoordinator(t, newTransactionCatalogue(work, broken), repository, bytes.NewReader(bytes.Repeat([]byte{2}, 32)))
+				ctx := &betweenStepsContext{Context: context.Background(), repository: repository, reached: make(chan struct{}), release: make(chan struct{})}
+
+				collected := make(chan error, 1)
+				go func() {
+					_, err := coordinator.CollectGarbage(ctx)
+					collected <- err
+				}()
+				<-ctx.reached
+
+				// TryLock first so a regression that holds the fence across the pass
+				// fails here instead of deadlocking the mutation.
+				require.True(t, coordinator.mutationMu.TryLock(), "the fence must be free between incarnation steps")
+				coordinator.mutationMu.Unlock()
+				require.NoError(t, tt.mutate(coordinator))
+
+				close(ctx.release)
+				require.NoError(t, <-collected)
+				steps := 0
+				for _, event := range repository.eventLog() {
+					if event == "collect" {
+						steps++
+					}
+				}
+				require.Equal(t, 2, steps, "both incarnation steps ran")
+
+				synctest.Wait()
+			})
 		})
 	}
 }
 
 func TestMarkBrokenCannotOverwriteDiscardReplacement(t *testing.T) {
-	t.Parallel()
-	old := degradedTransactionRecord()
-	catalogue := newTransactionCatalogue(old)
-	repository := &transactionRepository{deleteEntered: make(chan struct{}), releaseDelete: make(chan struct{})}
-	coordinator := NewCoordinator(catalogue, repository, bytes.NewReader(bytes.Repeat([]byte{2}, 16)))
+	synctest.Test(t, func(t *testing.T) {
+		old := degradedTransactionRecord()
+		catalogue := newTransactionCatalogue(old)
+		repository := &transactionRepositoryState{deleteEntered: make(chan struct{}), releaseDelete: make(chan struct{})}
+		coordinator := testCoordinator(t, catalogue, repository, bytes.NewReader(bytes.Repeat([]byte{2}, 16)))
 
-	discarded := make(chan error, 1)
-	go func() { discarded <- coordinator.Discard(t.Context(), old.Name) }()
-	<-repository.deleteEntered // Replace committed the fresh incarnation while Discard retains the mutation fence.
+		discarded := make(chan error, 1)
+		go func() { discarded <- coordinator.Discard(t.Context(), old.Name) }()
+		<-repository.deleteEntered // Replace committed the fresh incarnation while Discard retains the mutation fence.
 
-	marked := make(chan struct {
-		marked bool
-		err    error
-	}, 1)
-	go func() {
-		_, markedSession, err := coordinator.MarkBroken(t.Context(), old.Name, old.IncarnationID, "late restore failure")
-		marked <- struct {
+		marked := make(chan struct {
 			marked bool
 			err    error
-		}{markedSession, err}
-	}()
+		}, 1)
+		go func() {
+			_, markedSession, err := coordinator.MarkBroken(t.Context(), old.Name, old.IncarnationID, "late restore failure")
+			marked <- struct {
+				marked bool
+				err    error
+			}{markedSession, err}
+		}()
 
-	close(repository.releaseDelete)
-	require.NoError(t, <-discarded)
-	result := <-marked
-	require.NoError(t, result.err)
-	require.False(t, result.marked, "a late restore must not degrade the replacement incarnation")
+		close(repository.releaseDelete)
+		require.NoError(t, <-discarded)
+		result := <-marked
+		require.NoError(t, result.err)
+		require.False(t, result.marked, "a late restore must not degrade the replacement incarnation")
 
-	got, ok, err := catalogue.Record(old.Name)
-	require.NoError(t, err)
-	require.True(t, ok)
-	require.NotEqual(t, old.IncarnationID, got.IncarnationID)
-	require.Nil(t, got.Committed)
-	require.Empty(t, got.DegradedReason)
+		got, ok, err := newTransactionCatalogueStateMock(t, catalogue).Record(old.Name)
+		require.NoError(t, err)
+		require.True(t, ok)
+		require.NotEqual(t, old.IncarnationID, got.IncarnationID)
+		require.Nil(t, got.Committed)
+		require.Empty(t, got.DegradedReason)
+
+		synctest.Wait()
+	})
 }
 
 func TestDiscardPublicPreconditions(t *testing.T) {
-	t.Parallel()
+
 	uncommitted := degradedTransactionRecord()
 	uncommitted.Name = "work"
 	uncommitted.Committed = nil
@@ -640,46 +515,49 @@ func TestDiscardPublicPreconditions(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			ctx := context.Background()
-			if tt.cancelled {
-				cancelled, cancel := context.WithCancel(ctx)
-				cancel()
-				ctx = cancelled
-			}
-			var coordinator *Coordinator
-			var catalogue *transactionCatalogue
-			var repository *transactionRepository
-			if tt.incomplete {
-				coordinator = &Coordinator{}
-			} else {
-				catalogue = newTransactionCatalogue()
-				if tt.record != nil {
-					catalogue.records[tt.record.Name] = *tt.record
+			synctest.Test(t, func(t *testing.T) {
+				ctx := context.Background()
+				if tt.cancelled {
+					cancelled, cancel := context.WithCancel(ctx)
+					cancel()
+					ctx = cancelled
 				}
-				repository = &transactionRepository{}
-				coordinator = NewCoordinator(catalogue, repository, bytes.NewReader(bytes.Repeat([]byte{2}, 16)))
-			}
+				var coordinator *Coordinator
+				var catalogue *transactionCatalogueState
+				var repository *transactionRepositoryState
+				if tt.incomplete {
+					coordinator = &Coordinator{}
+				} else {
+					catalogue = newTransactionCatalogue()
+					if tt.record != nil {
+						catalogue.records[tt.record.Name] = *tt.record
+					}
+					repository = &transactionRepositoryState{}
+					coordinator = testCoordinator(t, catalogue, repository, bytes.NewReader(bytes.Repeat([]byte{2}, 16)))
+				}
 
-			err := coordinator.Discard(ctx, "work")
+				err := coordinator.Discard(ctx, "work")
 
-			if tt.wantErr == nil {
-				require.NoError(t, err)
-			} else if tt.incomplete {
-				require.EqualError(t, err, tt.wantErr.Error())
-			} else {
-				require.ErrorIs(t, err, tt.wantErr)
-			}
-			if !tt.incomplete {
-				require.Empty(t, catalogue.events)
-				require.Empty(t, repository.deleteCalls)
-			}
+				if tt.wantErr == nil {
+					require.NoError(t, err)
+				} else if tt.incomplete {
+					require.EqualError(t, err, tt.wantErr.Error())
+				} else {
+					require.ErrorIs(t, err, tt.wantErr)
+				}
+				if !tt.incomplete {
+					require.Empty(t, catalogue.events)
+					require.Empty(t, repository.deleteCalls)
+				}
+
+				synctest.Wait()
+			})
 		})
 	}
 }
 
 func TestDiscardIsRetryIdempotent(t *testing.T) {
-	t.Parallel()
+
 	failure := errors.New("injected discard failure")
 	tests := []struct {
 		name       string
@@ -690,34 +568,225 @@ func TestDiscardIsRetryIdempotent(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			old := degradedTransactionRecord()
-			old.TabNames = []string{"shell"}
-			catalogue := newTransactionCatalogue(old)
-			repository := &transactionRepository{}
-			if tt.failBefore {
-				catalogue.replaceErrOnce = failure
-			} else {
-				repository.deleteErrOnce = failure
-			}
-			ids := append(bytes.Repeat([]byte{2}, 16), bytes.Repeat([]byte{3}, 16)...)
-			coordinator := NewCoordinator(catalogue, repository, bytes.NewReader(ids))
+			synctest.Test(t, func(t *testing.T) {
+				old := degradedTransactionRecord()
+				old.TabNames = []string{"shell"}
+				catalogue := newTransactionCatalogue(old)
+				repository := &transactionRepositoryState{}
+				if tt.failBefore {
+					catalogue.replaceErrOnce = failure
+				} else {
+					repository.deleteErrOnce = failure
+				}
+				ids := append(bytes.Repeat([]byte{2}, 16), bytes.Repeat([]byte{3}, 16)...)
+				coordinator := testCoordinator(t, catalogue, repository, bytes.NewReader(ids))
 
-			err := coordinator.Discard(context.Background(), old.Name)
-			require.ErrorIs(t, err, failure)
-			require.NoError(t, coordinator.Discard(context.Background(), old.Name))
+				err := coordinator.Discard(context.Background(), old.Name)
+				require.ErrorIs(t, err, failure)
+				require.NoError(t, coordinator.Discard(context.Background(), old.Name))
 
-			got, ok, err := catalogue.Record(old.Name)
-			require.NoError(t, err)
-			require.True(t, ok)
-			require.Nil(t, got.Committed)
-			require.NotEqual(t, old.IncarnationID, got.IncarnationID)
-			require.Equal(t, old.TabNames, got.TabNames)
-			if tt.failBefore {
-				require.Contains(t, repository.deletedIDs, old.IncarnationID)
-			} else {
-				require.Empty(t, repository.deletedIDs, "background garbage collection owns the orphaned old directory")
-			}
+				got, ok, err := newTransactionCatalogueStateMock(t, catalogue).Record(old.Name)
+				require.NoError(t, err)
+				require.True(t, ok)
+				require.Nil(t, got.Committed)
+				require.NotEqual(t, old.IncarnationID, got.IncarnationID)
+				require.Equal(t, old.TabNames, got.TabNames)
+				if tt.failBefore {
+					require.Contains(t, repository.deletedIDs, old.IncarnationID)
+				} else {
+					require.Empty(t, repository.deletedIDs, "background garbage collection owns the orphaned old directory")
+				}
+
+				synctest.Wait()
+			})
 		})
+	}
+}
+
+func newTransactionCatalogueStateMock(t *testing.T, c *transactionCatalogueState) *portsmocks.MockCatalogue {
+	t.Helper()
+	m := portsmocks.NewMockCatalogue(t)
+	if c.replaceErrOnce != nil {
+		withTransactionReplaceError(c)(m)
+	}
+	m.EXPECT().Records().RunAndReturn(func() ([]domain.CatalogueRecord, error) {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		out := make([]domain.CatalogueRecord, 0, len(c.records))
+		for _, record := range c.records {
+			out = append(out, record)
+		}
+		return out, nil
+	}).Maybe()
+	m.EXPECT().Record(mock.Anything).RunAndReturn(func(name string) (domain.CatalogueRecord, bool, error) {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		record, ok := c.records[name]
+		return record, ok, nil
+	}).Maybe()
+	m.EXPECT().Create(mock.Anything).RunAndReturn(func(record domain.CatalogueRecord) error {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if _, exists := c.records[record.Name]; exists {
+			return errors.New("record exists")
+		}
+		c.records[record.Name] = record
+		c.events = append(c.events, "create")
+		if c.onCreate != nil {
+			c.onCreate(record)
+		}
+		return nil
+	}).Maybe()
+	m.EXPECT().UpdateMetadata(mock.Anything).RunAndReturn(func(arg0 domain.CatalogueMetadataUpdate) error { return nil }).Maybe()
+	m.EXPECT().Sync().RunAndReturn(func() error { return nil }).Maybe()
+	m.EXPECT().Replace(mock.Anything, mock.Anything).RunAndReturn(func(name string, record domain.CatalogueRecord) error {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if _, exists := c.records[name]; !exists {
+			return errors.New("record missing")
+		}
+		c.records[name] = record
+		c.events = append(c.events, "replace:"+name)
+		return nil
+	}).Maybe()
+	m.EXPECT().Rename(mock.Anything, mock.Anything).RunAndReturn(func(oldName string, record domain.CatalogueRecord) error {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if _, exists := c.records[oldName]; !exists {
+			return errors.New("record missing")
+		}
+		if _, exists := c.records[record.Name]; exists && record.Name != oldName {
+			return errors.New("record exists")
+		}
+		delete(c.records, oldName)
+		c.records[record.Name] = record
+		c.events = append(c.events, "rename:"+oldName+":"+record.Name)
+		return nil
+	}).Maybe()
+	m.EXPECT().Delete(mock.Anything).RunAndReturn(func(name string) error {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		delete(c.records, name)
+		c.events = append(c.events, "delete:"+name)
+		return nil
+	}).Maybe()
+	m.EXPECT().Close().RunAndReturn(func() error { return nil }).Maybe()
+	return m
+}
+
+func newTransactionRepositoryStateMock(t *testing.T, r *transactionRepositoryState) *portsmocks.MockSnapshotRepository {
+	t.Helper()
+	m := portsmocks.NewMockSnapshotRepository(t)
+	if r.deleteErrOnce != nil {
+		withTransactionDeleteError(r)(m)
+	}
+	m.EXPECT().DeleteIncarnation(mock.Anything, mock.Anything).RunAndReturn(func(arg0 context.Context, id domain.IncarnationID) error {
+		if r.deleteEntered != nil {
+			close(r.deleteEntered)
+			<-r.releaseDelete
+		}
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		r.deleteCalls = append(r.deleteCalls, id)
+		r.deletedIDs = append(r.deletedIDs, id)
+		return nil
+	}).Maybe()
+	return m
+}
+
+func newGarbageCollectionStateMock(t *testing.T, r *garbageCollectionState) *portsmocks.MockSnapshotRepository {
+	t.Helper()
+	m := portsmocks.NewMockSnapshotRepository(t)
+	m.EXPECT().SnapshotIncarnations(mock.Anything).RunAndReturn(func(arg0 context.Context) ([]domain.IncarnationID, error) {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		seen := make(map[domain.IncarnationID]struct{})
+		for id := range r.incarnations {
+			seen[id] = struct{}{}
+		}
+		for id := range r.generations {
+			seen[id] = struct{}{}
+		}
+		ids := make([]domain.IncarnationID, 0, len(seen))
+		for id := range seen {
+			ids = append(ids, id)
+		}
+		// Deterministic order lets tests pause between known steps.
+		slices.SortFunc(ids, func(a, b domain.IncarnationID) int { return bytes.Compare(a[:], b[:]) })
+		return ids, nil
+	}).Maybe()
+	m.EXPECT().CollectIncarnationGarbage(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(func(arg0 context.Context, id domain.IncarnationID, keep *domain.CheckpointRef) error {
+		r.mu.Lock()
+		block := !r.blocked
+		r.blocked = true
+		r.mu.Unlock()
+		if block {
+			close(r.collectionEntered)
+			<-r.releaseCollection
+		}
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if keep == nil {
+			delete(r.incarnations, id)
+			delete(r.generations, id)
+		} else {
+			for generation := range r.generations[id] {
+				if generation != keep.Generation && generation+1 != keep.Generation {
+					delete(r.generations[id], generation)
+				}
+			}
+		}
+		r.events = append(r.events, "collect")
+		return nil
+	}).Maybe()
+	m.EXPECT().DeleteIncarnation(mock.Anything, mock.Anything).RunAndReturn(func(arg0 context.Context, id domain.IncarnationID) error {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		delete(r.incarnations, id)
+		delete(r.generations, id)
+		return nil
+	}).Maybe()
+	m.EXPECT().Publish(mock.Anything, mock.Anything).RunAndReturn(func(arg0 context.Context, publication ports.SnapshotPublication) error {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if r.generations == nil {
+			r.generations = make(map[domain.IncarnationID]map[uint64]struct{})
+		}
+		if r.generations[publication.IncarnationID] == nil {
+			r.generations[publication.IncarnationID] = make(map[uint64]struct{})
+		}
+		r.generations[publication.IncarnationID][publication.Generation] = struct{}{}
+		r.events = append(r.events, "publish")
+		return nil
+	}).Maybe()
+	return m
+}
+
+func withTransactionReplaceError(c *transactionCatalogueState) func(*portsmocks.MockCatalogue) {
+	return func(m *portsmocks.MockCatalogue) {
+		m.EXPECT().Replace(mock.Anything, mock.Anything).RunAndReturn(func(string, domain.CatalogueRecord) error {
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			err := c.replaceErrOnce
+			c.replaceErrOnce = nil
+			return err
+		}).Once()
+	}
+}
+
+func withTransactionDeleteError(r *transactionRepositoryState) func(*portsmocks.MockSnapshotRepository) {
+	return func(m *portsmocks.MockSnapshotRepository) {
+		m.EXPECT().DeleteIncarnation(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, id domain.IncarnationID) error {
+			if r.deleteEntered != nil {
+				close(r.deleteEntered)
+				<-r.releaseDelete
+			}
+			r.mu.Lock()
+			defer r.mu.Unlock()
+			r.deleteCalls = append(r.deleteCalls, id)
+			err := r.deleteErrOnce
+			r.deleteErrOnce = nil
+			return err
+		}).Once()
 	}
 }

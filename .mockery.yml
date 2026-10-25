@@ -49,6 +49,15 @@ packages:
     interfaces:
       RawFramedTransport:
       FramedCarrier:
+  github.com/bnema/vev/internal/usecase/broker:
+    config:
+      dir: internal/usecase/broker
+      filename: broker_seams_mock_test.go
+      pkgname: broker
+    interfaces:
+      Runner:
+      Closeable:
+      LocalProbe:
   github.com/bnema/vev/internal/usecase/keys:
     config:
       dir: internal/usecase/keys

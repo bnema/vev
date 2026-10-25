@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"google.golang.org/protobuf/encoding/protowire"
@@ -81,25 +82,34 @@ func TestReadPreambleFrameRejectsUnscannedPayloads(t *testing.T) {
 // exchange refuses unknown and concatenated payloads on both sides before
 // unmarshal, with the server sending a typed refusal.
 func TestProtoPreambleRejectsScannedMalformation(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
 	t.Run("server rejects unknown request field", func(t *testing.T) {
-		raw := &scriptedTransport{recv: []wire.Envelope{{Payload: withUnknownField(t, mustMarshalPreambleRequest(t))}}}
-		_, err := runProtoServerPreamble(ctx, raw, defaultProtoCeilings())
-		require.ErrorIs(t, err, wire.ErrScanUnknown)
-		require.Equal(t, 1, raw.sentLen())
+		synctest.Test(t, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			raw, rawState := newScriptedTransport(t, withRecv(wire.Envelope{Payload: withUnknownField(t, mustMarshalPreambleRequest(t))}))
+			_, err := runProtoServerPreamble(ctx, raw, defaultProtoCeilings())
+			require.ErrorIs(t, err, wire.ErrScanUnknown)
+			require.Equal(t, 1, rawState.sentLen())
+		})
 	})
 	t.Run("server rejects concatenated request", func(t *testing.T) {
-		request := mustMarshalPreambleRequest(t)
-		raw := &scriptedTransport{recv: []wire.Envelope{{Payload: append(append([]byte(nil), request...), request...)}}}
-		_, err := runProtoServerPreamble(ctx, raw, defaultProtoCeilings())
-		require.ErrorIs(t, err, wire.ErrScanDuplicate)
-		require.Equal(t, 1, raw.sentLen())
+		synctest.Test(t, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			request := mustMarshalPreambleRequest(t)
+			raw, rawState := newScriptedTransport(t, withRecv(wire.Envelope{Payload: append(append([]byte(nil), request...), request...)}))
+			_, err := runProtoServerPreamble(ctx, raw, defaultProtoCeilings())
+			require.ErrorIs(t, err, wire.ErrScanDuplicate)
+			require.Equal(t, 1, rawState.sentLen())
+		})
 	})
 	t.Run("client rejects unknown response field", func(t *testing.T) {
-		raw := &scriptedTransport{recv: []wire.Envelope{{Payload: withUnknownField(t, mustMarshalPreambleResponse(t))}}}
-		_, err := runProtoClientPreamble(ctx, raw, defaultProtoCeilings())
-		require.ErrorIs(t, err, wire.ErrScanUnknown)
+		synctest.Test(t, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			raw, _ := newScriptedTransport(t, withRecv(wire.Envelope{Payload: withUnknownField(t, mustMarshalPreambleResponse(t))}))
+			_, err := runProtoClientPreamble(ctx, raw, defaultProtoCeilings())
+			require.ErrorIs(t, err, wire.ErrScanUnknown)
+		})
 	})
 }

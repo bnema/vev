@@ -14,10 +14,10 @@ func TestUISynchronizationClientDispatch(t *testing.T) {
 		protocol.Input{InputSeq: 3, ActionID: 7, Data: []byte("x")},
 		protocol.UIFence{ActionID: 7},
 	} {
-		clientRaw := &scriptedTransport{recv: []wire.Envelope{mustPreambleResponse(t)}}
+		clientRaw, clientState := newScriptedTransport(t, withRecv([]wire.Envelope{mustPreambleResponse(t)}...))
 		require.NoError(t, NewClientConnection(clientRaw).SendClient(message))
-		sent := mustSingleAppPayload(t, clientRaw)
-		serverRaw := &scriptedTransport{recv: mustServerPreambleQueue(t, sent)}
+		sent := mustSingleAppPayload(t, clientState)
+		serverRaw, _ := newScriptedTransport(t, withRecv(mustServerPreambleQueue(t, sent)...))
 		got, err := NewServerConnection(serverRaw).ReceiveClient()
 		require.NoError(t, err)
 		require.Equal(t, message, got)
@@ -28,7 +28,7 @@ func TestUISynchronizationClientDispatch(t *testing.T) {
 			headerLen -= len(input.Data)
 		}
 		for size := range headerLen {
-			raw := &scriptedTransport{recv: mustServerPreambleQueue(t, sent[:size])}
+			raw, _ := newScriptedTransport(t, withRecv(mustServerPreambleQueue(t, sent[:size])...))
 			_, err := NewServerConnection(raw).ReceiveClient()
 			require.Error(t, err, "prefix %d", size)
 		}
@@ -56,28 +56,28 @@ func TestUISynchronizationServerDispatch(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			for _, async := range []bool{false, true} {
-				serverRaw := &capableTransport{}
+				serverRaw, serverState := newCapableTransport(t)
 				server := NewServerConnection(serverRaw)
 				var sent []byte
 				if async {
 					require.NoError(t, server.SendServerAsync(test.message))
-					require.Equal(t, 1, len(serverRaw.async))
-					sent = serverRaw.async[0].Payload
+					require.Equal(t, 1, serverState.asyncLen())
+					sent = serverState.asyncPayload(0)
 				} else {
 					require.NoError(t, server.SendServer(test.message))
-					require.Equal(t, 1, serverRaw.sentLen())
-					sent = serverRaw.sentPayload(0)
+					require.Equal(t, 1, serverState.sentLen())
+					sent = serverState.sentPayload(0)
 				}
-				clientRaw := &scriptedTransport{recv: mustClientPreambleQueue(t, sent)}
+				clientRaw, _ := newScriptedTransport(t, withRecv(mustClientPreambleQueue(t, sent)...))
 				got, err := NewClientConnection(clientRaw).ReceiveServer()
 				require.NoError(t, err)
 				require.Equal(t, test.message, got)
 				for size := range len(sent) {
-					raw := &scriptedTransport{recv: mustClientPreambleQueue(t, sent[:size])}
+					raw, _ := newScriptedTransport(t, withRecv(mustClientPreambleQueue(t, sent[:size])...))
 					_, err := NewClientConnection(raw).ReceiveServer()
 					require.Error(t, err, "prefix %d", size)
 				}
-				raw := &scriptedTransport{recv: mustClientPreambleQueue(t, append(append([]byte(nil), sent...), 0))}
+				raw, _ := newScriptedTransport(t, withRecv(mustClientPreambleQueue(t, append(append([]byte(nil), sent...), 0))...))
 				_, err = NewClientConnection(raw).ReceiveServer()
 				require.Error(t, err)
 			}
