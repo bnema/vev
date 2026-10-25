@@ -252,29 +252,18 @@ func TestFloatingBlockedOpenReconcilesLatestResponsiveSize(t *testing.T) {
 		require.Equal(t, rectSize(calculateContentFloatingGeometry(tabSize(initial), cfg).Inner), openCall.size)
 		require.True(t, sess.geometry.requestResize(d, sess, nil, latest, true))
 		allowOpen()
-		select {
-		case <-resized:
-		case <-time.After(time.Second):
-			t.Fatal("floating install did not reconcile the resize committed while Open was blocked")
-		}
-		select {
-		case <-readerStarted:
-		case <-time.After(time.Second):
-			t.Fatal("floating reader did not start")
-		}
+		requireReceived(t, resized, "floating install did not reconcile the resize committed while Open was blocked")
+		requireReceived(t, readerStarted, "floating reader did not start")
 
-		require.Eventually(t, func() bool {
-			tb.mu.Lock()
-			p := tb.floating.pane
-			visible := tb.floating.state == floatingVisible
-			tb.mu.Unlock()
-			if !visible || p == nil {
-				return false
-			}
-			p.mu.Lock()
-			defer p.mu.Unlock()
-			return p.popupGeometry == latestGeometry && p.rect == latestGeometry.Inner
-		}, time.Second, time.Millisecond, "floating install retained the stale Open geometry")
+		synctest.Wait()
+		tb.mu.Lock()
+		p := tb.floating.pane
+		visible := tb.floating.state == floatingVisible
+		tb.mu.Unlock()
+		require.True(t, visible && p != nil, "floating pane was not visible at quiescence")
+		p.mu.Lock()
+		require.True(t, p.popupGeometry == latestGeometry && p.rect == latestGeometry.Inner, "floating install retained the stale Open geometry")
+		p.mu.Unlock()
 		d.teardownFloating(tb, nil)
 		d.sessWg.Wait()
 	})

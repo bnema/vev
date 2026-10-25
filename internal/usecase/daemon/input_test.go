@@ -762,12 +762,22 @@ func TestOverlayInputPrecedence(t *testing.T) {
 	}
 }
 
+// settleBubble waits for bubble quiescence when called from inside a synctest
+// bubble and is a no-op outside one (synctest.Wait panics there).
+func settleBubble() {
+	defer func() { _ = recover() }()
+	synctest.Wait()
+}
+
+// requirePTYWrite asserts the write is already queued, settling the bubble
+// first when there is one.
 func requirePTYWrite(t *testing.T, writes chan []byte, want []byte) {
 	t.Helper()
+	settleBubble()
 	select {
 	case got := <-writes:
 		require.Equal(t, want, got)
-	case <-time.After(time.Second):
+	default:
 		t.Fatalf("PTY did not receive %q", want)
 	}
 }
@@ -905,7 +915,6 @@ func TestAltXClosesActiveTabAndSelectsRemaining(t *testing.T) {
 		require.Len(t, sess.tabs, 2)
 		require.Equal(t, 1, testAttachmentTabIndex(sess), "closing middle tab selects the next remaining tab")
 		d.handleInput(sess, ac, []byte("Z"))
-		require.Eventually(t, func() bool { return len(writes) == 1 }, 2*time.Second, 5*time.Millisecond)
 		requirePTYWrite(t, writes, []byte("Z"))
 
 		releasePTY1()
@@ -1152,11 +1161,10 @@ func TestCopyModeMouseHorizontalReverseDragUsesExactOSC52(t *testing.T) {
 		d.handleInput(sess, ac, []byte("\x1b[<0;2;2m"))
 		d.handleInput(sess, ac, []byte("y"))
 		var msg protocol.Output
-		require.Eventually(t, func() bool {
+		for string(msg.Data) != string(scopy.OSC52("lph")[0]) {
 			frame := requireEnvelope(t, sends, "Output")
 			msg = unmarshalTestOutput(t, frame.Payload)
-			return string(msg.Data) == string(scopy.OSC52("lph")[0])
-		}, 2*time.Second, 5*time.Millisecond)
+		}
 		require.Equal(t, scopy.OSC52("lph")[0], msg.Data)
 		require.Nil(t, ac.overlays.copyPointer.pane)
 	})
@@ -1187,10 +1195,9 @@ func TestCopyModeMouseDragYanksOSC52AndExits(t *testing.T) {
 
 		d.handleInput(sess, ac, []byte("y"))
 		data := ""
-		require.Eventually(t, func() bool {
+		for !strings.HasPrefix(data, "\x1b]52;c;") {
 			data = string(mustOutputData(t, sends))
-			return strings.HasPrefix(data, "\x1b]52;c;")
-		}, 2*time.Second, 5*time.Millisecond, "OSC52 output = %q", data)
+		}
 		decoded, err := base64.StdEncoding.DecodeString(strings.TrimSuffix(strings.TrimPrefix(data, "\x1b]52;c;"), "\a"))
 		require.NoError(t, err)
 		require.Equal(t, "alpha\nb", string(decoded))

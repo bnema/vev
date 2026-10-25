@@ -332,15 +332,13 @@ func toastLifetimes(ac *attachedClient) []time.Duration {
 	return out
 }
 
-// awaitToastCount waits for the toast slice to reach want. The polled condition
-// only reads state; assertions stay on the test goroutine.
+// awaitToastCount runs inside a synctest bubble: after quiescence the toast
+// slice must hold want entries.
 func awaitToastCount(t *testing.T, ac *attachedClient, want int) []domain.Notification {
 	t.Helper()
-	require.Eventually(t, func() bool {
-		ns, _ := visibleToasts(ac)
-		return len(ns) == want
-	}, 2*time.Second, time.Millisecond, "toast count never reached %d", want)
+	synctest.Wait()
 	got, _ := visibleToasts(ac)
+	require.Len(t, got, want, "toast count never reached %d", want)
 	return got
 }
 
@@ -1024,10 +1022,9 @@ func TestToastBurstWaitsAndAdvancesOnExpiry(t *testing.T) {
 		require.Equal(t, 2, waiting)
 
 		clk.advance(noticeTTL(domain.NoticeInfo))
-		require.Eventually(t, func() bool {
-			ns, waiting := visibleToasts(ac)
-			return len(ns) == 2 && waiting == 0 && ns[0].Code == codes[4] && ns[1].Code == codes[3]
-		}, 2*time.Second, time.Millisecond, "expiry must promote the waiting notices")
+		synctest.Wait()
+		ns, waiting := visibleToasts(ac)
+		require.True(t, len(ns) == 2 && waiting == 0 && ns[0].Code == codes[4] && ns[1].Code == codes[3], "expiry must promote the waiting notices")
 	})
 }
 

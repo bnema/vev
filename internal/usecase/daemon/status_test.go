@@ -1551,19 +1551,14 @@ func TestStatusCoalescesCreateSwitchAndResize(t *testing.T) {
 		hg.Go(func() { d.handleConn(tr) })
 		requireEnvelope(t, sends, "Welcome")
 		first := requireEnvelope(t, sends, "Output")
-		require.Eventually(t, func() bool {
-			sessions := listSessions(t, d)
-			return len(sessions.Sessions) == 1 && sessions.Sessions[0].Tabs == 2
-		}, 2*time.Second, time.Millisecond)
+		synctest.Wait()
+		sessions := listSessions(t, d)
+		require.True(t, len(sessions.Sessions) == 1 && sessions.Sessions[0].Tabs == 2, "the queued create-tab command did not apply")
 
 		// The queued create, switch, and resize transitions may collapse into one
 		// latest-state wake. Advance every retained coordinator deadline
 		// until that coalesced output is observable.
-		resized := awaitCoordinatorOutput(
-			t, sends, clock.timers,
-			"while awaiting resized output",
-			"timed out awaiting resized output frame",
-		)
+		resized := requireCoordinatorOutput(t, sends, clock.timers, "while awaiting resized output")
 
 		for _, f := range []wire.Envelope{first, resized} {
 			out := unmarshalTestOutput(t, f.Payload)

@@ -143,11 +143,12 @@ func TestNoticesLoneEscapeClosesAfterDelay(t *testing.T) {
 		clk, clkTimers := newSignalClock(t, 1)
 		d.clock = clk
 		d.handleInput(sess, ac, []byte("\x1b"))
-		timer := <-clkTimers
+		timer := requireReceived(t, clkTimers, "notices escape did not arm its timer")
 		require.True(t, ac.overlays.noticesActive())
 
-		timer.ch <- time.Now()
-		require.Eventually(t, func() bool { return !ac.overlays.noticesActive() }, time.Second, 5*time.Millisecond)
+		timer.fire()
+		synctest.Wait()
+		require.False(t, ac.overlays.noticesActive(), "the lone escape did not close the notices overlay")
 		requireEnvelope(t, sends, "Output")
 	})
 }
