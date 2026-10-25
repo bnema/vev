@@ -48,7 +48,8 @@ func (c *attachPaletteClock) newTimer(delay time.Duration) ports.Timer {
 	} else {
 		c.timers <- timer
 	}
-	m := portsmocks.NewMockTimer(c.owner)
+	m := &portsmocks.MockTimer{}
+	m.Mock.Test(c.owner)
 	m.EXPECT().C().Return((<-chan time.Time)(timer.ch)).Maybe()
 	m.EXPECT().Reset(mock.Anything).Return(false).Maybe()
 	m.EXPECT().Stop().RunAndReturn(timer.stop).Maybe()

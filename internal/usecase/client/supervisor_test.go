@@ -55,7 +55,11 @@ func (c *supervisorTestClock) newTimer(delay time.Duration) ports.Timer {
 	case c.created <- timer:
 	default:
 	}
-	m := portsmocks.NewMockTimer(c.owner)
+	// Every expectation is optional, so the timer is not registered for
+	// AssertExpectations: a worker goroutine may still be building it while the
+	// test cleanup runs, and the assertion would race the expectation setup.
+	m := &portsmocks.MockTimer{}
+	m.Mock.Test(c.owner)
 	m.EXPECT().C().Return((<-chan time.Time)(timer.ch)).Maybe()
 	m.EXPECT().Reset(mock.Anything).Return(false).Maybe()
 	m.EXPECT().Stop().RunAndReturn(timer.stop).Maybe()
