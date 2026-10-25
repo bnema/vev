@@ -154,5 +154,13 @@ message RemotePreview {
   uint64 revision = 5;
   uint32 width = 6;
   uint32 height = 7;
-  repeated PreviewCell cells = 8;
+  reserved 8;
+  reserved "cells";
+  repeated CellStyle styles = 9; // at most 1024 entries
+  // Row-major uint32 little-endian code points, exactly width*height*4 bytes.
+  // 0 is an empty cell; 0xFFFFFFFF marks a wide-cell continuation.
+  bytes runes = 10;
+  // Row-major uint16 little-endian indices into styles, width*height*2 bytes.
+  // Non-OK previews carry no styles, runes, or style_ids.
+  bytes style_ids = 11;
 }

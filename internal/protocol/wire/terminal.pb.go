@@ -1109,13 +1109,19 @@ type RemotePreview struct {
 	Version uint32                 `protobuf:"varint,1,opt,name=version,proto3" json:"version,omitempty"`
 	// Closed status taxonomy: 0 = ok, 1 = unavailable, 2 = no such target,
 	// 3 = stale, 4 = malformed, 5 = too large.
-	Status        uint32         `protobuf:"varint,2,opt,name=status,proto3" json:"status,omitempty"`
-	LifecycleId   *LifecycleID   `protobuf:"bytes,3,opt,name=lifecycle_id,json=lifecycleId,proto3" json:"lifecycle_id,omitempty"`
-	TabId         string         `protobuf:"bytes,4,opt,name=tab_id,json=tabId,proto3" json:"tab_id,omitempty"`
-	Revision      uint64         `protobuf:"varint,5,opt,name=revision,proto3" json:"revision,omitempty"`
-	Width         uint32         `protobuf:"varint,6,opt,name=width,proto3" json:"width,omitempty"`
-	Height        uint32         `protobuf:"varint,7,opt,name=height,proto3" json:"height,omitempty"`
-	Cells         []*PreviewCell `protobuf:"bytes,8,rep,name=cells,proto3" json:"cells,omitempty"`
+	Status      uint32       `protobuf:"varint,2,opt,name=status,proto3" json:"status,omitempty"`
+	LifecycleId *LifecycleID `protobuf:"bytes,3,opt,name=lifecycle_id,json=lifecycleId,proto3" json:"lifecycle_id,omitempty"`
+	TabId       string       `protobuf:"bytes,4,opt,name=tab_id,json=tabId,proto3" json:"tab_id,omitempty"`
+	Revision    uint64       `protobuf:"varint,5,opt,name=revision,proto3" json:"revision,omitempty"`
+	Width       uint32       `protobuf:"varint,6,opt,name=width,proto3" json:"width,omitempty"`
+	Height      uint32       `protobuf:"varint,7,opt,name=height,proto3" json:"height,omitempty"`
+	Styles      []*CellStyle `protobuf:"bytes,9,rep,name=styles,proto3" json:"styles,omitempty"` // at most 1024 entries
+	// Row-major uint32 little-endian code points, exactly width*height*4 bytes.
+	// 0 is an empty cell; 0xFFFFFFFF marks a wide-cell continuation.
+	Runes []byte `protobuf:"bytes,10,opt,name=runes,proto3" json:"runes,omitempty"`
+	// Row-major uint16 little-endian indices into styles, width*height*2 bytes.
+	// Non-OK previews carry no styles, runes, or style_ids.
+	StyleIds      []byte `protobuf:"bytes,11,opt,name=style_ids,json=styleIds,proto3" json:"style_ids,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1199,9 +1205,23 @@ func (x *RemotePreview) GetHeight() uint32 {
 	return 0
 }
 
-func (x *RemotePreview) GetCells() []*PreviewCell {
+func (x *RemotePreview) GetStyles() []*CellStyle {
 	if x != nil {
-		return x.Cells
+		return x.Styles
+	}
+	return nil
+}
+
+func (x *RemotePreview) GetRunes() []byte {
+	if x != nil {
+		return x.Runes
+	}
+	return nil
+}
+
+func (x *RemotePreview) GetStyleIds() []byte {
+	if x != nil {
+		return x.StyleIds
 	}
 	return nil
 }
@@ -1289,7 +1309,7 @@ const file_terminal_proto_rawDesc = "" +
 	"\x06height\x18\x04 \x01(\rR\x06height\"y\n" +
 	"\x12RemotePreviewWatch\x12;\n" +
 	"\arequest\x18\x01 \x01(\v2!.vev.wire.v1.RemotePreviewRequestR\arequest\x12&\n" +
-	"\x0fmin_interval_ms\x18\x02 \x01(\rR\rminIntervalMs\"\x8f\x02\n" +
+	"\x0fmin_interval_ms\x18\x02 \x01(\rR\rminIntervalMs\"\xcf\x02\n" +
 	"\rRemotePreview\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\rR\aversion\x12\x16\n" +
 	"\x06status\x18\x02 \x01(\rR\x06status\x12;\n" +
@@ -1298,7 +1318,10 @@ const file_terminal_proto_rawDesc = "" +
 	"\brevision\x18\x05 \x01(\x04R\brevision\x12\x14\n" +
 	"\x05width\x18\x06 \x01(\rR\x05width\x12\x16\n" +
 	"\x06height\x18\a \x01(\rR\x06height\x12.\n" +
-	"\x05cells\x18\b \x03(\v2\x18.vev.wire.v1.PreviewCellR\x05cellsB-Z+github.com/bnema/vev/internal/protocol/wireb\x06proto3"
+	"\x06styles\x18\t \x03(\v2\x16.vev.wire.v1.CellStyleR\x06styles\x12\x14\n" +
+	"\x05runes\x18\n" +
+	" \x01(\fR\x05runes\x12\x1b\n" +
+	"\tstyle_ids\x18\v \x01(\fR\bstyleIdsJ\x04\b\b\x10\tR\x05cellsB-Z+github.com/bnema/vev/internal/protocol/wireb\x06proto3"
 
 var (
 	file_terminal_proto_rawDescOnce sync.Once
@@ -1336,7 +1359,7 @@ var file_terminal_proto_goTypes = []any{
 	(*RGB)(nil),                    // 19: vev.wire.v1.RGB
 	(*RemoteTarget)(nil),           // 20: vev.wire.v1.RemoteTarget
 	(*LifecycleID)(nil),            // 21: vev.wire.v1.LifecycleID
-	(*PreviewCell)(nil),            // 22: vev.wire.v1.PreviewCell
+	(*CellStyle)(nil),              // 22: vev.wire.v1.CellStyle
 }
 var file_terminal_proto_depIdxs = []int32{
 	18, // 0: vev.wire.v1.ViewContext.route:type_name -> vev.wire.v1.CommittedRouteIdentity
@@ -1348,7 +1371,7 @@ var file_terminal_proto_depIdxs = []int32{
 	20, // 6: vev.wire.v1.RemotePreviewRequest.target:type_name -> vev.wire.v1.RemoteTarget
 	15, // 7: vev.wire.v1.RemotePreviewWatch.request:type_name -> vev.wire.v1.RemotePreviewRequest
 	21, // 8: vev.wire.v1.RemotePreview.lifecycle_id:type_name -> vev.wire.v1.LifecycleID
-	22, // 9: vev.wire.v1.RemotePreview.cells:type_name -> vev.wire.v1.PreviewCell
+	22, // 9: vev.wire.v1.RemotePreview.styles:type_name -> vev.wire.v1.CellStyle
 	10, // [10:10] is the sub-list for method output_type
 	10, // [10:10] is the sub-list for method input_type
 	10, // [10:10] is the sub-list for extension type_name

@@ -14,6 +14,9 @@ package protoconv
 // exact mapping.
 
 import (
+	"encoding/binary"
+
+	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
@@ -73,9 +76,26 @@ func RemotePreviewToWire(message protocol.RemotePreview) (*wire.RemotePreview, e
 	if err := protocol.ValidateRemotePreview(message); err != nil {
 		return nil, err
 	}
-	cells, err := PreviewCellsToWire(message.Cells)
-	if err != nil {
-		return nil, err
+	styles := make([]*wire.CellStyle, 0)
+	ids := make(map[renderer.Style]uint16)
+	var runes, styleIDs []byte
+	if len(message.Cells) > 0 {
+		runes = make([]byte, len(message.Cells)*4)
+		styleIDs = make([]byte, len(message.Cells)*2)
+	}
+	for i, cell := range message.Cells {
+		id, ok := ids[cell.Style]
+		if !ok {
+			id = uint16(len(styles))
+			ids[cell.Style] = id
+			styles = append(styles, CellStyleToWire(cell.Style))
+		}
+		value := uint32(cell.Rune)
+		if cell.Continuation {
+			value = 0xFFFFFFFF
+		}
+		binary.LittleEndian.PutUint32(runes[i*4:], value)
+		binary.LittleEndian.PutUint16(styleIDs[i*2:], id)
 	}
 	return &wire.RemotePreview{
 		Version:     uint32(message.Version),
@@ -85,7 +105,9 @@ func RemotePreviewToWire(message protocol.RemotePreview) (*wire.RemotePreview, e
 		Revision:    message.Revision,
 		Width:       uint32(message.Width),
 		Height:      uint32(message.Height),
-		Cells:       cells,
+		Styles:      styles,
+		Runes:       runes,
+		StyleIds:    styleIDs,
 	}, nil
 }
 
@@ -123,11 +145,41 @@ func RemotePreviewFromWire(message *wire.RemotePreview) (protocol.RemotePreview,
 		return protocol.RemotePreview{}, err
 	}
 	preview.Height = height
-	cells, err := PreviewCellsFromWire(message.GetCells())
-	if err != nil {
-		return protocol.RemotePreview{}, err
+	count := int(width) * int(height)
+	if count > protocol.RemotePreviewMaxCells || len(message.GetStyles()) > protocol.RemotePreviewMaxStyles ||
+		len(message.GetRunes()) != count*4 || len(message.GetStyleIds()) != count*2 ||
+		(count > 0 && len(message.GetStyles()) == 0) ||
+		(status != protocol.RemotePreviewOK && (len(message.GetStyles()) != 0 || count != 0)) {
+		return protocol.RemotePreview{}, protocol.ErrInvalidRemotePreview
 	}
-	preview.Cells = cells
+	styles := make([]renderer.Style, len(message.GetStyles()))
+	for i, style := range message.GetStyles() {
+		converted, err := CellStyleFromWire(style)
+		if err != nil {
+			return protocol.RemotePreview{}, err
+		}
+		styles[i] = converted
+	}
+	if count > 0 {
+		preview.Cells = make([]renderer.Cell, count)
+	}
+	for i := range preview.Cells {
+		id := int(binary.LittleEndian.Uint16(message.GetStyleIds()[i*2:]))
+		if id >= len(styles) {
+			return protocol.RemotePreview{}, protocol.ErrInvalidRemotePreview
+		}
+		value := binary.LittleEndian.Uint32(message.GetRunes()[i*4:])
+		cell := renderer.Cell{Style: styles[id]}
+		if value == 0xFFFFFFFF {
+			cell.Continuation = true
+		} else {
+			if value > 0x10FFFF {
+				return protocol.RemotePreview{}, ErrOutOfRange
+			}
+			cell.Rune = rune(value)
+		}
+		preview.Cells[i] = cell
+	}
 	if err := protocol.ValidateRemotePreview(preview); err != nil {
 		return protocol.RemotePreview{}, err
 	}

@@ -1,6 +1,7 @@
 package protoconv
 
 import (
+	"encoding/binary"
 	"errors"
 	"testing"
 
@@ -247,70 +248,6 @@ func TestCellStyleRoundTrip(t *testing.T) {
 	}
 }
 
-// TestPreviewCellRoundTrip proves a cell survives an encode/decode cycle,
-// that decode refuses a nil message (unlike RGB/CellStyle, a single grid
-// cell is never optional), and that an out-of-range rune is refused in
-// both directions.
-func TestPreviewCellRoundTrip(t *testing.T) {
-	cell := renderer.Cell{Rune: 'A', Style: testStyle()}
-	wireCell, err := PreviewCellToWire(cell)
-	require.NoError(t, err)
-	decoded, err := PreviewCellFromWire(wireCell)
-	require.NoError(t, err)
-	require.Equal(t, cell, decoded)
-
-	t.Run("nil message refused", func(t *testing.T) {
-		_, err := PreviewCellFromWire(nil)
-		require.ErrorIs(t, err, ErrOutOfRange)
-	})
-
-	t.Run("encode rejects rune above max code point", func(t *testing.T) {
-		_, err := PreviewCellToWire(renderer.Cell{Rune: 0x110000})
-		require.ErrorIs(t, err, ErrOutOfRange)
-	})
-
-	t.Run("encode rejects negative rune", func(t *testing.T) {
-		_, err := PreviewCellToWire(renderer.Cell{Rune: -1})
-		require.ErrorIs(t, err, ErrOutOfRange)
-	})
-
-	t.Run("decode rejects rune above max code point", func(t *testing.T) {
-		_, err := PreviewCellFromWire(&wire.PreviewCell{RuneValue: 0x110000})
-		require.ErrorIs(t, err, ErrOutOfRange)
-	})
-}
-
-// TestPreviewCellsRoundTrip proves a slice of cells survives an
-// encode/decode cycle, that an empty/nil slice stays nil rather than an
-// empty allocation, and that one bad cell fails the whole slice.
-func TestPreviewCellsRoundTrip(t *testing.T) {
-	cells := []renderer.Cell{{Rune: 'a'}, {Rune: 'b'}}
-	wireCells, err := PreviewCellsToWire(cells)
-	require.NoError(t, err)
-	decoded, err := PreviewCellsFromWire(wireCells)
-	require.NoError(t, err)
-	require.Equal(t, cells, decoded)
-
-	t.Run("nil in, nil out", func(t *testing.T) {
-		out, err := PreviewCellsToWire(nil)
-		require.NoError(t, err)
-		require.Nil(t, out)
-		decoded, err := PreviewCellsFromWire(nil)
-		require.NoError(t, err)
-		require.Nil(t, decoded)
-	})
-
-	t.Run("bad cell fails the slice on encode", func(t *testing.T) {
-		_, err := PreviewCellsToWire([]renderer.Cell{{Rune: 'a'}, {Rune: 0x110000}})
-		require.ErrorIs(t, err, ErrOutOfRange)
-	})
-
-	t.Run("nil member fails the slice on decode", func(t *testing.T) {
-		_, err := PreviewCellsFromWire([]*wire.PreviewCell{{RuneValue: 'a'}, nil})
-		require.ErrorIs(t, err, ErrOutOfRange)
-	})
-}
-
 func testPreviewRequest() protocol.RemotePreviewRequest {
 	return protocol.RemotePreviewRequest{
 		Version: protocol.RemotePreviewSchemaVersion,
@@ -405,15 +342,15 @@ func TestRemotePreviewRoundTrip(t *testing.T) {
 	t.Run("decode refuses a too-large preview", func(t *testing.T) {
 		broken, err := RemotePreviewToWire(preview)
 		require.NoError(t, err)
-		broken.Cells = broken.Cells[:1]
+		broken.Runes = broken.Runes[:4]
 		_, err = RemotePreviewFromWire(broken)
-		require.ErrorIs(t, err, protocol.ErrRemotePreviewTooLarge)
+		require.ErrorIs(t, err, protocol.ErrInvalidRemotePreview)
 	})
 
 	t.Run("decode refuses cell encoding out of range", func(t *testing.T) {
 		broken, err := RemotePreviewToWire(preview)
 		require.NoError(t, err)
-		broken.Cells[0].RuneValue = 0x110000
+		binary.LittleEndian.PutUint32(broken.Runes, 0x110000)
 		_, err = RemotePreviewFromWire(broken)
 		require.ErrorIs(t, err, ErrOutOfRange)
 	})

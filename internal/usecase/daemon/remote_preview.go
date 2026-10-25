@@ -87,6 +87,7 @@ func (d *Daemon) captureRemotePreview(request protocol.RemotePreviewRequest) (pr
 			cells = append(cells, cell)
 		}
 	}
+	protocol.CapRemotePreviewStyles(cells)
 	preview := protocol.RemotePreview{
 		Version:     protocol.RemotePreviewSchemaVersion,
 		Status:      protocol.RemotePreviewOK,

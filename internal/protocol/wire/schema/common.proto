@@ -111,14 +111,6 @@ message CellStyle {
   RGB underline_color_rgb = 15;
 }
 
-// PreviewCell is one styled viewport cell: rune, continuation flag, style.
-// Cell payloads beyond rune/style never travel on this wire.
-message PreviewCell {
-  uint32 rune_value = 1;
-  bool continuation = 2;
-  CellStyle style = 3;
-}
-
 // RemoteRegistration is the exact configured identity of one monitored
 // endpoint (domain.RemoteRegistration).
 message RemoteRegistration {

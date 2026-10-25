@@ -786,68 +786,6 @@ func (x *CellStyle) GetUnderlineColorRgb() *RGB {
 	return nil
 }
 
-// PreviewCell is one styled viewport cell: rune, continuation flag, style.
-// Cell payloads beyond rune/style never travel on this wire.
-type PreviewCell struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	RuneValue     uint32                 `protobuf:"varint,1,opt,name=rune_value,json=runeValue,proto3" json:"rune_value,omitempty"`
-	Continuation  bool                   `protobuf:"varint,2,opt,name=continuation,proto3" json:"continuation,omitempty"`
-	Style         *CellStyle             `protobuf:"bytes,3,opt,name=style,proto3" json:"style,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *PreviewCell) Reset() {
-	*x = PreviewCell{}
-	mi := &file_common_proto_msgTypes[8]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *PreviewCell) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*PreviewCell) ProtoMessage() {}
-
-func (x *PreviewCell) ProtoReflect() protoreflect.Message {
-	mi := &file_common_proto_msgTypes[8]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use PreviewCell.ProtoReflect.Descriptor instead.
-func (*PreviewCell) Descriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{8}
-}
-
-func (x *PreviewCell) GetRuneValue() uint32 {
-	if x != nil {
-		return x.RuneValue
-	}
-	return 0
-}
-
-func (x *PreviewCell) GetContinuation() bool {
-	if x != nil {
-		return x.Continuation
-	}
-	return false
-}
-
-func (x *PreviewCell) GetStyle() *CellStyle {
-	if x != nil {
-		return x.Style
-	}
-	return nil
-}
-
 // RemoteRegistration is the exact configured identity of one monitored
 // endpoint (domain.RemoteRegistration).
 type RemoteRegistration struct {
@@ -861,7 +799,7 @@ type RemoteRegistration struct {
 
 func (x *RemoteRegistration) Reset() {
 	*x = RemoteRegistration{}
-	mi := &file_common_proto_msgTypes[9]
+	mi := &file_common_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -873,7 +811,7 @@ func (x *RemoteRegistration) String() string {
 func (*RemoteRegistration) ProtoMessage() {}
 
 func (x *RemoteRegistration) ProtoReflect() protoreflect.Message {
-	mi := &file_common_proto_msgTypes[9]
+	mi := &file_common_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -886,7 +824,7 @@ func (x *RemoteRegistration) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RemoteRegistration.ProtoReflect.Descriptor instead.
 func (*RemoteRegistration) Descriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{9}
+	return file_common_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *RemoteRegistration) GetEndpoint() string {
@@ -975,12 +913,7 @@ const file_common_proto_rawDesc = "" +
 	"\x0funderline_color\x18\f \x01(\x05R\x0eunderlineColor\x127\n" +
 	"\x0eforeground_rgb\x18\r \x01(\v2\x10.vev.wire.v1.RGBR\rforegroundRgb\x127\n" +
 	"\x0ebackground_rgb\x18\x0e \x01(\v2\x10.vev.wire.v1.RGBR\rbackgroundRgb\x12@\n" +
-	"\x13underline_color_rgb\x18\x0f \x01(\v2\x10.vev.wire.v1.RGBR\x11underlineColorRgb\"~\n" +
-	"\vPreviewCell\x12\x1d\n" +
-	"\n" +
-	"rune_value\x18\x01 \x01(\rR\truneValue\x12\"\n" +
-	"\fcontinuation\x18\x02 \x01(\bR\fcontinuation\x12,\n" +
-	"\x05style\x18\x03 \x01(\v2\x16.vev.wire.v1.CellStyleR\x05style\"r\n" +
+	"\x13underline_color_rgb\x18\x0f \x01(\v2\x10.vev.wire.v1.RGBR\x11underlineColorRgb\"r\n" +
 	"\x12RemoteRegistration\x12\x1a\n" +
 	"\bendpoint\x18\x01 \x01(\tR\bendpoint\x12 \n" +
 	"\vincarnation\x18\x02 \x01(\fR\vincarnation\x12\x1e\n" +
@@ -1012,7 +945,7 @@ func file_common_proto_rawDescGZIP() []byte {
 }
 
 var file_common_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_common_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
+var file_common_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
 var file_common_proto_goTypes = []any{
 	(ColorMode)(0),              // 0: vev.wire.v1.ColorMode
 	(ColorSource)(0),            // 1: vev.wire.v1.ColorSource
@@ -1024,25 +957,23 @@ var file_common_proto_goTypes = []any{
 	(*RGB)(nil),                 // 7: vev.wire.v1.RGB
 	(*ColorCapabilities)(nil),   // 8: vev.wire.v1.ColorCapabilities
 	(*CellStyle)(nil),           // 9: vev.wire.v1.CellStyle
-	(*PreviewCell)(nil),         // 10: vev.wire.v1.PreviewCell
-	(*RemoteRegistration)(nil),  // 11: vev.wire.v1.RemoteRegistration
+	(*RemoteRegistration)(nil),  // 10: vev.wire.v1.RemoteRegistration
 }
 var file_common_proto_depIdxs = []int32{
-	2,  // 0: vev.wire.v1.RemoteTarget.lifecycle_id:type_name -> vev.wire.v1.LifecycleID
-	3,  // 1: vev.wire.v1.RemoteTarget.stopped_tab:type_name -> vev.wire.v1.TabSelector
-	2,  // 2: vev.wire.v1.ExactTarget.lifecycle_id:type_name -> vev.wire.v1.LifecycleID
-	2,  // 3: vev.wire.v1.SessionAttachTarget.lifecycle_id:type_name -> vev.wire.v1.LifecycleID
-	0,  // 4: vev.wire.v1.ColorCapabilities.mode:type_name -> vev.wire.v1.ColorMode
-	1,  // 5: vev.wire.v1.ColorCapabilities.source:type_name -> vev.wire.v1.ColorSource
-	7,  // 6: vev.wire.v1.CellStyle.foreground_rgb:type_name -> vev.wire.v1.RGB
-	7,  // 7: vev.wire.v1.CellStyle.background_rgb:type_name -> vev.wire.v1.RGB
-	7,  // 8: vev.wire.v1.CellStyle.underline_color_rgb:type_name -> vev.wire.v1.RGB
-	9,  // 9: vev.wire.v1.PreviewCell.style:type_name -> vev.wire.v1.CellStyle
-	10, // [10:10] is the sub-list for method output_type
-	10, // [10:10] is the sub-list for method input_type
-	10, // [10:10] is the sub-list for extension type_name
-	10, // [10:10] is the sub-list for extension extendee
-	0,  // [0:10] is the sub-list for field type_name
+	2, // 0: vev.wire.v1.RemoteTarget.lifecycle_id:type_name -> vev.wire.v1.LifecycleID
+	3, // 1: vev.wire.v1.RemoteTarget.stopped_tab:type_name -> vev.wire.v1.TabSelector
+	2, // 2: vev.wire.v1.ExactTarget.lifecycle_id:type_name -> vev.wire.v1.LifecycleID
+	2, // 3: vev.wire.v1.SessionAttachTarget.lifecycle_id:type_name -> vev.wire.v1.LifecycleID
+	0, // 4: vev.wire.v1.ColorCapabilities.mode:type_name -> vev.wire.v1.ColorMode
+	1, // 5: vev.wire.v1.ColorCapabilities.source:type_name -> vev.wire.v1.ColorSource
+	7, // 6: vev.wire.v1.CellStyle.foreground_rgb:type_name -> vev.wire.v1.RGB
+	7, // 7: vev.wire.v1.CellStyle.background_rgb:type_name -> vev.wire.v1.RGB
+	7, // 8: vev.wire.v1.CellStyle.underline_color_rgb:type_name -> vev.wire.v1.RGB
+	9, // [9:9] is the sub-list for method output_type
+	9, // [9:9] is the sub-list for method input_type
+	9, // [9:9] is the sub-list for extension type_name
+	9, // [9:9] is the sub-list for extension extendee
+	0, // [0:9] is the sub-list for field type_name
 }
 
 func init() { file_common_proto_init() }
@@ -1057,7 +988,7 @@ func file_common_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_common_proto_rawDesc), len(file_common_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   10,
+			NumMessages:   9,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

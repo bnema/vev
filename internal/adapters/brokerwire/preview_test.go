@@ -13,6 +13,7 @@ package brokerwire
 // refused).
 
 import (
+	"fmt"
 	"testing"
 
 	renderer "github.com/bnema/vev-vt"
@@ -372,4 +373,40 @@ func TestPreviewWrongDirection(t *testing.T) {
 	raw = mustEncodeServer(t, testPreviewPublication(connection))
 	_, err = DecodeClient(raw, testEnvelopeCeiling, testChunkCeiling)
 	require.Error(t, err)
+}
+
+func TestPackedPreviewPublication(t *testing.T) {
+	for _, size := range [][2]int{{145, 50}, {256, 128}} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			m := testPreviewPublication(testConnectionID(0x61))
+			m.Preview.Width = uint16(size[0])
+			m.Preview.Height = uint16(size[1])
+			m.Preview.Cells = make([]renderer.Cell, size[0]*size[1])
+			for i := range m.Preview.Cells {
+				s := renderer.DefaultStyle()
+				s.HasForegroundRGB = true
+				s.HasBackgroundRGB = true
+				s.HasUnderlineColorRGB = true
+				s.ForegroundRGB = renderer.RGB{R: 255, G: uint8(i % 1024 >> 8), B: uint8(i)}
+				s.BackgroundRGB = s.ForegroundRGB
+				s.UnderlineColorRGB = s.ForegroundRGB
+				m.Preview.Cells[i] = renderer.Cell{Rune: 'x', Style: s}
+			}
+			raw, err := EncodeServer(m, MinBrokerEnvelopeBytes, MaxStreamChunkBytes)
+			require.NoError(t, err)
+			require.Greater(t, len(raw), int(MaxStreamChunkBytes))
+			got, err := DecodeServer(raw, MinBrokerEnvelopeBytes, MaxStreamChunkBytes)
+			require.NoError(t, err)
+			require.Equal(t, m, got)
+			for _, tc := range []struct {
+				name string
+				raw  []byte
+			}{{"truncated prefix", raw[:len(raw)-1]}, {"trailing garbage", append(append([]byte(nil), raw...), 0xff)}} {
+				t.Run(tc.name, func(t *testing.T) {
+					_, err := DecodeServer(tc.raw, MinBrokerEnvelopeBytes, MaxStreamChunkBytes)
+					require.Error(t, err)
+				})
+			}
+		})
+	}
 }

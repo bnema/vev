@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	renderer "github.com/bnema/vev-vt"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
@@ -448,4 +449,30 @@ func TestServeRemotePreviewWatchEndsOnHardContextCancel(t *testing.T) {
 	h.awaitDone(2 * time.Second)
 	h.conn.requireNoFrame(t)
 	h.conn.awaitClosed(t)
+}
+
+func TestCaptureRemotePreviewCapsStyles(t *testing.T) {
+	for _, n := range []int{1024, 1920} {
+		t.Run(fmt.Sprint(n), func(t *testing.T) {
+			h := newPreviewWatchHarness(t, "tab-1")
+			var b strings.Builder
+			b.WriteString("\x1b[H")
+			for i := 0; i < n; i++ {
+				fmt.Fprintf(&b, "\x1b[38;2;%d;%d;255mx", i%256, i/256)
+			}
+			writePreviewContent(t, h.tabs[0].focusedPane(), b.String())
+			request := buildPreviewWatch(h.sess, "tab-1", protocol.RemotePreviewWatchMinInterval).Request
+			request.Width = 80
+			request.Height = 24
+			got, err := h.d.captureRemotePreview(request)
+			require.NoError(t, err)
+			require.Equal(t, protocol.RemotePreviewOK, got.Status)
+			require.NoError(t, protocol.ValidateRemotePreview(got))
+			styles := map[renderer.Style]bool{}
+			for _, c := range got.Cells {
+				styles[c.Style] = true
+			}
+			require.LessOrEqual(t, len(styles), protocol.RemotePreviewMaxStyles)
+		})
+	}
 }

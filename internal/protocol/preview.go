@@ -12,7 +12,7 @@ import (
 )
 
 // RemotePreviewSchemaVersion is independent from the attachment protocol version.
-const RemotePreviewSchemaVersion uint16 = 1
+const RemotePreviewSchemaVersion uint16 = 2
 
 type RemotePreviewStatus uint8
 
@@ -76,6 +76,7 @@ type RemotePreview struct {
 }
 
 const (
+	RemotePreviewMaxStyles = 1024
 	RemotePreviewMaxWidth  = 256
 	RemotePreviewMaxHeight = 128
 	RemotePreviewMaxCells  = RemotePreviewMaxWidth * RemotePreviewMaxHeight
@@ -128,6 +129,13 @@ func ValidateRemotePreview(preview RemotePreview) error {
 	if want > RemotePreviewMaxCells || len(preview.Cells) != want {
 		return ErrRemotePreviewTooLarge
 	}
+	styles := make(map[renderer.Style]struct{})
+	for _, cell := range preview.Cells {
+		styles[cell.Style] = struct{}{}
+		if len(styles) > RemotePreviewMaxStyles {
+			return ErrInvalidRemotePreview
+		}
+	}
 	if !previewCellRunValid(int(preview.Width), preview.Cells) {
 		return ErrInvalidRemotePreview
 	}
@@ -176,4 +184,34 @@ func previewCellRunValid(width int, cells []renderer.Cell) bool {
 		}
 	}
 	return true
+}
+
+// CapRemotePreviewStyles degrades excess styles in place, preserving glyphs.
+// Reserve the default style only when degradation is needed, so exactly 1024
+// distinct styles remain lossless, including frames without a default cell.
+func CapRemotePreviewStyles(cells []renderer.Cell) {
+	styles := make(map[renderer.Style]struct{})
+	for _, cell := range cells {
+		styles[cell.Style] = struct{}{}
+		if len(styles) > RemotePreviewMaxStyles {
+			break
+		}
+	}
+	if len(styles) <= RemotePreviewMaxStyles {
+		return
+	}
+	clear(styles)
+	fallback := renderer.DefaultStyle()
+	styles[fallback] = struct{}{}
+	for i := range cells {
+		style := cells[i].Style
+		if _, ok := styles[style]; ok {
+			continue
+		}
+		if len(styles) < RemotePreviewMaxStyles {
+			styles[style] = struct{}{}
+		} else {
+			cells[i].Style = fallback
+		}
+	}
 }
