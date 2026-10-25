@@ -179,7 +179,7 @@ func TestServeUsesAttachmentWideActionLimitAcrossConnections(t *testing.T) {
 		}
 		select {
 		case <-secondDone:
-		case <-time.After(time.Second):
+		default:
 			t.Fatal("second socket server did not stop")
 		}
 	})

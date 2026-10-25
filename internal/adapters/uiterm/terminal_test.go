@@ -5,7 +5,7 @@ import (
 	"errors"
 	"io"
 	"testing"
-	"time"
+	"testing/synctest"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
@@ -77,29 +77,32 @@ func TestTerminalEnterRawUsesVisualInitialization(t *testing.T) {
 }
 
 func TestTerminalQueuesTerminalResponsesOutsideScreenWrite(t *testing.T) {
-	terminal := newTestTerminal(t, 4, 2)
-	if _, err := terminal.Write([]byte("\x1b[?7$p")); err != nil {
-		t.Fatal(err)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		terminal := newTestTerminal(t, 4, 2)
+		if _, err := terminal.Write([]byte("\x1b[?7$p")); err != nil {
+			t.Fatal(err)
+		}
 
-	result := make(chan string, 1)
-	go func() {
-		buffer := make([]byte, len("\x1b[?7;1$y"))
-		_, err := io.ReadFull(terminal.In(), buffer)
-		if err != nil {
-			result <- err.Error()
-			return
+		result := make(chan string, 1)
+		go func() {
+			buffer := make([]byte, len("\x1b[?7;1$y"))
+			_, err := io.ReadFull(terminal.In(), buffer)
+			if err != nil {
+				result <- err.Error()
+				return
+			}
+			result <- string(buffer)
+		}()
+		synctest.Wait()
+		select {
+		case got := <-result:
+			if got != "\x1b[?7;1$y" {
+				t.Fatalf("response = %q", got)
+			}
+		default:
+			t.Fatal("terminal response was not drained")
 		}
-		result <- string(buffer)
-	}()
-	select {
-	case got := <-result:
-		if got != "\x1b[?7;1$y" {
-			t.Fatalf("response = %q", got)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("terminal response was not drained")
-	}
+	})
 }
 
 func TestTerminalPublishesGeometryChangesImmediatelyOutsideOutputTransaction(t *testing.T) {
@@ -134,15 +137,18 @@ func TestTerminalRecoversAfterOversizedGeometry(t *testing.T) {
 }
 
 func TestTerminalSignalsCaptureUnavailable(t *testing.T) {
-	terminal := newTestTerminal(t, 4, 2)
-	terminal.BeginOutput(ports.UIContext{})
-	_, _ = terminal.Write([]byte("data"))
-	terminal.EndOutput(false)
-	select {
-	case <-terminal.Changes():
-	case <-time.After(time.Second):
-		t.Fatal("capture unavailability did not signal Changes")
-	}
+	synctest.Test(t, func(t *testing.T) {
+		terminal := newTestTerminal(t, 4, 2)
+		terminal.BeginOutput(ports.UIContext{})
+		_, _ = terminal.Write([]byte("data"))
+		terminal.EndOutput(false)
+		synctest.Wait()
+		select {
+		case <-terminal.Changes():
+		default:
+			t.Fatal("capture unavailability did not signal Changes")
+		}
+	})
 }
 
 func TestTerminalFailedTransactionMakesCaptureUnavailable(t *testing.T) {
