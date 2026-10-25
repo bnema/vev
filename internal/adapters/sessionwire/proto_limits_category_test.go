@@ -328,7 +328,7 @@ func TestReceiveCategoryEnvelopeCeilings(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			raw, _ := newScriptedTransport(t, withRecv([]wire.Envelope{{Payload: tt.payload}}...))
+			raw, _ := newScriptedTransport(t, withRecv(wire.Envelope{Payload: tt.payload}))
 			var err error
 			if tt.receiver == "server" {
 				conn := &serverConnection{handshake: handshake{raw: raw, ceilings: tt.ceilings}}

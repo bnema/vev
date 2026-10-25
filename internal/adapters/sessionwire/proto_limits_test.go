@@ -61,7 +61,7 @@ func TestTypedReceiveEnforcesNegotiatedCeilings(t *testing.T) {
 	smallOutput := mustEncodeServer(t, testOutput([]byte("12345")))
 
 	t.Run("server receive envelope ceiling", func(t *testing.T) {
-		raw, _ := newScriptedTransport(t, withRecv([]wire.Envelope{{Payload: largeInput}}...))
+		raw, _ := newScriptedTransport(t, withRecv(wire.Envelope{Payload: largeInput}))
 		conn := &serverConnection{handshake: handshake{raw: raw, ceilings: protoCeilings{maxReceiveEnvelopeBytes: 16, outputDataLimit: uint64(protocol.MaxOutputDataLen)}}}
 		conn.preambleOnce.Do(func() {})
 		_, err := conn.ReceiveClient()
@@ -70,7 +70,7 @@ func TestTypedReceiveEnforcesNegotiatedCeilings(t *testing.T) {
 		require.ErrorIs(t, failure.Err, wire.ErrScanLength)
 	})
 	t.Run("client receive envelope ceiling", func(t *testing.T) {
-		raw, _ := newScriptedTransport(t, withRecv([]wire.Envelope{{Payload: largeOutput}}...))
+		raw, _ := newScriptedTransport(t, withRecv(wire.Envelope{Payload: largeOutput}))
 		conn := &clientConnection{handshake: handshake{raw: raw, ceilings: protoCeilings{maxReceiveEnvelopeBytes: 16, outputDataLimit: uint64(protocol.MaxOutputDataLen)}}}
 		conn.preambleOnce.Do(func() {})
 		_, err := conn.ReceiveServer()
@@ -79,7 +79,7 @@ func TestTypedReceiveEnforcesNegotiatedCeilings(t *testing.T) {
 		require.ErrorIs(t, failure.Err, wire.ErrScanLength)
 	})
 	t.Run("client receive output data ceiling", func(t *testing.T) {
-		raw, _ := newScriptedTransport(t, withRecv([]wire.Envelope{{Payload: smallOutput}}...))
+		raw, _ := newScriptedTransport(t, withRecv(wire.Envelope{Payload: smallOutput}))
 		conn := &clientConnection{handshake: handshake{raw: raw, ceilings: protoCeilings{maxReceiveEnvelopeBytes: wire.AbsoluteEnvelopeLimit, outputDataLimit: 4}}}
 		conn.preambleOnce.Do(func() {})
 		_, err := conn.ReceiveServer()
@@ -88,14 +88,14 @@ func TestTypedReceiveEnforcesNegotiatedCeilings(t *testing.T) {
 		require.ErrorIs(t, failure.Err, errOutputDataExceedsLimit)
 	})
 	t.Run("within ceilings decodes", func(t *testing.T) {
-		serverRaw, _ := newScriptedTransport(t, withRecv([]wire.Envelope{{Payload: largeInput}}...))
+		serverRaw, _ := newScriptedTransport(t, withRecv(wire.Envelope{Payload: largeInput}))
 		server := &serverConnection{handshake: handshake{raw: serverRaw, ceilings: defaultProtoCeilings()}}
 		server.preambleOnce.Do(func() {})
 		got, err := server.ReceiveClient()
 		require.NoError(t, err)
 		require.Equal(t, []byte(bytes.Repeat([]byte("x"), 64)), got.(protocol.Input).Data)
 
-		clientRaw, _ := newScriptedTransport(t, withRecv([]wire.Envelope{{Payload: smallOutput}}...))
+		clientRaw, _ := newScriptedTransport(t, withRecv(wire.Envelope{Payload: smallOutput}))
 		client := &clientConnection{handshake: handshake{raw: clientRaw, ceilings: defaultProtoCeilings()}}
 		client.preambleOnce.Do(func() {})
 		decoded, err := client.ReceiveServer()
