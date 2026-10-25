@@ -192,6 +192,7 @@ func TestNewRejectsInvalidConfig(t *testing.T) {
 	}
 }
 
+// real I/O: uses real loopback sockets.
 func TestProxyForwardsTrafficBothDirections(t *testing.T) {
 	serverAddr, serverPackets := startEchoServer(t)
 	proxy, _, events := newTestProxy(t, Config{ServerAddr: serverAddr, Seed: 1})
@@ -230,6 +231,7 @@ func TestProxyForwardsTrafficBothDirections(t *testing.T) {
 	}
 }
 
+// real I/O: uses real loopback sockets.
 func TestProxySeededLossIsReproducible(t *testing.T) {
 	const packets = 100
 	run := func(t *testing.T) (Stats, []Event) {
@@ -276,6 +278,7 @@ func TestProxySeededLossIsReproducible(t *testing.T) {
 	}
 }
 
+// real I/O: uses real loopback sockets.
 func TestProxyDuplicationRepeatsPackets(t *testing.T) {
 	const packets = 3
 	serverAddr, serverPackets := startSinkServer(t)
@@ -304,6 +307,7 @@ func TestProxyDuplicationRepeatsPackets(t *testing.T) {
 	}
 }
 
+// real I/O: uses real loopback sockets.
 func TestProxyReorderingDeliversOutOfOrder(t *testing.T) {
 	serverAddr, serverPackets := startSinkServer(t)
 	proxy, clock, events := newTestProxy(t, Config{
@@ -340,6 +344,7 @@ func TestProxyReorderingDeliversOutOfOrder(t *testing.T) {
 	}
 }
 
+// real I/O: uses real loopback sockets.
 func TestProxyLatencyHoldsPacketsUntilClockAdvances(t *testing.T) {
 	serverAddr, serverPackets := startSinkServer(t)
 	proxy, clock, events := newTestProxy(t, Config{
@@ -365,6 +370,7 @@ func TestProxyLatencyHoldsPacketsUntilClockAdvances(t *testing.T) {
 	}
 }
 
+// real I/O: uses real loopback sockets.
 func TestProxyBlackoutWindowDropsDuringInterval(t *testing.T) {
 	serverAddr, serverPackets := startSinkServer(t)
 	proxy, clock, events := newTestProxy(t, Config{
@@ -410,6 +416,7 @@ func TestProxyBlackoutWindowDropsDuringInterval(t *testing.T) {
 	}
 }
 
+// real I/O: uses real loopback sockets.
 func TestProxyManualBlackoutToggles(t *testing.T) {
 	serverAddr, serverPackets := startSinkServer(t)
 	proxy, _, events := newTestProxy(t, Config{ServerAddr: serverAddr, Seed: 6})
@@ -432,6 +439,7 @@ func TestProxyManualBlackoutToggles(t *testing.T) {
 	}
 }
 
+// real I/O: uses real loopback sockets.
 func TestProxyQueueCapacityBoundsInFlightPackets(t *testing.T) {
 	serverAddr, serverPackets := startSinkServer(t)
 	proxy, clock, events := newTestProxy(t, Config{
@@ -466,6 +474,7 @@ func TestProxyQueueCapacityBoundsInFlightPackets(t *testing.T) {
 	}
 }
 
+// real I/O: uses real loopback sockets.
 func TestProxyDropsOversizeDatagrams(t *testing.T) {
 	serverAddr, serverPackets := startSinkServer(t)
 	proxy, _, events := newTestProxy(t, Config{
@@ -488,6 +497,7 @@ func TestProxyDropsOversizeDatagrams(t *testing.T) {
 	}
 }
 
+// real I/O: uses real loopback sockets.
 func TestProxyRebindChangesUpstreamSourceAddress(t *testing.T) {
 	serverAddr, serverPackets := startSinkServer(t)
 	proxy, _, events := newTestProxy(t, Config{
@@ -513,6 +523,7 @@ func TestProxyRebindChangesUpstreamSourceAddress(t *testing.T) {
 	}
 }
 
+// real I/O: uses real loopback sockets.
 func TestProxyExplicitRebindKeepsRoundTripWorking(t *testing.T) {
 	serverAddr, serverPackets := startEchoServer(t)
 	proxy, _, events := newTestProxy(t, Config{ServerAddr: serverAddr, Seed: 17})
@@ -547,6 +558,7 @@ func TestProxyExplicitRebindKeepsRoundTripWorking(t *testing.T) {
 	}
 }
 
+// real I/O: uses real loopback sockets.
 func TestProxyCloseIsIdempotent(t *testing.T) {
 	serverAddr, _ := startSinkServer(t)
 	proxy, _, _ := newTestProxy(t, Config{ServerAddr: serverAddr})
@@ -566,6 +578,7 @@ func TestProxyCloseIsIdempotent(t *testing.T) {
 // MTU-sized packets in bursts, with a blackout window in the middle) through a
 // fully impaired link and checks that every packet is accounted for exactly
 // once: received + duplicates == sent + drops.
+// real I/O: uses real loopback sockets.
 func TestProxyQUICLikeFlowUnderImpairment(t *testing.T) {
 	const (
 		phaseA     = 120
