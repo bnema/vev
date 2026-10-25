@@ -298,7 +298,7 @@ func TestMultipleForcedSnapshotsCoalesceToOneSuccessor(t *testing.T) {
 }
 
 func TestForcedSnapshotShutdownTimeoutRetainsRetryableStateAndNotice(t *testing.T) {
-	clock := newSnapshotDeadlineClock()
+	clock, deadlineTimers := newSignalClock(t, 4)
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
 	repository := portsmocks.NewMockSnapshotRepository(t)
 	WithSnapshotRepository(repository)(d)
@@ -342,7 +342,7 @@ func TestForcedSnapshotShutdownTimeoutRetainsRetryableStateAndNotice(t *testing.
 
 	killed := make(chan error, 1)
 	go func() { killed <- d.killSession(sess, protocol.ReasonServerShutdown, false) }()
-	timer := clock.nextTimer(t)
+	timer := requireReceived(t, deadlineTimers, "snapshot deadline timer was not created")
 	timer.fire()
 	require.Error(t, <-killed)
 
@@ -383,7 +383,7 @@ func TestServeShutdownDeadlineStillJoinsRetainedSessionWriter(t *testing.T) {
 	pty, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
 	clock := newServeShutdownClock(t)
-	d := newTestDaemon(t, newFactory(t, pty), clock)
+	d := newTestDaemon(t, newFactory(t, pty), clock.mock)
 	repository := portsmocks.NewMockSnapshotRepository(t)
 	WithSnapshotRepository(repository)(d)
 
@@ -593,7 +593,7 @@ func TestServeShutdownDeadlineStillJoinsUncooperativeSnapshotRepository(t *testi
 	p, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
 	clock := newServeShutdownClock(t)
-	d := newTestDaemon(t, newFactory(t, p), clock)
+	d := newTestDaemon(t, newFactory(t, p), clock.mock)
 	repository := portsmocks.NewMockSnapshotRepository(t)
 	WithSnapshotRepository(repository)(d)
 	noticeStore := portsmocks.NewMockNoticeStore(t)
@@ -674,38 +674,47 @@ func TestServeShutdownDeadlineStillJoinsUncooperativeSnapshotRepository(t *testi
 	require.Equal(t, uint64(1), lastValid.Load(), "the last valid checkpoint remains available after the terminal attempt times out")
 }
 
+// serveShutdownClock is the plain state behind a generated clock mock: it
+// records the final-flush deadline timers and the budget their firing spends.
 type serveShutdownClock struct {
-	t testing.TB
-
-	finalTimers chan *snapshotDeadlineTimer
+	mock        *portsmocks.MockClock
+	finalTimers chan *budgetTimer
 	finalBudget atomic.Int64
 }
 
+// budgetTimer is a deadline timer whose firing spends its delay from the clock's
+// budget. It is a value holder around a testTimer, not a ports.Timer.
+type budgetTimer struct {
+	timer *testTimer
+	spend func()
+}
+
+func (b *budgetTimer) fire() {
+	b.spend()
+	b.timer.fire()
+}
+
 func newServeShutdownClock(t testing.TB) *serveShutdownClock {
-	return &serveShutdownClock{t: t, finalTimers: make(chan *snapshotDeadlineTimer, 2)}
-}
-
-func (*serveShutdownClock) Now() time.Time { return time.Unix(100, 0) }
-func (c *serveShutdownClock) NewTimer(delay time.Duration) ports.Timer {
-	if delay != snapshotFinalFlushTimeout {
-		return newStubTimer(c.t)
-	}
-	timer := &snapshotDeadlineTimer{ch: make(chan time.Time, 1), onFire: func() {
-		c.finalBudget.Add(int64(delay))
-	}}
-	c.finalTimers <- timer
-	return timer
-}
-
-func (c *serveShutdownClock) nextFinalTimer(t *testing.T) *snapshotDeadlineTimer {
-	t.Helper()
-	select {
-	case timer := <-c.finalTimers:
+	c := &serveShutdownClock{finalTimers: make(chan *budgetTimer, 2)}
+	clock, timers := newSignalClock(t, 4)
+	stub := newStubTimer(t)
+	c.mock = portsmocks.NewMockClock(t)
+	c.mock.EXPECT().Now().Return(time.Unix(100, 0)).Maybe()
+	c.mock.EXPECT().NewTimer(mock.Anything).RunAndReturn(func(delay time.Duration) ports.Timer {
+		if delay != snapshotFinalFlushTimeout {
+			return stub
+		}
+		timer := clock.NewTimer(delay)
+		tt := <-timers
+		c.finalTimers <- &budgetTimer{timer: tt, spend: func() { c.finalBudget.Add(int64(delay)) }}
 		return timer
-	case <-time.After(testWaitTimeout):
-		t.Fatal("shutdown checkpoint deadline timer was not created")
-		return nil
-	}
+	}).Maybe()
+	return c
+}
+
+func (c *serveShutdownClock) nextFinalTimer(t *testing.T) *budgetTimer {
+	t.Helper()
+	return requireReceived(t, c.finalTimers, "shutdown checkpoint deadline timer was not created")
 }
 
 func serveSnapshotListener(t *testing.T, tr wire.Transport) *mockServerListener {
@@ -732,7 +741,7 @@ func serveSnapshotListener(t *testing.T, tr wire.Transport) *mockServerListener 
 }
 
 func TestRoutineSnapshotEligibilityStartsAtCompletionAndForcedDoesNotMoveIt(t *testing.T) {
-	clock := &snapshotSchedulerClock{t: t, now: time.Unix(100, 0)}
+	clock := newFixedSnapshotClock(t, time.Unix(100, 0))
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
 	repository := portsmocks.NewMockSnapshotRepository(t)
 	WithSnapshotRepository(repository)(d)
@@ -765,75 +774,44 @@ func TestRoutineSnapshotEligibilityStartsAtCompletionAndForcedDoesNotMoveIt(t *t
 	sess.snapshotMu.Unlock()
 }
 
-type snapshotSchedulerClock struct {
-	t testing.TB
-
-	mu  sync.Mutex
-	now time.Time
-}
-
-func (c *snapshotSchedulerClock) Now() time.Time {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.now
-}
-
-func (c *snapshotSchedulerClock) NewTimer(time.Duration) ports.Timer { return newStubTimer(c.t) }
-
-type snapshotDeadlineClock struct {
-	timers chan *snapshotDeadlineTimer
-}
-
-func newSnapshotDeadlineClock() *snapshotDeadlineClock {
-	return &snapshotDeadlineClock{timers: make(chan *snapshotDeadlineTimer, 4)}
-}
-
-func (*snapshotDeadlineClock) Now() time.Time { return time.Unix(100, 0) }
-func (c *snapshotDeadlineClock) NewTimer(time.Duration) ports.Timer {
-	timer := &snapshotDeadlineTimer{ch: make(chan time.Time, 1)}
-	c.timers <- timer
-	return timer
-}
-
-func (c *snapshotDeadlineClock) nextTimer(t *testing.T) *snapshotDeadlineTimer {
+// newFixedSnapshotClock reports a constant time and never fires its timers.
+func newFixedSnapshotClock(t testing.TB, now time.Time) *portsmocks.MockClock {
 	t.Helper()
-	select {
-	case timer := <-c.timers:
-		return timer
-	case <-time.After(testWaitTimeout):
-		t.Fatal("snapshot deadline timer was not created")
-		return nil
-	}
+	clock := portsmocks.NewMockClock(t)
+	clock.EXPECT().Now().Return(now).Maybe()
+	clock.EXPECT().NewTimer(mock.Anything).Return(newStubTimer(t)).Maybe()
+	return clock
 }
 
-type snapshotDeadlineTimer struct {
-	ch     chan time.Time
-	onFire func()
-}
-
-func (t *snapshotDeadlineTimer) C() <-chan time.Time    { return t.ch }
-func (*snapshotDeadlineTimer) Reset(time.Duration) bool { return true }
-func (*snapshotDeadlineTimer) Stop() bool               { return true }
-func (t *snapshotDeadlineTimer) fire() {
-	if t.onFire != nil {
-		t.onFire()
-	}
-	t.ch <- time.Unix(101, 0)
-}
-
-// deterministicSnapshotClock records timer resets and advances only when a
-// test explicitly fires its timer. It deliberately has no wall-clock behavior.
+// deterministicSnapshotClock is the plain state behind a generated clock mock
+// that records timer resets and advances only when a test says so.
 type deterministicSnapshotClock struct {
+	mock   *portsmocks.MockClock
 	mu     sync.Mutex
 	now    time.Time
 	timers chan *deterministicSnapshotTimer
 }
 
-func newDeterministicSnapshotClock(now time.Time) *deterministicSnapshotClock {
-	return &deterministicSnapshotClock{now: now, timers: make(chan *deterministicSnapshotTimer, 1)}
+func newDeterministicSnapshotClock(t testing.TB, now time.Time) *deterministicSnapshotClock {
+	c := &deterministicSnapshotClock{now: now, timers: make(chan *deterministicSnapshotTimer, 1)}
+	c.mock = portsmocks.NewMockClock(t)
+	c.mock.EXPECT().Now().RunAndReturn(c.current).Maybe()
+	c.mock.EXPECT().NewTimer(mock.Anything).RunAndReturn(func(time.Duration) ports.Timer {
+		timer := &deterministicSnapshotTimer{clock: c, ch: make(chan time.Time, 1), resets: make(chan time.Duration, 16)}
+		m := portsmocks.NewMockTimer(t)
+		m.EXPECT().C().Return((<-chan time.Time)(timer.ch)).Maybe()
+		m.EXPECT().Reset(mock.Anything).RunAndReturn(func(delay time.Duration) bool {
+			timer.resets <- delay
+			return true
+		}).Maybe()
+		m.EXPECT().Stop().Return(true).Maybe()
+		c.timers <- timer
+		return m
+	}).Maybe()
+	return c
 }
 
-func (c *deterministicSnapshotClock) Now() time.Time {
+func (c *deterministicSnapshotClock) current() time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.now
@@ -845,27 +823,16 @@ func (c *deterministicSnapshotClock) advance(now time.Time) {
 	c.mu.Unlock()
 }
 
-func (c *deterministicSnapshotClock) NewTimer(time.Duration) ports.Timer {
-	timer := &deterministicSnapshotTimer{clock: c, ch: make(chan time.Time, 1), resets: make(chan time.Duration, 16)}
-	c.timers <- timer
-	return timer
-}
-
 func (c *deterministicSnapshotClock) timer() *deterministicSnapshotTimer { return <-c.timers }
 
+// deterministicSnapshotTimer is the observable side of a generated timer mock.
 type deterministicSnapshotTimer struct {
 	clock  *deterministicSnapshotClock
 	ch     chan time.Time
 	resets chan time.Duration
 }
 
-func (t *deterministicSnapshotTimer) C() <-chan time.Time { return t.ch }
-func (t *deterministicSnapshotTimer) Reset(delay time.Duration) bool {
-	t.resets <- delay
-	return true
-}
-func (*deterministicSnapshotTimer) Stop() bool { return true }
-func (t *deterministicSnapshotTimer) fire()    { t.ch <- t.clock.Now() }
+func (t *deterministicSnapshotTimer) fire() { t.ch <- t.clock.current() }
 
 func awaitSnapshotCleanSignal(sess *session) {
 	for {
@@ -882,8 +849,8 @@ func awaitSnapshotCleanSignal(sess *session) {
 
 func TestSnapshotCompletionSchedulesRoutineRetriesFromCompletion(t *testing.T) {
 	now := time.Unix(100, 0)
-	clock := newDeterministicSnapshotClock(now)
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
+	clock := newDeterministicSnapshotClock(t, now)
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock.mock)
 	repository := portsmocks.NewMockSnapshotRepository(t)
 	WithSnapshotRepository(repository)(d)
 
@@ -916,8 +883,8 @@ func TestSnapshotCompletionSchedulesRoutineRetriesFromCompletion(t *testing.T) {
 
 func TestSnapshotSchedulerImmediateEligibilityAndStaleCapturesRemainDirty(t *testing.T) {
 	now := time.Unix(100, 0)
-	clock := newDeterministicSnapshotClock(now)
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
+	clock := newDeterministicSnapshotClock(t, now)
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock.mock)
 
 	t.Run("no prior attempt is immediately eligible", func(t *testing.T) {
 		published := make(chan ports.SnapshotPublication, 1)
@@ -974,8 +941,8 @@ func TestSnapshotSchedulerImmediateEligibilityAndStaleCapturesRemainDirty(t *tes
 
 func TestSnapshotWorkerQueueIsBoundedAndForcedCapturesCoalesce(t *testing.T) {
 	now := time.Unix(100, 0)
-	clock := newDeterministicSnapshotClock(now)
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
+	clock := newDeterministicSnapshotClock(t, now)
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock.mock)
 	repository := portsmocks.NewMockSnapshotRepository(t)
 	WithSnapshotRepository(repository)(d)
 	startSnapshotEncodeWorker(t, d)
@@ -1032,8 +999,8 @@ func TestSnapshotWorkerQueueIsBoundedAndForcedCapturesCoalesce(t *testing.T) {
 
 func TestSnapshotRepositorySaverUsesEarliestDeadlineAndRecomputes(t *testing.T) {
 	now := time.Unix(100, 0)
-	clock := newDeterministicSnapshotClock(now)
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
+	clock := newDeterministicSnapshotClock(t, now)
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock.mock)
 	repository := portsmocks.NewMockSnapshotRepository(t)
 	WithSnapshotRepository(repository)(d)
 	startSnapshotEncodeWorker(t, d)
