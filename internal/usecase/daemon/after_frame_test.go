@@ -41,7 +41,7 @@ func TestAfterFrameQueueReleasesOnlyAfterALaterCapture(t *testing.T) {
 				q.runReady()
 				var got []string
 				for range tt.wantRan {
-					got = append(got, awaitTestValue(t, ran, "released work did not run"))
+					got = append(got, requireReceived(t, ran, "released work did not run"))
 				}
 				require.ElementsMatch(t, tt.wantRan, got)
 				select {
@@ -99,7 +99,7 @@ func TestAfterNextFrameRunsOrDropsByCapability(t *testing.T) {
 					frozen.unfreeze()
 				}
 				if tt.wantRun {
-					awaitTestValue(t, ran, "queued work did not run after the frame")
+					requireReceived(t, ran, "queued work did not run after the frame")
 					return
 				}
 				select {

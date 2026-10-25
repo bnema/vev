@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"testing/synctest"
 
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -264,37 +265,40 @@ func TestMoveTabPersistenceMatrix(t *testing.T) {
 }
 
 func TestMoveSnapshotPublicationFailureReportsWithoutRollback(t *testing.T) {
-	d, source, _, _ := newManualSessionWithPTYs(t, newQuietPTY(t), newQuietPTY(t))
-	source.ephemeral = true
-	moved := source.tabs[0]
-	moved.stableID = "moved-tab"
-	destination := addMoveTabTestSession(t, d, "destination", "destination-tab")
-	destination.ephemeral = false
-	destination.snapEligible.Store(true)
-	destination.snapshotWake = d.snapshots.wake
+	synctest.Test(t, func(t *testing.T) {
+		d, source, ac, _ := newManualSessionWithPTYs(t, newQuietPTY(t), newQuietPTY(t))
+		stopOverlayTimersOnCleanup(t, ac)
+		source.ephemeral = true
+		moved := source.tabs[0]
+		moved.stableID = "moved-tab"
+		destination := addMoveTabTestSession(t, d, "destination", "destination-tab")
+		destination.ephemeral = false
+		destination.snapEligible.Store(true)
+		destination.snapshotWake = d.snapshots.wake
 
-	repository := &movePersistenceRepository{
-		publish: errors.New("injected publication failure"),
-		daemon:  d, source: source, destination: destination, moved: moved, pane: moved.focusedPane(),
-	}
-	WithSnapshotRepository(repository.mock(t))(d)
-	startSnapshotEncodeWorker(t, d)
+		repository := &movePersistenceRepository{
+			publish: errors.New("injected publication failure"),
+			daemon:  d, source: source, destination: destination, moved: moved, pane: moved.focusedPane(),
+		}
+		WithSnapshotRepository(repository.mock(t))(d)
+		startSnapshotEncodeWorker(t, d)
 
-	require.NoError(t, d.moveTab(moveTabRequest{
-		Source: moveSessionLocator{ID: source.id, Incarnation: source.incarnation}, SourceTabID: domain.TabStableID(moved.stableID),
-		Destination: moveSessionLocator{ID: destination.id, Incarnation: destination.incarnation},
-	}))
-	d.scheduleEligibleRepositorySnapshots()
-	awaitSnapshotIdle(t, destination)
+		require.NoError(t, d.moveTab(moveTabRequest{
+			Source: moveSessionLocator{ID: source.id, Incarnation: source.incarnation}, SourceTabID: domain.TabStableID(moved.stableID),
+			Destination: moveSessionLocator{ID: destination.id, Incarnation: destination.incarnation},
+		}))
+		d.scheduleEligibleRepositorySnapshots()
+		requireSnapshotIdle(t, destination)
 
-	require.Same(t, moved, destination.tabs[len(destination.tabs)-1], "repository failure must not roll back live membership")
-	require.Same(t, destination, moved.focusedPane().ownerSnapshot().session)
-	require.True(t, destination.snapDirty.Load(), "failed publication remains scheduler-retryable")
-	repository.mu.Lock()
-	require.Equal(t, []string{"publish"}, repository.events, "move persistence uses only the existing snapshot publication format")
-	require.True(t, repository.outsideLocks, "repository publication must run outside architecture locks")
-	repository.mu.Unlock()
-	history := d.notices.history()
-	require.NotEmpty(t, history)
-	require.Equal(t, domain.NoticeSnapshotWrite, history[len(history)-1].Code)
+		require.Same(t, moved, destination.tabs[len(destination.tabs)-1], "repository failure must not roll back live membership")
+		require.Same(t, destination, moved.focusedPane().ownerSnapshot().session)
+		require.True(t, destination.snapDirty.Load(), "failed publication remains scheduler-retryable")
+		repository.mu.Lock()
+		require.Equal(t, []string{"publish"}, repository.events, "move persistence uses only the existing snapshot publication format")
+		require.True(t, repository.outsideLocks, "repository publication must run outside architecture locks")
+		repository.mu.Unlock()
+		history := d.notices.history()
+		require.NotEmpty(t, history)
+		require.Equal(t, domain.NoticeSnapshotWrite, history[len(history)-1].Code)
+	})
 }

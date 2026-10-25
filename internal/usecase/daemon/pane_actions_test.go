@@ -219,7 +219,7 @@ func TestDelayedRetryUsesFreshLayoutAfterPaneResize(t *testing.T) {
 		resizeTimer := awaitCoordinatorScheduledTimer(t, clock)
 		resizeDone := captureResizeCallbackDone(t, rc)
 		resizeTimer.ch <- time.Time{}
-		awaitTestCompletion(t, resizeDone, "failed client resize did not complete")
+		requireReceived(t, resizeDone, "failed client resize did not complete")
 		var retryTimer *coordinatorMockTimer
 		for retryTimer == nil {
 			candidate := awaitCoordinatorScheduledTimer(t, clock)
@@ -247,7 +247,7 @@ func TestDelayedRetryUsesFreshLayoutAfterPaneResize(t *testing.T) {
 		retryDone := rc.retryLane.token.done
 		rc.mu.Unlock()
 		retryTimer.ch <- time.Time{}
-		awaitTestCompletion(t, retryDone, "delayed resize retry did not complete")
+		requireReceived(t, retryDone, "delayed resize retry did not complete")
 
 		require.Equal(t, []domain.Size{{Cols: 40, Rows: 22}, rectSize(currentFirst)}, failed.requested(), "delayed retry must not apply stale PTY geometry")
 		require.Equal(t, currentFirst, first.rect, "delayed retry must not publish a stale rectangle")

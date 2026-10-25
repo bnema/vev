@@ -2101,7 +2101,7 @@ func TestPurgeAllLiveQuarantineJoinBoundedByDeadlineReleasesAdmission(t *testing
 		// The retry succeeds once the uncooperative publisher returns: the bound
 		// released admission without discarding ownership of the unit.
 		release()
-		awaitSnapshotIdle(t, live)
+		requireSnapshotIdle(t, live)
 		require.False(t, d.purgeAllSessions(protocol.ReasonSessionKilled).Failed())
 		require.Equal(t, 0, sessionCount(d), "the retried purge must remove the unit")
 		d.mu.Lock()
@@ -2180,14 +2180,14 @@ func TestPurgeAllLiveQuarantineAbortRestoresSurvivingSession(t *testing.T) {
 		// Once the uncooperative publication returns, the surviving session must
 		// checkpoint again.
 		release()
-		awaitSnapshotIdle(t, live)
+		requireSnapshotIdle(t, live)
 		// The fake clock's routine pacing interval is zero-now based, so clear it and
 		// prove the rolled-back coordinator schedules a real replacement capture.
 		live.snapshotMu.Lock()
 		live.snapshotNextEligibleAt = time.Time{}
 		live.snapshotMu.Unlock()
 		require.True(t, d.scheduleSnapshot(live), "the surviving session must schedule a replacement checkpoint")
-		awaitSnapshotClean(t, live)
+		requireSnapshotClean(t, live)
 		_, ok, err := catalogue.Record("work")
 		require.NoError(t, err)
 		require.True(t, ok, "the surviving session must keep its durable authority")

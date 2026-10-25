@@ -3,6 +3,7 @@ package daemon
 import (
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/mock"
@@ -56,29 +57,31 @@ func TestMovePickerInputFailSafe(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			clock, graceTime := newPickerGraceClock(t, time.Unix(100, 0))
-			d, source, ac, _, _, releases, sends := setupMovePickerSessionsCore(t, clock, 0)
-			defer releaseAll(releases)
+			synctest.Test(t, func(t *testing.T) {
+				clock, graceTime := newPickerGraceClock(t, time.Unix(100, 0))
+				d, source, ac, _, _, releases, sends := setupMovePickerSessionsCore(t, clock, 0)
+				defer releaseAll(releases)
 
-			openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMovePane, moveSourceForSession(source, ac, "source-tab", "source-pane"))
-			ac.overlays.pickerMu.Lock()
-			interaction := ac.overlays.pickerInteraction
-			ac.overlays.pickerMu.Unlock()
-			graceTime.advance(tt.elapsed)
+				openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMovePane, moveSourceForSession(source, ac, "source-tab", "source-pane"))
+				ac.overlays.pickerMu.Lock()
+				interaction := ac.overlays.pickerInteraction
+				ac.overlays.pickerMu.Unlock()
+				graceTime.advance(tt.elapsed)
 
-			effect := pickActionEffectForTest(t, source, ac)
-			d.handleInputForAttachment(effect, []byte("a"))
-			effect.End()
+				effect := pickActionEffectForTest(t, source, ac)
+				d.handleInputForAttachment(effect, []byte("a"))
+				effect.End()
 
-			require.Equal(t, tt.wantOpen, ac.overlays.pickerClientActive())
-			if !tt.wantReleased {
-				return
-			}
-			closed := awaitSentServerMessage(t, sends, "PickerClosed", func(message protocol.ServerMessage) bool {
-				_, ok := message.(protocol.PickerClosed)
-				return ok
-			}).(protocol.PickerClosed)
-			require.Equal(t, interaction, closed.InteractionID)
+				require.Equal(t, tt.wantOpen, ac.overlays.pickerClientActive())
+				if !tt.wantReleased {
+					return
+				}
+				closed := awaitSentServerMessage(t, sends, "PickerClosed", func(message protocol.ServerMessage) bool {
+					_, ok := message.(protocol.PickerClosed)
+					return ok
+				}).(protocol.PickerClosed)
+				require.Equal(t, interaction, closed.InteractionID)
+			})
 		})
 	}
 }

@@ -3,7 +3,6 @@ package daemon
 import (
 	"testing"
 	"testing/synctest"
-	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -14,7 +13,7 @@ import (
 // awaitSentServerMessage drains captured frames until one satisfies match.
 func awaitSentServerMessage(t *testing.T, sends <-chan wire.Envelope, what string, match func(protocol.ServerMessage) bool) protocol.ServerMessage {
 	t.Helper()
-	deadline := time.After(2 * time.Second)
+	synctest.Wait()
 	for {
 		select {
 		case frame := <-sends:
@@ -22,7 +21,7 @@ func awaitSentServerMessage(t *testing.T, sends <-chan wire.Envelope, what strin
 			if match(message) {
 				return message
 			}
-		case <-deadline:
+		default:
 			t.Fatalf("daemon sent no %s", what)
 			return nil
 		}
@@ -34,22 +33,24 @@ func awaitSentServerMessage(t *testing.T, sends <-chan wire.Envelope, what strin
 // composes its own picker for, and opens no daemon interaction that could
 // swallow input.
 func TestSessionPickerCommandOffersClientPickerOverLiveAttachment(t *testing.T) {
-	d, source, ac, _, _, releases, sends := setupMovePickerSessionsCore(t, newStubClock(t), 0)
-	defer releaseAll(releases)
+	synctest.Test(t, func(t *testing.T) {
+		d, source, ac, _, _, releases, sends := setupMovePickerSessionsCore(t, newStubClock(t), 0)
+		defer releaseAll(releases)
 
-	d.handleInput(source, ac, []byte("\x1b "))
-	require.True(t, ac.overlays.paletteActive())
-	d.handleInput(source, ac, []byte("SSP\r"))
+		d.handleInput(source, ac, []byte("\x1b "))
+		require.True(t, ac.overlays.paletteActive())
+		d.handleInput(source, ac, []byte("SSP\r"))
 
-	offer := awaitSentServerMessage(t, sends, "navigation PickerOffer", func(message protocol.ServerMessage) bool {
-		_, ok := message.(protocol.PickerOffer)
-		return ok
-	}).(protocol.PickerOffer)
-	require.Equal(t, protocol.PickerIntentNavigation, offer.Intent)
-	require.NotZero(t, offer.InteractionID)
-	require.False(t, ac.overlays.pickerClientActive(), "a navigation offer must not open a daemon interaction")
-	require.Same(t, source, ac.currentAttachmentSession(), "SSP must keep the attachment live")
-	assertNoFurtherFrame(t, sends, "Detached", "SSP must not detach the attachment")
+		offer := awaitSentServerMessage(t, sends, "navigation PickerOffer", func(message protocol.ServerMessage) bool {
+			_, ok := message.(protocol.PickerOffer)
+			return ok
+		}).(protocol.PickerOffer)
+		require.Equal(t, protocol.PickerIntentNavigation, offer.Intent)
+		require.NotZero(t, offer.InteractionID)
+		require.False(t, ac.overlays.pickerClientActive(), "a navigation offer must not open a daemon interaction")
+		require.Same(t, source, ac.currentAttachmentSession(), "SSP must keep the attachment live")
+		assertNoFurtherFrame(t, sends, "Detached", "SSP must not detach the attachment")
+	})
 }
 
 // TestPaletteClientPickerFollowsPaletteErasingFrame pins the ordering the
@@ -97,9 +98,9 @@ func TestPaletteClientPickerFollowsPaletteErasingFrame(t *testing.T) {
 				d.handleInput(source, ac, []byte("\r"))
 				require.False(t, ac.overlays.paletteActive())
 				if tt.saturated {
-					// The work runs asynchronously once released, so give a wrong
+					// The work runs asynchronously once released; quiescence gives a wrong
 					// early release time to reach the wire before asserting.
-					assertNoSentServerMessage(t, sends, 200*time.Millisecond, tt.opens, "picker opened before the palette-erasing frame could be sent")
+					assertNoSentServerMessage(t, sends, tt.opens, "picker opened before the palette-erasing frame could be sent")
 					d.handleAttachmentClientMessage(captureAttachmentCapability(source, ac, ac.transport()), protocol.Ack{Epoch: blocking.Epoch, State: blocking.New})
 				}
 
@@ -124,15 +125,15 @@ func isPickerSnapshot(message protocol.ServerMessage) bool {
 	return ok
 }
 
-// assertNoSentServerMessage fails if a matching message is sent within wait.
-func assertNoSentServerMessage(t *testing.T, sends <-chan wire.Envelope, wait time.Duration, match func(protocol.ServerMessage) bool, failure string) {
+// assertNoSentServerMessage fails if a matching message is queued at quiescence.
+func assertNoSentServerMessage(t *testing.T, sends <-chan wire.Envelope, match func(protocol.ServerMessage) bool, failure string) {
 	t.Helper()
-	deadline := time.After(wait)
+	synctest.Wait()
 	for {
 		select {
 		case frame := <-sends:
 			require.False(t, match(decodeServerMessage(t, frame)), failure)
-		case <-deadline:
+		default:
 			return
 		}
 	}
@@ -141,17 +142,19 @@ func assertNoSentServerMessage(t *testing.T, sends <-chan wire.Envelope, wait ti
 // A scripted CommandRequest has no palette to erase: its refusals stay
 // synchronous command results instead of a false success.
 func TestCommandRequestMovePickerReportsRefusalSynchronously(t *testing.T) {
-	d, source, ac, _, _, releases, sends := setupMovePickerSessionsCore(t, newStubClock(t), 0)
-	defer releaseAll(releases)
-	d.mu.Lock()
-	delete(d.sessions, "destination")
-	d.mu.Unlock()
-	token := captureAttachmentCapability(source, ac, ac.transport())
-	require.False(t, d.handleAttachmentClientMessage(token, protocol.CommandRequest{Version: protocol.Version, RequestID: 5, Attached: true, Slug: "move-pane"}))
-	result := awaitSentServerMessage(t, sends, "CommandResult", func(message protocol.ServerMessage) bool {
-		_, ok := message.(protocol.CommandResult)
-		return ok
-	}).(protocol.CommandResult)
-	require.NotEqual(t, protocol.CommandSucceeded, result.Outcome, "a refused move must not report success")
-	require.False(t, ac.overlays.pickerClientActive())
+	synctest.Test(t, func(t *testing.T) {
+		d, source, ac, _, _, releases, sends := setupMovePickerSessionsCore(t, newStubClock(t), 0)
+		defer releaseAll(releases)
+		d.mu.Lock()
+		delete(d.sessions, "destination")
+		d.mu.Unlock()
+		token := captureAttachmentCapability(source, ac, ac.transport())
+		require.False(t, d.handleAttachmentClientMessage(token, protocol.CommandRequest{Version: protocol.Version, RequestID: 5, Attached: true, Slug: "move-pane"}))
+		result := awaitSentServerMessage(t, sends, "CommandResult", func(message protocol.ServerMessage) bool {
+			_, ok := message.(protocol.CommandResult)
+			return ok
+		}).(protocol.CommandResult)
+		require.NotEqual(t, protocol.CommandSucceeded, result.Outcome, "a refused move must not report success")
+		require.False(t, ac.overlays.pickerClientActive())
+	})
 }

@@ -212,33 +212,35 @@ func TestCountingOutputTransportCountsOpaquePayloadAndRejectsShortPayload(t *tes
 }
 
 func TestPerformanceFixtureCounters(t *testing.T) {
-	fixture := newPerformanceFixture(t, performanceConfig{})
+	synctest.Test(t, func(t *testing.T) {
+		fixture := newPerformanceFixture(t, performanceConfig{})
 
-	fixture.paintLive()
-	fixture.paintLive()
-	metrics := fixture.metrics()
-	require.Equal(t, uint64(2), metrics.outputFrames)
-	require.Equal(t, uint64(2), metrics.renderCaptures, "capture is one immutable state snapshot per live render request")
-	require.Equal(t, uint64(2), metrics.renderCompositions, "composition is one frame built from each captured state")
-	require.Equal(t, uint64(2), metrics.renderEmissions, "emission is one accepted output frame")
-	require.Positive(t, metrics.outputBytes)
-	require.Positive(t, metrics.outputPayloadBytes)
-	require.Equal(t, uint64(2), metrics.coordinatorInvalidations)
-	require.Equal(t, uint64(2), metrics.coordinatorWakes)
-	require.Equal(t, uint64(2), metrics.coordinatorCoalesced)
-	require.Positive(t, metrics.coordinatorWakes, "coordinator metric ratios require a nonzero denominator")
+		fixture.paintLive()
+		fixture.paintLive()
+		metrics := fixture.metrics()
+		require.Equal(t, uint64(2), metrics.outputFrames)
+		require.Equal(t, uint64(2), metrics.renderCaptures, "capture is one immutable state snapshot per live render request")
+		require.Equal(t, uint64(2), metrics.renderCompositions, "composition is one frame built from each captured state")
+		require.Equal(t, uint64(2), metrics.renderEmissions, "emission is one accepted output frame")
+		require.Positive(t, metrics.outputBytes)
+		require.Positive(t, metrics.outputPayloadBytes)
+		require.Equal(t, uint64(2), metrics.coordinatorInvalidations)
+		require.Equal(t, uint64(2), metrics.coordinatorWakes)
+		require.Equal(t, uint64(2), metrics.coordinatorCoalesced)
+		require.Positive(t, metrics.coordinatorWakes, "coordinator metric ratios require a nonzero denominator")
 
-	fixture.captureSnapshot()
-	metrics = fixture.metrics()
-	require.Equal(t, uint64(1), metrics.snapshotWrites)
-	require.Positive(t, metrics.snapshotManifestBytes)
-	require.Positive(t, metrics.snapshotObjectBytes)
+		fixture.captureSnapshot()
+		metrics = fixture.metrics()
+		require.Equal(t, uint64(1), metrics.snapshotWrites)
+		require.Positive(t, metrics.snapshotManifestBytes)
+		require.Positive(t, metrics.snapshotObjectBytes)
 
-	fixture.enterCopySearch()
-	require.Positive(t, fixture.searchMatches())
+		fixture.enterCopySearch()
+		require.Positive(t, fixture.searchMatches())
 
-	fixture.resize()
-	require.True(t, fixture.resized())
+		fixture.resize()
+		require.True(t, fixture.resized())
+	})
 }
 
 func TestRenderStageHooksCountProductionBoundariesOnFailedSend(t *testing.T) {
@@ -1250,7 +1252,7 @@ func (f *performanceFixture) captureSnapshot() {
 	require.True(f.t, f.d.captureSession(f.sess))
 	// Worker finalization clears snapshotPending and signals snapshotChanged on
 	// every success and failure path after persistence has returned.
-	awaitSnapshotIdle(f.t, f.sess)
+	requireSnapshotIdle(f.t, f.sess)
 }
 
 func (f *performanceFixture) enterCopySearch() {

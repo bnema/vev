@@ -721,7 +721,7 @@ func TestPaletteDeniedPostHandoffAttachmentEffectClosesAndInvalidates(t *testing
 		d.handlePaletteInput(ac, []byte("\r"))
 
 		require.False(t, ac.overlays.paletteActive(), "denied cleanup admission must still close the executed palette")
-		invalidation := awaitTestValue(t, invalidations, "denied palette cleanup did not invalidate rendering")
+		invalidation := requireReceived(t, invalidations, "denied palette cleanup did not invalidate rendering")
 		require.True(t, invalidation.reset)
 	})
 }
@@ -753,11 +753,11 @@ func TestPaletteJRSDoesNotRevalidateTargetInDaemon(t *testing.T) {
 			d.handleInputForAttachment(token, []byte("JRS 1\r"))
 			close(inputHandled)
 		}()
-		awaitTestCompletion(t, validated, "JRS did not publish the captured route action")
+		requireReceived(t, validated, "JRS did not publish the captured route action")
 		// The daemon must not consult or revalidate the target lifecycle. The
 		// client owns exact-target validation after it receives this action.
 		close(releaseHandoff)
-		awaitTestCompletion(t, inputHandled, "JRS route-action input did not complete")
+		requireReceived(t, inputHandled, "JRS route-action input did not complete")
 
 		actionFrame := requireFrame(t, sends, "RouteNavigationAction")
 		action := decodeServerMessage(t, actionFrame).(protocol.RouteNavigationAction)

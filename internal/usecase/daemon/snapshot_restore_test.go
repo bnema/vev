@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -223,65 +224,67 @@ func TestValidateRestoreSessionSnapshot(t *testing.T) {
 }
 
 func TestRestoreIncrementalGenerationAcceptance(t *testing.T) {
-	snapshot := restoreAcceptanceSession(t, "restored")
-	generation := acceptanceGeneration(t, snapshot, 9)
-	repository := &snapshotAcceptanceRepository{names: []string{snapshot.Name}, generations: map[string]ports.SnapshotGeneration{snapshot.Name: generation}}
-	pty, release := newBlockingPTY(t)
-	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
-	d.baseEnv = []string{"TERM=xterm-kitty", "COLORTERM=truecolor"}
-	checkpoint := domain.CheckpointRef{Generation: generation.Generation, ManifestDigest: snapcodec.ManifestDigest(generation.Manifest)}
-	record := domain.CatalogueRecord{Name: snapshot.Name, IncarnationID: generation.IncarnationID, Cwd: "/snapshot/cwd", CreatedAt: int64(snapshot.CreatedAt), Committed: &checkpoint}
-	catalogue := newRecoveryCatalogueOnly(t, []domain.CatalogueRecord{record})
-	repositoryMock := repository.mock(t)
-	WithCatalogue(catalogue, []domain.CatalogueRecord{record})(d)
-	WithSnapshotRepository(repositoryMock)(d)
-	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, repositoryMock, nil))(d)
-	t.Cleanup(func() { release(); d.sessWg.Wait() })
+	synctest.Test(t, func(t *testing.T) {
+		snapshot := restoreAcceptanceSession(t, "restored")
+		generation := acceptanceGeneration(t, snapshot, 9)
+		repository := &snapshotAcceptanceRepository{names: []string{snapshot.Name}, generations: map[string]ports.SnapshotGeneration{snapshot.Name: generation}}
+		pty, release := newBlockingPTY(t)
+		d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
+		d.baseEnv = []string{"TERM=xterm-kitty", "COLORTERM=truecolor"}
+		checkpoint := domain.CheckpointRef{Generation: generation.Generation, ManifestDigest: snapcodec.ManifestDigest(generation.Manifest)}
+		record := domain.CatalogueRecord{Name: snapshot.Name, IncarnationID: generation.IncarnationID, Cwd: "/snapshot/cwd", CreatedAt: int64(snapshot.CreatedAt), Committed: &checkpoint}
+		catalogue := newRecoveryCatalogueOnly(t, []domain.CatalogueRecord{record})
+		repositoryMock := repository.mock(t)
+		WithCatalogue(catalogue, []domain.CatalogueRecord{record})(d)
+		WithSnapshotRepository(repositoryMock)(d)
+		WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, repositoryMock, nil))(d)
+		t.Cleanup(func() { release(); d.sessWg.Wait() })
 
-	d.restoreIncrementalSnapshots(context.Background())
+		d.restoreIncrementalSnapshots(context.Background())
 
-	d.mu.Lock()
-	restored := d.findByNameLocked(snapshot.Name)
-	d.mu.Unlock()
-	require.NotNil(t, restored)
-	require.False(t, restored.snapDirty.Load(), "a loaded generation must begin clean")
-	require.Equal(t, uint64(9), restored.snapshotPublishedGeneration, "the loaded manifest is the repository generation head")
-	require.Equal(t, 0, testAttachmentTabIndex(restored))
-	require.Equal(t, "/snapshot/cwd", restored.cwd)
-	require.Len(t, restored.tabs, 1)
-	tab := restored.tabs[0]
-	require.Equal(t, 293, tab.size.Cols)
-	require.Equal(t, layout.PaneID("pane-7"), tab.tree.Focus)
-	pane := tab.panes[layout.PaneID("pane-7")]
-	pane.mu.Lock()
-	wantHistory := []string{strings.Repeat("a", 293), strings.Repeat("b", 293), strings.Repeat("c", 293), strings.Repeat("d", 293), strings.Repeat("e", 293), "primary-visible", "alternate-active"}
-	require.Equal(t, wantHistory, snapshotHistoryTexts(pane.history.View()), "bounded history must precede primary and active alternate transcript rows")
-	for y := range pane.screen.Rows() {
-		for x := range pane.screen.Columns() {
-			require.Truef(t, pane.screen.Cell(x, y).Equal(renderer.BlankCell()), "restored frame cell (%d,%d) must be blank", x, y)
+		d.mu.Lock()
+		restored := d.findByNameLocked(snapshot.Name)
+		d.mu.Unlock()
+		require.NotNil(t, restored)
+		require.False(t, restored.snapDirty.Load(), "a loaded generation must begin clean")
+		require.Equal(t, uint64(9), restored.snapshotPublishedGeneration, "the loaded manifest is the repository generation head")
+		require.Equal(t, 0, testAttachmentTabIndex(restored))
+		require.Equal(t, "/snapshot/cwd", restored.cwd)
+		require.Len(t, restored.tabs, 1)
+		tab := restored.tabs[0]
+		require.Equal(t, 293, tab.size.Cols)
+		require.Equal(t, layout.PaneID("pane-7"), tab.tree.Focus)
+		pane := tab.panes[layout.PaneID("pane-7")]
+		pane.mu.Lock()
+		wantHistory := []string{strings.Repeat("a", 293), strings.Repeat("b", 293), strings.Repeat("c", 293), strings.Repeat("d", 293), strings.Repeat("e", 293), "primary-visible", "alternate-active"}
+		require.Equal(t, wantHistory, snapshotHistoryTexts(pane.history.View()), "bounded history must precede primary and active alternate transcript rows")
+		for y := range pane.screen.Rows() {
+			for x := range pane.screen.Columns() {
+				require.Truef(t, pane.screen.Cell(x, y).Equal(renderer.BlankCell()), "restored frame cell (%d,%d) must be blank", x, y)
+			}
 		}
-	}
-	require.Equal(t, 7, pane.history.Len())
-	cells := 0
-	view := pane.history.View()
-	for y := range view.Len() {
-		cells += view.RowWidth(y)
-	}
-	require.Equal(t, 7*293, cells)
-	require.Equal(t, defaultScrollbackRows, pane.history.Cap())
-	require.Equal(t, defaultScrollbackBytes, pane.history.ByteCap())
-	require.LessOrEqual(t, pane.history.LogicalBytes(), pane.history.ByteCap())
-	pane.screen.Write([]byte("new-output"))
-	pane.screen.Write([]byte("\x1b[?1049h\x1b[?1049l"))
-	require.Equal(t, wantHistory, snapshotHistoryTexts(pane.history.View()), "new output and redraw must not remove recovered history")
-	pane.mu.Unlock()
+		require.Equal(t, 7, pane.history.Len())
+		cells := 0
+		view := pane.history.View()
+		for y := range view.Len() {
+			cells += view.RowWidth(y)
+		}
+		require.Equal(t, 7*293, cells)
+		require.Equal(t, defaultScrollbackRows, pane.history.Cap())
+		require.Equal(t, defaultScrollbackBytes, pane.history.ByteCap())
+		require.LessOrEqual(t, pane.history.LogicalBytes(), pane.history.ByteCap())
+		pane.screen.Write([]byte("new-output"))
+		pane.screen.Write([]byte("\x1b[?1049h\x1b[?1049l"))
+		require.Equal(t, wantHistory, snapshotHistoryTexts(pane.history.View()), "new output and redraw must not remove recovered history")
+		pane.mu.Unlock()
 
-	startSnapshotEncodeWorker(t, d)
-	markSnapshotDirty(restored)
-	require.True(t, d.scheduleSnapshot(restored))
-	awaitSnapshotClean(t, restored)
-	require.Len(t, repository.publishes, 1)
-	require.Equal(t, uint64(10), repository.publishes[0].Generation, "a restored session must continue the concrete repository generation stream")
+		startSnapshotEncodeWorker(t, d)
+		markSnapshotDirty(restored)
+		require.True(t, d.scheduleSnapshot(restored))
+		requireSnapshotClean(t, restored)
+		require.Len(t, repository.publishes, 1)
+		require.Equal(t, uint64(10), repository.publishes[0].Generation, "a restored session must continue the concrete repository generation stream")
+	})
 }
 
 type paneLayoutSnapshotFixture struct {
@@ -503,58 +506,60 @@ func captureRestoredPaneLayout(tb *tab) restoredPaneLayout {
 }
 
 func TestRestoredSessionMetadataUpdatePreservesCheckpointLineage(t *testing.T) {
-	snapshot := restoreAcceptanceSession(t, "restored")
-	generation := acceptanceGeneration(t, snapshot, 9)
-	repository := &snapshotAcceptanceRepository{names: []string{snapshot.Name}, generations: map[string]ports.SnapshotGeneration{snapshot.Name: generation}}
-	committed := domain.CheckpointRef{Generation: generation.Generation, ManifestDigest: snapcodec.ManifestDigest(generation.Manifest)}
-	record := domain.CatalogueRecord{
-		Name: snapshot.Name, IncarnationID: generation.IncarnationID, Cwd: "/snapshot/cwd",
-		CreatedAt: int64(snapshot.CreatedAt), UpdatedAt: 81, LastUsedSeq: 17,
-		TabNames: []string{"before"}, Committed: &committed,
-	}
-	catalogue, catalogueState := newRecoveryCatalogueMock(t, []domain.CatalogueRecord{record})
-	repositoryMock := repository.mock(t)
+	synctest.Test(t, func(t *testing.T) {
+		snapshot := restoreAcceptanceSession(t, "restored")
+		generation := acceptanceGeneration(t, snapshot, 9)
+		repository := &snapshotAcceptanceRepository{names: []string{snapshot.Name}, generations: map[string]ports.SnapshotGeneration{snapshot.Name: generation}}
+		committed := domain.CheckpointRef{Generation: generation.Generation, ManifestDigest: snapcodec.ManifestDigest(generation.Manifest)}
+		record := domain.CatalogueRecord{
+			Name: snapshot.Name, IncarnationID: generation.IncarnationID, Cwd: "/snapshot/cwd",
+			CreatedAt: int64(snapshot.CreatedAt), UpdatedAt: 81, LastUsedSeq: 17,
+			TabNames: []string{"before"}, Committed: &committed,
+		}
+		catalogue, catalogueState := newRecoveryCatalogueMock(t, []domain.CatalogueRecord{record})
+		repositoryMock := repository.mock(t)
 
-	pty, release := newBlockingPTY(t)
-	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
-	coordinator := recoveryusecase.NewCoordinator(catalogue, repositoryMock, nil)
-	WithCatalogue(catalogue, []domain.CatalogueRecord{record})(d)
-	WithSnapshotRepository(repositoryMock)(d)
-	WithRecoveryCoordinator(coordinator)(d)
-	t.Cleanup(func() { release(); d.sessWg.Wait() })
+		pty, release := newBlockingPTY(t)
+		d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
+		coordinator := recoveryusecase.NewCoordinator(catalogue, repositoryMock, nil)
+		WithCatalogue(catalogue, []domain.CatalogueRecord{record})(d)
+		WithSnapshotRepository(repositoryMock)(d)
+		WithRecoveryCoordinator(coordinator)(d)
+		t.Cleanup(func() { release(); d.sessWg.Wait() })
 
-	d.restoreIncrementalSnapshots(context.Background())
-	d.mu.Lock()
-	restored := d.findByNameLocked(snapshot.Name)
-	d.mu.Unlock()
-	require.NotNil(t, restored)
-	require.NoError(t, d.renameTab(restored, restored.tabs[0], "after"))
+		d.restoreIncrementalSnapshots(context.Background())
+		d.mu.Lock()
+		restored := d.findByNameLocked(snapshot.Name)
+		d.mu.Unlock()
+		require.NotNil(t, restored)
+		require.NoError(t, d.renameTab(restored, restored.tabs[0], "after"))
 
-	updates := catalogueState.MetadataUpdates()
-	require.Len(t, updates, 1, "the authoritative Catalogue port must receive restored-session metadata updates")
-	require.Equal(t, record.IncarnationID, updates[0].IncarnationID)
-	updated, ok, err := catalogue.Record(record.Name)
-	require.NoError(t, err)
-	require.True(t, ok)
-	require.Equal(t, record.IncarnationID, updated.IncarnationID)
-	require.Equal(t, record.Committed, updated.Committed)
-	require.Equal(t, record.DegradedReason, updated.DegradedReason)
-	require.Equal(t, []string{"after"}, updated.TabNames)
+		updates := catalogueState.MetadataUpdates()
+		require.Len(t, updates, 1, "the authoritative Catalogue port must receive restored-session metadata updates")
+		require.Equal(t, record.IncarnationID, updates[0].IncarnationID)
+		updated, ok, err := catalogue.Record(record.Name)
+		require.NoError(t, err)
+		require.True(t, ok)
+		require.Equal(t, record.IncarnationID, updated.IncarnationID)
+		require.Equal(t, record.Committed, updated.Committed)
+		require.Equal(t, record.DegradedReason, updated.DegradedReason)
+		require.Equal(t, []string{"after"}, updated.TabNames)
 
-	startSnapshotEncodeWorker(t, d)
-	markSnapshotDirty(restored)
-	require.True(t, d.scheduleSnapshot(restored))
-	awaitSnapshotIdle(t, restored)
-	d.snapshots.noticeMu.Lock()
-	failure := d.snapshots.activeFailureSignature
-	d.snapshots.noticeMu.Unlock()
-	require.Empty(t, failure)
-	require.Len(t, repository.publishes, 1)
-	require.Equal(t, record.Committed, repository.publishes[0].ParentCheckpoint)
-	published, ok, err := catalogue.Record(record.Name)
-	require.NoError(t, err)
-	require.True(t, ok)
-	require.Equal(t, uint64(10), published.Committed.Generation)
+		startSnapshotEncodeWorker(t, d)
+		markSnapshotDirty(restored)
+		require.True(t, d.scheduleSnapshot(restored))
+		requireSnapshotIdle(t, restored)
+		d.snapshots.noticeMu.Lock()
+		failure := d.snapshots.activeFailureSignature
+		d.snapshots.noticeMu.Unlock()
+		require.Empty(t, failure)
+		require.Len(t, repository.publishes, 1)
+		require.Equal(t, record.Committed, repository.publishes[0].ParentCheckpoint)
+		published, ok, err := catalogue.Record(record.Name)
+		require.NoError(t, err)
+		require.True(t, ok)
+		require.Equal(t, uint64(10), published.Committed.Generation)
+	})
 }
 
 func TestRestorePaneTerminalRequiresCompleteRecoveryAndInstallsAtomically(t *testing.T) {
