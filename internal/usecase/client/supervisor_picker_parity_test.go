@@ -26,20 +26,17 @@ import (
 type parityTestPicker struct {
 	*mockpickerHost
 	*mockpickerPresentationHost
+	*mockpickerKillResolver
 	*attachTestPickerState
 }
 
 func newParityTestPicker(t *testing.T) *parityTestPicker {
 	host, state := newAttachTestPicker(t)
-	p := &parityTestPicker{mockpickerHost: host, mockpickerPresentationHost: newMockpickerPresentationHost(t), attachTestPickerState: state}
+	p := &parityTestPicker{mockpickerHost: host, mockpickerPresentationHost: newMockpickerPresentationHost(t), mockpickerKillResolver: newMockpickerKillResolver(t), attachTestPickerState: state}
+	p.mockpickerKillResolver.EXPECT().ResolveKill(mock.Anything).RunAndReturn(state.resolveKill).Maybe()
 	p.mockpickerPresentationHost.EXPECT().Notify(mock.Anything).Run(state.recordNotice).Maybe()
 	p.mockpickerPresentationHost.EXPECT().invalidatePresentation().Return().Maybe()
 	return p
-}
-
-// ResolveKill satisfies the optional pickerKillResolver seam.
-func (p *parityTestPicker) ResolveKill(key string) (pickerKillTarget, error) {
-	return p.attachTestPickerState.resolveKill(key)
 }
 
 // TestPickerOverlayCommitAnotherTabSwitchesInPlace pins the tab-aware same

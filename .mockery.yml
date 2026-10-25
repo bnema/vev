@@ -117,6 +117,11 @@ packages:
           dir: internal/usecase/client
           filename: picker_host_mock_test.go
           pkgname: client
+      pickerKillResolver:
+        config:
+          dir: internal/usecase/client
+          filename: picker_kill_resolver_mock_test.go
+          pkgname: client
   github.com/bnema/vev/internal/usecase/command:
     interfaces:
       Context:
