@@ -27,7 +27,7 @@ type warmHarness struct {
 
 func newWarmHarness(t *testing.T, warm int, idle time.Duration) *warmHarness {
 	t.Helper()
-	h := &warmHarness{clock: newManualClock(time.Unix(0, 0)), target: "alpha", dials: make(map[ports.BrokerDaemonIdentity][]*fakePhysical)}
+	h := &warmHarness{clock: newManualClock(t, time.Unix(0, 0)), target: "alpha", dials: make(map[ports.BrokerDaemonIdentity][]*fakePhysical)}
 	routes := portsmocks.NewMockBrokerRouteAuthority(t)
 	routes.EXPECT().ResolveDialTarget(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, r ports.BrokerOpenStreamRequest) (ports.BrokerDialTarget, error) {
 		h.mu.Lock()
@@ -46,7 +46,7 @@ func newWarmHarness(t *testing.T, warm int, idle time.Duration) *warmHarness {
 		h.mu.Unlock()
 		return f, nil
 	}).Maybe()
-	pool, err := NewPool(1, routes, binder, connector, h.clock, PoolLimits{Physical: 4, Clients: 4, Streams: 16, StreamsPerClient: 16, Warm: warm, Idle: idle})
+	pool, err := NewPool(1, routes, binder, connector, h.clock.mock, PoolLimits{Physical: 4, Clients: 4, Streams: 16, StreamsPerClient: 16, Warm: warm, Idle: idle})
 	require.NoError(t, err)
 	h.pool = pool
 	t.Cleanup(func() { require.NoError(t, pool.Close()) })
@@ -329,7 +329,7 @@ func TestNewPoolWarmLimits(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			pool, err := NewPool(1, portsmocks.NewMockBrokerRouteAuthority(t), portsmocks.NewMockBrokerIdentityBinder(t), portsmocks.NewMockBrokerEndpointConnector(t), newManualClock(time.Unix(0, 0)), PoolLimits{Physical: 1, Clients: 1, Streams: 1, StreamsPerClient: 1, Warm: tt.warm, Idle: tt.idle})
+			pool, err := NewPool(1, portsmocks.NewMockBrokerRouteAuthority(t), portsmocks.NewMockBrokerIdentityBinder(t), portsmocks.NewMockBrokerEndpointConnector(t), newManualClock(t, time.Unix(0, 0)).mock, PoolLimits{Physical: 1, Clients: 1, Streams: 1, StreamsPerClient: 1, Warm: tt.warm, Idle: tt.idle})
 			if tt.wantErr {
 				require.ErrorIs(t, err, ports.BrokerAdmissionInvalid)
 				return

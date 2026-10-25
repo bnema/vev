@@ -87,7 +87,7 @@ func requireNoLocalProbeWithin(t *testing.T, probe *scriptedLocalProbe, window t
 // daemon through localProbe, beside an optional remote probe.
 func newLocalTestRegistry(t *testing.T, store ports.BrokerHostStore, remoteProbe ports.BrokerHostProbe, localProbe LocalProbe, clock *manualClock) *Registry {
 	t.Helper()
-	registry, err := NewRegistryWithConfig(1, store, remoteProbe, clock, nil, RegistryConfig{
+	registry, err := NewRegistryWithConfig(1, store, remoteProbe, clock.mock, nil, RegistryConfig{
 		Local: &LocalObservation{DisplayOrigin: "local", Policy: poolPolicy(), Probe: localProbe},
 	})
 	require.NoError(t, err)
@@ -110,7 +110,7 @@ func waitLocal(t *testing.T, r *Registry, predicate func(ports.BrokerDaemonObser
 // authority plus the observed identity/incarnation/version, and is never
 // durable: the store persists the remote observations only.
 func TestRegistryPublishesObservedLocalDaemonFirst(t *testing.T) {
-	clock := newManualClock(time.Unix(100, 0))
+	clock := newManualClock(t, time.Unix(100, 0))
 	store := newTestStore()
 	local := newScriptedLocalProbe(1)
 	registry := newLocalTestRegistry(t, store, newTestProbe(1), local, clock)
@@ -157,7 +157,7 @@ func TestRegistryPublishesObservedLocalDaemonFirst(t *testing.T) {
 // endpoint, registration, policy, or display origin.
 func TestRegistryLocalObservationNeverInventsState(t *testing.T) {
 	t.Run("failure keeps zero identity and typed availability", func(t *testing.T) {
-		clock := newManualClock(time.Unix(100, 0))
+		clock := newManualClock(t, time.Unix(100, 0))
 		local := newScriptedLocalProbe(1)
 		registry := newLocalTestRegistry(t, newTestStore(), newTestProbe(1), local, clock)
 		startRegistry(t, registry)
@@ -178,7 +178,7 @@ func TestRegistryLocalObservationNeverInventsState(t *testing.T) {
 	})
 
 	t.Run("hostile probe cannot supply local authority", func(t *testing.T) {
-		clock := newManualClock(time.Unix(100, 0))
+		clock := newManualClock(t, time.Unix(100, 0))
 		local := newScriptedLocalProbe(1)
 		registry := newLocalTestRegistry(t, newTestStore(), newTestProbe(1), local, clock)
 		startRegistry(t, registry)
@@ -263,7 +263,7 @@ func TestRegistryLocalPendingReprobeHonorsExplicitReconcileOnly(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			clock := newManualClock(time.Unix(100, 0))
+			clock := newManualClock(t, time.Unix(100, 0))
 			local := newScriptedLocalProbe(2)
 			registry := newLocalTestRegistry(t, newTestStore(), nil, local, clock)
 			startRegistry(t, registry)
@@ -293,7 +293,7 @@ func TestRegistryLocalPendingReprobeHonorsExplicitReconcileOnly(t *testing.T) {
 // observation the wire refuses: a partial identity (identity without a version)
 // is rejected without inventing the missing half.
 func TestRegistryLocalObservationValidatesProbeResults(t *testing.T) {
-	clock := newManualClock(time.Unix(100, 0))
+	clock := newManualClock(t, time.Unix(100, 0))
 	local := newScriptedLocalProbe(1)
 	registry := newLocalTestRegistry(t, newTestStore(), newTestProbe(1), local, clock)
 	startRegistry(t, registry)
@@ -316,7 +316,7 @@ func TestRegistryLocalObservationValidatesProbeResults(t *testing.T) {
 // read-only registry owns no local producer, a local producer requires a probe,
 // and its policy and display origin are validated before anything is published.
 func TestRegistryLocalObservationConstruction(t *testing.T) {
-	clock := newManualClock(time.Unix(100, 0))
+	clock := newManualClock(t, time.Unix(100, 0))
 	valid := &LocalObservation{DisplayOrigin: "local", Policy: poolPolicy(), Probe: newScriptedLocalProbe(1)}
 
 	invalidPolicy := poolPolicy()
@@ -360,7 +360,7 @@ func TestRegistryLocalObservationConstruction(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := NewRegistryWithConfig(1, newTestStore(), tt.remoteProbe, clock, nil, tt.cfg)
+			_, err := NewRegistryWithConfig(1, newTestStore(), tt.remoteProbe, clock.mock, nil, tt.cfg)
 			require.Error(t, err)
 		})
 	}
@@ -370,9 +370,9 @@ func TestRegistryLocalObservationConstruction(t *testing.T) {
 // only the broker's own machine daemon needs no remote probe, and that such a
 // registry refuses remote membership rather than silently never probing it.
 func TestRegistryLocalOnlyRequiresNoRemoteProbe(t *testing.T) {
-	clock := newManualClock(time.Unix(100, 0))
+	clock := newManualClock(t, time.Unix(100, 0))
 	local := newScriptedLocalProbe(1)
-	registry, err := NewRegistryWithConfig(1, newTestStore(), nil, clock, nil, RegistryConfig{
+	registry, err := NewRegistryWithConfig(1, newTestStore(), nil, clock.mock, nil, RegistryConfig{
 		Local: &LocalObservation{DisplayOrigin: "local", Policy: poolPolicy(), Probe: local},
 	})
 	require.NoError(t, err)
@@ -472,7 +472,7 @@ func TestRegistryLocalEntryStaysFirstAcrossMembershipChanges(t *testing.T) {
 			remotes: nil,
 		},
 	}
-	registry := newLocalTestRegistry(t, newTestStore(), newTestProbe(1), newScriptedLocalProbe(1), newManualClock(time.Unix(100, 0)))
+	registry := newLocalTestRegistry(t, newTestStore(), newTestProbe(1), newScriptedLocalProbe(1), newManualClock(t, time.Unix(100, 0)))
 	for _, tt := range steps {
 		t.Run(tt.name, func(t *testing.T) {
 			tt.apply(t, registry)
@@ -491,7 +491,7 @@ func TestRegistryLocalEntryStaysFirstAcrossMembershipChanges(t *testing.T) {
 // a remote host it could never probe. The setHosts/ReplaceHosts refusals are
 // covered beside this test.
 func TestRegistryLocalOnlyRefusesRestoredRemoteMembership(t *testing.T) {
-	clock := newManualClock(time.Unix(100, 0))
+	clock := newManualClock(t, time.Unix(100, 0))
 	local := func() *LocalObservation {
 		return &LocalObservation{DisplayOrigin: "local", Policy: poolPolicy(), Probe: newScriptedLocalProbe(1)}
 	}
@@ -500,13 +500,13 @@ func TestRegistryLocalOnlyRefusesRestoredRemoteMembership(t *testing.T) {
 	t.Run("construction refuses a store with restored remote membership", func(t *testing.T) {
 		store := newTestStore()
 		store.hosts = ports.BrokerHosts{Revision: 1, Hosts: hostRecords(reg)}
-		_, err := NewRegistryWithConfig(1, store, nil, clock, nil, RegistryConfig{Local: local()})
+		_, err := NewRegistryWithConfig(1, store, nil, clock.mock, nil, RegistryConfig{Local: local()})
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "remote hosts require a host probe")
 	})
 
 	t.Run("projectMembership refuses restored remote membership directly", func(t *testing.T) {
-		registry, err := NewRegistryWithConfig(1, newTestStore(), nil, clock, nil, RegistryConfig{Local: local()})
+		registry, err := NewRegistryWithConfig(1, newTestStore(), nil, clock.mock, nil, RegistryConfig{Local: local()})
 		require.NoError(t, err)
 		// Empty restored membership is accepted: the local-only registry owns no
 		// remote host and needs no remote probe.
@@ -558,10 +558,10 @@ func TestPoolLocalStreamsShareOnePhysicalEntry(t *testing.T) {
 // case because the immutable default refuses before the membership mode is even
 // consulted.
 func TestRegistryMutableAddHostLocalOnlyNoRemoteProbe(t *testing.T) {
-	clock := newManualClock(time.Unix(100, 0))
+	clock := newManualClock(t, time.Unix(100, 0))
 	store := newMembershipStore()
 	local := newScriptedLocalProbe(1)
-	registry, err := NewRegistryWithConfig(1, store, nil, clock, nil, RegistryConfig{
+	registry, err := NewRegistryWithConfig(1, store, nil, clock.mock, nil, RegistryConfig{
 		MembershipMode:       MembershipMutable,
 		IncarnationGenerator: (&incarnationSequencer{}).generate,
 		Local:                &LocalObservation{DisplayOrigin: "local", Policy: poolPolicy(), Probe: local},

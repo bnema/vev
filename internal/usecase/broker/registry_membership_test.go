@@ -99,7 +99,7 @@ func (s *membershipStore) durableAuthority() ports.BrokerHosts {
 func newMutableRegistry(t *testing.T, store ports.BrokerHostStore, clock *manualClock, generator func() ([16]byte, error)) (*Registry, *testProbe) {
 	t.Helper()
 	probe := newTestProbe(2)
-	registry, err := NewRegistryWithConfig(1, store, probe, clock, nil, RegistryConfig{
+	registry, err := NewRegistryWithConfig(1, store, probe, clock.mock, nil, RegistryConfig{
 		MembershipMode:       MembershipMutable,
 		IncarnationGenerator: generator,
 		ObservationDisabled:  false,
@@ -178,7 +178,7 @@ func currentObservation() ports.BrokerDaemonObservation {
 func TestRegistryMutableConcurrentAddsLoseNoUpdate(t *testing.T) {
 	const adds = 32
 	store := newMembershipStore()
-	registry, _ := newMutableRegistry(t, store, newManualClock(time.Unix(100, 0)), (&incarnationSequencer{}).generate)
+	registry, _ := newMutableRegistry(t, store, newManualClock(t, time.Unix(100, 0)), (&incarnationSequencer{}).generate)
 	start := registry.authority.Revision
 
 	endpoints := make([]string, adds)
@@ -248,7 +248,7 @@ func TestRegistryMembershipModeRejectsUnknownMode(t *testing.T) {
 	// The mock has no expectations: any store call during construction fails
 	// the test, so a refusal must happen before the durable store is touched.
 	store := portsmocks.NewMockBrokerHostStore(t)
-	registry, err := NewRegistryWithConfig(1, store, newTestProbe(1), newManualClock(time.Unix(100, 0)), nil,
+	registry, err := NewRegistryWithConfig(1, store, newTestProbe(1), newManualClock(t, time.Unix(100, 0)).mock, nil,
 		RegistryConfig{MembershipMode: MembershipMode(9)})
 	require.ErrorContains(t, err, "invalid membership mode")
 	require.Nil(t, registry)
@@ -263,7 +263,7 @@ func TestRegistryImmutableMembershipRefusesEveryMutation(t *testing.T) {
 	store := portsmocks.NewMockBrokerHostStore(t)
 	store.EXPECT().Load().Return(ports.BrokerSnapshot{}, nil).Once()
 	store.EXPECT().LoadHosts().Return(ports.BrokerHosts{Revision: 3, Hosts: []ports.BrokerHostRecord{pinnedRecord(reg, poolPolicy())}}, nil).Once()
-	registry, err := NewRegistry(1, store, newTestProbe(1), newManualClock(time.Unix(100, 0)), nil)
+	registry, err := NewRegistry(1, store, newTestProbe(1), newManualClock(t, time.Unix(100, 0)).mock, nil)
 	require.NoError(t, err)
 	authority := registry.authority
 	before := registry.Snapshot()
@@ -309,7 +309,7 @@ func TestRegistryImmutableMembershipRefusesEveryMutation(t *testing.T) {
 	// Control: the same duplicate add is admitted when the mode is mutable, so
 	// the refusals above are the mode and not the validity of the operation.
 	seq := &incarnationSequencer{}
-	mutable, _ := newMutableRegistry(t, newMembershipStore(pinnedRecord(reg, poolPolicy())), newManualClock(time.Unix(100, 0)), seq.generate)
+	mutable, _ := newMutableRegistry(t, newMembershipStore(pinnedRecord(reg, poolPolicy())), newManualClock(t, time.Unix(100, 0)), seq.generate)
 	added, err := mutable.AddHost(context.Background(), reg.Endpoint, poolPolicy())
 	require.NoError(t, err)
 	require.Equal(t, reg, added)
@@ -322,7 +322,7 @@ func TestRegistryImmutableMembershipRefusesEveryMutation(t *testing.T) {
 func TestRegistryMutableAddPinsDuplicatePreservingIdentity(t *testing.T) {
 	seq := &incarnationSequencer{}
 	store := newMembershipStore(ports.BrokerHostRecord{Registration: registration(t, "alpha.test", 1), Learned: true, Policy: poolPolicy(), Route: canonicalRoute(poolPolicy(), "alpha.test")})
-	registry, _ := newMutableRegistry(t, store, newManualClock(time.Unix(100, 0)), seq.generate)
+	registry, _ := newMutableRegistry(t, store, newManualClock(t, time.Unix(100, 0)), seq.generate)
 	reg := registration(t, "alpha.test", 1)
 
 	got, err := registry.AddHost(context.Background(), reg.Endpoint, poolPolicy())
@@ -363,7 +363,7 @@ func TestRegistryMutableAddConflictingPolicyConflicts(t *testing.T) {
 	seq := &incarnationSequencer{}
 	reg := registration(t, "alpha.test", 1)
 	store := newMembershipStore(pinnedRecord(reg, poolPolicy()))
-	registry, _ := newMutableRegistry(t, store, newManualClock(time.Unix(100, 0)), seq.generate)
+	registry, _ := newMutableRegistry(t, store, newManualClock(t, time.Unix(100, 0)), seq.generate)
 	authority := registry.authority
 	before := registry.Snapshot()
 
@@ -389,7 +389,7 @@ func TestRegistryMutableAddEntropyFailureLeavesAuthorityUnchanged(t *testing.T) 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			store := newMembershipStore()
-			registry, _ := newMutableRegistry(t, store, newManualClock(time.Unix(100, 0)), tc.generator)
+			registry, _ := newMutableRegistry(t, store, newManualClock(t, time.Unix(100, 0)), tc.generator)
 			authority := registry.authority
 			before := registry.Snapshot()
 
@@ -410,7 +410,7 @@ func TestRegistryMutableRemoveExactStaleAndAbsent(t *testing.T) {
 	alpha := registration(t, "alpha.test", 1)
 	beta := registration(t, "beta.test", 2)
 	store := newMembershipStore(pinnedRecord(alpha, poolPolicy()), pinnedRecord(beta, poolPolicy()))
-	registry, _ := newMutableRegistry(t, store, newManualClock(time.Unix(100, 0)), (&incarnationSequencer{}).generate)
+	registry, _ := newMutableRegistry(t, store, newManualClock(t, time.Unix(100, 0)), (&incarnationSequencer{}).generate)
 	authority := registry.authority
 	before := registry.Snapshot()
 
@@ -467,7 +467,7 @@ func TestRegistryMutableRemoveExactStaleAndAbsent(t *testing.T) {
 func TestRegistryMutableNoOpRemoveVerifiesCAS(t *testing.T) {
 	alpha := registration(t, "alpha.test", 1)
 	store := newMembershipStore(pinnedRecord(alpha, poolPolicy()))
-	registry, _ := newMutableRegistry(t, store, newManualClock(time.Unix(100, 0)), (&incarnationSequencer{}).generate)
+	registry, _ := newMutableRegistry(t, store, newManualClock(t, time.Unix(100, 0)), (&incarnationSequencer{}).generate)
 	authority := registry.authority
 	before := registry.Snapshot()
 
@@ -489,7 +489,7 @@ func TestRegistryMutableNoOpRemoveVerifiesCAS(t *testing.T) {
 func TestRegistryMutableRemoveReAddGetsFreshIncarnation(t *testing.T) {
 	seq := &incarnationSequencer{}
 	store := newMembershipStore()
-	registry, _ := newMutableRegistry(t, store, newManualClock(time.Unix(100, 0)), seq.generate)
+	registry, _ := newMutableRegistry(t, store, newManualClock(t, time.Unix(100, 0)), seq.generate)
 
 	first, err := registry.AddHost(context.Background(), "alpha.test", poolPolicy())
 	require.NoError(t, err)
@@ -525,7 +525,7 @@ func TestRegistryMutableRemoveReAddGetsFreshIncarnation(t *testing.T) {
 func TestRegistryMutableUpdatePolicyIncrementsGenerationOnce(t *testing.T) {
 	alpha := registration(t, "alpha.test", 1)
 	store := newMembershipStore(pinnedRecord(alpha, poolPolicy()))
-	registry, _ := newMutableRegistry(t, store, newManualClock(time.Unix(100, 0)), (&incarnationSequencer{}).generate)
+	registry, _ := newMutableRegistry(t, store, newManualClock(t, time.Unix(100, 0)), (&incarnationSequencer{}).generate)
 
 	// Not found and a stale expectation are definite conflicts, refused before
 	// the store is touched.
@@ -563,7 +563,7 @@ func TestRegistryMutableUpdatePolicyIncrementsGenerationOnce(t *testing.T) {
 func TestRegistryMutableUpdateEqualPolicyPreservesIdentityAndVerifiesCAS(t *testing.T) {
 	alpha := registration(t, "alpha.test", 1)
 	store := newMembershipStore(pinnedRecord(alpha, poolPolicy()))
-	registry, _ := newMutableRegistry(t, store, newManualClock(time.Unix(100, 0)), (&incarnationSequencer{}).generate)
+	registry, _ := newMutableRegistry(t, store, newManualClock(t, time.Unix(100, 0)), (&incarnationSequencer{}).generate)
 	before := registry.Snapshot()
 
 	got, err := registry.UpdateHostPolicy(context.Background(), alpha, poolPolicy())
@@ -592,7 +592,7 @@ func TestRegistryMutableUpdatePolicyOverflowRefused(t *testing.T) {
 	alpha := registration(t, "alpha.test", 1)
 	alpha.Generation = ^domain.RemoteGeneration(0)
 	store := newMembershipStore(pinnedRecord(alpha, poolPolicy()))
-	registry, _ := newMutableRegistry(t, store, newManualClock(time.Unix(100, 0)), (&incarnationSequencer{}).generate)
+	registry, _ := newMutableRegistry(t, store, newManualClock(t, time.Unix(100, 0)), (&incarnationSequencer{}).generate)
 	authority := registry.authority
 	before := registry.Snapshot()
 
@@ -608,7 +608,7 @@ func TestRegistryMutableUpdatePolicyOverflowRefused(t *testing.T) {
 // populate the new generation, whether it carries the retired registration or
 // the current one with a retired attempt token.
 func TestRegistryMutableProbeCompletionFencedByChangedGeneration(t *testing.T) {
-	clock := newManualClock(time.Unix(100, 0))
+	clock := newManualClock(t, time.Unix(100, 0))
 	store := newMembershipStore()
 	registry, _ := newMutableRegistry(t, store, clock, (&incarnationSequencer{}).generate)
 	regA, err := registry.AddHost(context.Background(), "alpha.test", poolPolicy())
@@ -648,7 +648,7 @@ func TestRegistryMutableProbeCompletionFencedByChangedGeneration(t *testing.T) {
 // current attempt is in flight, so it neither clears the in-flight slot nor
 // publishes under the retired registration.
 func TestRegistryMutableStaleCompletionDoesNotClearLiveAttempt(t *testing.T) {
-	clock := newManualClock(time.Unix(100, 0))
+	clock := newManualClock(t, time.Unix(100, 0))
 	registry, _ := newMutableRegistry(t, newMembershipStore(), clock, (&incarnationSequencer{}).generate)
 	regA, err := registry.AddHost(context.Background(), "alpha.test", poolPolicy())
 	require.NoError(t, err)
@@ -684,7 +684,7 @@ func TestRegistryMutableStaleCompletionDoesNotClearLiveAttempt(t *testing.T) {
 // the endpoint was re-added under a fresh incarnation, and the re-add supersedes
 // rather than revives the retirement.
 func TestRegistryMutableStaleProbeCannotReviveRemovedRegistration(t *testing.T) {
-	clock := newManualClock(time.Unix(100, 0))
+	clock := newManualClock(t, time.Unix(100, 0))
 	seq := &incarnationSequencer{}
 	registry, _ := newMutableRegistry(t, newMembershipStore(), clock, seq.generate)
 	regA, err := registry.AddHost(context.Background(), "alpha.test", poolPolicy())
@@ -721,7 +721,7 @@ func TestRegistryMutableStaleProbeCannotReviveRemovedRegistration(t *testing.T) 
 // promptly, a fresh attempt observes the new registration, and the retired
 // answer can never surface as the new generation's observation.
 func TestRegistryMutablePolicyChangeRetiresInflightProbe(t *testing.T) {
-	registry, probe := newMutableRegistry(t, newMembershipStore(), newManualClock(time.Unix(100, 0)), (&incarnationSequencer{}).generate)
+	registry, probe := newMutableRegistry(t, newMembershipStore(), newManualClock(t, time.Unix(100, 0)), (&incarnationSequencer{}).generate)
 	regA, err := registry.AddHost(context.Background(), "alpha.test", poolPolicy())
 	require.NoError(t, err)
 	startRegistry(t, registry)
@@ -771,7 +771,7 @@ func newMembershipFixture(t *testing.T) *membershipFixture {
 	alpha := registration(t, "alpha.test", 1)
 	fixture := &membershipFixture{alpha: alpha}
 	fixture.store = newMembershipStore(pinnedRecord(alpha, poolPolicy()), pinnedRecord(registration(t, "beta.test", 2), poolPolicy()))
-	registry, _ := newMutableRegistry(t, fixture.store, newManualClock(time.Unix(100, 0)), (&incarnationSequencer{}).generate)
+	registry, _ := newMutableRegistry(t, fixture.store, newManualClock(t, time.Unix(100, 0)), (&incarnationSequencer{}).generate)
 	fixture.registry = registry
 	fixture.attempt = admitMembershipAttempt(t, registry, alpha.Endpoint)
 

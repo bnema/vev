@@ -15,8 +15,8 @@ import (
 // at test end so an unexpired run goroutine can never leak into another test.
 func newTestSupervisor(t testing.TB, grace time.Duration) (*Supervisor, *manualClock) {
 	t.Helper()
-	clock := newManualClock(time.Unix(0, 0))
-	s, err := NewSupervisor(clock, SupervisorConfig{IdleGrace: grace})
+	clock := newManualClock(t, time.Unix(0, 0))
+	s, err := NewSupervisor(clock.mock, SupervisorConfig{IdleGrace: grace})
 	require.NoError(t, err)
 	// Ignore the error: a test may deliberately register a failing drain hook.
 	t.Cleanup(func() { _ = s.Close() })

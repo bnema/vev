@@ -16,8 +16,10 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/catalogue"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -30,28 +32,36 @@ const probeGrace = 25 * time.Millisecond
 // when Advance is called, and timers with equal deadlines fire in creation
 // order. Scheduling assertions are therefore exact instead of racing wall time.
 type manualClock struct {
+	mock   *portsmocks.MockClock
+	t      testing.TB
 	mu     sync.Mutex
 	now    time.Time
 	order  uint64
 	timers map[*manualTimer]struct{}
 }
 
-func newManualClock(start time.Time) *manualClock {
-	return &manualClock{now: start, timers: make(map[*manualTimer]struct{})}
+func newManualClock(t testing.TB, start time.Time) *manualClock {
+	t.Helper()
+	c := &manualClock{mock: portsmocks.NewMockClock(t), t: t, now: start, timers: make(map[*manualTimer]struct{})}
+	c.mock.EXPECT().Now().RunAndReturn(c.Now).Maybe()
+	c.mock.EXPECT().NewTimer(mock.Anything).RunAndReturn(func(d time.Duration) ports.Timer {
+		timer := &manualTimer{clock: c, ch: make(chan time.Time, 1)}
+		m := portsmocks.NewMockTimer(c.t)
+		m.EXPECT().C().Return((<-chan time.Time)(timer.ch)).Maybe()
+		m.EXPECT().Stop().RunAndReturn(timer.stop).Maybe()
+		m.EXPECT().Reset(mock.Anything).RunAndReturn(timer.reset).Maybe()
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		timer.arm(d)
+		return m
+	}).Maybe()
+	return c
 }
 
 func (c *manualClock) Now() time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.now
-}
-
-func (c *manualClock) NewTimer(d time.Duration) ports.Timer {
-	timer := &manualTimer{clock: c, ch: make(chan time.Time, 1)}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	timer.arm(d)
-	return timer
 }
 
 // Advance moves time forward and fires every timer that came due.
@@ -92,9 +102,7 @@ type manualTimer struct {
 	active bool
 }
 
-func (t *manualTimer) C() <-chan time.Time { return t.ch }
-
-func (t *manualTimer) Stop() bool {
+func (t *manualTimer) stop() bool {
 	t.clock.mu.Lock()
 	defer t.clock.mu.Unlock()
 	if !t.active {
@@ -105,7 +113,7 @@ func (t *manualTimer) Stop() bool {
 	return true
 }
 
-func (t *manualTimer) Reset(d time.Duration) bool {
+func (t *manualTimer) reset(d time.Duration) bool {
 	t.clock.mu.Lock()
 	defer t.clock.mu.Unlock()
 	wasActive := t.active
@@ -565,7 +573,7 @@ func newTestStore() *testStore { return &testStore{} }
 // failure never depends on jitter.
 func newTestRegistry(t *testing.T, epoch ports.BrokerEpoch, store ports.BrokerHostStore, probe ports.BrokerHostProbe, clock *manualClock) *Registry {
 	t.Helper()
-	registry, err := NewRegistry(epoch, store, probe, clock, nil)
+	registry, err := NewRegistry(epoch, store, probe, clock.mock, nil)
 	require.NoError(t, err)
 	registry.jitter = identityJitter
 	return registry
@@ -738,7 +746,7 @@ func TestRegistryRestoresPersistedSnapshotUnderFreshEpoch(t *testing.T) {
 		}},
 	}
 	store := &testStore{loaded: stored}
-	registry, err := NewRegistry(11, store, newTestProbe(1), newManualClock(time.Unix(100, 0)), nil)
+	registry, err := NewRegistry(11, store, newTestProbe(1), newManualClock(t, time.Unix(100, 0)).mock, nil)
 	require.NoError(t, err)
 
 	snapshot := registry.Snapshot()
@@ -764,47 +772,47 @@ func TestRegistryRestoresPersistedSnapshotUnderFreshEpoch(t *testing.T) {
 }
 
 func TestRegistryRestoreRejectsInvalidInputs(t *testing.T) {
-	clock := newManualClock(time.Unix(100, 0))
+	clock := newManualClock(t, time.Unix(100, 0))
 	reg := registration(t, "example.test", 1)
 
-	_, err := NewRegistry(0, newTestStore(), newTestProbe(1), clock, nil)
+	_, err := NewRegistry(0, newTestStore(), newTestProbe(1), clock.mock, nil)
 	require.Error(t, err)
-	_, err = NewRegistry(1, newTestStore(), nil, clock, nil)
+	_, err = NewRegistry(1, newTestStore(), nil, clock.mock, nil)
 	require.Error(t, err)
 	_, err = NewRegistry(1, newTestStore(), newTestProbe(1), nil, nil)
 	require.Error(t, err)
 
 	// The store is a required dependency: a literal nil store is rejected, and
 	// a typed nil behind the interface is rejected without panicking.
-	_, err = NewRegistry(1, nil, newTestProbe(1), clock, nil)
+	_, err = NewRegistry(1, nil, newTestProbe(1), clock.mock, nil)
 	require.Error(t, err)
 	var typedNilStore *testStore
-	_, err = NewRegistry(1, typedNilStore, newTestProbe(1), clock, nil)
+	_, err = NewRegistry(1, typedNilStore, newTestProbe(1), clock.mock, nil)
 	require.Error(t, err)
 
 	loadErr := errors.New("load failed")
-	_, err = NewRegistry(1, &testStore{loadErr: loadErr}, newTestProbe(1), clock, nil)
+	_, err = NewRegistry(1, &testStore{loadErr: loadErr}, newTestProbe(1), clock.mock, nil)
 	require.ErrorIs(t, err, loadErr)
 
-	_, err = NewRegistry(1, &testStore{loaded: ports.BrokerSnapshot{Epoch: 7}}, newTestProbe(1), clock, nil)
+	_, err = NewRegistry(1, &testStore{loaded: ports.BrokerSnapshot{Epoch: 7}}, newTestProbe(1), clock.mock, nil)
 	require.Error(t, err)
 
 	// A durable record without an epoch is inconsistent, never silently empty.
-	_, err = NewRegistry(1, &testStore{loaded: ports.BrokerSnapshot{Epoch: 0, Daemons: []ports.BrokerDaemonObservation{{Endpoint: reg.Endpoint, Registration: reg}}}}, newTestProbe(1), clock, nil)
+	_, err = NewRegistry(1, &testStore{loaded: ports.BrokerSnapshot{Epoch: 0, Daemons: []ports.BrokerDaemonObservation{{Endpoint: reg.Endpoint, Registration: reg}}}}, newTestProbe(1), clock.mock, nil)
 	require.Error(t, err)
-	_, err = NewRegistry(1, &testStore{loaded: ports.BrokerSnapshot{Epoch: 0, Removed: []ports.BrokerHostTombstone{{Endpoint: reg.Endpoint, Registration: reg, RetiredRevision: 3}}}}, newTestProbe(1), clock, nil)
+	_, err = NewRegistry(1, &testStore{loaded: ports.BrokerSnapshot{Epoch: 0, Removed: []ports.BrokerHostTombstone{{Endpoint: reg.Endpoint, Registration: reg, RetiredRevision: 3}}}}, newTestProbe(1), clock.mock, nil)
 	require.Error(t, err)
-	_, err = NewRegistry(1, &testStore{loaded: ports.BrokerSnapshot{Epoch: 0, Revision: 4}}, newTestProbe(1), clock, nil)
+	_, err = NewRegistry(1, &testStore{loaded: ports.BrokerSnapshot{Epoch: 0, Revision: 4}}, newTestProbe(1), clock.mock, nil)
 	require.Error(t, err)
 
-	empty, err := NewRegistry(1, &testStore{}, newTestProbe(1), clock, nil)
+	empty, err := NewRegistry(1, &testStore{}, newTestProbe(1), clock.mock, nil)
 	require.NoError(t, err)
 	require.Equal(t, ports.BrokerRevision(1), empty.Snapshot().Revision)
 	require.Empty(t, empty.Snapshot().Daemons)
 }
 
 func TestRegistryRestoreRejectsPersistedSnapshotFromItsOwnEpoch(t *testing.T) {
-	clock := newManualClock(time.Unix(100, 0))
+	clock := newManualClock(t, time.Unix(100, 0))
 	reg := registration(t, "example.test", 1)
 
 	// A fresh broker process samples a fresh epoch and restarts its revision
@@ -820,7 +828,7 @@ func TestRegistryRestoreRejectsPersistedSnapshotFromItsOwnEpoch(t *testing.T) {
 			Availability: domain.RemoteAvailabilityReachable,
 		}},
 	}
-	_, err := NewRegistry(7, &testStore{loaded: currentEpoch}, newTestProbe(1), clock, nil)
+	_, err := NewRegistry(7, &testStore{loaded: currentEpoch}, newTestProbe(1), clock.mock, nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "matches the new registry epoch")
 
@@ -828,19 +836,19 @@ func TestRegistryRestoreRejectsPersistedSnapshotFromItsOwnEpoch(t *testing.T) {
 	// record from the current epoch.
 	_, err = NewRegistry(7, &testStore{loaded: ports.BrokerSnapshot{Epoch: 7, Revision: 1, Removed: []ports.BrokerHostTombstone{{
 		Endpoint: reg.Endpoint, Registration: reg, RetiredRevision: 1,
-	}}}}, newTestProbe(1), clock, nil)
+	}}}}, newTestProbe(1), clock.mock, nil)
 	require.Error(t, err)
-	_, err = NewRegistry(7, &testStore{loaded: ports.BrokerSnapshot{Epoch: 7, Revision: 1}}, newTestProbe(1), clock, nil)
+	_, err = NewRegistry(7, &testStore{loaded: ports.BrokerSnapshot{Epoch: 7, Revision: 1}}, newTestProbe(1), clock.mock, nil)
 	require.Error(t, err)
 
 	// A different epoch is still adopted normally.
-	registry, err := NewRegistry(8, &testStore{loaded: currentEpoch}, newTestProbe(1), clock, nil)
+	registry, err := NewRegistry(8, &testStore{loaded: currentEpoch}, newTestProbe(1), clock.mock, nil)
 	require.NoError(t, err)
 	require.Len(t, registry.Snapshot().Daemons, 1)
 }
 
 func TestRegistrySetHostsRejectsInvalidRegistrations(t *testing.T) {
-	registry := newTestRegistry(t, 1, newTestStore(), newTestProbe(1), newManualClock(time.Unix(100, 0)))
+	registry := newTestRegistry(t, 1, newTestStore(), newTestProbe(1), newManualClock(t, time.Unix(100, 0)))
 
 	reg := registration(t, "example.test", 1)
 	require.Error(t, registry.setHosts(hostRecords(reg, reg)))
@@ -849,7 +857,7 @@ func TestRegistrySetHostsRejectsInvalidRegistrations(t *testing.T) {
 }
 
 func TestRegistrySetHostsRejectsHostLimitWithoutMutation(t *testing.T) {
-	registry := newTestRegistry(t, 1, newTestStore(), newTestProbe(1), newManualClock(time.Unix(100, 0)))
+	registry := newTestRegistry(t, 1, newTestStore(), newTestProbe(1), newManualClock(t, time.Unix(100, 0)))
 	reg := registration(t, "example.test", 1)
 	require.NoError(t, registry.setHosts(hostRecords(reg)))
 
@@ -868,7 +876,7 @@ func TestRegistrySetHostsRejectsHostLimitWithoutMutation(t *testing.T) {
 }
 
 func TestRegistryUnchangedSetHostsIsNoOpAndReorderRepublishes(t *testing.T) {
-	clock := newManualClock(time.Unix(100, 0))
+	clock := newManualClock(t, time.Unix(100, 0))
 	probe := newTestProbe(2)
 	registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
 	first := registration(t, "example.test", 1)
@@ -948,7 +956,7 @@ func TestRegistrySanitizesDerivedDisplayOrigin(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			clock := newManualClock(time.Unix(100, 0))
+			clock := newManualClock(t, time.Unix(100, 0))
 			probe := newTestProbe(1)
 			registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
 			require.NoError(t, registry.setHosts(hostRecords(registration(t, tc.endpoint, 1))))
@@ -975,7 +983,7 @@ func TestRegistrySanitizesDerivedDisplayOrigin(t *testing.T) {
 // displayable origin, and membership that cannot be published is refused where
 // authority is owned instead of freezing every later publication.
 func TestRegistryRefusesUnpublishableMembership(t *testing.T) {
-	registry := newTestRegistry(t, 1, newTestStore(), newTestProbe(1), newManualClock(time.Unix(100, 0)))
+	registry := newTestRegistry(t, 1, newTestStore(), newTestProbe(1), newManualClock(t, time.Unix(100, 0)))
 	err := registry.setHosts(hostRecords(registration(t, "user@\u202e", 1)))
 	require.ErrorContains(t, err, "not publishable")
 	require.Empty(t, registry.Snapshot().Daemons)
@@ -986,7 +994,7 @@ func TestRegistryRefusesUnpublishableMembership(t *testing.T) {
 // a snapshot the wire refuses aborts every client connection on subscribe, and a
 // refused publication never advances the revision series.
 func TestRegistryRefusesInvalidPublication(t *testing.T) {
-	registry := newTestRegistry(t, 1, newTestStore(), newTestProbe(1), newManualClock(time.Unix(100, 0)))
+	registry := newTestRegistry(t, 1, newTestStore(), newTestProbe(1), newManualClock(t, time.Unix(100, 0)))
 	require.NoError(t, registry.setHosts(hostRecords(registration(t, "example.test", 1))))
 	before := registry.Snapshot()
 
@@ -1002,7 +1010,7 @@ func TestRegistryRefusesInvalidPublication(t *testing.T) {
 }
 
 func TestRegistrySnapshotIsImmutable(t *testing.T) {
-	clock := newManualClock(time.Unix(100, 0))
+	clock := newManualClock(t, time.Unix(100, 0))
 	probe := newTestProbe(1)
 	registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
 	reg := registration(t, "example.test", 1)
@@ -1051,7 +1059,7 @@ func TestRegistrySnapshotIsImmutable(t *testing.T) {
 
 func TestRegistrySchedulesFreshObservationAfterSuccess(t *testing.T) {
 	start := time.Unix(100, 0)
-	clock := newManualClock(start)
+	clock := newManualClock(t, start)
 	probe := newTestProbe(1)
 	registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
 	reg := registration(t, "example.test", 1)
@@ -1101,10 +1109,10 @@ func TestRegistryAppliesSubscriptionDemandFreshness(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			start := time.Unix(100, 0)
-			clock := newManualClock(start)
+			clock := newManualClock(t, start)
 			remoteProbe := newTestProbe(1)
 			localProbe := newScriptedLocalProbe(1)
-			registry, err := NewRegistryWithConfig(1, newTestStore(), remoteProbe, clock, nil, RegistryConfig{
+			registry, err := NewRegistryWithConfig(1, newTestStore(), remoteProbe, clock.mock, nil, RegistryConfig{
 				Local:                &LocalObservation{DisplayOrigin: "local", Policy: poolPolicy(), Probe: localProbe},
 				DemandFreshForLocal:  demandLocal,
 				DemandFreshForRemote: demandRemote,
@@ -1148,7 +1156,7 @@ func TestRegistryAppliesSubscriptionDemandFreshness(t *testing.T) {
 // observation stops after the last closes and resumes immediately on reopen.
 func TestRegistrySetDemandIsCountedNotBoolean(t *testing.T) {
 	start := time.Unix(100, 0)
-	clock := newManualClock(start)
+	clock := newManualClock(t, start)
 	probe := newTestProbe(2)
 	registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
 	registry.demandFreshForRemote = 500 * time.Millisecond
@@ -1184,7 +1192,7 @@ func TestRegistrySetDemandIsCountedNotBoolean(t *testing.T) {
 
 func TestRegistryDemandOverridesFreshSchedule(t *testing.T) {
 	start := time.Unix(100, 0)
-	clock := newManualClock(start)
+	clock := newManualClock(t, start)
 	probe := newTestProbe(1)
 	registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
 	reg := registration(t, "example.test", 1)
@@ -1206,7 +1214,7 @@ func TestRegistryDemandOverridesFreshSchedule(t *testing.T) {
 
 func TestRegistryCoalescesConcurrentDemand(t *testing.T) {
 	start := time.Unix(100, 0)
-	clock := newManualClock(start)
+	clock := newManualClock(t, start)
 	probe := newTestProbe(2)
 	registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
 	reg := registration(t, "example.test", 1)
@@ -1238,7 +1246,7 @@ func TestRegistryCoalescesConcurrentDemand(t *testing.T) {
 }
 
 func TestRegistryIgnoresDemandForUnknownEndpoint(t *testing.T) {
-	clock := newManualClock(time.Unix(100, 0))
+	clock := newManualClock(t, time.Unix(100, 0))
 	probe := newTestProbe(1)
 	registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
 	reg := registration(t, "example.test", 1)
@@ -1254,7 +1262,7 @@ func TestRegistryIgnoresDemandForUnknownEndpoint(t *testing.T) {
 
 func TestRegistryPublishesReachabilityAndPersists(t *testing.T) {
 	start := time.Unix(100, 0)
-	clock := newManualClock(start)
+	clock := newManualClock(t, start)
 	probe := newTestProbe(1)
 	store := &testStore{}
 	registry := newTestRegistry(t, 3, store, probe, clock)
@@ -1346,7 +1354,7 @@ func TestRegistryNonReachableOutcomesUseTypedFailureBackoff(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			start := time.Unix(100, 0)
-			clock := newManualClock(start)
+			clock := newManualClock(t, start)
 			probe := newTestProbe(1)
 			registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
 			reg := registration(t, "example.test", 1)
@@ -1412,7 +1420,7 @@ func TestRegistryNonReachableOutcomesUseTypedFailureBackoff(t *testing.T) {
 
 func TestRegistryClassifiesOversizedProbeProjectionAsInvalidResponse(t *testing.T) {
 	start := time.Unix(100, 0)
-	clock := newManualClock(start)
+	clock := newManualClock(t, start)
 	probe := newTestProbe(1)
 	registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
 	reg := registration(t, "example.test", 1)
@@ -1471,7 +1479,7 @@ func TestRegistryClassifiesOversizedProbeProjectionAsInvalidResponse(t *testing.
 
 func TestRegistryAcceptsProbeProjectionAtSessionBound(t *testing.T) {
 	start := time.Unix(100, 0)
-	clock := newManualClock(start)
+	clock := newManualClock(t, start)
 	probe := newTestProbe(1)
 	registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
 	reg := registration(t, "example.test", 1)
@@ -1502,7 +1510,7 @@ func TestRegistryAcceptsProbeProjectionAtSessionBound(t *testing.T) {
 // stays authoritative instead of a snapshot that can never be written.
 func TestRegistryRejectsNonDurableObservation(t *testing.T) {
 	start := time.Unix(100, 0)
-	clock := newManualClock(start)
+	clock := newManualClock(t, start)
 	probe := newTestProbe(1)
 	registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
 	reg := registration(t, "example.test", 1)
@@ -1549,7 +1557,7 @@ func TestRegistryRejectsNonDurableObservation(t *testing.T) {
 // which would silently freeze durable persistence.
 func TestRegistryRevisionOverflowFailsClosed(t *testing.T) {
 	logger, logs := testLogger()
-	registry, err := NewRegistry(1, newTestStore(), newTestProbe(1), newManualClock(time.Unix(100, 0)), logger)
+	registry, err := NewRegistry(1, newTestStore(), newTestProbe(1), newManualClock(t, time.Unix(100, 0)).mock, logger)
 	require.NoError(t, err)
 	first := registration(t, "example.test", 1)
 	require.NoError(t, registry.setHosts(hostRecords(first)))
@@ -1586,7 +1594,7 @@ func TestRegistryRevisionOverflowFailsClosed(t *testing.T) {
 
 func TestRegistryPreservesLastSuccessAndOwnsFailureEpisode(t *testing.T) {
 	start := time.Unix(100, 0)
-	clock := newManualClock(start)
+	clock := newManualClock(t, start)
 	probe := newTestProbe(1)
 	registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
 	reg := registration(t, "example.test", 1)
@@ -1650,7 +1658,7 @@ func TestRegistryPreservesLastSuccessAndOwnsFailureEpisode(t *testing.T) {
 
 func TestRegistryDemandCapsFailureBackoff(t *testing.T) {
 	start := time.Unix(100, 0)
-	clock := newManualClock(start)
+	clock := newManualClock(t, start)
 	probe := newTestProbe(1)
 	reg := registration(t, "demand.test", 1)
 	store := newTestStore()
@@ -1680,7 +1688,7 @@ func TestRegistryDemandCapsFailureBackoff(t *testing.T) {
 
 func TestRegistryBackoffIsExponentialAndCapped(t *testing.T) {
 	start := time.Unix(100, 0)
-	clock := newManualClock(start)
+	clock := newManualClock(t, start)
 	probe := newTestProbe(1)
 	registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
 	reg := registration(t, "example.test", 1)
@@ -1718,7 +1726,7 @@ func TestRegistryBackoffIsExponentialAndCapped(t *testing.T) {
 
 func TestRegistryJitterAppliesToRetryAndHealthyRefresh(t *testing.T) {
 	start := time.Unix(100, 0)
-	clock := newManualClock(start)
+	clock := newManualClock(t, start)
 	probe := newTestProbe(1)
 	registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
 	registry.jitter = func(base time.Duration, _ string, _ uint64) time.Duration { return base / 2 }
@@ -1778,7 +1786,7 @@ func TestRegistryFencesStaleCompletionAcrossRegistrationChanges(t *testing.T) {
 	}
 	assertFenced := func(t *testing.T, current, replacement domain.RemoteRegistration) {
 		t.Helper()
-		clock := newManualClock(time.Unix(100, 0))
+		clock := newManualClock(t, time.Unix(100, 0))
 		probe := newTestProbe(2)
 		registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
 		require.NoError(t, registry.setHosts(hostRecords(current)))
@@ -1826,7 +1834,7 @@ func TestRegistryFencesStaleCompletionAcrossRegistrationChanges(t *testing.T) {
 }
 
 func TestRegistryFencesRetiredAttemptsAcrossRemovalAndIdenticalReAdd(t *testing.T) {
-	clock := newManualClock(time.Unix(100, 0))
+	clock := newManualClock(t, time.Unix(100, 0))
 	probe := newTestProbe(2)
 	registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
 	reg := registration(t, "example.test", 1)
@@ -1894,7 +1902,7 @@ func TestRegistryRetiresInflightAttemptsOnReplacementAndRemoval(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			clock := newManualClock(time.Unix(100, 0))
+			clock := newManualClock(t, time.Unix(100, 0))
 			probe := newTestProbe(2)
 			registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
 			require.NoError(t, registry.setHosts(hostRecords(current)))
@@ -1918,7 +1926,7 @@ func TestRegistryRetiresInflightAttemptsOnReplacementAndRemoval(t *testing.T) {
 }
 
 func TestRegistryChurnKeepsOneActiveProbePerEndpoint(t *testing.T) {
-	clock := newManualClock(time.Unix(100, 0))
+	clock := newManualClock(t, time.Unix(100, 0))
 	probe := newChurnProbe()
 	defer probe.openRelease()
 	registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
@@ -2013,7 +2021,7 @@ func TestRegistryChurnKeepsOneActiveProbePerEndpoint(t *testing.T) {
 }
 
 func TestRegistryPublishesBoundedTombstones(t *testing.T) {
-	registry := newTestRegistry(t, 1, newTestStore(), newTestProbe(1), newManualClock(time.Unix(100, 0)))
+	registry := newTestRegistry(t, 1, newTestStore(), newTestProbe(1), newManualClock(t, time.Unix(100, 0)))
 
 	// Two full membership rounds with distinct endpoints: without pruning the
 	// retired set would double.
@@ -2040,10 +2048,10 @@ func TestRegistryPublishesBoundedTombstones(t *testing.T) {
 }
 
 func TestRegistryPersistenceRunsOffLockAndCoalescesWrites(t *testing.T) {
-	clock := newManualClock(time.Unix(100, 0))
+	clock := newManualClock(t, time.Unix(100, 0))
 	probe := newTestProbe(1)
 	store := newBlockingStore()
-	registry, err := NewRegistry(1, store, probe, clock, nil)
+	registry, err := NewRegistry(1, store, probe, clock.mock, nil)
 	require.NoError(t, err)
 	defer registry.store.close()
 
@@ -2089,10 +2097,10 @@ func TestRegistryPersistenceRunsOffLockAndCoalescesWrites(t *testing.T) {
 // publication, no observation may be applied behind it, and the run loop
 // resumes scheduling as soon as the CAS commits.
 func TestRegistryReplaceHostsBlockedCASKeepsSnapshotLockFree(t *testing.T) {
-	clock := newManualClock(time.Unix(100, 0))
+	clock := newManualClock(t, time.Unix(100, 0))
 	probe := newTestProbe(2)
 	store := newBlockingCASStore()
-	registry, err := NewRegistry(1, store, probe, clock, nil)
+	registry, err := NewRegistry(1, store, probe, clock.mock, nil)
 	require.NoError(t, err)
 
 	reg := registration(t, "example.test", 1)
@@ -2161,12 +2169,12 @@ window:
 }
 
 func TestRegistryStoreErrorsAreObservableAndDoNotStallPublication(t *testing.T) {
-	clock := newManualClock(time.Unix(100, 0))
+	clock := newManualClock(t, time.Unix(100, 0))
 	probe := newTestProbe(1)
 	logger, logs := testLogger()
 	storeErr := errors.New("disk full")
 	store := &testStore{storeErr: storeErr}
-	registry, err := NewRegistry(1, store, probe, clock, logger)
+	registry, err := NewRegistry(1, store, probe, clock.mock, logger)
 	require.NoError(t, err)
 	defer registry.store.close()
 
@@ -2187,7 +2195,7 @@ func TestRegistryStoreErrorsAreObservableAndDoNotStallPublication(t *testing.T) 
 }
 
 func TestRegistryPersistedCopyClearsChecking(t *testing.T) {
-	clock := newManualClock(time.Unix(100, 0))
+	clock := newManualClock(t, time.Unix(100, 0))
 	probe := newTestProbe(1)
 	store := &testStore{}
 	registry := newTestRegistry(t, 3, store, probe, clock)
@@ -2219,7 +2227,7 @@ func TestRegistryPersistedCopyClearsChecking(t *testing.T) {
 // fresh registry reopened over that snapshot neither resurrects the retired
 // host nor sees a stale tombstone.
 func TestRegistryNeverPersistsRetirementTombstones(t *testing.T) {
-	clock := newManualClock(time.Unix(100, 0))
+	clock := newManualClock(t, time.Unix(100, 0))
 	store := &testStore{}
 	registry := newTestRegistry(t, 1, store, newTestProbe(1), clock)
 	defer registry.store.close()
@@ -2240,14 +2248,14 @@ func TestRegistryNeverPersistsRetirementTombstones(t *testing.T) {
 
 	// Reopening over the durable snapshot adopts empty membership without the
 	// stale tombstone.
-	reopened, err := NewRegistry(2, &testStore{loaded: stored}, newTestProbe(1), clock, nil)
+	reopened, err := NewRegistry(2, &testStore{loaded: stored}, newTestProbe(1), clock.mock, nil)
 	require.NoError(t, err)
 	require.Empty(t, reopened.Snapshot().Daemons)
 	require.Empty(t, reopened.Snapshot().Removed)
 }
 
 func TestRegistryBoundsSlowSubscribersAndStopsOnCancellation(t *testing.T) {
-	clock := newManualClock(time.Unix(100, 0))
+	clock := newManualClock(t, time.Unix(100, 0))
 	probe := newTestProbe(1)
 	registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
 
@@ -2298,11 +2306,11 @@ func TestRegistryBoundsSlowSubscribersAndStopsOnCancellation(t *testing.T) {
 }
 
 func TestRegistryRunIsSingleShotAndCleansUpInFlightState(t *testing.T) {
-	clock := newManualClock(time.Unix(100, 0))
+	clock := newManualClock(t, time.Unix(100, 0))
 	probe := newTestProbe(1)
 	logger, logs := testLogger()
 	store := &testStore{}
-	registry, err := NewRegistry(1, store, probe, clock, logger)
+	registry, err := NewRegistry(1, store, probe, clock.mock, logger)
 	require.NoError(t, err)
 	reg := registration(t, "example.test", 1)
 	require.NoError(t, registry.setHosts(hostRecords(reg)))
@@ -2371,7 +2379,7 @@ func TestRegistryRunIsSingleShotAndCleansUpInFlightState(t *testing.T) {
 
 func TestRegistryRevisionsIncreaseMonotonicallyWithinEpoch(t *testing.T) {
 	start := time.Unix(100, 0)
-	clock := newManualClock(start)
+	clock := newManualClock(t, start)
 	probe := newTestProbe(2)
 	registry := newTestRegistry(t, 42, newTestStore(), probe, clock)
 
@@ -2409,7 +2417,7 @@ func TestRegistryRevisionsIncreaseMonotonicallyWithinEpoch(t *testing.T) {
 // registry from its own host records and a hostile probe result can never
 // override it.
 func TestRegistryProbeCannotOverrideConfiguredAuthority(t *testing.T) {
-	clock := newManualClock(time.Unix(100, 0))
+	clock := newManualClock(t, time.Unix(100, 0))
 	probe := newTestProbe(1)
 	registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
 	reg := registration(t, "user@host:22", 1)
@@ -2450,7 +2458,7 @@ func TestRegistryProbeCannotOverrideConfiguredAuthority(t *testing.T) {
 // incarnation, protocol version, and capabilities flow from a probe result into
 // the published snapshot; configured authority is stamped alongside them.
 func TestRegistryPublishesObservedDaemonIdentity(t *testing.T) {
-	clock := newManualClock(time.Unix(100, 0))
+	clock := newManualClock(t, time.Unix(100, 0))
 	probe := newTestProbe(1)
 	registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
 	reg := registration(t, "user@host:22", 1)
@@ -2490,7 +2498,7 @@ func TestRegistryRejectsObservedIdentityWithoutProtocolVersion(t *testing.T) {
 		Availability:  domain.RemoteAvailabilityReachable,
 	}).Validate())
 
-	clock := newManualClock(time.Unix(100, 0))
+	clock := newManualClock(t, time.Unix(100, 0))
 	probe := newTestProbe(1)
 	registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
 	reg := registration(t, "user@host:22", 1)
@@ -2516,7 +2524,7 @@ func TestRegistryRejectsObservedIdentityWithoutProtocolVersion(t *testing.T) {
 // invariant: remote daemons appear in durable membership registration order (no
 // local producer exists yet, so the snapshot carries remotes only).
 func TestRegistryPublishesRemoteDaemonsInRegistrationOrder(t *testing.T) {
-	registry := newTestRegistry(t, 1, newTestStore(), newTestProbe(1), newManualClock(time.Unix(100, 0)))
+	registry := newTestRegistry(t, 1, newTestStore(), newTestProbe(1), newManualClock(t, time.Unix(100, 0)))
 	first := registration(t, "a.test", 1)
 	second := registration(t, "b.test", 2)
 	third := registration(t, "c.test", 3)

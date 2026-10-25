@@ -30,7 +30,7 @@ func TestRegistryRestoresAuthoritativeMembership(t *testing.T) {
 			}
 			store.EXPECT().Load().Return(snapshot, nil).Once()
 			store.EXPECT().LoadHosts().Return(hosts, nil).Once()
-			r, err := NewRegistry(2, store, newTestProbe(1), newManualClock(time.Unix(100, 0)), nil)
+			r, err := NewRegistry(2, store, newTestProbe(1), newManualClock(t, time.Unix(100, 0)).mock, nil)
 			require.NoError(t, err)
 			got := r.Snapshot()
 			require.Equal(t, ports.BrokerEpoch(2), got.Epoch)
@@ -51,7 +51,7 @@ func TestRegistryRestoresAuthoritativeMembership(t *testing.T) {
 // authority error, or authority that fails validation is fatal instead of
 // being skipped as an optional capability.
 func TestRegistryRejectsAuthorityAndLoadFailures(t *testing.T) {
-	clock := newManualClock(time.Unix(100, 0))
+	clock := newManualClock(t, time.Unix(100, 0))
 	reg := registration(t, "host", 1)
 	loadErr := errors.New("snapshot load failed")
 	authorityErr := errors.New("authority load failed")
@@ -69,7 +69,7 @@ func TestRegistryRejectsAuthorityAndLoadFailures(t *testing.T) {
 			store := portsmocks.NewMockBrokerHostStore(t)
 			store.EXPECT().Load().Return(ports.BrokerSnapshot{}, nil).Once()
 			store.EXPECT().LoadHosts().Return(hosts, nil).Once()
-			registry, err := NewRegistry(1, store, newTestProbe(1), clock, nil)
+			registry, err := NewRegistry(1, store, newTestProbe(1), clock.mock, nil)
 			require.Error(t, err)
 			require.Nil(t, registry)
 		})
@@ -77,7 +77,7 @@ func TestRegistryRejectsAuthorityAndLoadFailures(t *testing.T) {
 	t.Run("snapshot load error", func(t *testing.T) {
 		store := portsmocks.NewMockBrokerHostStore(t)
 		store.EXPECT().Load().Return(ports.BrokerSnapshot{}, loadErr).Once()
-		registry, err := NewRegistry(1, store, newTestProbe(1), clock, nil)
+		registry, err := NewRegistry(1, store, newTestProbe(1), clock.mock, nil)
 		require.ErrorIs(t, err, loadErr)
 		require.Nil(t, registry)
 	})
@@ -85,7 +85,7 @@ func TestRegistryRejectsAuthorityAndLoadFailures(t *testing.T) {
 		store := portsmocks.NewMockBrokerHostStore(t)
 		store.EXPECT().Load().Return(ports.BrokerSnapshot{}, nil).Once()
 		store.EXPECT().LoadHosts().Return(ports.BrokerHosts{}, authorityErr).Once()
-		registry, err := NewRegistry(1, store, newTestProbe(1), clock, nil)
+		registry, err := NewRegistry(1, store, newTestProbe(1), clock.mock, nil)
 		require.ErrorIs(t, err, authorityErr)
 		require.Nil(t, registry)
 	})
@@ -95,7 +95,7 @@ func TestRegistryRejectsAuthorityAndLoadFailures(t *testing.T) {
 // durable authority revision is store-local and never seeds the publication
 // series, and construction writes nothing back.
 func TestRegistryRestoreIsReadOnlyAndPublicationLocal(t *testing.T) {
-	clock := newManualClock(time.Unix(100, 0))
+	clock := newManualClock(t, time.Unix(100, 0))
 	reg := registration(t, "host", 1)
 	store := portsmocks.NewMockBrokerHostStore(t)
 	store.EXPECT().Load().Return(ports.BrokerSnapshot{Epoch: 5, Revision: 4096, Daemons: []ports.BrokerDaemonObservation{{
@@ -103,7 +103,7 @@ func TestRegistryRestoreIsReadOnlyAndPublicationLocal(t *testing.T) {
 	}}}, nil).Once()
 	store.EXPECT().LoadHosts().Return(ports.BrokerHosts{Revision: 99, Hosts: []ports.BrokerHostRecord{{Registration: reg, Pinned: true, Policy: poolPolicy(), Route: canonicalRoute(poolPolicy(), reg.Endpoint)}}}, nil).Once()
 
-	r, err := NewRegistry(6, store, newTestProbe(1), clock, nil)
+	r, err := NewRegistry(6, store, newTestProbe(1), clock.mock, nil)
 	require.NoError(t, err)
 	snapshot := r.Snapshot()
 	require.Equal(t, ports.BrokerRevision(1), snapshot.Revision)

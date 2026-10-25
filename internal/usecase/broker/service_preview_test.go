@@ -123,8 +123,8 @@ type previewFixture struct {
 func newPreviewFixture(t *testing.T, target domain.RemoteSessionTarget) *previewFixture {
 	t.Helper()
 	connector := &previewTestConnector{opened: make(chan *previewWatchConn, 8)}
-	clock := newManualClock(time.Unix(0, 0))
-	registry, err := NewRegistryWithConfig(1, newTestStore(), nil, clock, nil, RegistryConfig{ObservationDisabled: true})
+	clock := newManualClock(t, time.Unix(0, 0))
+	registry, err := NewRegistryWithConfig(1, newTestStore(), nil, clock.mock, nil, RegistryConfig{ObservationDisabled: true})
 	require.NoError(t, err)
 	authority, _, _, _ := composeTestAuthority(t, 1, registry, connector.Connect, clock)
 	authority.codec = testSessionCodec{}

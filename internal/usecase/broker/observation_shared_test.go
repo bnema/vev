@@ -89,7 +89,7 @@ func TestBrokerRemoteProbeBorrowsWarmTransport(t *testing.T) {
 			}
 			// Use the real pool for borrowing. Stateful pool retirement is
 			// covered with a fake physical in broker's worker tests.
-			pool, err := NewPool(7, routes, probe.Binder, connector, newManualClock(time.Unix(0, 0)), PoolLimits{Physical: 1, Clients: 1, Streams: 2, StreamsPerClient: 2, Warm: 1})
+			pool, err := NewPool(7, routes, probe.Binder, connector, newManualClock(t, time.Unix(0, 0)).mock, PoolLimits{Physical: 1, Clients: 1, Streams: 2, StreamsPerClient: 2, Warm: 1})
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, pool.Close()) })
 			if tt.shared && tt.bound && !tt.retired {
@@ -184,7 +184,7 @@ func TestBrokerRemoteProbeSilentBorrowedTransportNeverRedials(t *testing.T) {
 				Epoch: 7, Routes: routes, Binder: portsmocks.NewMockBrokerIdentityBinder(t), Connector: connector,
 				Hosts: observationHosts(t, record), Codec: codec,
 			}
-			pool, err := NewPool(7, routes, probe.Binder, connector, newManualClock(time.Unix(0, 0)), PoolLimits{Physical: 1, Clients: 1, Streams: 2, StreamsPerClient: 2, Warm: 1})
+			pool, err := NewPool(7, routes, probe.Binder, connector, newManualClock(t, time.Unix(0, 0)).mock, PoolLimits{Physical: 1, Clients: 1, Streams: 2, StreamsPerClient: 2, Warm: 1})
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, pool.Close()) })
 			require.True(t, pool.AdoptPhysical(physical, policy))

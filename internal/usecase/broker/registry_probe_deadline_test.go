@@ -49,7 +49,7 @@ func TestRegistryProbeDeadlineReleasesAttempt(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			clock := newManualClock(time.Unix(100, 0))
+			clock := newManualClock(t, time.Unix(100, 0))
 			reg := registration(t, "user@host:22", 1)
 			release := make(chan struct{})
 			t.Cleanup(func() { close(release) })
@@ -84,7 +84,7 @@ func TestRegistryProbeDeadlineReleasesAttempt(t *testing.T) {
 					return observe(ctx)
 				})
 			}
-			registry, err := NewRegistryWithConfig(1, newTestStore(), remote, clock, nil, RegistryConfig{Local: localProbe, ProbeTimeout: probeTimeout})
+			registry, err := NewRegistryWithConfig(1, newTestStore(), remote, clock.mock, nil, RegistryConfig{Local: localProbe, ProbeTimeout: probeTimeout})
 			require.NoError(t, err)
 			registry.jitter = identityJitter
 			if !tt.local {

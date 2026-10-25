@@ -16,7 +16,7 @@ import (
 // cancelled context is refused before authority is consulted, and an unknown
 // endpoint reports absence without an error.
 func TestRegistryLookupHostDeepCopyAndCancel(t *testing.T) {
-	clock := newManualClock(time.Unix(100, 0))
+	clock := newManualClock(t, time.Unix(100, 0))
 	registry := newTestRegistry(t, 1, newTestStore(), newTestProbe(1), clock)
 	reg := registration(t, "user@host:22", 1)
 	require.NoError(t, registry.ReplaceHosts(hostRecords(reg)))

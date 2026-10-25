@@ -17,7 +17,7 @@ import (
 // whose durable content is unchanged does not rewrite the store.
 func TestRegistryIdleRefreshPublishesOnceAndSkipsUnchangedPersistence(t *testing.T) {
 	start := time.Unix(100, 0)
-	clock := newManualClock(start)
+	clock := newManualClock(t, start)
 	probe := newTestProbe(1)
 	store := newTestStore()
 	registry := newTestRegistry(t, 1, store, probe, clock)
@@ -79,7 +79,7 @@ func TestRegistryIdleRefreshPublishesOnceAndSkipsUnchangedPersistence(t *testing
 // TestRegistryExplicitProbeStillPublishesChecking keeps the visible refresh
 // state for requested observations and for hosts not confirmed reachable.
 func TestRegistryExplicitProbeStillPublishesChecking(t *testing.T) {
-	clock := newManualClock(time.Unix(100, 0))
+	clock := newManualClock(t, time.Unix(100, 0))
 	probe := newTestProbe(1)
 	registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
 	reg := registration(t, "example.test", 1)

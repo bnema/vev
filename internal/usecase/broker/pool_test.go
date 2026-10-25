@@ -79,7 +79,7 @@ func poolRequest(id ports.BrokerConnectionID, n uint64) ports.BrokerOpenStreamRe
 }
 func setupPool(t testing.TB, connector poolConnector) (*Pool, *manualClock) {
 	t.Helper()
-	clock := newManualClock(time.Unix(0, 0))
+	clock := newManualClock(t, time.Unix(0, 0))
 	resolver := portsmocks.NewMockBrokerRouteAuthority(t)
 	resolver.EXPECT().ResolveDialTarget(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, r ports.BrokerOpenStreamRequest) (ports.BrokerDialTarget, error) {
 		return ports.BrokerDialTarget{Fence: ports.BrokerEndpointFence{Local: true}, Policy: r.Policy, Address: "fake", StartMode: r.StartMode, ExpectedIdentity: ports.BrokerExpectedIdentity{Identity: "canonical", Bound: true}}, nil
@@ -88,7 +88,7 @@ func setupPool(t testing.TB, connector poolConnector) (*Pool, *manualClock) {
 	binder.EXPECT().BindAuthenticatedIdentity(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, request ports.BrokerIdentityBindingRequest) (ports.BrokerDaemonIdentity, error) {
 		return request.Identity, nil
 	}).Maybe()
-	p, err := NewPool(1, resolver, binder, connector, clock, PoolLimits{Physical: 2, Clients: 128, Streams: 128, StreamsPerClient: 128, Warm: 2, Idle: time.Minute})
+	p, err := NewPool(1, resolver, binder, connector, clock.mock, PoolLimits{Physical: 2, Clients: 128, Streams: 128, StreamsPerClient: 128, Warm: 2, Idle: time.Minute})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, p.Close()) })
 	return p, clock
@@ -111,7 +111,7 @@ func TestPoolRefusedResolutionNeverDials(t *testing.T) {
 	resolver.EXPECT().ResolveDialTarget(mock.Anything, mock.Anything).Return(ports.BrokerDialTarget{}, ports.BrokerError{Code: ports.BrokerErrorConflictingPolicy, Cause: errors.New("refused")}).Once()
 	connector := portsmocks.NewMockBrokerEndpointConnector(t)
 	binder := portsmocks.NewMockBrokerIdentityBinder(t)
-	pool, err := NewPool(1, resolver, binder, connector, newManualClock(time.Unix(0, 0)), PoolLimits{Physical: 1, Clients: 8, Streams: 8, StreamsPerClient: 8, Warm: 1, Idle: time.Minute})
+	pool, err := NewPool(1, resolver, binder, connector, newManualClock(t, time.Unix(0, 0)).mock, PoolLimits{Physical: 1, Clients: 8, Streams: 8, StreamsPerClient: 8, Warm: 1, Idle: time.Minute})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, pool.Close()) })
 

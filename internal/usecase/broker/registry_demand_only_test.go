@@ -13,7 +13,7 @@ import (
 
 func TestRegistryObservesOnlyUnderSubscriptionOrExplicitRequest(t *testing.T) {
 	start := time.Unix(100, 0)
-	clock := newManualClock(start)
+	clock := newManualClock(t, start)
 	probe := newTestProbe(4)
 	local := newScriptedLocalProbe(4)
 	registry := newLocalTestRegistry(t, newTestStore(), probe, local, clock)

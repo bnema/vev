@@ -12,7 +12,7 @@ import (
 
 func TestRegistryNoDaemonUsesPassiveCadenceEvenWithDemand(t *testing.T) {
 	start := time.Unix(100, 0)
-	clock := newManualClock(start)
+	clock := newManualClock(t, start)
 	probe := newTestProbe(2)
 	registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
 	registry.jitter = identityJitter
