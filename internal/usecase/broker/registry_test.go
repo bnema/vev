@@ -46,7 +46,10 @@ func newManualClock(t testing.TB, start time.Time) *manualClock {
 	c.mock.EXPECT().Now().RunAndReturn(c.Now).Maybe()
 	c.mock.EXPECT().NewTimer(mock.Anything).RunAndReturn(func(d time.Duration) ports.Timer {
 		timer := &manualTimer{clock: c, ch: make(chan time.Time, 1)}
-		m := portsmocks.NewMockTimer(c.t)
+		// Timers may be created by teardown goroutines after cleanup starts.
+		// All timer expectations are optional; bind failures without adding cleanup.
+		m := &portsmocks.MockTimer{}
+		m.Test(c.t)
 		m.EXPECT().C().Return((<-chan time.Time)(timer.ch)).Maybe()
 		m.EXPECT().Stop().RunAndReturn(timer.stop).Maybe()
 		m.EXPECT().Reset(mock.Anything).RunAndReturn(timer.reset).Maybe()
@@ -193,7 +196,7 @@ type testStore struct {
 	changes  chan struct{}
 }
 
-func (s *testStore) Load() (ports.BrokerSnapshot, error) {
+func (s *testStore) load() (ports.BrokerSnapshot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.loadErr != nil {
@@ -202,7 +205,7 @@ func (s *testStore) Load() (ports.BrokerSnapshot, error) {
 	return s.loaded.Clone(), nil
 }
 
-func (s *testStore) LoadHosts() (ports.BrokerHosts, error) {
+func (s *testStore) loadHosts() (ports.BrokerHosts, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.hostsErr != nil {
@@ -218,7 +221,7 @@ func (s *testStore) LoadHosts() (ports.BrokerHosts, error) {
 	return authority, nil
 }
 
-func (s *testStore) ReplaceHosts(expected uint64, hosts []ports.BrokerHostRecord) error {
+func (s *testStore) replaceHosts(expected uint64, hosts []ports.BrokerHostRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.hostsErr != nil {
@@ -235,9 +238,7 @@ func (s *testStore) ReplaceHosts(expected uint64, hosts []ports.BrokerHostRecord
 	return nil
 }
 
-func (s *testStore) Close() error { return nil }
-
-func (s *testStore) Store(snapshot ports.BrokerSnapshot) error {
+func (s *testStore) store(snapshot ports.BrokerSnapshot) error {
 	s.mu.Lock()
 	s.stored = snapshot.Clone()
 	s.writes++
@@ -301,17 +302,7 @@ func newBlockingStore() *blockingStore {
 	return &blockingStore{entered: make(chan ports.BrokerRevision, 1), released: make(chan struct{})}
 }
 
-func (s *blockingStore) Load() (ports.BrokerSnapshot, error) { return ports.BrokerSnapshot{}, nil }
-
-func (s *blockingStore) LoadHosts() (ports.BrokerHosts, error) {
-	return ports.BrokerHosts{Revision: 1}, nil
-}
-
-func (s *blockingStore) ReplaceHosts(uint64, []ports.BrokerHostRecord) error { return nil }
-
-func (s *blockingStore) Close() error { return nil }
-
-func (s *blockingStore) Store(snapshot ports.BrokerSnapshot) error {
+func (s *blockingStore) store(snapshot ports.BrokerSnapshot) error {
 	s.mu.Lock()
 	s.revisions = append(s.revisions, snapshot.Revision)
 	s.mu.Unlock()
@@ -349,12 +340,12 @@ func newBlockingCASStore() *blockingCASStore {
 	return &blockingCASStore{entered: make(chan struct{}, 1), released: make(chan struct{})}
 }
 
-func (s *blockingCASStore) ReplaceHosts(expected uint64, hosts []ports.BrokerHostRecord) error {
+func (s *blockingCASStore) replaceHosts(expected uint64, hosts []ports.BrokerHostRecord) error {
 	s.block.Do(func() {
 		s.entered <- struct{}{}
 		<-s.released
 	})
-	return s.testStore.ReplaceHosts(expected, hosts)
+	return s.testStore.replaceHosts(expected, hosts)
 }
 
 // releaseCAS lets the parked CAS commit. It is idempotent so a failing test can
@@ -569,11 +560,57 @@ func hostSessions(count int) []catalogue.RemoteCatalogSession {
 // instead of relying on an optional seam.
 func newTestStore() *testStore { return &testStore{} }
 
+type storeOption func(*portsmocks.MockBrokerHostStore)
+
+func mockHostStore(t testing.TB, state *testStore, options ...storeOption) *portsmocks.MockBrokerHostStore {
+	t.Helper()
+	m := portsmocks.NewMockBrokerHostStore(t)
+	for _, option := range options {
+		option(m)
+	}
+	m.EXPECT().Load().RunAndReturn(state.load).Maybe()
+	m.EXPECT().LoadHosts().RunAndReturn(state.loadHosts).Maybe()
+	m.EXPECT().ReplaceHosts(mock.Anything, mock.Anything).RunAndReturn(state.replaceHosts).Maybe()
+	m.EXPECT().Store(mock.Anything).RunAndReturn(state.store).Maybe()
+	m.EXPECT().Close().Return(nil).Maybe()
+	return m
+}
+
+// hostStoreFixture converts state-only fixtures at the test composition boundary.
+func hostStoreFixture(t testing.TB, fixture any) ports.BrokerHostStore {
+	switch s := fixture.(type) {
+	case nil:
+		return nil
+	case *membershipStore:
+		return mockHostStore(t, s.testStore, func(m *portsmocks.MockBrokerHostStore) {
+			m.EXPECT().ReplaceHosts(mock.Anything, mock.Anything).RunAndReturn(s.replaceHosts).Maybe()
+		})
+	case *casThenGateStore:
+		return mockHostStore(t, s.testStore, func(m *portsmocks.MockBrokerHostStore) {
+			m.EXPECT().ReplaceHosts(mock.Anything, mock.Anything).RunAndReturn(s.replaceHosts).Maybe()
+		})
+	case *blockingCASStore:
+		return mockHostStore(t, &s.testStore, func(m *portsmocks.MockBrokerHostStore) {
+			m.EXPECT().ReplaceHosts(mock.Anything, mock.Anything).RunAndReturn(s.replaceHosts).Maybe()
+		})
+	case *blockingStore:
+		return mockHostStore(t, &testStore{}, func(m *portsmocks.MockBrokerHostStore) {
+			m.EXPECT().Store(mock.Anything).RunAndReturn(s.store).Maybe()
+		})
+	case *testStore:
+		return mockHostStore(t, s)
+	case ports.BrokerHostStore:
+		return s
+	default:
+		panic("unsupported store fixture")
+	}
+}
+
 // newTestRegistry builds a registry with exact scheduling and no logger so a
 // failure never depends on jitter.
-func newTestRegistry(t *testing.T, epoch ports.BrokerEpoch, store ports.BrokerHostStore, probe ports.BrokerHostProbe, clock *manualClock) *Registry {
+func newTestRegistry(t *testing.T, epoch ports.BrokerEpoch, store any, probe ports.BrokerHostProbe, clock *manualClock) *Registry {
 	t.Helper()
-	registry, err := NewRegistry(epoch, store, probe, clock.mock, nil)
+	registry, err := NewRegistry(epoch, hostStoreFixture(t, store), probe, clock.mock, nil)
 	require.NoError(t, err)
 	registry.jitter = identityJitter
 	return registry
@@ -746,7 +783,7 @@ func TestRegistryRestoresPersistedSnapshotUnderFreshEpoch(t *testing.T) {
 		}},
 	}
 	store := &testStore{loaded: stored}
-	registry, err := NewRegistry(11, store, newTestProbe(1), newManualClock(t, time.Unix(100, 0)).mock, nil)
+	registry, err := NewRegistry(11, hostStoreFixture(t, store), newTestProbe(1), newManualClock(t, time.Unix(100, 0)).mock, nil)
 	require.NoError(t, err)
 
 	snapshot := registry.Snapshot()
@@ -775,37 +812,37 @@ func TestRegistryRestoreRejectsInvalidInputs(t *testing.T) {
 	clock := newManualClock(t, time.Unix(100, 0))
 	reg := registration(t, "example.test", 1)
 
-	_, err := NewRegistry(0, newTestStore(), newTestProbe(1), clock.mock, nil)
+	_, err := NewRegistry(0, hostStoreFixture(t, newTestStore()), newTestProbe(1), clock.mock, nil)
 	require.Error(t, err)
-	_, err = NewRegistry(1, newTestStore(), nil, clock.mock, nil)
+	_, err = NewRegistry(1, hostStoreFixture(t, newTestStore()), nil, clock.mock, nil)
 	require.Error(t, err)
-	_, err = NewRegistry(1, newTestStore(), newTestProbe(1), nil, nil)
+	_, err = NewRegistry(1, hostStoreFixture(t, newTestStore()), newTestProbe(1), nil, nil)
 	require.Error(t, err)
 
 	// The store is a required dependency: a literal nil store is rejected, and
 	// a typed nil behind the interface is rejected without panicking.
-	_, err = NewRegistry(1, nil, newTestProbe(1), clock.mock, nil)
+	_, err = NewRegistry(1, hostStoreFixture(t, nil), newTestProbe(1), clock.mock, nil)
 	require.Error(t, err)
-	var typedNilStore *testStore
-	_, err = NewRegistry(1, typedNilStore, newTestProbe(1), clock.mock, nil)
+	var typedNilStore *portsmocks.MockBrokerHostStore
+	_, err = NewRegistry(1, hostStoreFixture(t, typedNilStore), newTestProbe(1), clock.mock, nil)
 	require.Error(t, err)
 
 	loadErr := errors.New("load failed")
-	_, err = NewRegistry(1, &testStore{loadErr: loadErr}, newTestProbe(1), clock.mock, nil)
+	_, err = NewRegistry(1, hostStoreFixture(t, &testStore{loadErr: loadErr}), newTestProbe(1), clock.mock, nil)
 	require.ErrorIs(t, err, loadErr)
 
-	_, err = NewRegistry(1, &testStore{loaded: ports.BrokerSnapshot{Epoch: 7}}, newTestProbe(1), clock.mock, nil)
+	_, err = NewRegistry(1, hostStoreFixture(t, &testStore{loaded: ports.BrokerSnapshot{Epoch: 7}}), newTestProbe(1), clock.mock, nil)
 	require.Error(t, err)
 
 	// A durable record without an epoch is inconsistent, never silently empty.
-	_, err = NewRegistry(1, &testStore{loaded: ports.BrokerSnapshot{Epoch: 0, Daemons: []ports.BrokerDaemonObservation{{Endpoint: reg.Endpoint, Registration: reg}}}}, newTestProbe(1), clock.mock, nil)
+	_, err = NewRegistry(1, hostStoreFixture(t, &testStore{loaded: ports.BrokerSnapshot{Epoch: 0, Daemons: []ports.BrokerDaemonObservation{{Endpoint: reg.Endpoint, Registration: reg}}}}), newTestProbe(1), clock.mock, nil)
 	require.Error(t, err)
-	_, err = NewRegistry(1, &testStore{loaded: ports.BrokerSnapshot{Epoch: 0, Removed: []ports.BrokerHostTombstone{{Endpoint: reg.Endpoint, Registration: reg, RetiredRevision: 3}}}}, newTestProbe(1), clock.mock, nil)
+	_, err = NewRegistry(1, hostStoreFixture(t, &testStore{loaded: ports.BrokerSnapshot{Epoch: 0, Removed: []ports.BrokerHostTombstone{{Endpoint: reg.Endpoint, Registration: reg, RetiredRevision: 3}}}}), newTestProbe(1), clock.mock, nil)
 	require.Error(t, err)
-	_, err = NewRegistry(1, &testStore{loaded: ports.BrokerSnapshot{Epoch: 0, Revision: 4}}, newTestProbe(1), clock.mock, nil)
+	_, err = NewRegistry(1, hostStoreFixture(t, &testStore{loaded: ports.BrokerSnapshot{Epoch: 0, Revision: 4}}), newTestProbe(1), clock.mock, nil)
 	require.Error(t, err)
 
-	empty, err := NewRegistry(1, &testStore{}, newTestProbe(1), clock.mock, nil)
+	empty, err := NewRegistry(1, hostStoreFixture(t, &testStore{}), newTestProbe(1), clock.mock, nil)
 	require.NoError(t, err)
 	require.Equal(t, ports.BrokerRevision(1), empty.Snapshot().Revision)
 	require.Empty(t, empty.Snapshot().Daemons)
@@ -828,21 +865,21 @@ func TestRegistryRestoreRejectsPersistedSnapshotFromItsOwnEpoch(t *testing.T) {
 			Availability: domain.RemoteAvailabilityReachable,
 		}},
 	}
-	_, err := NewRegistry(7, &testStore{loaded: currentEpoch}, newTestProbe(1), clock.mock, nil)
+	_, err := NewRegistry(7, hostStoreFixture(t, &testStore{loaded: currentEpoch}), newTestProbe(1), clock.mock, nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "matches the new registry epoch")
 
 	// The same rejection holds for a tombstone-only and for an empty-hosts
 	// record from the current epoch.
-	_, err = NewRegistry(7, &testStore{loaded: ports.BrokerSnapshot{Epoch: 7, Revision: 1, Removed: []ports.BrokerHostTombstone{{
+	_, err = NewRegistry(7, hostStoreFixture(t, &testStore{loaded: ports.BrokerSnapshot{Epoch: 7, Revision: 1, Removed: []ports.BrokerHostTombstone{{
 		Endpoint: reg.Endpoint, Registration: reg, RetiredRevision: 1,
-	}}}}, newTestProbe(1), clock.mock, nil)
+	}}}}), newTestProbe(1), clock.mock, nil)
 	require.Error(t, err)
-	_, err = NewRegistry(7, &testStore{loaded: ports.BrokerSnapshot{Epoch: 7, Revision: 1}}, newTestProbe(1), clock.mock, nil)
+	_, err = NewRegistry(7, hostStoreFixture(t, &testStore{loaded: ports.BrokerSnapshot{Epoch: 7, Revision: 1}}), newTestProbe(1), clock.mock, nil)
 	require.Error(t, err)
 
 	// A different epoch is still adopted normally.
-	registry, err := NewRegistry(8, &testStore{loaded: currentEpoch}, newTestProbe(1), clock.mock, nil)
+	registry, err := NewRegistry(8, hostStoreFixture(t, &testStore{loaded: currentEpoch}), newTestProbe(1), clock.mock, nil)
 	require.NoError(t, err)
 	require.Len(t, registry.Snapshot().Daemons, 1)
 }
@@ -1112,7 +1149,7 @@ func TestRegistryAppliesSubscriptionDemandFreshness(t *testing.T) {
 			clock := newManualClock(t, start)
 			remoteProbe := newTestProbe(1)
 			localProbe := newScriptedLocalProbe(1)
-			registry, err := NewRegistryWithConfig(1, newTestStore(), remoteProbe, clock.mock, nil, RegistryConfig{
+			registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, newTestStore()), remoteProbe, clock.mock, nil, RegistryConfig{
 				Local:                &LocalObservation{DisplayOrigin: "local", Policy: poolPolicy(), Probe: localProbe},
 				DemandFreshForLocal:  demandLocal,
 				DemandFreshForRemote: demandRemote,
@@ -1557,7 +1594,7 @@ func TestRegistryRejectsNonDurableObservation(t *testing.T) {
 // which would silently freeze durable persistence.
 func TestRegistryRevisionOverflowFailsClosed(t *testing.T) {
 	logger, logs := testLogger()
-	registry, err := NewRegistry(1, newTestStore(), newTestProbe(1), newManualClock(t, time.Unix(100, 0)).mock, logger)
+	registry, err := NewRegistry(1, hostStoreFixture(t, newTestStore()), newTestProbe(1), newManualClock(t, time.Unix(100, 0)).mock, logger)
 	require.NoError(t, err)
 	first := registration(t, "example.test", 1)
 	require.NoError(t, registry.setHosts(hostRecords(first)))
@@ -1662,7 +1699,7 @@ func TestRegistryDemandCapsFailureBackoff(t *testing.T) {
 	probe := newTestProbe(1)
 	reg := registration(t, "demand.test", 1)
 	store := newTestStore()
-	require.NoError(t, store.ReplaceHosts(1, hostRecords(reg)))
+	require.NoError(t, store.replaceHosts(1, hostRecords(reg)))
 	registry := newTestRegistry(t, 1, store, probe, clock)
 	startRegistry(t, registry)
 	registry.SetDemand(true)
@@ -2051,7 +2088,7 @@ func TestRegistryPersistenceRunsOffLockAndCoalescesWrites(t *testing.T) {
 	clock := newManualClock(t, time.Unix(100, 0))
 	probe := newTestProbe(1)
 	store := newBlockingStore()
-	registry, err := NewRegistry(1, store, probe, clock.mock, nil)
+	registry, err := NewRegistry(1, hostStoreFixture(t, store), probe, clock.mock, nil)
 	require.NoError(t, err)
 	defer registry.store.close()
 
@@ -2100,7 +2137,7 @@ func TestRegistryReplaceHostsBlockedCASKeepsSnapshotLockFree(t *testing.T) {
 	clock := newManualClock(t, time.Unix(100, 0))
 	probe := newTestProbe(2)
 	store := newBlockingCASStore()
-	registry, err := NewRegistry(1, store, probe, clock.mock, nil)
+	registry, err := NewRegistry(1, hostStoreFixture(t, store), probe, clock.mock, nil)
 	require.NoError(t, err)
 
 	reg := registration(t, "example.test", 1)
@@ -2174,7 +2211,7 @@ func TestRegistryStoreErrorsAreObservableAndDoNotStallPublication(t *testing.T) 
 	logger, logs := testLogger()
 	storeErr := errors.New("disk full")
 	store := &testStore{storeErr: storeErr}
-	registry, err := NewRegistry(1, store, probe, clock.mock, logger)
+	registry, err := NewRegistry(1, hostStoreFixture(t, store), probe, clock.mock, logger)
 	require.NoError(t, err)
 	defer registry.store.close()
 
@@ -2248,7 +2285,7 @@ func TestRegistryNeverPersistsRetirementTombstones(t *testing.T) {
 
 	// Reopening over the durable snapshot adopts empty membership without the
 	// stale tombstone.
-	reopened, err := NewRegistry(2, &testStore{loaded: stored}, newTestProbe(1), clock.mock, nil)
+	reopened, err := NewRegistry(2, hostStoreFixture(t, &testStore{loaded: stored}), newTestProbe(1), clock.mock, nil)
 	require.NoError(t, err)
 	require.Empty(t, reopened.Snapshot().Daemons)
 	require.Empty(t, reopened.Snapshot().Removed)
@@ -2310,7 +2347,7 @@ func TestRegistryRunIsSingleShotAndCleansUpInFlightState(t *testing.T) {
 	probe := newTestProbe(1)
 	logger, logs := testLogger()
 	store := &testStore{}
-	registry, err := NewRegistry(1, store, probe, clock.mock, logger)
+	registry, err := NewRegistry(1, hostStoreFixture(t, store), probe, clock.mock, logger)
 	require.NoError(t, err)
 	reg := registration(t, "example.test", 1)
 	require.NoError(t, registry.setHosts(hostRecords(reg)))

@@ -62,7 +62,7 @@ func newMembershipStore(hosts ...ports.BrokerHostRecord) *membershipStore {
 	return &membershipStore{testStore: &testStore{hosts: ports.BrokerHosts{Revision: 1, Hosts: hosts}}}
 }
 
-func (s *membershipStore) ReplaceHosts(expected uint64, hosts []ports.BrokerHostRecord) error {
+func (s *membershipStore) replaceHosts(expected uint64, hosts []ports.BrokerHostRecord) error {
 	s.casMu.Lock()
 	s.casCall++
 	err := s.casErr
@@ -70,7 +70,7 @@ func (s *membershipStore) ReplaceHosts(expected uint64, hosts []ports.BrokerHost
 	if err != nil {
 		return err
 	}
-	return s.testStore.ReplaceHosts(expected, hosts)
+	return s.testStore.replaceHosts(expected, hosts)
 }
 
 func (s *membershipStore) failCAS(err error) {
@@ -96,10 +96,10 @@ func (s *membershipStore) durableAuthority() ports.BrokerHosts {
 
 // newMutableRegistry builds a mutable registry with exact scheduling, a
 // deterministic incarnation seam, and its scripted probe.
-func newMutableRegistry(t *testing.T, store ports.BrokerHostStore, clock *manualClock, generator func() ([16]byte, error)) (*Registry, *testProbe) {
+func newMutableRegistry(t *testing.T, store any, clock *manualClock, generator func() ([16]byte, error)) (*Registry, *testProbe) {
 	t.Helper()
 	probe := newTestProbe(2)
-	registry, err := NewRegistryWithConfig(1, store, probe, clock.mock, nil, RegistryConfig{
+	registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, store), probe, clock.mock, nil, RegistryConfig{
 		MembershipMode:       MembershipMutable,
 		IncarnationGenerator: generator,
 		ObservationDisabled:  false,
@@ -248,7 +248,7 @@ func TestRegistryMembershipModeRejectsUnknownMode(t *testing.T) {
 	// The mock has no expectations: any store call during construction fails
 	// the test, so a refusal must happen before the durable store is touched.
 	store := portsmocks.NewMockBrokerHostStore(t)
-	registry, err := NewRegistryWithConfig(1, store, newTestProbe(1), newManualClock(t, time.Unix(100, 0)).mock, nil,
+	registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, store), newTestProbe(1), newManualClock(t, time.Unix(100, 0)).mock, nil,
 		RegistryConfig{MembershipMode: MembershipMode(9)})
 	require.ErrorContains(t, err, "invalid membership mode")
 	require.Nil(t, registry)
@@ -263,7 +263,7 @@ func TestRegistryImmutableMembershipRefusesEveryMutation(t *testing.T) {
 	store := portsmocks.NewMockBrokerHostStore(t)
 	store.EXPECT().Load().Return(ports.BrokerSnapshot{}, nil).Once()
 	store.EXPECT().LoadHosts().Return(ports.BrokerHosts{Revision: 3, Hosts: []ports.BrokerHostRecord{pinnedRecord(reg, poolPolicy())}}, nil).Once()
-	registry, err := NewRegistry(1, store, newTestProbe(1), newManualClock(t, time.Unix(100, 0)).mock, nil)
+	registry, err := NewRegistry(1, hostStoreFixture(t, store), newTestProbe(1), newManualClock(t, time.Unix(100, 0)).mock, nil)
 	require.NoError(t, err)
 	authority := registry.authority
 	before := registry.Snapshot()
@@ -472,7 +472,7 @@ func TestRegistryMutableNoOpRemoveVerifiesCAS(t *testing.T) {
 	before := registry.Snapshot()
 
 	// An illicit second mutator moves durable authority behind the registry.
-	require.NoError(t, store.testStore.ReplaceHosts(authority.Revision, []ports.BrokerHostRecord{pinnedRecord(alpha, poolPolicy())}))
+	require.NoError(t, store.testStore.replaceHosts(authority.Revision, []ports.BrokerHostRecord{pinnedRecord(alpha, poolPolicy())}))
 
 	removed, err := registry.RemoveHost(context.Background(), registration(t, "gamma.test", 3))
 	require.ErrorIs(t, err, ports.ErrBrokerHostConflict)
@@ -576,7 +576,7 @@ func TestRegistryMutableUpdateEqualPolicyPreservesIdentityAndVerifiesCAS(t *test
 
 	// The no-op still verified the loaded revision: a revision moved behind the
 	// registry turns the same call into a definite conflict.
-	require.NoError(t, store.testStore.ReplaceHosts(registry.authority.Revision, []ports.BrokerHostRecord{pinnedRecord(alpha, poolPolicy())}))
+	require.NoError(t, store.testStore.replaceHosts(registry.authority.Revision, []ports.BrokerHostRecord{pinnedRecord(alpha, poolPolicy())}))
 	authority := registry.authority
 	_, err = registry.UpdateHostPolicy(context.Background(), alpha, poolPolicy())
 	require.ErrorIs(t, err, ports.ErrBrokerHostConflict)

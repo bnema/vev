@@ -124,7 +124,7 @@ func newPreviewFixture(t *testing.T, target domain.RemoteSessionTarget) *preview
 	t.Helper()
 	connector := &previewTestConnector{opened: make(chan *previewWatchConn, 8)}
 	clock := newManualClock(t, time.Unix(0, 0))
-	registry, err := NewRegistryWithConfig(1, newTestStore(), nil, clock.mock, nil, RegistryConfig{ObservationDisabled: true})
+	registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, newTestStore()), nil, clock.mock, nil, RegistryConfig{ObservationDisabled: true})
 	require.NoError(t, err)
 	authority, _, _, _ := composeTestAuthority(t, 1, registry, connector.Connect, clock)
 	authority.codec = testSessionCodec{}

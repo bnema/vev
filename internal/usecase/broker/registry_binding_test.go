@@ -11,7 +11,7 @@ import (
 
 func TestRegistryBindsAuthenticatedIdentityDurablyAndIdempotently(t *testing.T) {
 	store := newMembershipStore()
-	registry, err := NewRegistryWithConfig(1, store, nil, newManualClock(t, time.Unix(1, 0)).mock, nil, RegistryConfig{MembershipMode: MembershipMutable, ObservationDisabled: true})
+	registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, store), nil, newManualClock(t, time.Unix(1, 0)).mock, nil, RegistryConfig{MembershipMode: MembershipMutable, ObservationDisabled: true})
 	require.NoError(t, err)
 	policy := poolPolicy()
 	registration, err := registry.AddHost(context.Background(), "user@example.test", policy)
@@ -37,7 +37,7 @@ func TestRegistryBindsAuthenticatedIdentityDurablyAndIdempotently(t *testing.T) 
 
 func TestRegistryRejectsAuthenticatedIdentityAcrossIncompatiblePolicies(t *testing.T) {
 	store := newMembershipStore()
-	registry, err := NewRegistryWithConfig(1, store, nil, newManualClock(t, time.Unix(1, 0)).mock, nil, RegistryConfig{MembershipMode: MembershipMutable, ObservationDisabled: true})
+	registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, store), nil, newManualClock(t, time.Unix(1, 0)).mock, nil, RegistryConfig{MembershipMode: MembershipMutable, ObservationDisabled: true})
 	require.NoError(t, err)
 	policy := poolPolicy()
 	first, err := registry.AddHost(context.Background(), "first.example.test", policy)
@@ -57,7 +57,7 @@ func TestRegistryRejectsAuthenticatedIdentityAcrossIncompatiblePolicies(t *testi
 
 func TestRegistryIdentityBindingIsFencedAcrossRemoveReadd(t *testing.T) {
 	store := newMembershipStore()
-	registry, err := NewRegistryWithConfig(1, store, nil, newManualClock(t, time.Unix(1, 0)).mock, nil, RegistryConfig{MembershipMode: MembershipMutable, ObservationDisabled: true})
+	registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, store), nil, newManualClock(t, time.Unix(1, 0)).mock, nil, RegistryConfig{MembershipMode: MembershipMutable, ObservationDisabled: true})
 	require.NoError(t, err)
 	policy := poolPolicy()
 	old, err := registry.AddHost(context.Background(), "user@example.test", policy)
