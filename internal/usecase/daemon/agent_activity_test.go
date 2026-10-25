@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/mock"
@@ -172,19 +173,21 @@ func TestAgentActivitySchedulerCoalesces(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := newAgentTestRig(t, 1)
-			p := r.pane(0)
-			for range 50 {
-				r.sched.markDirty(p)
-			}
-			r.advance(0)
-			for range tt.steps {
-				r.advance(tt.every)
-				r.sched.markDirty(p)
+			synctest.Test(t, func(t *testing.T) {
+				r := newAgentTestRig(t, 1)
+				p := r.pane(0)
+				for range 50 {
+					r.sched.markDirty(p)
+				}
 				r.advance(0)
-			}
-			r.advance(agentScanMaxLatency)
-			require.Equal(t, tt.wantScans, r.ptys[0].calls.Load())
+				for range tt.steps {
+					r.advance(tt.every)
+					r.sched.markDirty(p)
+					r.advance(0)
+				}
+				r.advance(agentScanMaxLatency)
+				require.Equal(t, tt.wantScans, r.ptys[0].calls.Load())
+			})
 		})
 	}
 }
@@ -221,14 +224,16 @@ func TestAgentActivityIdentifyCaching(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := newAgentTestRig(t, 1)
-			r.runAgent(0, 777, "claude")
-			r.output(0, claudeWorkingRows...)
-			r.settle()
-			r.advance(tt.gap)
-			r.output(0, claudeWorkingRows...)
-			r.settle()
-			r.proc.AssertNumberOfCalls(t, "Argv", tt.wantArgv)
+			synctest.Test(t, func(t *testing.T) {
+				r := newAgentTestRig(t, 1)
+				r.runAgent(0, 777, "claude")
+				r.output(0, claudeWorkingRows...)
+				r.settle()
+				r.advance(tt.gap)
+				r.output(0, claudeWorkingRows...)
+				r.settle()
+				r.proc.AssertNumberOfCalls(t, "Argv", tt.wantArgv)
+			})
 		})
 	}
 }
@@ -249,16 +254,18 @@ func TestAgentActivityNoneIsReverified(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := newAgentTestRig(t, 1)
-			r.runAgent(0, 777, "vim")
-			r.output(0, "~")
-			r.settle()
-			for _, gap := range tt.gaps {
-				r.advance(gap - agentScanMaxLatency)
+			synctest.Test(t, func(t *testing.T) {
+				r := newAgentTestRig(t, 1)
+				r.runAgent(0, 777, "vim")
 				r.output(0, "~")
 				r.settle()
-			}
-			r.proc.AssertNumberOfCalls(t, "Argv", tt.wantArgv)
+				for _, gap := range tt.gaps {
+					r.advance(gap - agentScanMaxLatency)
+					r.output(0, "~")
+					r.settle()
+				}
+				r.proc.AssertNumberOfCalls(t, "Argv", tt.wantArgv)
+			})
 		})
 	}
 }
@@ -291,15 +298,17 @@ func TestAgentActivityIdentifySource(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := newAgentTestRig(t, 1)
-			r.ptys[0].pgid.Store(777)
-			r.proc.EXPECT().Argv(777).Return(tt.argv, tt.argvErr)
-			if tt.wantGroup {
-				r.proc.EXPECT().GroupArgv(777, agentTestShellPid).Return([]string{"claude"}, nil)
-			}
-			r.output(0, claudeWorkingRows...)
-			r.settle()
-			require.Equal(t, agentactivity.IndicatorWorking, r.sess.tabs[0].agentIndicator())
+			synctest.Test(t, func(t *testing.T) {
+				r := newAgentTestRig(t, 1)
+				r.ptys[0].pgid.Store(777)
+				r.proc.EXPECT().Argv(777).Return(tt.argv, tt.argvErr)
+				if tt.wantGroup {
+					r.proc.EXPECT().GroupArgv(777, agentTestShellPid).Return([]string{"claude"}, nil)
+				}
+				r.output(0, claudeWorkingRows...)
+				r.settle()
+				require.Equal(t, agentactivity.IndicatorWorking, r.sess.tabs[0].agentIndicator())
+			})
 		})
 	}
 }
@@ -332,19 +341,21 @@ func TestAgentActivityTransitions(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := newAgentTestRig(t, 2)
-			selectTestAttachmentTab(r.sess, 0)
-			r.runAgent(1, 777, "claude")
-			for i, rows := range tt.rows {
-				if tt.gaps != nil {
-					r.advance(tt.gaps[i])
+			synctest.Test(t, func(t *testing.T) {
+				r := newAgentTestRig(t, 2)
+				selectTestAttachmentTab(r.sess, 0)
+				r.runAgent(1, 777, "claude")
+				for i, rows := range tt.rows {
+					if tt.gaps != nil {
+						r.advance(tt.gaps[i])
+					}
+					r.output(1, rows...)
+					r.settle()
 				}
-				r.output(1, rows...)
-				r.settle()
-			}
-			// Resolve a pending idle hold.
-			r.advance(agentactivity.DefaultIdleHoldCap)
-			require.Equal(t, tt.want, r.sess.tabs[1].agentIndicator())
+				// Resolve a pending idle hold.
+				r.advance(agentactivity.DefaultIdleHoldCap)
+				require.Equal(t, tt.want, r.sess.tabs[1].agentIndicator())
+			})
 		})
 	}
 }
@@ -382,12 +393,14 @@ func TestAgentActivityTabAggregation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := newAgentTestRig(t, 1)
-			tb := r.sess.tabs[0]
-			for _, status := range tt.panes {
-				seedAgentStatus(r.d, r.sess, tb, &pane{}, status)
-			}
-			require.Equal(t, tt.want, tb.agentIndicator())
+			synctest.Test(t, func(t *testing.T) {
+				r := newAgentTestRig(t, 1)
+				tb := r.sess.tabs[0]
+				for _, status := range tt.panes {
+					seedAgentStatus(r.d, r.sess, tb, &pane{}, status)
+				}
+				require.Equal(t, tt.want, tb.agentIndicator())
+			})
 		})
 	}
 }
@@ -405,18 +418,20 @@ func TestAgentActivityDoneOnlyWhenUnseen(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := newAgentTestRig(t, 2)
-			selectTestAttachmentTab(r.sess, tt.shownTab)
-			r.ac.setTerminalFocus(tt.focus)
-			r.runAgent(1, 777, "claude")
-			r.output(1, claudeWorkingRows...)
-			r.settle()
-			r.advance(3 * time.Second)
-			r.output(1, claudeIdleRows...)
-			r.settle()
-			r.advance(agentactivity.DefaultIdleHoldCap)
-			got := r.sess.tabs[1].agentIndicator() == agentactivity.IndicatorDone
-			require.Equal(t, tt.wantDone, got)
+			synctest.Test(t, func(t *testing.T) {
+				r := newAgentTestRig(t, 2)
+				selectTestAttachmentTab(r.sess, tt.shownTab)
+				r.ac.setTerminalFocus(tt.focus)
+				r.runAgent(1, 777, "claude")
+				r.output(1, claudeWorkingRows...)
+				r.settle()
+				r.advance(3 * time.Second)
+				r.output(1, claudeIdleRows...)
+				r.settle()
+				r.advance(agentactivity.DefaultIdleHoldCap)
+				got := r.sess.tabs[1].agentIndicator() == agentactivity.IndicatorDone
+				require.Equal(t, tt.wantDone, got)
+			})
 		})
 	}
 }
@@ -452,48 +467,52 @@ func TestAgentActivityAckKeepsNewerDone(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := newAgentTestRig(t, 3)
-			selectTestAttachmentTab(r.sess, 0)
-			a, b := r.sess.tabs[1], r.sess.tabs[2]
-			seedAgentStatus(r.d, r.sess, a, r.pane(1), agentPaneStatus{state: agentactivity.Idle, done: true})
-			rendered := a.agentState.Load().gen
-			// A second completion published after the paint rendered gen.
-			seedAgentStatus(r.d, r.sess, a, &pane{}, agentPaneStatus{state: agentactivity.Idle, done: true})
-			seedAgentStatus(r.d, r.sess, b, r.pane(2), agentPaneStatus{state: agentactivity.Idle, done: true})
-			if tt.overflow {
-				for len(r.sched.acks) < cap(r.sched.acks) {
-					r.sched.acks <- b
+			synctest.Test(t, func(t *testing.T) {
+				r := newAgentTestRig(t, 3)
+				selectTestAttachmentTab(r.sess, 0)
+				a, b := r.sess.tabs[1], r.sess.tabs[2]
+				seedAgentStatus(r.d, r.sess, a, r.pane(1), agentPaneStatus{state: agentactivity.Idle, done: true})
+				rendered := a.agentState.Load().gen
+				// A second completion published after the paint rendered gen.
+				seedAgentStatus(r.d, r.sess, a, &pane{}, agentPaneStatus{state: agentactivity.Idle, done: true})
+				seedAgentStatus(r.d, r.sess, b, r.pane(2), agentPaneStatus{state: agentactivity.Idle, done: true})
+				if tt.overflow {
+					for len(r.sched.acks) < cap(r.sched.acks) {
+						r.sched.acks <- b
+					}
 				}
-			}
-			selectTestAttachmentTab(r.sess, 1)
-			require.True(t, r.sess.ackAgentDone(r.d, a, r.ac, rendered, paneVisibilitySeq(a)))
-			r.advance(0)
-			require.Equal(t, agentactivity.IndicatorDone, a.agentIndicator(), "a completion newer than the rendered generation survives")
-			r.sched.requestAck(a, a.agentState.Load().gen, paneVisibilitySeq(a))
-			r.advance(0)
-			require.Equal(t, agentactivity.IndicatorIdle, a.agentIndicator())
-			require.Equal(t, agentactivity.IndicatorDone, b.agentIndicator(), "another tab's completion is not acknowledged")
+				selectTestAttachmentTab(r.sess, 1)
+				require.True(t, r.sess.ackAgentDone(r.d, a, r.ac, rendered, paneVisibilitySeq(a)))
+				r.advance(0)
+				require.Equal(t, agentactivity.IndicatorDone, a.agentIndicator(), "a completion newer than the rendered generation survives")
+				r.sched.requestAck(a, a.agentState.Load().gen, paneVisibilitySeq(a))
+				r.advance(0)
+				require.Equal(t, agentactivity.IndicatorIdle, a.agentIndicator())
+				require.Equal(t, agentactivity.IndicatorDone, b.agentIndicator(), "another tab's completion is not acknowledged")
+			})
 		})
 	}
 }
 
 func TestAgentActivityInboxOverflowRescans(t *testing.T) {
-	r := newAgentTestRig(t, 1)
-	r.runAgent(0, 777, "claude")
-	stranger := &pane{}
-	for len(r.sched.dirty) < cap(r.sched.dirty) {
-		stranger.activityDirty.Store(false)
-		r.sched.dirty <- stranger
-	}
-	p := r.pane(0)
-	p.mu.Lock()
-	p.screen.Write([]byte("\x1b[2J\x1b[" + fmt.Sprint(p.screen.Rows()-2) + ";1H" + strings.Join(claudeWorkingRows, "\r\n")))
-	p.mu.Unlock()
-	r.sched.markDirty(p)
-	require.True(t, r.sched.rescanAll.Load(), "a full inbox falls back to a sweep")
-	r.advance(0)
-	r.settle()
-	require.Equal(t, agentactivity.IndicatorWorking, r.sess.tabs[0].agentIndicator())
+	synctest.Test(t, func(t *testing.T) {
+		r := newAgentTestRig(t, 1)
+		r.runAgent(0, 777, "claude")
+		stranger := &pane{}
+		for len(r.sched.dirty) < cap(r.sched.dirty) {
+			stranger.activityDirty.Store(false)
+			r.sched.dirty <- stranger
+		}
+		p := r.pane(0)
+		p.mu.Lock()
+		p.screen.Write([]byte("\x1b[2J\x1b[" + fmt.Sprint(p.screen.Rows()-2) + ";1H" + strings.Join(claudeWorkingRows, "\r\n")))
+		p.mu.Unlock()
+		r.sched.markDirty(p)
+		require.True(t, r.sched.rescanAll.Load(), "a full inbox falls back to a sweep")
+		r.advance(0)
+		r.settle()
+		require.Equal(t, agentactivity.IndicatorWorking, r.sess.tabs[0].agentIndicator())
+	})
 }
 
 func TestAgentActivityCleanup(t *testing.T) {
@@ -526,14 +545,16 @@ func TestAgentActivityCleanup(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := newAgentTestRig(t, 2)
-			selectTestAttachmentTab(r.sess, 0)
-			r.runAgent(1, 777, "claude")
-			r.output(1, claudeWorkingRows...)
-			r.settle()
-			require.Equal(t, agentactivity.IndicatorWorking, r.sess.tabs[1].agentIndicator())
-			tt.cleanup(r)
-			require.Equal(t, agentactivity.IndicatorNone, r.sess.tabs[1].agentIndicator())
+			synctest.Test(t, func(t *testing.T) {
+				r := newAgentTestRig(t, 2)
+				selectTestAttachmentTab(r.sess, 0)
+				r.runAgent(1, 777, "claude")
+				r.output(1, claudeWorkingRows...)
+				r.settle()
+				require.Equal(t, agentactivity.IndicatorWorking, r.sess.tabs[1].agentIndicator())
+				tt.cleanup(r)
+				require.Equal(t, agentactivity.IndicatorNone, r.sess.tabs[1].agentIndicator())
+			})
 		})
 	}
 }
@@ -554,31 +575,33 @@ func TestAgentActivityOffIgnoresOutput(t *testing.T) {
 // a fake clock: a dirty pane arms the timer, its firing scans, and cancel
 // returns.
 func TestAgentActivitySchedulerRunArmsOneTimerAndExits(t *testing.T) {
-	r := newAgentTestRig(t, 1)
-	clock := portsmocks.NewMockClock(t)
-	clock.EXPECT().Now().Return(r.now).Maybe()
-	timerC := make(chan time.Time, 1)
-	timer := portsmocks.NewMockTimer(t)
-	timer.EXPECT().C().Return((<-chan time.Time)(timerC)).Maybe()
-	timer.EXPECT().Stop().Return(true).Maybe()
-	timer.EXPECT().Reset(mock.Anything).Return(true).Maybe()
-	armed := make(chan time.Duration, 8)
-	clock.EXPECT().NewTimer(mock.Anything).RunAndReturn(func(d time.Duration) ports.Timer {
-		armed <- d
-		return timer
-	}).Maybe()
-	r.d.clock = clock
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		r.sched.run(ctx)
-		close(done)
-	}()
-	r.sched.markDirty(r.pane(0))
-	require.Equal(t, agentScanQuiet, <-armed)
-	cancel()
-	<-done
-	require.Empty(t, armed, "one timer serves every pane")
+	synctest.Test(t, func(t *testing.T) {
+		r := newAgentTestRig(t, 1)
+		clock := portsmocks.NewMockClock(t)
+		clock.EXPECT().Now().Return(r.now).Maybe()
+		timerC := make(chan time.Time, 1)
+		timer := portsmocks.NewMockTimer(t)
+		timer.EXPECT().C().Return((<-chan time.Time)(timerC)).Maybe()
+		timer.EXPECT().Stop().Return(true).Maybe()
+		timer.EXPECT().Reset(mock.Anything).Return(true).Maybe()
+		armed := make(chan time.Duration, 8)
+		clock.EXPECT().NewTimer(mock.Anything).RunAndReturn(func(d time.Duration) ports.Timer {
+			armed <- d
+			return timer
+		}).Maybe()
+		r.d.clock = clock
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() {
+			r.sched.run(ctx)
+			close(done)
+		}()
+		r.sched.markDirty(r.pane(0))
+		require.Equal(t, agentScanQuiet, <-armed)
+		cancel()
+		<-done
+		require.Empty(t, armed, "one timer serves every pane")
+	})
 }
 
 func TestAgentActivityScansStaticScreensWhenEnabled(t *testing.T) {
@@ -603,13 +626,15 @@ func TestAgentActivityScansStaticScreensWhenEnabled(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := newAgentTestRig(t, 2)
-			selectTestAttachmentTab(r.sess, 0)
-			r.runAgent(1, 777, "claude")
-			tt.enable(r)
-			r.advance(0)
-			r.settle()
-			require.Equal(t, agentactivity.IndicatorBlocked, r.sess.tabs[1].agentIndicator())
+			synctest.Test(t, func(t *testing.T) {
+				r := newAgentTestRig(t, 2)
+				selectTestAttachmentTab(r.sess, 0)
+				r.runAgent(1, 777, "claude")
+				tt.enable(r)
+				r.advance(0)
+				r.settle()
+				require.Equal(t, agentactivity.IndicatorBlocked, r.sess.tabs[1].agentIndicator())
+			})
 		})
 	}
 }
@@ -668,32 +693,34 @@ func TestAgentActivityZutTurn(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := newAgentTestRig(t, 2)
-			selectTestAttachmentTab(r.sess, 0)
-			r.runAgent(1, 777, "zut")
-			tb := r.sess.tabs[1]
-			write := r.output
-			if tt.top {
-				write = r.outputTop
-			}
+			synctest.Test(t, func(t *testing.T) {
+				r := newAgentTestRig(t, 2)
+				selectTestAttachmentTab(r.sess, 0)
+				r.runAgent(1, 777, "zut")
+				tb := r.sess.tabs[1]
+				write := r.output
+				if tt.top {
+					write = r.outputTop
+				}
 
-			write(1, zutIdleRows...)
-			r.settle()
-			r.advance(agentactivity.DefaultStartupGrace)
-			require.Equal(t, agentactivity.IndicatorIdle, tb.agentIndicator(), "settled zut is idle")
-			require.True(t, r.sched.nextDeadline().IsZero(), "an idle pane parks the scheduler")
+				write(1, zutIdleRows...)
+				r.settle()
+				r.advance(agentactivity.DefaultStartupGrace)
+				require.Equal(t, agentactivity.IndicatorIdle, tb.agentIndicator(), "settled zut is idle")
+				require.True(t, r.sched.nextDeadline().IsZero(), "an idle pane parks the scheduler")
 
-			// Output long after the idle publish starts a new scan.
-			r.advance(10 * time.Second)
-			write(1, zutWorkingRows...)
-			r.settle()
-			require.Equal(t, agentactivity.IndicatorWorking, tb.agentIndicator())
+				// Output long after the idle publish starts a new scan.
+				r.advance(10 * time.Second)
+				write(1, zutWorkingRows...)
+				r.settle()
+				require.Equal(t, agentactivity.IndicatorWorking, tb.agentIndicator())
 
-			r.advance(agentactivity.DefaultMinDoneWorking)
-			write(1, zutIdleRows...)
-			r.settle()
-			r.advance(agentactivity.DefaultIdleHoldCap)
-			require.Equal(t, agentactivity.IndicatorDone, tb.agentIndicator())
+				r.advance(agentactivity.DefaultMinDoneWorking)
+				write(1, zutIdleRows...)
+				r.settle()
+				r.advance(agentactivity.DefaultIdleHoldCap)
+				require.Equal(t, agentactivity.IndicatorDone, tb.agentIndicator())
+			})
 		})
 	}
 }
@@ -795,23 +822,25 @@ func TestAgentActivityTerminalBell(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := newAgentTestRig(t, 2)
-			selectTestAttachmentTab(r.sess, 0)
-			tt.run(r)
+			synctest.Test(t, func(t *testing.T) {
+				r := newAgentTestRig(t, 2)
+				selectTestAttachmentTab(r.sess, 0)
+				tt.run(r)
 
-			require.Equal(t, tt.wantAttention, r.tabAttention(1))
-			agents := r.d.currentRuntimeConfig().agents.Activity
-			snap := r.sess.statusSegmentsWithAgents(r.ac, false, agents)
-			require.Equal(t, tt.wantTab, snap.tabs[1].activity, "tab cell")
+				require.Equal(t, tt.wantAttention, r.tabAttention(1))
+				agents := r.d.currentRuntimeConfig().agents.Activity
+				snap := r.sess.statusSegmentsWithAgents(r.ac, false, agents)
+				require.Equal(t, tt.wantTab, snap.tabs[1].activity, "tab cell")
 
-			// The bottom bar of another session draws this session's entry
-			// from its route attention and the published session index.
-			view := r.sess.snapshotView(viewOptions{})
-			indicator := agentactivity.IndicatorNone
-			if lookup := r.d.agentSessionLookup(); lookup != nil {
-				indicator = lookup(r.sess.incarnation)
-			}
-			require.Equal(t, tt.wantEntry, entryCell(view.hasAttention, sessionEntryActivity(indicator, true)), "session entry")
+				// The bottom bar of another session draws this session's entry
+				// from its route attention and the published session index.
+				view := r.sess.snapshotView(viewOptions{})
+				indicator := agentactivity.IndicatorNone
+				if lookup := r.d.agentSessionLookup(); lookup != nil {
+					indicator = lookup(r.sess.incarnation)
+				}
+				require.Equal(t, tt.wantEntry, entryCell(view.hasAttention, sessionEntryActivity(indicator, true)), "session entry")
+			})
 		})
 	}
 }

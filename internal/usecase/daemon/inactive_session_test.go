@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"testing"
+	"testing/synctest"
 
 	"github.com/stretchr/testify/require"
 
@@ -32,10 +33,12 @@ func TestInactiveSessionPredicates(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			require.Equal(t, test.visible, test.entry.visible())
-			require.Equal(t, test.broken, test.entry.broken())
-			require.Equal(t, test.canResume, test.entry.canResume())
-			require.Equal(t, test.restorePending, test.entry.restorePending())
+			synctest.Test(t, func(t *testing.T) {
+				require.Equal(t, test.visible, test.entry.visible())
+				require.Equal(t, test.broken, test.entry.broken())
+				require.Equal(t, test.canResume, test.entry.canResume())
+				require.Equal(t, test.restorePending, test.entry.restorePending())
+			})
 		})
 	}
 }
@@ -53,11 +56,13 @@ func TestInactiveSessionLifecycleMatch(t *testing.T) {
 		{name: "different incarnation", mutate: func(candidate *inactiveSession) { candidate.incarnation[0]++ }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			candidate := entry
-			if test.mutate != nil {
-				test.mutate(&candidate)
-			}
-			require.Equal(t, test.want, entry.sameLifecycle(candidate))
+			synctest.Test(t, func(t *testing.T) {
+				candidate := entry
+				if test.mutate != nil {
+					test.mutate(&candidate)
+				}
+				require.Equal(t, test.want, entry.sameLifecycle(candidate))
+			})
 		})
 	}
 }

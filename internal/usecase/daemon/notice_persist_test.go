@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"testing"
+	"testing/synctest"
 
 	"github.com/stretchr/testify/require"
 
@@ -19,34 +20,37 @@ import (
 // a previous daemon are recorded to history and toasted to the first client
 // that attaches after this daemon starts before their claim is acknowledged.
 func TestStartupClaimRecordsAndToastsPendingNotices(t *testing.T) {
-	claimed := []domain.Notification{
-		{Code: domain.NoticeSnapshotWrite, Severity: domain.NoticeError, Message: "session a shut down without saving terminal state"},
-		{Code: domain.NoticeSnapshotWrite, Severity: domain.NoticeError, Message: "session b shut down without saving terminal state"},
-	}
-	notices := portsmocks.NewMockNoticeStore(t)
-	notices.EXPECT().Claim().Return(claimed, nil).Once()
-	notices.EXPECT().Ack().Return(nil).Once()
+	synctest.Test(t, func(t *testing.T) {
+		claimed := []domain.Notification{
+			{Code: domain.NoticeSnapshotWrite, Severity: domain.NoticeError, Message: "session a shut down without saving terminal state"},
+			{Code: domain.NoticeSnapshotWrite, Severity: domain.NoticeError, Message: "session b shut down without saving terminal state"},
+		}
+		notices := portsmocks.NewMockNoticeStore(t)
+		notices.EXPECT().Claim().Return(claimed, nil).Once()
+		notices.EXPECT().Ack().Return(nil).Once()
 
-	p, releasePTY := newBlockingPTY(t)
-	defer releasePTY()
-	d := newTestDaemon(t, newFactory(t, p), newStubClock(t))
-	d.noticeStore = notices
+		p, releasePTY := newBlockingPTY(t)
+		defer releasePTY()
+		d := newTestDaemon(t, newFactory(t, p), newStubClock(t))
+		d.noticeStore = notices
 
-	d.restoreSnapshots(t.Context())
+		d.restoreSnapshots(t.Context())
 
-	require.Len(t, d.notices.history(), 2, "each drained notice is recorded individually")
+		require.Len(t, d.notices.history(), 2, "each drained notice is recorded individually")
 
-	tr, _ := newCapturingTransport(t)
-	sess, ac, err := d.route(protocol.Hello{
-		Version: protocol.Version,
-		Intent:  protocol.IntentEphemeral,
-		Size:    domain.Size{Cols: 80, Rows: 24},
-	}, tr)
-	require.NoError(t, err)
-	d.firstPaint(sess, ac)
+		tr, _ := newCapturingTransport(t)
+		sess, ac, err := d.route(protocol.Hello{
+			Version: protocol.Version,
+			Intent:  protocol.IntentEphemeral,
+			Size:    domain.Size{Cols: 80, Rows: 24},
+		}, tr)
+		require.NoError(t, err)
+		stopOverlayTimersOnCleanup(t, ac)
+		d.firstPaint(sess, ac)
 
-	toasts := awaitToastCount(t, ac, 1)
-	require.Equal(t, domain.NoticeSnapshotWrite, toasts[0].Code)
-	require.Equal(t, 2, toasts[0].Count, "two same-code drained notices dedup into one toast counted twice")
-	require.Empty(t, d.notices.drainPending(), "firstPaint must consume the queue")
+		toasts := requireToastCount(t, ac, 1)
+		require.Equal(t, domain.NoticeSnapshotWrite, toasts[0].Code)
+		require.Equal(t, 2, toasts[0].Count, "two same-code drained notices dedup into one toast counted twice")
+		require.Empty(t, d.notices.drainPending(), "firstPaint must consume the queue")
+	})
 }

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"testing"
+	"testing/synctest"
 
 	"github.com/stretchr/testify/require"
 
@@ -10,82 +11,86 @@ import (
 )
 
 func TestPaletteSessionSelectionCompletesSamePeerSwitch(t *testing.T) {
-	d, source, ac, sends, releases := newManualTabSession(t, 1)
-	defer releaseAll(releases)
+	synctest.Test(t, func(t *testing.T) {
+		d, source, ac, sends, releases := newManualTabSession(t, 1)
+		defer releaseAll(releases)
 
-	lifecycle := domain.SessionLifecycleID{7}
-	target := &session{
-		sessionCore: sessionCore{
-			id: "target", name: "target", incarnation: lifecycle,
-			attachments: make(map[*attachedClient]struct{}),
-		},
-		ctx: source.ctx, cancel: func() {},
-		tabs: []*tab{newTab(nil, domain.Size{Cols: 80, Rows: 23})},
-	}
-	publishTiledPaneOwners(target, target.tabs[0])
-	d.mu.Lock()
-	d.sessions[target.id] = target
-	d.mu.Unlock()
-	ac.setRouteSnapshot(protocol.RecentRouteSnapshot{Generation: 1})
+		lifecycle := domain.SessionLifecycleID{7}
+		target := &session{
+			sessionCore: sessionCore{
+				id: "target", name: "target", incarnation: lifecycle,
+				attachments: make(map[*attachedClient]struct{}),
+			},
+			ctx: source.ctx, cancel: func() {},
+			tabs: []*tab{newTab(nil, domain.Size{Cols: 80, Rows: 23})},
+		}
+		publishTiledPaneOwners(target, target.tabs[0])
+		d.mu.Lock()
+		d.sessions[target.id] = target
+		d.mu.Unlock()
+		ac.setRouteSnapshot(protocol.RecentRouteSnapshot{Generation: 1})
 
-	token := beginRecentRoutePaletteEffect(t, d, source, ac)
-	d.handleInputForAttachment(token, []byte("\x1b "))
-	awaitFrame(t, sends, "Output")
-	d.handleInputForAttachment(token, []byte("target\r"))
-	targetFrame := awaitFrame(t, sends, "AttachTarget")
-	attachTarget := decodeServerMessage(t, targetFrame).(protocol.AttachTarget)
-	require.Equal(t, &protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "target"}, attachTarget.ExactTarget)
+		token := beginRecentRoutePaletteEffect(t, d, source, ac)
+		d.handleInputForAttachment(token, []byte("\x1b "))
+		requireFrame(t, sends, "Output")
+		d.handleInputForAttachment(token, []byte("target\r"))
+		targetFrame := requireFrame(t, sends, "AttachTarget")
+		attachTarget := decodeServerMessage(t, targetFrame).(protocol.AttachTarget)
+		require.Equal(t, &protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "target"}, attachTarget.ExactTarget)
 
-	d.switchSamePeerForAttachment(token, protocol.SamePeerSwitchRequest{
-		RequestID: 1, Target: *attachTarget.ExactTarget,
+		d.switchSamePeerForAttachment(token, protocol.SamePeerSwitchRequest{
+			RequestID: 1, Target: *attachTarget.ExactTarget,
+		})
+
+		require.Same(t, target, ac.currentAttachmentSession())
+		identityFrame := requireFrame(t, sends, "CommittedRouteIdentity")
+		identity := decodeServerMessage(t, identityFrame).(protocol.CommittedRouteIdentity)
+		require.Equal(t, attachTarget.ExactTarget, &identity.Target)
 	})
-
-	require.Same(t, target, ac.currentAttachmentSession())
-	identityFrame := awaitFrame(t, sends, "CommittedRouteIdentity")
-	identity := decodeServerMessage(t, identityFrame).(protocol.CommittedRouteIdentity)
-	require.Equal(t, attachTarget.ExactTarget, &identity.Target)
 }
 
 func TestSamePeerSwitchTransitionsExactTargetAndPreferredTab(t *testing.T) {
-	d, source, ac, sends, releases := newManualTabSession(t, 1)
-	defer releaseAll(releases)
+	synctest.Test(t, func(t *testing.T) {
+		d, source, ac, sends, releases := newManualTabSession(t, 1)
+		defer releaseAll(releases)
 
-	lifecycle := domain.SessionLifecycleID{7}
-	target := &session{
-		sessionCore: sessionCore{id: "target", name: "target", incarnation: lifecycle, attachments: make(map[*attachedClient]struct{})},
-		ctx:         source.ctx,
-		cancel:      func() {},
-		tabs: []*tab{
-			newTab(nil, domain.Size{Cols: 80, Rows: 23}),
-			newTab(nil, domain.Size{Cols: 80, Rows: 23}),
-		},
-	}
-	for _, tab := range target.tabs {
-		publishTiledPaneOwners(target, tab)
-	}
-	d.mu.Lock()
-	d.sessions[target.id] = target
-	d.mu.Unlock()
-	ac.setRouteSnapshot(protocol.RecentRouteSnapshot{Generation: 1})
+		lifecycle := domain.SessionLifecycleID{7}
+		target := &session{
+			sessionCore: sessionCore{id: "target", name: "target", incarnation: lifecycle, attachments: make(map[*attachedClient]struct{})},
+			ctx:         source.ctx,
+			cancel:      func() {},
+			tabs: []*tab{
+				newTab(nil, domain.Size{Cols: 80, Rows: 23}),
+				newTab(nil, domain.Size{Cols: 80, Rows: 23}),
+			},
+		}
+		for _, tab := range target.tabs {
+			publishTiledPaneOwners(target, tab)
+		}
+		d.mu.Lock()
+		d.sessions[target.id] = target
+		d.mu.Unlock()
+		ac.setRouteSnapshot(protocol.RecentRouteSnapshot{Generation: 1})
 
-	token := source.captureAttachmentCapability(ac, ac.transport())
-	effect, admitted := ac.beginAttachmentEffect(token)
-	require.True(t, admitted)
-	defer effect.End()
-	requestTarget := protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "target"}
-	ac.offerSamePeerTarget(requestTarget)
+		token := source.captureAttachmentCapability(ac, ac.transport())
+		effect, admitted := ac.beginAttachmentEffect(token)
+		require.True(t, admitted)
+		defer effect.End()
+		requestTarget := protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "target"}
+		ac.offerSamePeerTarget(requestTarget)
 
-	d.switchSamePeerForAttachment(effect, protocol.SamePeerSwitchRequest{
-		RequestID:      1,
-		Target:         requestTarget,
-		PreferredTabID: domain.TabStableID(target.tabs[1].stableID),
+		d.switchSamePeerForAttachment(effect, protocol.SamePeerSwitchRequest{
+			RequestID:      1,
+			Target:         requestTarget,
+			PreferredTabID: domain.TabStableID(target.tabs[1].stableID),
+		})
+
+		require.Same(t, target, ac.currentAttachmentSession())
+		require.Equal(t, domain.TabStableID(target.tabs[1].stableID), ac.viewSnapshot().tabID)
+		identityFrame := requireFrame(t, sends, "CommittedRouteIdentity")
+		identity := decodeServerMessage(t, identityFrame).(protocol.CommittedRouteIdentity)
+		require.Equal(t, protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "target"}, identity.Target)
 	})
-
-	require.Same(t, target, ac.currentAttachmentSession())
-	require.Equal(t, domain.TabStableID(target.tabs[1].stableID), ac.viewSnapshot().tabID)
-	identityFrame := awaitFrame(t, sends, "CommittedRouteIdentity")
-	identity := decodeServerMessage(t, identityFrame).(protocol.CommittedRouteIdentity)
-	require.Equal(t, protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "target"}, identity.Target)
 }
 
 func TestFinishSendErrorDetachClearsSamePeerOffer(t *testing.T) {
@@ -101,24 +106,26 @@ func TestFinishSendErrorDetachClearsSamePeerOffer(t *testing.T) {
 }
 
 func TestSamePeerSwitchRejectsStaleTargetWithoutMutation(t *testing.T) {
-	d, source, ac, sends, releases := newManualTabSession(t, 1)
-	defer releaseAll(releases)
-	ac.setRouteSnapshot(protocol.RecentRouteSnapshot{Generation: 1})
+	synctest.Test(t, func(t *testing.T) {
+		d, source, ac, sends, releases := newManualTabSession(t, 1)
+		defer releaseAll(releases)
+		ac.setRouteSnapshot(protocol.RecentRouteSnapshot{Generation: 1})
 
-	token := source.captureAttachmentCapability(ac, ac.transport())
-	effect, admitted := ac.beginAttachmentEffect(token)
-	require.True(t, admitted)
-	defer effect.End()
+		token := source.captureAttachmentCapability(ac, ac.transport())
+		effect, admitted := ac.beginAttachmentEffect(token)
+		require.True(t, admitted)
+		defer effect.End()
 
-	d.switchSamePeerForAttachment(effect, protocol.SamePeerSwitchRequest{
-		RequestID: 1,
-		Target:    protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{9}, SessionName: "missing"},
+		d.switchSamePeerForAttachment(effect, protocol.SamePeerSwitchRequest{
+			RequestID: 1,
+			Target:    protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{9}, SessionName: "missing"},
+		})
+
+		require.Same(t, source, ac.currentAttachmentSession())
+		failureFrame := requireFrame(t, sends, "SamePeerSwitchFailure")
+		failure := decodeServerMessage(t, failureFrame).(protocol.SamePeerSwitchFailure)
+		require.Equal(t, protocol.SamePeerSwitchFailure{RequestID: 1, Code: protocol.SamePeerSwitchStaleTarget}, failure)
 	})
-
-	require.Same(t, source, ac.currentAttachmentSession())
-	failureFrame := awaitFrame(t, sends, "SamePeerSwitchFailure")
-	failure := decodeServerMessage(t, failureFrame).(protocol.SamePeerSwitchFailure)
-	require.Equal(t, protocol.SamePeerSwitchFailure{RequestID: 1, Code: protocol.SamePeerSwitchStaleTarget}, failure)
 }
 
 // TestSamePeerSwitchClientInitiated pins that the client picker can move its
@@ -143,50 +150,52 @@ func TestSamePeerSwitchClientInitiated(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d, source, ac, sends, releases := newManualTabSession(t, 1)
-			defer releaseAll(releases)
-			target := &session{
-				sessionCore: sessionCore{id: "target", name: "target", incarnation: lifecycle, attachments: make(map[*attachedClient]struct{})},
-				ctx:         source.ctx,
-				cancel:      func() {},
-				tabs:        []*tab{newTab(nil, domain.Size{Cols: 80, Rows: 23})},
-			}
-			publishTiledPaneOwners(target, target.tabs[0])
-			d.mu.Lock()
-			d.sessions[target.id] = target
-			d.mu.Unlock()
-			ac.setRouteSnapshot(protocol.RecentRouteSnapshot{Generation: 1})
-			if tt.offer != nil {
-				ac.offerSamePeerTarget(*tt.offer)
-			}
-			d.mu.Lock()
-			d.purgeAdmissionClosing = tt.purging
-			d.mu.Unlock()
+			synctest.Test(t, func(t *testing.T) {
+				d, source, ac, sends, releases := newManualTabSession(t, 1)
+				defer releaseAll(releases)
+				target := &session{
+					sessionCore: sessionCore{id: "target", name: "target", incarnation: lifecycle, attachments: make(map[*attachedClient]struct{})},
+					ctx:         source.ctx,
+					cancel:      func() {},
+					tabs:        []*tab{newTab(nil, domain.Size{Cols: 80, Rows: 23})},
+				}
+				publishTiledPaneOwners(target, target.tabs[0])
+				d.mu.Lock()
+				d.sessions[target.id] = target
+				d.mu.Unlock()
+				ac.setRouteSnapshot(protocol.RecentRouteSnapshot{Generation: 1})
+				if tt.offer != nil {
+					ac.offerSamePeerTarget(*tt.offer)
+				}
+				d.mu.Lock()
+				d.purgeAdmissionClosing = tt.purging
+				d.mu.Unlock()
 
-			token := source.captureAttachmentCapability(ac, ac.transport())
-			effect, admitted := ac.beginAttachmentEffect(token)
-			require.True(t, admitted)
-			defer effect.End()
-			d.switchSamePeerForAttachment(effect, protocol.SamePeerSwitchRequest{RequestID: 1, Target: requestTarget})
+				token := source.captureAttachmentCapability(ac, ac.transport())
+				effect, admitted := ac.beginAttachmentEffect(token)
+				require.True(t, admitted)
+				defer effect.End()
+				d.switchSamePeerForAttachment(effect, protocol.SamePeerSwitchRequest{RequestID: 1, Target: requestTarget})
 
-			d.mu.Lock()
-			require.Zero(t, d.purgeAdmissionActive, "the switch releases its purge admission")
-			d.purgeAdmissionClosing = false
-			d.mu.Unlock()
-			if tt.switched {
-				require.Same(t, target, ac.currentAttachmentSession())
-				identity := decodeServerMessage(t, awaitFrame(t, sends, "CommittedRouteIdentity")).(protocol.CommittedRouteIdentity)
-				require.Equal(t, requestTarget, identity.Target)
-				return
-			}
-			require.Same(t, source, ac.currentAttachmentSession())
-			failure := decodeServerMessage(t, awaitFrame(t, sends, "SamePeerSwitchFailure")).(protocol.SamePeerSwitchFailure)
-			require.Equal(t, tt.wantCode, failure.Code)
-			if tt.offer != nil {
-				ac.samePeerOfferMu.Lock()
-				defer ac.samePeerOfferMu.Unlock()
-				require.Equal(t, tt.offer, ac.samePeerOffer, "a refused switch keeps the pending offer")
-			}
+				d.mu.Lock()
+				require.Zero(t, d.purgeAdmissionActive, "the switch releases its purge admission")
+				d.purgeAdmissionClosing = false
+				d.mu.Unlock()
+				if tt.switched {
+					require.Same(t, target, ac.currentAttachmentSession())
+					identity := decodeServerMessage(t, requireFrame(t, sends, "CommittedRouteIdentity")).(protocol.CommittedRouteIdentity)
+					require.Equal(t, requestTarget, identity.Target)
+					return
+				}
+				require.Same(t, source, ac.currentAttachmentSession())
+				failure := decodeServerMessage(t, requireFrame(t, sends, "SamePeerSwitchFailure")).(protocol.SamePeerSwitchFailure)
+				require.Equal(t, tt.wantCode, failure.Code)
+				if tt.offer != nil {
+					ac.samePeerOfferMu.Lock()
+					defer ac.samePeerOfferMu.Unlock()
+					require.Equal(t, tt.offer, ac.samePeerOffer, "a refused switch keeps the pending offer")
+				}
+			})
 		})
 	}
 }
@@ -210,37 +219,39 @@ func TestSamePeerSwitchRefreshesTargetFromSwitchingAttachment(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d, source, ac, _, releases := newManualTabSession(t, 1)
-			defer releaseAll(releases)
-			ac.setClientEnvironment(tt.clientEnv)
+			synctest.Test(t, func(t *testing.T) {
+				d, source, ac, _, releases := newManualTabSession(t, 1)
+				defer releaseAll(releases)
+				ac.setClientEnvironment(tt.clientEnv)
 
-			lifecycle := domain.SessionLifecycleID{7}
-			target := &session{
-				sessionCore: sessionCore{id: "target", name: "target", incarnation: lifecycle, attachments: make(map[*attachedClient]struct{})},
-				ctx:         source.ctx,
-				cancel:      func() {},
-				tabs:        []*tab{newTab(nil, domain.Size{Cols: 80, Rows: 23})},
-				env:         append([]string(nil), targetEnv...),
-			}
-			publishTiledPaneOwners(target, target.tabs[0])
-			d.mu.Lock()
-			d.sessions[target.id] = target
-			d.mu.Unlock()
-			ac.setRouteSnapshot(protocol.RecentRouteSnapshot{Generation: 1})
+				lifecycle := domain.SessionLifecycleID{7}
+				target := &session{
+					sessionCore: sessionCore{id: "target", name: "target", incarnation: lifecycle, attachments: make(map[*attachedClient]struct{})},
+					ctx:         source.ctx,
+					cancel:      func() {},
+					tabs:        []*tab{newTab(nil, domain.Size{Cols: 80, Rows: 23})},
+					env:         append([]string(nil), targetEnv...),
+				}
+				publishTiledPaneOwners(target, target.tabs[0])
+				d.mu.Lock()
+				d.sessions[target.id] = target
+				d.mu.Unlock()
+				ac.setRouteSnapshot(protocol.RecentRouteSnapshot{Generation: 1})
 
-			token := source.captureAttachmentCapability(ac, ac.transport())
-			effect, admitted := ac.beginAttachmentEffect(token)
-			require.True(t, admitted)
-			defer effect.End()
-			requestTarget := protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "target"}
-			ac.offerSamePeerTarget(requestTarget)
+				token := source.captureAttachmentCapability(ac, ac.transport())
+				effect, admitted := ac.beginAttachmentEffect(token)
+				require.True(t, admitted)
+				defer effect.End()
+				requestTarget := protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "target"}
+				ac.offerSamePeerTarget(requestTarget)
 
-			d.switchSamePeerForAttachment(effect, protocol.SamePeerSwitchRequest{RequestID: 1, Target: requestTarget})
+				d.switchSamePeerForAttachment(effect, protocol.SamePeerSwitchRequest{RequestID: 1, Target: requestTarget})
 
-			require.Same(t, target, ac.currentAttachmentSession())
-			target.mu.Lock()
-			defer target.mu.Unlock()
-			require.Equal(t, tt.want, target.env)
+				require.Same(t, target, ac.currentAttachmentSession())
+				target.mu.Lock()
+				defer target.mu.Unlock()
+				require.Equal(t, tt.want, target.env)
+			})
 		})
 	}
 }

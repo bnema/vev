@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"testing"
+	"testing/synctest"
 
 	vt "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
@@ -90,7 +91,9 @@ func TestOverlayInputCursor(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.want, overlayInputCursor(tt.overlays, tt.pane, 20, 10))
+			synctest.Test(t, func(t *testing.T) {
+				require.Equal(t, tt.want, overlayInputCursor(tt.overlays, tt.pane, 20, 10))
+			})
 		})
 	}
 }
@@ -99,23 +102,25 @@ func TestOverlayInputCursor(t *testing.T) {
 // the open palette shows the real terminal cursor after its query, which is
 // what lets client predictive echo type ahead in it.
 func TestPaletteInputLineOwnsTerminalCursor(t *testing.T) {
-	p, release := newBlockingPTY(t)
-	defer release()
-	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	client := vt.NewScreen(80, 25)
-	d.paint(sess, ac, true, nil)
-	mustApplyOutput(t, client, awaitFrame(t, sends, "Output"))
+	synctest.Test(t, func(t *testing.T) {
+		p, release := newBlockingPTY(t)
+		defer release()
+		d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+		client := vt.NewScreen(80, 25)
+		d.paint(sess, ac, true, nil)
+		mustApplyOutput(t, client, requireFrame(t, sends, "Output"))
 
-	d.handleInput(sess, ac, []byte("\x1b "))
-	mustApplyOutput(t, client, awaitFrame(t, sends, "Output"))
-	require.True(t, client.CursorVisible(), "open palette shows the real cursor")
-	row, col := client.CursorRow(), client.CursorCol()
-	require.Equal(t, '>', client.Cell(col-2, row).Rune, "cursor sits after the query prompt")
+		d.handleInput(sess, ac, []byte("\x1b "))
+		mustApplyOutput(t, client, requireFrame(t, sends, "Output"))
+		require.True(t, client.CursorVisible(), "open palette shows the real cursor")
+		row, col := client.CursorRow(), client.CursorCol()
+		require.Equal(t, '>', client.Cell(col-2, row).Rune, "cursor sits after the query prompt")
 
-	d.handleInput(sess, ac, []byte("ab"))
-	mustApplyOutput(t, client, awaitFrame(t, sends, "Output"))
-	require.True(t, client.CursorVisible())
-	require.Equal(t, row, client.CursorRow())
-	require.Equal(t, col+2, client.CursorCol(), "cursor follows typed query")
-	require.Equal(t, 'b', client.Cell(col+1, row).Rune)
+		d.handleInput(sess, ac, []byte("ab"))
+		mustApplyOutput(t, client, requireFrame(t, sends, "Output"))
+		require.True(t, client.CursorVisible())
+		require.Equal(t, row, client.CursorRow())
+		require.Equal(t, col+2, client.CursorCol(), "cursor follows typed query")
+		require.Equal(t, 'b', client.Cell(col+1, row).Rune)
+	})
 }
