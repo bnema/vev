@@ -3,6 +3,7 @@ package daemon
 import (
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -40,289 +41,304 @@ func newBlockedPeerConnection(t testing.TB) (*mockServerConnection, *blockedPeer
 }
 
 func TestStaleCapacityReadinessRequeuesWithoutAnotherInvalidation(t *testing.T) {
-	d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
-	rc := d.attachCoordinator(sess, nil, ac, true)
-	require.True(t, sess.repairAttachmentView(ac))
-	rc.opts.clock = nil // drive fire explicitly; the interleaving is the test.
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
+		rc := d.attachCoordinator(sess, nil, ac, true)
+		require.True(t, sess.repairAttachmentView(ac))
+		rc.opts.clock = nil // drive fire explicitly; the interleaving is the test.
 
-	firstObserved := make(chan struct{})
-	retryObserved := make(chan struct{})
-	releaseFirst := make(chan struct{})
-	releaseRetry := make(chan struct{})
-	var probes atomic.Int32
-	rc.opts.ackReadyFor = func(*attachedClient) bool {
-		switch probes.Add(1) {
-		case 1:
-			close(firstObserved)
-			<-releaseFirst
-		case 2:
-			close(retryObserved)
-			<-releaseRetry
+		firstObserved := make(chan struct{})
+		retryObserved := make(chan struct{})
+		releaseFirst := make(chan struct{})
+		releaseRetry := make(chan struct{})
+		var probes atomic.Int32
+		rc.opts.ackReadyFor = func(*attachedClient) bool {
+			switch probes.Add(1) {
+			case 1:
+				close(firstObserved)
+				<-releaseFirst
+			case 2:
+				close(retryObserved)
+				<-releaseRetry
+			}
+			return true
 		}
-		return true
-	}
 
-	pane := sess.tabs[0].focusedPane()
-	pane.mu.Lock()
-	pane.screen.Write([]byte("capacity race"))
-	pane.mu.Unlock()
-	require.True(t, rc.invalidate(renderInvalidation{class: invalidateUrgent, producer: "capacity-race-test"}))
-	fireDone := make(chan struct{})
-	go func() {
-		rc.fireCurrent(false)
-		close(fireDone)
-	}()
-	awaitTestCompletion(t, firstObserved, "readiness probe did not start")
+		pane := sess.tabs[0].focusedPane()
+		pane.mu.Lock()
+		pane.screen.Write([]byte("capacity race"))
+		pane.mu.Unlock()
+		require.True(t, rc.invalidate(renderInvalidation{class: invalidateUrgent, producer: "capacity-race-test"}))
+		fireDone := make(chan struct{})
+		go func() {
+			rc.fireCurrent(false)
+			close(fireDone)
+		}()
+		requireReceived(t, firstObserved, "readiness probe did not start")
 
-	// Readiness was observed while the window had room. Fill it before the
-	// wake reaches paint; paint must report the failed final capacity check.
-	ac.sendMu.Lock()
-	ac.output.maxOutstanding = 1
-	ac.output.next = 1
-	ac.output.acked = 0
-	ac.output.syncCapacityLocked()
-	ac.sendMu.Unlock()
-	close(releaseFirst)
-	awaitTestCompletion(t, retryObserved, "capacity failure did not schedule an internal retry")
+		// Readiness was observed while the window had room. Fill it before the
+		// wake reaches paint; paint must report the failed final capacity check.
+		ac.sendMu.Lock()
+		ac.output.maxOutstanding = 1
+		ac.output.next = 1
+		ac.output.acked = 0
+		ac.output.syncCapacityLocked()
+		ac.sendMu.Unlock()
+		close(releaseFirst)
+		requireReceived(t, retryObserved, "capacity failure did not schedule an internal retry")
 
-	// The retry is already in flight. Restore capacity without publishing any
-	// new invalidation or ACK notification, then let that retry paint.
-	ac.sendMu.Lock()
-	ac.output.maxOutstanding = 2
-	ac.output.syncCapacityLocked()
-	ac.sendMu.Unlock()
-	close(releaseRetry)
-	frame := awaitFrame(t, sends, "Output")
-	output, ok := decodeServerMessage(t, frame).(protocol.Output)
-	require.True(t, ok)
-	require.Contains(t, string(output.Data), "capacity race")
-	awaitTestCompletion(t, fireDone, "initial fire did not finish")
+		// The retry is already in flight. Restore capacity without publishing any
+		// new invalidation or ACK notification, then let that retry paint.
+		ac.sendMu.Lock()
+		ac.output.maxOutstanding = 2
+		ac.output.syncCapacityLocked()
+		ac.sendMu.Unlock()
+		close(releaseRetry)
+		frame := requireFrame(t, sends, "Output")
+		output, ok := decodeServerMessage(t, frame).(protocol.Output)
+		require.True(t, ok)
+		require.Contains(t, string(output.Data), "capacity race")
+		requireReceived(t, fireDone, "initial fire did not finish")
 
-	rc.mu.Lock()
-	requeuedPending := rc.pending
-	rc.mu.Unlock()
-	require.False(t, requeuedPending, "successful internal retry must consume the mutation")
-	require.Equal(t, int32(2), probes.Load(), "retry must not require another external wake")
+		rc.mu.Lock()
+		requeuedPending := rc.pending
+		rc.mu.Unlock()
+		require.False(t, requeuedPending, "successful internal retry must consume the mutation")
+		require.Equal(t, int32(2), probes.Load(), "retry must not require another external wake")
+	})
 }
 
 func TestAttachmentResizeKeepsPeerWindowAndExpandsSharedContent(t *testing.T) {
-	pty, releasePTY := newBlockingPTY(t)
-	defer releasePTY()
-	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
-	firstTransport, _ := newCapturingTransport(t)
-	sess, first, err := d.route(protocol.Hello{
-		Version: protocol.Version, Intent: protocol.IntentNew, Name: "work",
-		Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{1},
-	}, firstTransport)
-	require.NoError(t, err)
-	secondTransport, _ := newCapturingTransport(t)
-	_, second, err := d.route(protocol.Hello{
-		Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work",
-		Size: domain.Size{Cols: 100, Rows: 40}, ClientID: [16]byte{2},
-	}, secondTransport)
-	require.NoError(t, err)
-	require.True(t, sess.repairAttachmentView(second))
+	synctest.Test(t, func(t *testing.T) {
+		pty, releasePTY := newBlockingPTY(t)
+		defer releasePTY()
+		d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
+		firstTransport, _ := newCapturingTransport(t)
+		sess, first, err := d.route(protocol.Hello{
+			Version: protocol.Version, Intent: protocol.IntentNew, Name: "work",
+			Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{1},
+		}, firstTransport)
+		require.NoError(t, err)
+		secondTransport, _ := newCapturingTransport(t)
+		_, second, err := d.route(protocol.Hello{
+			Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work",
+			Size: domain.Size{Cols: 100, Rows: 40}, ClientID: [16]byte{2},
+		}, secondTransport)
+		require.NoError(t, err)
+		require.True(t, sess.repairAttachmentView(second))
 
-	tb := sess.tabs[0]
-	firstSize := first.geometry.Size
-	secondRevision := second.viewSnapshot().revision
-	secondEpoch := second.output.currentEpoch()
+		tb := sess.tabs[0]
+		firstSize := first.geometry.Size
+		secondRevision := second.viewSnapshot().revision
+		secondEpoch := second.output.currentEpoch()
 
-	rc := sess.renderCoordinator()
-	lease := rc.attachmentLease(second)
-	require.True(t, rc.markAttachmentReady(lease))
-	token := sess.captureAttachmentCapability(second, secondTransport)
-	token.lease = lease
-	second.installTestAttachmentCapability(token)
-	effect, admitted := second.beginAttachmentEffect(token)
-	require.True(t, admitted)
-	require.True(t, d.resizeAttachmentForLease(effect, domain.Size{Cols: 120, Rows: 50}))
-	effect.End()
+		rc := sess.renderCoordinator()
+		lease := rc.attachmentLease(second)
+		require.True(t, rc.markAttachmentReady(lease))
+		token := sess.captureAttachmentCapability(second, secondTransport)
+		token.lease = lease
+		second.installTestAttachmentCapability(token)
+		effect, admitted := second.beginAttachmentEffect(token)
+		require.True(t, admitted)
+		require.True(t, d.resizeAttachmentForLease(effect, domain.Size{Cols: 120, Rows: 50}))
+		effect.End()
 
-	tb.mu.Lock()
-	require.Equal(t, domain.Size{Cols: 120, Rows: 48}, tb.size)
-	tb.mu.Unlock()
-	require.Equal(t, firstSize, first.geometry.Size)
-	require.Equal(t, domain.Size{Cols: 120, Rows: 50}, second.geometry.Size)
-	require.Equal(t, secondRevision+1, second.viewSnapshot().revision)
-	require.Greater(t, second.output.currentEpoch(), secondEpoch)
+		tb.mu.Lock()
+		require.Equal(t, domain.Size{Cols: 120, Rows: 48}, tb.size)
+		tb.mu.Unlock()
+		require.Equal(t, firstSize, first.geometry.Size)
+		require.Equal(t, domain.Size{Cols: 120, Rows: 50}, second.geometry.Size)
+		require.Equal(t, secondRevision+1, second.viewSnapshot().revision)
+		require.Greater(t, second.output.currentEpoch(), secondEpoch)
+	})
 }
 
 func TestAttachmentFirstPaintDoesNotWaitForBlockedPeer(t *testing.T) {
-	pty, releasePTY := newBlockingPTY(t)
-	defer releasePTY()
-	clock, _ := newSignalClock(t, 16)
-	d := newTestDaemon(t, newFactory(t, pty), clock)
-	oldTransport, oldTransportPeer := newBlockedPeerConnection(t)
-	sess, old, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{1}}, oldTransport)
-	require.NoError(t, err)
-	newTransport, newTransportPeer := newBlockedPeerConnection(t)
-	_, fresh, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{2}}, newTransport)
-	require.NoError(t, err)
+	synctest.Test(t, func(t *testing.T) {
+		pty, releasePTY := newBlockingPTY(t)
+		defer releasePTY()
+		clock, _ := newSignalClock(t, 16)
+		d := newTestDaemon(t, newFactory(t, pty), clock)
+		oldTransport, oldTransportPeer := newBlockedPeerConnection(t)
+		sess, old, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{1}}, oldTransport)
+		require.NoError(t, err)
+		newTransport, newTransportPeer := newBlockedPeerConnection(t)
+		_, fresh, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{2}}, newTransport)
+		require.NoError(t, err)
 
-	rc := sess.renderCoordinator()
-	oldLease := rc.attachmentLease(old)
-	freshLease := rc.attachmentLease(fresh)
-	require.True(t, rc.markAttachmentReady(oldLease))
-	oldTransportPeer.blocked.Store(true)
-	pane := sess.tabs[0].focusedPane()
-	pane.mu.Lock()
-	pane.screen.Write([]byte("slow peer"))
-	pane.mu.Unlock()
-	require.True(t, rc.invalidate(renderInvalidation{class: invalidateUrgent, reset: true, producer: "test"}))
-	rc.fireCurrent(false)
-	awaitTestCompletion(t, oldTransportPeer.entered, "slow attachment did not begin its blocked output")
+		rc := sess.renderCoordinator()
+		oldLease := rc.attachmentLease(old)
+		freshLease := rc.attachmentLease(fresh)
+		require.True(t, rc.markAttachmentReady(oldLease))
+		oldTransportPeer.blocked.Store(true)
+		pane := sess.tabs[0].focusedPane()
+		pane.mu.Lock()
+		pane.screen.Write([]byte("slow peer"))
+		pane.mu.Unlock()
+		require.True(t, rc.invalidate(renderInvalidation{class: invalidateUrgent, reset: true, producer: "test"}))
+		rc.fireCurrent(false)
+		requireReceived(t, oldTransportPeer.entered, "slow attachment did not begin its blocked output")
 
-	require.True(t, rc.markAttachmentReady(freshLease))
-	token := sess.captureAttachmentCapability(fresh, newTransport)
-	token.lease = freshLease
-	painted := make(chan bool, 1)
-	go func() { painted <- d.firstPaintForTransition(token) }()
-	frame := awaitTestValue(t, newTransportPeer.sends, "healthy attachment first paint was gated by slow peer")
-	require.Equal(t, "Output", envelopeMessageName(t, frame.Payload))
-	require.True(t, <-painted)
-	oldTransportPeer.open()
+		require.True(t, rc.markAttachmentReady(freshLease))
+		token := sess.captureAttachmentCapability(fresh, newTransport)
+		token.lease = freshLease
+		painted := make(chan bool, 1)
+		go func() { painted <- d.firstPaintForTransition(token) }()
+		// A stale paint worker is parked on viewMu (not durably blocked), so
+		// synctest.Wait would never return; a plain receive still fails as a
+		// bubble deadlock if the healthy peer's first paint were gated.
+		frame := <-newTransportPeer.sends
+		require.Equal(t, "Output", envelopeMessageName(t, frame.Payload))
+		require.True(t, <-painted)
+		oldTransportPeer.open()
+	})
 }
 
 func TestMultiAttachmentHandshakeFirstPaintNotGatedByBlockedPeer(t *testing.T) {
-	pty, releasePTY := newBlockingPTY(t)
-	defer releasePTY()
-	clock, _ := newSignalClock(t, 16)
-	d := newTestDaemon(t, newFactory(t, pty), clock)
-	oldTransport, oldTransportPeer := newBlockedPeerConnection(t)
-	sess, old, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{1}}, oldTransport)
-	require.NoError(t, err)
-	rc := sess.renderCoordinator()
-	require.True(t, rc.markAttachmentReady(rc.attachmentLease(old)))
+	synctest.Test(t, func(t *testing.T) {
+		pty, releasePTY := newBlockingPTY(t)
+		defer releasePTY()
+		clock, _ := newSignalClock(t, 16)
+		d := newTestDaemon(t, newFactory(t, pty), clock)
+		oldTransport, oldTransportPeer := newBlockedPeerConnection(t)
+		sess, old, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{1}}, oldTransport)
+		require.NoError(t, err)
+		rc := sess.renderCoordinator()
+		require.True(t, rc.markAttachmentReady(rc.attachmentLease(old)))
 
-	oldTransportPeer.blocked.Store(true)
-	pane := sess.tabs[0].focusedPane()
-	pane.mu.Lock()
-	pane.screen.Write([]byte("slow peer"))
-	pane.mu.Unlock()
-	require.True(t, rc.invalidate(renderInvalidation{class: invalidateUrgent, reset: true, producer: "test"}))
-	fireDone := make(chan struct{})
-	go func() {
-		rc.fireCurrent(false)
-		close(fireDone)
-	}()
-	awaitTestCompletion(t, oldTransportPeer.entered, "slow attachment did not begin its blocked output")
+		oldTransportPeer.blocked.Store(true)
+		pane := sess.tabs[0].focusedPane()
+		pane.mu.Lock()
+		pane.screen.Write([]byte("slow peer"))
+		pane.mu.Unlock()
+		require.True(t, rc.invalidate(renderInvalidation{class: invalidateUrgent, reset: true, producer: "test"}))
+		fireDone := make(chan struct{})
+		go func() {
+			rc.fireCurrent(false)
+			close(fireDone)
+		}()
+		requireReceived(t, oldTransportPeer.entered, "slow attachment did not begin its blocked output")
 
-	hello := protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{2}}
-	tr, sends, releaseConn := newConn(t, mustClientEnvelope(hello))
-	defer releaseConn()
-	handshakeDone := make(chan struct{})
-	go func() {
-		d.handleConn(tr)
-		close(handshakeDone)
-	}()
-	awaitFrame(t, sends, "Welcome")
-	firstPaint := awaitFrame(t, sends, "Output")
-	require.Equal(t, "Output", envelopeMessageName(t, firstPaint.Payload))
-	releaseConn()
-	awaitTestCompletion(t, handshakeDone, "multi-attachment handshake did not complete after first paint")
-	oldTransportPeer.open()
-	awaitTestCompletion(t, fireDone, "slow peer output did not finish after release")
+		hello := protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{2}}
+		tr, sends, releaseConn := newConn(t, mustClientEnvelope(hello))
+		defer releaseConn()
+		handshakeDone := make(chan struct{})
+		go func() {
+			d.handleConn(tr)
+			close(handshakeDone)
+		}()
+		requireFrame(t, sends, "Welcome")
+		firstPaint := requireFrame(t, sends, "Output")
+		require.Equal(t, "Output", envelopeMessageName(t, firstPaint.Payload))
+		releaseConn()
+		requireReceived(t, handshakeDone, "multi-attachment handshake did not complete after first paint")
+		oldTransportPeer.open()
+		requireReceived(t, fireDone, "slow peer output did not finish after release")
+	})
 }
 
 func TestAttachmentPaintFanoutDoesNotWaitForBlockedPeer(t *testing.T) {
-	pty, releasePTY := newBlockingPTY(t)
-	defer releasePTY()
-	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
-	firstTransport, firstTransportPeer := newBlockedPeerConnection(t)
-	sess, _, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{1}}, firstTransport)
-	require.NoError(t, err)
-	secondTransport, secondTransportPeer := newBlockedPeerConnection(t)
-	_, _, err = d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{2}}, secondTransport)
-	require.NoError(t, err)
-	rc := sess.renderCoordinator()
-	for _, ac := range sess.snapshotAttachments() {
-		require.True(t, rc.markAttachmentReady(rc.attachmentLease(ac)))
-	}
-	firstTransportPeer.blocked.Store(true)
+	synctest.Test(t, func(t *testing.T) {
+		pty, releasePTY := newBlockingPTY(t)
+		defer releasePTY()
+		d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
+		firstTransport, firstTransportPeer := newBlockedPeerConnection(t)
+		sess, _, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{1}}, firstTransport)
+		require.NoError(t, err)
+		secondTransport, secondTransportPeer := newBlockedPeerConnection(t)
+		_, _, err = d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{2}}, secondTransport)
+		require.NoError(t, err)
+		rc := sess.renderCoordinator()
+		for _, ac := range sess.snapshotAttachments() {
+			require.True(t, rc.markAttachmentReady(rc.attachmentLease(ac)))
+		}
+		firstTransportPeer.blocked.Store(true)
 
-	sess.tabs[0].focusedPane().screen.Write([]byte("shared"))
-	rc.invalidate(renderInvalidation{class: invalidateUrgent, reset: true, producer: "test"})
-	rc.fireCurrent(false)
-	select {
-	case <-firstTransportPeer.entered:
-	case <-time.After(time.Second):
-		t.Fatal("first attachment did not reach blocked send")
-	}
-	select {
-	case frame := <-secondTransportPeer.sends:
-		require.Equal(t, "Output", envelopeMessageName(t, frame.Payload))
-		out, ok := decodeServerMessage(t, frame).(protocol.Output)
-		require.True(t, ok)
-		require.True(t, out.Full, "fan-out peers must send a fresh first frame even after another attachment acknowledges shared damage")
-	case <-time.After(time.Second):
-		t.Fatal("second attachment waited for first attachment transport")
-	}
-	firstTransportPeer.open()
+		sess.tabs[0].focusedPane().screen.Write([]byte("shared"))
+		rc.invalidate(renderInvalidation{class: invalidateUrgent, reset: true, producer: "test"})
+		rc.fireCurrent(false)
+		select {
+		case <-firstTransportPeer.entered:
+		case <-time.After(time.Second):
+			t.Fatal("first attachment did not reach blocked send")
+		}
+		select {
+		case frame := <-secondTransportPeer.sends:
+			require.Equal(t, "Output", envelopeMessageName(t, frame.Payload))
+			out, ok := decodeServerMessage(t, frame).(protocol.Output)
+			require.True(t, ok)
+			require.True(t, out.Full, "fan-out peers must send a fresh first frame even after another attachment acknowledges shared damage")
+		case <-time.After(time.Second):
+			t.Fatal("second attachment waited for first attachment transport")
+		}
+		firstTransportPeer.open()
+	})
 }
 
 func TestAttachmentResizeUsesLatestClaimedSessionGeometry(t *testing.T) {
-	pty, releasePTY := newBlockingPTY(t)
-	defer releasePTY()
-	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
-	firstTransport, _ := newCapturingTransport(t)
-	sess, first, err := d.route(protocol.Hello{
-		Version: protocol.Version, Intent: protocol.IntentNew, Name: "work",
-		Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{1},
-	}, firstTransport)
-	require.NoError(t, err)
-	secondTransport, _ := newCapturingTransport(t)
-	_, second, err := d.route(protocol.Hello{
-		Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work",
-		Size: domain.Size{Cols: 100, Rows: 40}, ClientID: [16]byte{2},
-	}, secondTransport)
-	require.NoError(t, err)
-	d.firstPaint(sess, second)
+	synctest.Test(t, func(t *testing.T) {
+		pty, releasePTY := newBlockingPTY(t)
+		defer releasePTY()
+		d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
+		firstTransport, _ := newCapturingTransport(t)
+		sess, first, err := d.route(protocol.Hello{
+			Version: protocol.Version, Intent: protocol.IntentNew, Name: "work",
+			Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{1},
+		}, firstTransport)
+		require.NoError(t, err)
+		secondTransport, _ := newCapturingTransport(t)
+		_, second, err := d.route(protocol.Hello{
+			Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work",
+			Size: domain.Size{Cols: 100, Rows: 40}, ClientID: [16]byte{2},
+		}, secondTransport)
+		require.NoError(t, err)
+		d.firstPaint(sess, second)
 
-	tb := sess.tabs[0]
-	tb.mu.Lock()
-	require.Equal(t, domain.Size{Cols: 100, Rows: 38}, tb.size, "the newest attachment claim must win")
-	tb.mu.Unlock()
+		tb := sess.tabs[0]
+		tb.mu.Lock()
+		require.Equal(t, domain.Size{Cols: 100, Rows: 38}, tb.size, "the newest attachment claim must win")
+		tb.mu.Unlock()
 
-	rc := sess.renderCoordinator()
-	firstLease := rc.attachmentLease(first)
-	secondLease := rc.attachmentLease(second)
-	require.True(t, rc.markAttachmentReady(firstLease))
-	require.True(t, rc.markAttachmentReady(secondLease))
-	resize := func(ac *attachedClient, tr ports.ServerConnection, size domain.Size) {
-		token := sess.captureAttachmentCapability(ac, tr)
-		d.handleAttachmentClientFrame(token, mustMarshalResize(protocol.Resize{Size: size}))
-	}
-	resize(second, secondTransport, domain.Size{Cols: 120, Rows: 50})
+		rc := sess.renderCoordinator()
+		firstLease := rc.attachmentLease(first)
+		secondLease := rc.attachmentLease(second)
+		require.True(t, rc.markAttachmentReady(firstLease))
+		require.True(t, rc.markAttachmentReady(secondLease))
+		resize := func(ac *attachedClient, tr ports.ServerConnection, size domain.Size) {
+			token := sess.captureAttachmentCapability(ac, tr)
+			d.handleAttachmentClientFrame(token, mustMarshalResize(protocol.Resize{Size: size}))
+		}
+		resize(second, secondTransport, domain.Size{Cols: 120, Rows: 50})
 
-	tb.mu.Lock()
-	require.Equal(t, domain.Size{Cols: 120, Rows: 48}, tb.size)
-	tb.mu.Unlock()
-	require.Equal(t, domain.Size{Cols: 80, Rows: 24}, first.geometry.Size)
-	require.Equal(t, domain.Size{Cols: 120, Rows: 50}, second.geometry.Size)
+		tb.mu.Lock()
+		require.Equal(t, domain.Size{Cols: 120, Rows: 48}, tb.size)
+		tb.mu.Unlock()
+		require.Equal(t, domain.Size{Cols: 80, Rows: 24}, first.geometry.Size)
+		require.Equal(t, domain.Size{Cols: 120, Rows: 50}, second.geometry.Size)
 
-	// A same-size resize is still a claim, so the smaller peer can take
-	// authority without changing its local window state first.
-	resize(second, secondTransport, domain.Size{Cols: 90, Rows: 30})
-	resize(first, firstTransport, domain.Size{Cols: 80, Rows: 24})
-	tb.mu.Lock()
-	require.Equal(t, domain.Size{Cols: 80, Rows: 22}, tb.size)
-	tb.mu.Unlock()
+		// A same-size resize is still a claim, so the smaller peer can take
+		// authority without changing its local window state first.
+		resize(second, secondTransport, domain.Size{Cols: 90, Rows: 30})
+		resize(first, firstTransport, domain.Size{Cols: 80, Rows: 24})
+		tb.mu.Lock()
+		require.Equal(t, domain.Size{Cols: 80, Rows: 22}, tb.size)
+		tb.mu.Unlock()
 
-	// The latest resize wins even when it is smaller than a live peer.
-	resize(first, firstTransport, domain.Size{Cols: 70, Rows: 20})
-	tb.mu.Lock()
-	require.Equal(t, domain.Size{Cols: 70, Rows: 18}, tb.size)
-	tb.mu.Unlock()
-	require.Equal(t, domain.Size{Cols: 70, Rows: 20}, first.geometry.Size)
-	require.Equal(t, domain.Size{Cols: 90, Rows: 30}, second.geometry.Size)
+		// The latest resize wins even when it is smaller than a live peer.
+		resize(first, firstTransport, domain.Size{Cols: 70, Rows: 20})
+		tb.mu.Lock()
+		require.Equal(t, domain.Size{Cols: 70, Rows: 18}, tb.size)
+		tb.mu.Unlock()
+		require.Equal(t, domain.Size{Cols: 70, Rows: 20}, first.geometry.Size)
+		require.Equal(t, domain.Size{Cols: 90, Rows: 30}, second.geometry.Size)
 
-	// Detaching the latest claimant falls back to the most recent remaining
-	// attachment claim rather than reverting to the historical maximum.
-	d.clientGone(sess, first, first.transport(), true)
-	tb.mu.Lock()
-	require.Equal(t, domain.Size{Cols: 90, Rows: 28}, tb.size)
-	tb.mu.Unlock()
+		// Detaching the latest claimant falls back to the most recent remaining
+		// attachment claim rather than reverting to the historical maximum.
+		d.clientGone(sess, first, first.transport(), true)
+		tb.mu.Lock()
+		require.Equal(t, domain.Size{Cols: 90, Rows: 28}, tb.size)
+		tb.mu.Unlock()
+	})
 }
 
 func TestStaleAttachmentGeometryClaimCannotCommit(t *testing.T) {

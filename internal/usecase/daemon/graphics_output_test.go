@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -106,87 +107,93 @@ func TestGraphicsOutputReplaysStaticKittenIcatFixture(t *testing.T) {
 }
 
 func TestKittyAttachmentPaintCarriesGraphicsInTheOutputStateRecord(t *testing.T) {
-	p, releasePTY := newBlockingPTY(t)
-	defer releasePTY()
-	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	ac.terminalCapabilities.KittyGraphics = true
-	ac.output.graphicsOutput = newGraphicsOutputState()
-	fixture, err := os.ReadFile("testdata/kitten-icat-stream-chunk.bin")
-	require.NoError(t, err)
-	pane := sess.tabs[0].focusedPane()
-	// This fixture contains pixel-space Kitty output without cell metadata;
-	// provide the terminal pixel geometry explicitly so attachment clipping can
-	// map its placement safely.
-	geometry := domain.Geometry{Size: domain.Size{Cols: 80, Rows: 23}, PixelWidth: 800, PixelHeight: 460}
-	pane.geometry = geometry
-	setScreenGeometry(pane.screen, geometry)
-	pane.screen.Write(fixture)
+	synctest.Test(t, func(t *testing.T) {
+		p, releasePTY := newBlockingPTY(t)
+		defer releasePTY()
+		d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+		ac.terminalCapabilities.KittyGraphics = true
+		ac.output.graphicsOutput = newGraphicsOutputState()
+		fixture, err := os.ReadFile("testdata/kitten-icat-stream-chunk.bin")
+		require.NoError(t, err)
+		pane := sess.tabs[0].focusedPane()
+		// This fixture contains pixel-space Kitty output without cell metadata;
+		// provide the terminal pixel geometry explicitly so attachment clipping can
+		// map its placement safely.
+		geometry := domain.Geometry{Size: domain.Size{Cols: 80, Rows: 23}, PixelWidth: 800, PixelHeight: 460}
+		pane.geometry = geometry
+		setScreenGeometry(pane.screen, geometry)
+		pane.screen.Write(fixture)
 
-	d.paint(sess, ac, true, nil)
-	frame := awaitFrame(t, sends, "Output")
-	output := unmarshalTestOutput(t, frame.Payload)
-	require.Contains(t, string(output.Data), "\x1b_Ga=t,i=")
-	require.Contains(t, string(output.Data), ",f=100")
-	require.Contains(t, string(output.Data), "\x1b_Ga=p,i=")
-	require.Contains(t, string(output.Data), ",q=2")
-	require.Positive(t, output.New, "graphics must ride the ordinary state-bearing output")
+		d.paint(sess, ac, true, nil)
+		frame := requireFrame(t, sends, "Output")
+		output := unmarshalTestOutput(t, frame.Payload)
+		require.Contains(t, string(output.Data), "\x1b_Ga=t,i=")
+		require.Contains(t, string(output.Data), ",f=100")
+		require.Contains(t, string(output.Data), "\x1b_Ga=p,i=")
+		require.Contains(t, string(output.Data), ",q=2")
+		require.Positive(t, output.New, "graphics must ride the ordinary state-bearing output")
 
-	outer := vt.NewScreen(output.Size.Cols, output.Size.Rows)
-	outer.Write(output.Data)
-	require.Equal(t, uint64(1), outer.GraphicsSnapshot().Usage().Assets)
-	require.Equal(t, uint64(1), outer.GraphicsSnapshot().Usage().Placements)
+		outer := vt.NewScreen(output.Size.Cols, output.Size.Rows)
+		outer.Write(output.Data)
+		require.Equal(t, uint64(1), outer.GraphicsSnapshot().Usage().Assets)
+		require.Equal(t, uint64(1), outer.GraphicsSnapshot().Usage().Placements)
+	})
 }
 
 func TestFreshCapabilityDowngradePreservesForeignTerminalGraphics(t *testing.T) {
-	p, releasePTY := newBlockingPTY(t)
-	defer releasePTY()
-	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	ac.terminalCapabilities.KittyGraphics = true
-	ac.output.graphicsOutput = newGraphicsOutputState()
-	ac.output.graphicsUnsupportedWarned.Store(true)
-	d.mu.Lock()
-	d.reconfigureAttachmentOutput(sess, ac, protocol.Hello{KittyDirectGraphics: false})
-	d.mu.Unlock()
-	require.False(t, ac.terminalCapabilities.SupportsKittyGraphics())
-	require.Nil(t, ac.output.graphicsOutput)
-	require.False(t, ac.output.graphicsUnsupportedWarned.Load(), "replacement terminal must receive its own unsupported-graphics warning")
+	synctest.Test(t, func(t *testing.T) {
+		p, releasePTY := newBlockingPTY(t)
+		defer releasePTY()
+		d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+		ac.terminalCapabilities.KittyGraphics = true
+		ac.output.graphicsOutput = newGraphicsOutputState()
+		ac.output.graphicsUnsupportedWarned.Store(true)
+		d.mu.Lock()
+		d.reconfigureAttachmentOutput(sess, ac, protocol.Hello{KittyDirectGraphics: false})
+		d.mu.Unlock()
+		require.False(t, ac.terminalCapabilities.SupportsKittyGraphics())
+		require.Nil(t, ac.output.graphicsOutput)
+		require.False(t, ac.output.graphicsUnsupportedWarned.Load(), "replacement terminal must receive its own unsupported-graphics warning")
 
-	d.paint(sess, ac, true, nil)
-	frame := awaitFrame(t, sends, "Output")
-	output := unmarshalTestOutput(t, frame.Payload)
-	require.Positive(t, output.New)
-	require.NotContains(t, string(output.Data), "\x1b_Ga=d,d=A", "vev must never globally delete terminal images")
+		d.paint(sess, ac, true, nil)
+		frame := requireFrame(t, sends, "Output")
+		output := unmarshalTestOutput(t, frame.Payload)
+		require.Positive(t, output.New)
+		require.NotContains(t, string(output.Data), "\x1b_Ga=d,d=A", "vev must never globally delete terminal images")
 
-	outer := vt.NewScreen(80, 24)
-	foreign := newGraphicsOutputState()
-	foreignOutput, err := foreign.prepare(kittenGraphicsSnapshot(t), true)
-	require.NoError(t, err)
-	outer.Write(foreignOutput.data)
-	require.Equal(t, uint64(1), outer.GraphicsSnapshot().Usage().Placements)
-	outer.Write(output.Data)
-	require.Equal(t, uint64(1), outer.GraphicsSnapshot().Usage().Assets)
-	require.Equal(t, uint64(1), outer.GraphicsSnapshot().Usage().Placements)
+		outer := vt.NewScreen(80, 24)
+		foreign := newGraphicsOutputState()
+		foreignOutput, err := foreign.prepare(kittenGraphicsSnapshot(t), true)
+		require.NoError(t, err)
+		outer.Write(foreignOutput.data)
+		require.Equal(t, uint64(1), outer.GraphicsSnapshot().Usage().Placements)
+		outer.Write(output.Data)
+		require.Equal(t, uint64(1), outer.GraphicsSnapshot().Usage().Assets)
+		require.Equal(t, uint64(1), outer.GraphicsSnapshot().Usage().Placements)
+	})
 }
 
 func TestReplacementKittyTerminalGetsFreshGraphicsState(t *testing.T) {
-	d := newTestDaemon(t, nil, newStubClock(t))
-	sess := &session{sessionCore: sessionCore{id: "work"}}
-	ac := &attachedClient{clientID: [16]byte{1}, output: newOutputStateStream()}
+	synctest.Test(t, func(t *testing.T) {
+		d := newTestDaemon(t, nil, newStubClock(t))
+		sess := &session{sessionCore: sessionCore{id: "work"}}
+		ac := &attachedClient{clientID: [16]byte{1}, output: newOutputStateStream()}
 
-	d.mu.Lock()
-	oldBase, oldFence := d.reserveGraphicsNamespaceLeaseLocked(graphicsNamespaceKey(sess, ac.clientID))
-	oldState := newGraphicsOutputStateWithLease(oldBase, oldFence)
-	oldState.mayHaveEmitted = true
-	ac.output.graphicsOutput = oldState
-	ac.output.graphicsUnsupportedWarned.Store(true)
-	d.reconfigureAttachmentOutput(sess, ac, protocol.Hello{KittyDirectGraphics: true})
-	d.mu.Unlock()
+		d.mu.Lock()
+		oldBase, oldFence := d.reserveGraphicsNamespaceLeaseLocked(graphicsNamespaceKey(sess, ac.clientID))
+		oldState := newGraphicsOutputStateWithLease(oldBase, oldFence)
+		oldState.mayHaveEmitted = true
+		ac.output.graphicsOutput = oldState
+		ac.output.graphicsUnsupportedWarned.Store(true)
+		d.reconfigureAttachmentOutput(sess, ac, protocol.Hello{KittyDirectGraphics: true})
+		d.mu.Unlock()
 
-	require.True(t, ac.terminalCapabilities.SupportsKittyGraphics())
-	require.NotNil(t, ac.output.graphicsOutput)
-	require.NotSame(t, oldState, ac.output.graphicsOutput)
-	require.NotEqual(t, oldBase, ac.output.graphicsOutput.namespaceBase, "replacement terminal must not reuse terminal-global Kitty IDs")
-	require.False(t, ac.output.graphicsUnsupportedWarned.Load())
+		require.True(t, ac.terminalCapabilities.SupportsKittyGraphics())
+		require.NotNil(t, ac.output.graphicsOutput)
+		require.NotSame(t, oldState, ac.output.graphicsOutput)
+		require.NotEqual(t, oldBase, ac.output.graphicsOutput.namespaceBase, "replacement terminal must not reuse terminal-global Kitty IDs")
+		require.False(t, ac.output.graphicsUnsupportedWarned.Load())
+	})
 }
 
 func TestPaneGraphicsCoordinateGeometrySurvivesAttachmentResize(t *testing.T) {
@@ -380,197 +387,207 @@ func TestGraphicsOutputExhaustionResetsInsideItsNamespace(t *testing.T) {
 }
 
 func TestGraphicsNamespaceQuarantinesOnParkExpiryAndFailedCleanup(t *testing.T) {
-	d := newTestDaemon(t, nil, newStubClock(t))
-	base := graphicsIDNamespaceSize + 1
-	block := (base - 1) / graphicsIDNamespaceSize
+	synctest.Test(t, func(t *testing.T) {
+		d := newTestDaemon(t, nil, newStubClock(t))
+		base := graphicsIDNamespaceSize + 1
+		block := (base - 1) / graphicsIDNamespaceSize
 
-	parkedState := newGraphicsOutputStateWithBase(base)
-	parked := &parkedAttachment{
-		sess: &session{sessionCore: sessionCore{name: "parked"}},
-		ac:   &attachedClient{output: attachmentOutputWithGraphics(parkedState)},
-		done: make(chan struct{}),
-	}
-	d.mu.Lock()
-	d.graphics.reserved[block] = struct{}{}
-	d.resume.parked[1] = parked
-	d.mu.Unlock()
-	d.expireParked(1, parked)
-	require.Nil(t, parked.ac.output.graphicsOutput)
-	d.mu.Lock()
-	_, reserved := d.graphics.reserved[block]
-	d.mu.Unlock()
-	require.False(t, reserved, "park expiry with no outer objects may release the attachment namespace")
+		parkedState := newGraphicsOutputStateWithBase(base)
+		parked := &parkedAttachment{
+			sess: &session{sessionCore: sessionCore{name: "parked"}},
+			ac:   &attachedClient{output: attachmentOutputWithGraphics(parkedState)},
+			done: make(chan struct{}),
+		}
+		d.mu.Lock()
+		d.graphics.reserved[block] = struct{}{}
+		d.resume.parked[1] = parked
+		d.mu.Unlock()
+		d.expireParked(1, parked)
+		require.Nil(t, parked.ac.output.graphicsOutput)
+		d.mu.Lock()
+		_, reserved := d.graphics.reserved[block]
+		d.mu.Unlock()
+		require.False(t, reserved, "park expiry with no outer objects may release the attachment namespace")
 
-	failedState := newGraphicsOutputStateWithBase(base)
-	seed, err := failedState.prepare(kittenGraphicsSnapshot(t), true)
-	require.NoError(t, err)
-	seed.commit()
-	failed := &attachedClient{
-		tr:     newFailingConnection(t),
-		output: attachmentOutputWithGraphics(failedState),
-	}
-	d.mu.Lock()
-	d.graphics.reserved[block] = struct{}{}
-	d.mu.Unlock()
-	require.Error(t, d.cleanupAttachmentOutput(failed), "failing transport must surface the cleanup send error")
-	require.Nil(t, failed.output.graphicsOutput)
-	d.mu.Lock()
-	_, reserved = d.graphics.reserved[block]
-	d.mu.Unlock()
-	require.True(t, reserved, "failed terminal cleanup must quarantine the namespace")
+		failedState := newGraphicsOutputStateWithBase(base)
+		seed, err := failedState.prepare(kittenGraphicsSnapshot(t), true)
+		require.NoError(t, err)
+		seed.commit()
+		failed := &attachedClient{
+			tr:     newFailingConnection(t),
+			output: attachmentOutputWithGraphics(failedState),
+		}
+		d.mu.Lock()
+		d.graphics.reserved[block] = struct{}{}
+		d.mu.Unlock()
+		require.Error(t, d.cleanupAttachmentOutput(failed), "failing transport must surface the cleanup send error")
+		require.Nil(t, failed.output.graphicsOutput)
+		d.mu.Lock()
+		_, reserved = d.graphics.reserved[block]
+		d.mu.Unlock()
+		require.True(t, reserved, "failed terminal cleanup must quarantine the namespace")
+	})
 }
 
 func TestGraphicsNamespaceStaysQuarantinedAfterSocketSendSuccessWithoutTerminalFlush(t *testing.T) {
-	d := newTestDaemon(t, nil, newStubClock(t))
-	key := "session:unflushed:attachment"
-	d.mu.Lock()
-	oldBase, oldFence := d.reserveGraphicsNamespaceLeaseLocked(key)
-	d.mu.Unlock()
+	synctest.Test(t, func(t *testing.T) {
+		d := newTestDaemon(t, nil, newStubClock(t))
+		key := "session:unflushed:attachment"
+		d.mu.Lock()
+		oldBase, oldFence := d.reserveGraphicsNamespaceLeaseLocked(key)
+		d.mu.Unlock()
 
-	state := newGraphicsOutputStateWithLease(oldBase, oldFence)
-	seed, err := state.prepare(kittenGraphicsSnapshot(t), true)
-	require.NoError(t, err)
-	seed.markSendAttempted()
-	seed.commit()
+		state := newGraphicsOutputStateWithLease(oldBase, oldFence)
+		seed, err := state.prepare(kittenGraphicsSnapshot(t), true)
+		require.NoError(t, err)
+		seed.markSendAttempted()
+		seed.commit()
 
-	// This transport models only successful delivery to the client socket. It
-	// deliberately provides no evidence that the client flushed the side effect
-	// to its outer terminal before being lost.
-	transport, transportLog := newTrackedConnection(t)
-	ac := &attachedClient{tr: transport, output: attachmentOutputWithGraphics(state)}
-	require.NoError(t, d.cleanupAttachmentOutput(ac))
-	require.Nil(t, ac.output.graphicsOutput)
-	sends := transportLog.Sends()
-	require.Len(t, sends, 1)
-	cleanup := unmarshalTestOutput(t, sends[0].Payload)
-	require.Zero(t, cleanup.New, "graphics cleanup is an unacknowledged side-effect frame")
+		// This transport models only successful delivery to the client socket. It
+		// deliberately provides no evidence that the client flushed the side effect
+		// to its outer terminal before being lost.
+		transport, transportLog := newTrackedConnection(t)
+		ac := &attachedClient{tr: transport, output: attachmentOutputWithGraphics(state)}
+		require.NoError(t, d.cleanupAttachmentOutput(ac))
+		require.Nil(t, ac.output.graphicsOutput)
+		sends := transportLog.Sends()
+		require.Len(t, sends, 1)
+		cleanup := unmarshalTestOutput(t, sends[0].Payload)
+		require.Zero(t, cleanup.New, "graphics cleanup is an unacknowledged side-effect frame")
 
-	d.mu.Lock()
-	_, quarantined := d.graphics.quarantines[(oldBase-1)/graphicsIDNamespaceSize]
-	newBase, _ := d.reserveGraphicsNamespaceLeaseLocked(key)
-	d.mu.Unlock()
-	require.True(t, quarantined, "socket-send success cannot prove terminal cleanup")
-	require.NotEqual(t, oldBase, newBase, "an unflushed cleanup must not expose the old IDs to another attachment")
+		d.mu.Lock()
+		_, quarantined := d.graphics.quarantines[(oldBase-1)/graphicsIDNamespaceSize]
+		newBase, _ := d.reserveGraphicsNamespaceLeaseLocked(key)
+		d.mu.Unlock()
+		require.True(t, quarantined, "socket-send success cannot prove terminal cleanup")
+		require.NotEqual(t, oldBase, newBase, "an unflushed cleanup must not expose the old IDs to another attachment")
+	})
 }
 
 func TestGraphicsNamespaceStaysQuarantinedAfterFinalDeleteAndParkExpiry(t *testing.T) {
-	d := newTestDaemon(t, nil, newStubClock(t))
-	key := "session:empty-park:attachment"
-	d.mu.Lock()
-	oldBase, oldFence := d.reserveGraphicsNamespaceLeaseLocked(key)
-	d.mu.Unlock()
+	synctest.Test(t, func(t *testing.T) {
+		d := newTestDaemon(t, nil, newStubClock(t))
+		key := "session:empty-park:attachment"
+		d.mu.Lock()
+		oldBase, oldFence := d.reserveGraphicsNamespaceLeaseLocked(key)
+		d.mu.Unlock()
 
-	state := newGraphicsOutputStateWithLease(oldBase, oldFence)
-	seed, err := state.prepare(kittenGraphicsSnapshot(t), true)
-	require.NoError(t, err)
-	seed.markSendAttempted()
-	seed.commit()
-	finalDelete, err := state.prepare(nil, false)
-	require.NoError(t, err)
-	require.NotEmpty(t, finalDelete.data)
-	finalDelete.markSendAttempted()
-	finalDelete.commit()
-	require.Empty(t, state.assets)
-	require.Empty(t, state.placements)
+		state := newGraphicsOutputStateWithLease(oldBase, oldFence)
+		seed, err := state.prepare(kittenGraphicsSnapshot(t), true)
+		require.NoError(t, err)
+		seed.markSendAttempted()
+		seed.commit()
+		finalDelete, err := state.prepare(nil, false)
+		require.NoError(t, err)
+		require.NotEmpty(t, finalDelete.data)
+		finalDelete.markSendAttempted()
+		finalDelete.commit()
+		require.Empty(t, state.assets)
+		require.Empty(t, state.placements)
 
-	parked := &parkedAttachment{
-		sess: &session{sessionCore: sessionCore{name: "parked"}},
-		ac:   &attachedClient{output: attachmentOutputWithGraphics(state)},
-		done: make(chan struct{}),
-	}
-	d.mu.Lock()
-	d.resume.parked[1] = parked
-	d.mu.Unlock()
-	d.expireParked(1, parked)
+		parked := &parkedAttachment{
+			sess: &session{sessionCore: sessionCore{name: "parked"}},
+			ac:   &attachedClient{output: attachmentOutputWithGraphics(state)},
+			done: make(chan struct{}),
+		}
+		d.mu.Lock()
+		d.resume.parked[1] = parked
+		d.mu.Unlock()
+		d.expireParked(1, parked)
 
-	d.mu.Lock()
-	_, quarantined := d.graphics.quarantines[(oldBase-1)/graphicsIDNamespaceSize]
-	newBase, _ := d.reserveGraphicsNamespaceLeaseLocked(key)
-	d.mu.Unlock()
-	require.True(t, quarantined, "an apparently empty parked state still has unacknowledged terminal history")
-	require.NotEqual(t, oldBase, newBase, "park expiry must not recycle IDs after the final delete")
+		d.mu.Lock()
+		_, quarantined := d.graphics.quarantines[(oldBase-1)/graphicsIDNamespaceSize]
+		newBase, _ := d.reserveGraphicsNamespaceLeaseLocked(key)
+		d.mu.Unlock()
+		require.True(t, quarantined, "an apparently empty parked state still has unacknowledged terminal history")
+		require.NotEqual(t, oldBase, newBase, "park expiry must not recycle IDs after the final delete")
+	})
 }
 
 func TestGraphicsNamespacePoolExhaustionFallsBackToText(t *testing.T) {
-	d := newTestDaemon(t, nil, newStubClock(t))
-	d.mu.Lock()
-	for block := uint64(0); block < graphicsIDNamespaceCount; block++ {
-		d.graphics.reserved[block] = struct{}{}
-	}
-	ac := d.prepareAttachedClientLocked(
-		&session{sessionCore: sessionCore{id: "work"}},
-		newQuietConnection(t),
-		domain.Geometry{Size: defaultSize},
-		attachClientOptions{
-			capabilitiesSet:      true,
-			terminalCapabilities: terminalcap.Capabilities{KittyGraphics: true, Color: terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor}},
-		},
-	)
-	d.mu.Unlock()
+	synctest.Test(t, func(t *testing.T) {
+		d := newTestDaemon(t, nil, newStubClock(t))
+		d.mu.Lock()
+		for block := uint64(0); block < graphicsIDNamespaceCount; block++ {
+			d.graphics.reserved[block] = struct{}{}
+		}
+		ac := d.prepareAttachedClientLocked(
+			&session{sessionCore: sessionCore{id: "work"}},
+			newQuietConnection(t),
+			domain.Geometry{Size: defaultSize},
+			attachClientOptions{
+				capabilitiesSet:      true,
+				terminalCapabilities: terminalcap.Capabilities{KittyGraphics: true, Color: terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor}},
+			},
+		)
+		d.mu.Unlock()
 
-	require.Nil(t, ac.output.graphicsOutput)
-	require.False(t, ac.terminalCapabilities.SupportsKittyGraphics())
-	require.NotNil(t, ac.output, "namespace exhaustion must preserve the ordinary text renderer")
+		require.Nil(t, ac.output.graphicsOutput)
+		require.False(t, ac.terminalCapabilities.SupportsKittyGraphics())
+		require.NotNil(t, ac.output, "namespace exhaustion must preserve the ordinary text renderer")
+	})
 }
 
 func TestGraphicsNamespaceQuarantineFencesTimedOutLateDelete(t *testing.T) {
-	clock, clockTimers := newSignalClock(t, 1)
-	d := newTestDaemon(t, nil, clock)
-	key := "session:stale:attachment"
-	d.mu.Lock()
-	oldBase, oldFence := d.reserveGraphicsNamespaceLeaseLocked(key)
-	d.mu.Unlock()
-	oldState := newGraphicsOutputStateWithLease(oldBase, oldFence)
-	seed, err := oldState.prepare(kittenGraphicsSnapshot(t), true)
-	require.NoError(t, err)
-	seed.commit()
-	var oldID uint64
-	for _, asset := range oldState.assets {
-		oldID = asset.id
-		break
-	}
-	require.NotZero(t, oldID)
+	synctest.Test(t, func(t *testing.T) {
+		clock, clockTimers := newSignalClock(t, 1)
+		d := newTestDaemon(t, nil, clock)
+		key := "session:stale:attachment"
+		d.mu.Lock()
+		oldBase, oldFence := d.reserveGraphicsNamespaceLeaseLocked(key)
+		d.mu.Unlock()
+		oldState := newGraphicsOutputStateWithLease(oldBase, oldFence)
+		seed, err := oldState.prepare(kittenGraphicsSnapshot(t), true)
+		require.NoError(t, err)
+		seed.commit()
+		var oldID uint64
+		for _, asset := range oldState.assets {
+			oldID = asset.id
+			break
+		}
+		require.NotZero(t, oldID)
 
-	transport, late := newLateGraphicsCleanupConnection(t)
-	ac := &attachedClient{tr: transport, output: attachmentOutputWithGraphics(oldState)}
-	cleanupDone := make(chan struct{})
-	go func() {
-		_ = d.cleanupAttachmentOutput(ac)
-		close(cleanupDone)
-	}()
-	awaitTestCompletion(t, late.entered, "timed-out cleanup did not reach the stale transport")
-	timer := awaitTestValue(t, clockTimers, "cleanup watchdog timer was not armed")
-	timer.ch <- time.Time{}
-	awaitTestCompletion(t, cleanupDone, "timed-out cleanup did not retire the attachment")
+		transport, late := newLateGraphicsCleanupConnection(t)
+		ac := &attachedClient{tr: transport, output: attachmentOutputWithGraphics(oldState)}
+		cleanupDone := make(chan struct{})
+		go func() {
+			_ = d.cleanupAttachmentOutput(ac)
+			close(cleanupDone)
+		}()
+		requireReceived(t, late.entered, "timed-out cleanup did not reach the stale transport")
+		timer := requireReceived(t, clockTimers, "cleanup watchdog timer was not armed")
+		timer.ch <- time.Time{}
+		requireReceived(t, cleanupDone, "timed-out cleanup did not retire the attachment")
 
-	d.mu.Lock()
-	newBase, newFence := d.reserveGraphicsNamespaceLeaseLocked(key)
-	_, quarantined := d.graphics.quarantines[(oldBase-1)/graphicsIDNamespaceSize]
-	d.mu.Unlock()
-	require.True(t, quarantined, "timed-out cleanup must keep its namespace quarantined")
-	require.NotEqual(t, oldBase, newBase, "new allocation must skip the quarantined namespace")
+		d.mu.Lock()
+		newBase, newFence := d.reserveGraphicsNamespaceLeaseLocked(key)
+		_, quarantined := d.graphics.quarantines[(oldBase-1)/graphicsIDNamespaceSize]
+		d.mu.Unlock()
+		require.True(t, quarantined, "timed-out cleanup must keep its namespace quarantined")
+		require.NotEqual(t, oldBase, newBase, "new allocation must skip the quarantined namespace")
 
-	newState := newGraphicsOutputStateWithLease(newBase, newFence)
-	fresh, err := newState.prepare(kittenGraphicsSnapshot(t), true)
-	require.NoError(t, err)
-	var newID uint64
-	for _, asset := range fresh.state.assets {
-		newID = asset.id
-		break
-	}
-	require.NotZero(t, newID)
-	require.NotEqual(t, oldID, newID, "fresh attachment IDs must not share the quarantined block")
+		newState := newGraphicsOutputStateWithLease(newBase, newFence)
+		fresh, err := newState.prepare(kittenGraphicsSnapshot(t), true)
+		require.NoError(t, err)
+		var newID uint64
+		for _, asset := range fresh.state.assets {
+			newID = asset.id
+			break
+		}
+		require.NotZero(t, newID)
+		require.NotEqual(t, oldID, newID, "fresh attachment IDs must not share the quarantined block")
 
-	late.open()
-	staleFrame := awaitTestValue(t, late.sends, "late stale cleanup did not execute")
-	awaitTestCompletion(t, late.finished, "late stale cleanup did not return")
-	staleOutput := unmarshalTestOutput(t, staleFrame.Payload)
-	require.Contains(t, string(staleOutput.Data), "i="+strconv.FormatUint(oldID, 10))
-	require.NotContains(t, string(staleOutput.Data), "i="+strconv.FormatUint(newID, 10), "late cleanup must never target the fresh attachment")
-	d.mu.Lock()
-	_, retained := d.graphics.quarantines[(oldBase-1)/graphicsIDNamespaceSize]
-	d.mu.Unlock()
-	require.True(t, retained, "late transport success is not a terminal ACK and must not release the namespace")
+		late.open()
+		staleFrame := requireReceived(t, late.sends, "late stale cleanup did not execute")
+		requireReceived(t, late.finished, "late stale cleanup did not return")
+		staleOutput := unmarshalTestOutput(t, staleFrame.Payload)
+		require.Contains(t, string(staleOutput.Data), "i="+strconv.FormatUint(oldID, 10))
+		require.NotContains(t, string(staleOutput.Data), "i="+strconv.FormatUint(newID, 10), "late cleanup must never target the fresh attachment")
+		d.mu.Lock()
+		_, retained := d.graphics.quarantines[(oldBase-1)/graphicsIDNamespaceSize]
+		d.mu.Unlock()
+		require.True(t, retained, "late transport success is not a terminal ACK and must not release the namespace")
+	})
 }
 
 func TestGraphicsOutputKeysIncludeSourceSceneContent(t *testing.T) {

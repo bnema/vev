@@ -4,6 +4,7 @@ import (
 	"errors"
 	"runtime"
 	"testing"
+	"testing/synctest"
 
 	vt "github.com/bnema/vev-vt"
 	renderer "github.com/bnema/vev-vt/ansi"
@@ -80,41 +81,43 @@ func TestAttachmentOutputUsesTerminalColorProfile(t *testing.T) {
 }
 
 func TestAttachmentOutputCapacityProbeDoesNotRaceWithSend(t *testing.T) {
-	stream := newOutputStateStream(1)
-	frame := renderer.NewFrame(3, 1)
-	fillOutputStateRows(frame, []string{"abc"})
-	prepared, err := stream.prepareTestOutput(frame, nil, true)
-	require.NoError(t, err)
+	synctest.Test(t, func(t *testing.T) {
+		stream := newOutputStateStream(1)
+		frame := renderer.NewFrame(3, 1)
+		fillOutputStateRows(frame, []string{"abc"})
+		prepared, err := stream.prepareTestOutput(frame, nil, true)
+		require.NoError(t, err)
 
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	sendDone := make(chan error, 1)
-	go func() {
-		sendDone <- prepared.send(prepared.data, 0, outputFrameSender(func(wire.Envelope) error {
-			close(entered)
-			<-release
-			return nil
-		}))
-	}()
-	awaitTestCompletion(t, entered, "output send was not admitted")
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		sendDone := make(chan error, 1)
+		go func() {
+			sendDone <- prepared.send(prepared.data, 0, outputFrameSender(func(wire.Envelope) error {
+				close(entered)
+				<-release
+				return nil
+			}))
+		}()
+		requireReceived(t, entered, "output send was not admitted")
 
-	probed := make(chan struct{})
-	go func() {
-		for range 100_000 {
-			_ = stream.atCapacity()
-			runtime.Gosched()
-		}
-		close(probed)
-	}()
-	close(release)
-	require.NoError(t, <-sendDone)
-	<-probed
-	require.True(t, stream.atCapacity())
+		probed := make(chan struct{})
+		go func() {
+			for range 100_000 {
+				_ = stream.atCapacity()
+				runtime.Gosched()
+			}
+			close(probed)
+		}()
+		close(release)
+		require.NoError(t, <-sendDone)
+		<-probed
+		require.True(t, stream.atCapacity())
 
-	stream.ack(1, 1)
-	require.False(t, stream.atCapacity())
-	stream.rebase()
-	require.False(t, stream.atCapacity())
+		stream.ack(1, 1)
+		require.False(t, stream.atCapacity())
+		stream.rebase()
+		require.False(t, stream.atCapacity())
+	})
 }
 
 func TestAttachmentOutputEpochsAreAttachmentLocalAndPreparedFramesAreFenced(t *testing.T) {
