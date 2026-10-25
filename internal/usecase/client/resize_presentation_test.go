@@ -245,11 +245,11 @@ func startResizeHarness(t *testing.T, options resizeHarnessOptions) *resizeSuper
 	if options.closeResizes {
 		terminal.closeResizeEvents()
 	}
-	service := newSupervisorTestService(ports.BrokerConnectionID{1})
+	service := newSupervisorTestService(t, ports.BrokerConnectionID{1})
 	service.publish(3, 1)
 	connect := options.connect
 	if connect == nil {
-		connect = func(context.Context, int) (ports.BrokerNavigator, error) { return service, nil }
+		connect = func(context.Context, int) (ports.BrokerNavigator, error) { return service.port, nil }
 	}
 	connector := newSupervisorTestConnector(connect)
 	recorder := newResizeRenderRecorder(terminal)

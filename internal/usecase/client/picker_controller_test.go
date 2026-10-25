@@ -433,9 +433,9 @@ func TestSupervisorPickerFoldsPublicationsAndInput(t *testing.T) {
 	t.Cleanup(reader.close)
 	terminal := &pickerRecordingTerminal{in: reader}
 	connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) {
-		service := newSupervisorTestService(ports.BrokerConnectionID{1})
+		service := newSupervisorTestService(t, ports.BrokerConnectionID{1})
 		service.hub.publish(pickerTestSnapshot(3, 1, clock.Now(), "alpha", "beta"))
-		return service, nil
+		return service.port, nil
 	})
 	controller := newPickerController(clock, pickerTestFreshness, terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor})
 	sup := mustSupervisor(t, SupervisorConfig{Connector: connector, Terminal: terminal, Clock: clock, Picker: controller})
@@ -477,10 +477,10 @@ func TestSupervisorPickerFoldsLaterPublication(t *testing.T) {
 	t.Cleanup(reader.close)
 	terminal := &pickerRecordingTerminal{in: reader}
 
-	service := newSupervisorTestService(ports.BrokerConnectionID{1})
+	service := newSupervisorTestService(t, ports.BrokerConnectionID{1})
 	connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) {
 		service.hub.publish(pickerTestSnapshot(3, 1, clock.Now(), "alpha"))
-		return service, nil
+		return service.port, nil
 	})
 	controller := newPickerController(clock, pickerTestFreshness, terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor})
 	sup := mustSupervisor(t, SupervisorConfig{Connector: connector, Terminal: terminal, Clock: clock, Picker: controller})

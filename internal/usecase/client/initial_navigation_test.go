@@ -337,18 +337,18 @@ func TestInitialNavigationResolverIsConsultedAtMostOnce(t *testing.T) {
 	terminal := newAttachTerminal(t, reader, false)
 	picker := newAttachTestPicker()
 
-	first := newSupervisorTestService(ports.BrokerConnectionID{1})
+	first := newSupervisorTestService(t, ports.BrokerConnectionID{1})
 	first.publishSnapshot(localDaemonSnapshot(7, 1))
-	second := newSupervisorTestService(ports.BrokerConnectionID{2})
+	second := newSupervisorTestService(t, ports.BrokerConnectionID{2})
 	stream := newSessionStream(t)
 	first.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 		return stream.conn, nil
 	})
 	connector := newSupervisorTestConnector(func(_ context.Context, call int) (ports.BrokerNavigator, error) {
 		if call == 1 {
-			return first, nil
+			return first.port, nil
 		}
-		return second, nil
+		return second.port, nil
 	})
 
 	var calls atomic.Int64
@@ -381,8 +381,8 @@ func TestInitialNavigationResolverIsConsultedAtMostOnce(t *testing.T) {
 	// The resolver may not mutate the supervisor's authority: the epoch it saw
 	// stays the committed one.
 	require.Equal(t, ports.BrokerEpoch(7), ports.BrokerEpoch(resolvedEpoch.Load()))
-	require.Equal(t, ports.BrokerEpoch(7), first.Snapshot().Epoch)
-	require.Len(t, first.Snapshot().Daemons, 1)
+	require.Equal(t, ports.BrokerEpoch(7), first.port.Snapshot().Epoch)
+	require.Len(t, first.port.Snapshot().Daemons, 1)
 
 	stream.deliver(protocol.ErrorMsg{Code: protocol.ErrInternal, Text: "creation failed"})
 	require.Eventually(t, func() bool { return sup.State().Presentation == PresentPicker }, 5*time.Second, time.Millisecond)
@@ -473,7 +473,7 @@ func TestInitialNavigationResolverFailureIsSelectionUnavailable(t *testing.T) {
 	reader := newAttachTestReader()
 	terminal := newAttachTerminal(t, reader, false)
 	picker := newAttachTestPicker()
-	service := newSupervisorTestService(ports.BrokerConnectionID{1})
+	service := newSupervisorTestService(t, ports.BrokerConnectionID{1})
 	service.publishSnapshot(localDaemonSnapshot(3, 1))
 	opened := false
 	service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
@@ -484,7 +484,7 @@ func TestInitialNavigationResolverFailureIsSelectionUnavailable(t *testing.T) {
 	var calls atomic.Int64
 	resolverErr := errors.New("no such target")
 	sup := mustSupervisor(t, SupervisorConfig{
-		Connector: newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) { return service, nil }),
+		Connector: newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) { return service.port, nil }),
 		Terminal:  terminal.port, Clock: clock, Jitter: func() float64 { return 0 }, Picker: picker,
 		NotifyLifecycle: func(notice LifecycleNotice) { notices <- notice },
 		ResolveInitialNavigation: func(ports.BrokerSnapshot) (InitialNavigation, error) {
@@ -528,7 +528,7 @@ func TestInitialNavigationWaitsForTargetObservation(t *testing.T) {
 			reader := newAttachTestReader()
 			terminal := newAttachTerminal(t, reader, false)
 			picker := newAttachTestPicker()
-			service := newSupervisorTestService(ports.BrokerConnectionID{1})
+			service := newSupervisorTestService(t, ports.BrokerConnectionID{1})
 			service.publishSnapshot(localDaemonSnapshot(3, 1))
 			var opened atomic.Int64
 			service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
@@ -538,7 +538,7 @@ func TestInitialNavigationWaitsForTargetObservation(t *testing.T) {
 			notices := make(chan LifecycleNotice, 4)
 			var calls atomic.Int64
 			sup := mustSupervisor(t, SupervisorConfig{
-				Connector: newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) { return service, nil }),
+				Connector: newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) { return service.port, nil }),
 				Terminal:  terminal.port, Clock: clock, Jitter: func() float64 { return 0 }, Picker: picker,
 				NotifyLifecycle: func(notice LifecycleNotice) { notices <- notice },
 				ResolveInitialNavigation: func(snapshot ports.BrokerSnapshot) (InitialNavigation, error) {
@@ -620,12 +620,12 @@ func TestInitialNavigationDropsDecisionsTakenWhileHidden(t *testing.T) {
 	terminal := newAttachTerminal(t, reader, false)
 	picker := newAttachTestPicker()
 
-	service := newSupervisorTestService(ports.BrokerConnectionID{1})
+	service := newSupervisorTestService(t, ports.BrokerConnectionID{1})
 	stream := newSessionStream(t)
 	service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 		return stream.conn, nil
 	})
-	connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) { return service, nil })
+	connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) { return service.port, nil })
 	// A keystroke typed during the cold start: the hidden picker recorded a
 	// commit before the broker published anything.
 	picker.recordOp(pickerOp{commit: true}, "row", ports.BrokerOpenStreamRequest{})

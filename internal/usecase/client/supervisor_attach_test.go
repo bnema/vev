@@ -424,11 +424,11 @@ func startAttachHarnessConfig(t *testing.T, picker pickerHost, configure func(*S
 	// available starts true, exactly like a real composition terminal: a
 	// presentation-only publication is observable before any frame drains.
 	terminal := newAttachTerminal(t, reader, true)
-	service := newSupervisorTestService(ports.BrokerConnectionID{1})
+	service := newSupervisorTestService(t, ports.BrokerConnectionID{1})
 	service.publish(3, 1)
 
 	connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) {
-		return service, nil
+		return service.port, nil
 	})
 	cfg := SupervisorConfig{
 		Connector: connector,
@@ -1729,7 +1729,7 @@ func TestSupervisorAttachmentReachableFromRealPicker(t *testing.T) {
 	reader := newPickerChunkReader()
 	t.Cleanup(reader.close)
 	terminal := newAttachTerminal(t, reader, true)
-	service := newSupervisorTestService(ports.BrokerConnectionID{1})
+	service := newSupervisorTestService(t, ports.BrokerConnectionID{1})
 	service.hub.publish(pickerTestSnapshot(3, 1, clock.Now(), "alpha"))
 	admittedStreams := make(chan *streamLog, 1)
 	service.setOpenStream(func(_ context.Context, _ ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
@@ -1739,7 +1739,7 @@ func TestSupervisorAttachmentReachableFromRealPicker(t *testing.T) {
 	})
 
 	controller := newPickerController(clock, pickerTestFreshness, terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor})
-	connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) { return service, nil })
+	connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) { return service.port, nil })
 	sup := mustSupervisor(t, SupervisorConfig{
 		Connector: connector,
 		Terminal:  terminal.port,

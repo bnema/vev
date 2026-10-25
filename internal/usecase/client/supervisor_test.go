@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
@@ -309,8 +311,9 @@ func (s supervisorTestSubscription) Close() {
 // so a test can order a parent cancellation strictly before a settle decision that
 // runs after the connection is released.
 type supervisorTestService struct {
-	id  ports.BrokerConnectionID
-	hub *supervisorTestHub
+	port *portsmocks.MockBrokerNavigator
+	id   ports.BrokerConnectionID
+	hub  *supervisorTestHub
 
 	mu       sync.Mutex
 	err      error
@@ -335,38 +338,54 @@ type supervisorTestService struct {
 	reconciles []string
 }
 
-func newSupervisorTestService(id ports.BrokerConnectionID) *supervisorTestService {
-	return &supervisorTestService{
+func newSupervisorTestService(t *testing.T, id ports.BrokerConnectionID, opts ...func(*portsmocks.MockBrokerNavigator)) *supervisorTestService {
+	s := &supervisorTestService{
 		id:        id,
 		hub:       newSupervisorTestHub(),
 		done:      make(chan struct{}),
 		closed:    make(chan struct{}),
 		subClosed: make(chan struct{}, 1),
 	}
+	s.port = portsmocks.NewMockBrokerNavigator(t)
+	for _, opt := range opts {
+		opt(s.port)
+	}
+	s.port.EXPECT().ConnectionID().RunAndReturn(s.recordConnectionID).Maybe()
+	s.port.EXPECT().NextStreamID().RunAndReturn(s.recordNextStreamID).Maybe()
+	s.port.EXPECT().Done().RunAndReturn(s.recordDone).Maybe()
+	s.port.EXPECT().Err().RunAndReturn(s.recordErr).Maybe()
+	s.port.EXPECT().Snapshot().RunAndReturn(s.recordSnapshot).Maybe()
+	s.port.EXPECT().Subscribe().RunAndReturn(s.recordSubscribe).Maybe()
+	s.port.EXPECT().SubscribePreview(mock.Anything).RunAndReturn(s.recordSubscribePreview).Maybe()
+	s.port.EXPECT().OpenStream(mock.Anything, mock.Anything).RunAndReturn(s.recordOpenStream).Maybe()
+	s.port.EXPECT().RequestReconcile(mock.Anything).Run(s.recordRequestReconcile).Maybe()
+	s.port.EXPECT().Close().RunAndReturn(s.recordClose).Maybe()
+	return s
+
 }
 
-func (s *supervisorTestService) ConnectionID() ports.BrokerConnectionID { return s.id }
+func (s *supervisorTestService) recordConnectionID() ports.BrokerConnectionID { return s.id }
 
 // NextStreamID is the connection's only stream allocator, exactly like the
 // production service: the tested supervisor reads every identity here.
-func (s *supervisorTestService) NextStreamID() (ports.BrokerStreamID, error) {
+func (s *supervisorTestService) recordNextStreamID() (ports.BrokerStreamID, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.nextStream++
 	return s.nextStream, nil
 }
 
-func (s *supervisorTestService) Done() <-chan struct{} { return s.done }
+func (s *supervisorTestService) recordDone() <-chan struct{} { return s.done }
 
-func (s *supervisorTestService) Err() error {
+func (s *supervisorTestService) recordErr() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.err
 }
 
-func (s *supervisorTestService) Snapshot() ports.BrokerSnapshot { return s.hub.current() }
+func (s *supervisorTestService) recordSnapshot() ports.BrokerSnapshot { return s.hub.current() }
 
-func (s *supervisorTestService) Subscribe() (ports.BrokerSubscription, error) {
+func (s *supervisorTestService) recordSubscribe() (ports.BrokerSubscription, error) {
 	return s.hub.subscribe(func() {
 		select {
 		case s.subClosed <- struct{}{}:
@@ -375,11 +394,11 @@ func (s *supervisorTestService) Subscribe() (ports.BrokerSubscription, error) {
 	}), nil
 }
 
-func (s *supervisorTestService) SubscribePreview(ports.BrokerPreviewRequest) (ports.BrokerPreviewSubscription, error) {
+func (s *supervisorTestService) recordSubscribePreview(ports.BrokerPreviewRequest) (ports.BrokerPreviewSubscription, error) {
 	return nil, errors.New("supervisor test service does not support preview")
 }
 
-func (s *supervisorTestService) OpenStream(ctx context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+func (s *supervisorTestService) recordOpenStream(ctx context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 	s.mu.Lock()
 	s.openCalls = append(s.openCalls, request)
 	open := s.openStream
@@ -404,7 +423,7 @@ func (s *supervisorTestService) openedRequests() []ports.BrokerOpenStreamRequest
 	return append([]ports.BrokerOpenStreamRequest(nil), s.openCalls...)
 }
 
-func (s *supervisorTestService) RequestReconcile(endpoint string) {
+func (s *supervisorTestService) recordRequestReconcile(endpoint string) {
 	s.mu.Lock()
 	s.reconciles = append(s.reconciles, endpoint)
 	s.mu.Unlock()
@@ -417,7 +436,7 @@ func (s *supervisorTestService) reconcileHints() []string {
 	return append([]string(nil), s.reconciles...)
 }
 
-func (s *supervisorTestService) Close() error {
+func (s *supervisorTestService) recordClose() error {
 	s.closeOnce.Do(func() {
 		if s.closeGate != nil {
 			select {
@@ -706,13 +725,13 @@ func TestSupervisorPickerPublicationRequestsRepaint(t *testing.T) {
 	clock := newSupervisorTestClock()
 	reader := newSupervisorTestReader()
 	t.Cleanup(reader.unblock)
-	service := newSupervisorTestService(ports.BrokerConnectionID{1})
+	service := newSupervisorTestService(t, ports.BrokerConnectionID{1})
 	service.publish(1, 1)
 	renders := make(chan State, 16)
 
 	sup := mustSupervisor(t, SupervisorConfig{
 		Connector: newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) {
-			return service, nil
+			return service.port, nil
 		}),
 		Terminal: newSupervisorTestTerminal(reader),
 		Clock:    clock,
@@ -756,16 +775,16 @@ func TestSupervisorBrokerLossReconnectsWithFreshGeneration(t *testing.T) {
 	t.Cleanup(reader.unblock)
 	terminal := newSupervisorTestTerminal(reader)
 
-	first := newSupervisorTestService(ports.BrokerConnectionID{1})
+	first := newSupervisorTestService(t, ports.BrokerConnectionID{1})
 	first.publish(1, 1)
-	second := newSupervisorTestService(ports.BrokerConnectionID{2})
+	second := newSupervisorTestService(t, ports.BrokerConnectionID{2})
 
 	connector := newSupervisorTestConnector(func(_ context.Context, call int) (ports.BrokerNavigator, error) {
 		switch call {
 		case 1:
-			return first, nil
+			return first.port, nil
 		default:
-			return second, nil
+			return second.port, nil
 		}
 	})
 
@@ -839,11 +858,11 @@ func TestSupervisorCancellationClosesLateConnection(t *testing.T) {
 	terminal := newSupervisorTestTerminal(reader)
 
 	release := make(chan struct{})
-	late := newSupervisorTestService(ports.BrokerConnectionID{9})
+	late := newSupervisorTestService(t, ports.BrokerConnectionID{9})
 	late.publish(1, 1)
 	connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) {
 		<-release
-		return late, nil
+		return late.port, nil
 	})
 
 	sup := mustSupervisor(t, SupervisorConfig{
@@ -1032,7 +1051,7 @@ func TestSupervisorCancellationRacingSettlementIsTerminal(t *testing.T) {
 		{
 			name: "ready connection",
 			attempt: func() (*supervisorTestService, error) {
-				service := newSupervisorTestService(ports.BrokerConnectionID{3})
+				service := newSupervisorTestService(t, ports.BrokerConnectionID{3})
 				service.publish(1, 1)
 				return service, nil
 			},
@@ -1057,7 +1076,7 @@ func TestSupervisorCancellationRacingSettlementIsTerminal(t *testing.T) {
 					if service == nil {
 						return nil, err
 					}
-					return service, err
+					return service.port, err
 				})
 				require.Equal(t, 1, race.connector.awaitStart(t), "round %d", round)
 
@@ -1085,11 +1104,11 @@ func TestSupervisorCancellationRacingSettlementIsTerminal(t *testing.T) {
 
 	t.Run("established loss", func(t *testing.T) {
 		for round := 0; round < supervisorCancellationRaceRounds; round++ {
-			losing := newSupervisorTestService(ports.BrokerConnectionID{4})
+			losing := newSupervisorTestService(t, ports.BrokerConnectionID{4})
 			losing.publish(1, 1)
 			losing.holdClose()
 			race := startCancellationRace(t, func(context.Context, int) (ports.BrokerNavigator, error) {
-				return losing, nil
+				return losing.port, nil
 			})
 			require.Equal(t, 1, race.connector.awaitStart(t), "round %d", round)
 			require.Eventually(t, func() bool { return race.supervisor.State().Connectivity == ConnectivityReady }, 5*time.Second, time.Millisecond, "round %d", round)
@@ -1212,25 +1231,6 @@ func (r *cancellationRaceRecorder) recorded() ([]State, []error) {
 	return append([]State(nil), r.renders...), append([]error(nil), r.notified...)
 }
 
-// supervisorNilSub is a typed-nil subscription: it satisfies the interface but
-// is nil underneath, so only the reflection guard keeps the supervisor from
-// dereferencing it.
-type supervisorNilSub struct{}
-
-func (*supervisorNilSub) Changed() <-chan struct{} { return nil }
-func (*supervisorNilSub) Close()                   {}
-
-// supervisorNilSubService overrides Subscribe so a test can exercise the
-// supervisor's nil-subscription guard without a live subscription.
-type supervisorNilSubService struct {
-	*supervisorTestService
-	sub ports.BrokerSubscription
-}
-
-func (s *supervisorNilSubService) Subscribe() (ports.BrokerSubscription, error) {
-	return s.sub, nil
-}
-
 // TestSupervisorDefensiveGenerationFenceRejectsSupersededAttempt pins the
 // defensive generation fence directly: a settled attempt whose generation is not
 // the current one is retired and discarded, while the current generation is
@@ -1252,11 +1252,11 @@ func TestSupervisorDefensiveGenerationFenceRejectsSupersededAttempt(t *testing.T
 	current := sup.State().Generation
 	require.Equal(t, uint64(1), current)
 
-	service := newSupervisorTestService(ports.BrokerConnectionID{1})
+	service := newSupervisorTestService(t, ports.BrokerConnectionID{1})
 	subClosed := make(chan struct{})
 	stale := supervisorAttempt{
 		generation: current - 1,
-		service:    service,
+		service:    service.port,
 		sub:        supervisorTestSubscription{closeFn: func() { close(subClosed) }},
 	}
 	adopted, cause := sup.adoptAttempt(context.Background(), stale)
@@ -1276,8 +1276,8 @@ func TestSupervisorDefensiveGenerationFenceRejectsSupersededAttempt(t *testing.T
 	}
 
 	// The current generation is adopted, so its live service is left untouched.
-	live := newSupervisorTestService(ports.BrokerConnectionID{2})
-	adopted, cause = sup.adoptAttempt(context.Background(), supervisorAttempt{generation: current, service: live})
+	live := newSupervisorTestService(t, ports.BrokerConnectionID{2})
+	adopted, cause = sup.adoptAttempt(context.Background(), supervisorAttempt{generation: current, service: live.port})
 	require.True(t, adopted, "the current generation must be adopted")
 	require.NoError(t, cause)
 	select {
@@ -1347,10 +1347,10 @@ func TestSupervisorNormalizesUntypedLoss(t *testing.T) {
 	t.Cleanup(reader.unblock)
 	terminal := newSupervisorTestTerminal(reader)
 
-	service := newSupervisorTestService(ports.BrokerConnectionID{1})
+	service := newSupervisorTestService(t, ports.BrokerConnectionID{1})
 	service.publish(1, 1)
 	connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) {
-		return service, nil
+		return service.port, nil
 	})
 	sup := mustSupervisor(t, SupervisorConfig{
 		Connector: connector,
@@ -1386,7 +1386,7 @@ func TestSupervisorNilSubscriptionIsTypedUnavailable(t *testing.T) {
 		sub  ports.BrokerSubscription
 	}{
 		{"nil interface", nil},
-		{"typed nil", (*supervisorNilSub)(nil)},
+		{"typed nil", (*portsmocks.MockBrokerSubscription)(nil)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1398,8 +1398,8 @@ func TestSupervisorNilSubscriptionIsTypedUnavailable(t *testing.T) {
 			t.Cleanup(reader.unblock)
 			terminal := newSupervisorTestTerminal(reader)
 
-			base := newSupervisorTestService(ports.BrokerConnectionID{7})
-			svc := &supervisorNilSubService{supervisorTestService: base, sub: tc.sub}
+			base := newSupervisorTestService(t, ports.BrokerConnectionID{7}, func(m *portsmocks.MockBrokerNavigator) { m.EXPECT().Subscribe().Return(tc.sub, nil).Maybe() })
+			svc := base.port
 			connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) {
 				return svc, nil
 			})
