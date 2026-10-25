@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"testing/synctest"
 
 	"github.com/stretchr/testify/require"
 
@@ -29,9 +30,11 @@ func boundedDial(ctx context.Context, dialer ports.ClientDialer) (ports.ClientCo
 }
 
 func TestBoundedDialCancelsPrivateContextAfterFailure(t *testing.T) {
-	dialer := &failedContextDialer{}
-	_, err := boundedDial(context.Background(), dialer)
-	require.ErrorContains(t, err, "dial failed")
-	require.NotNil(t, dialer.ctx)
-	require.ErrorIs(t, dialer.ctx.Err(), context.Canceled)
+	synctest.Test(t, func(t *testing.T) {
+		dialer := &failedContextDialer{}
+		_, err := boundedDial(context.Background(), dialer)
+		require.ErrorContains(t, err, "dial failed")
+		require.NotNil(t, dialer.ctx)
+		require.ErrorIs(t, dialer.ctx.Err(), context.Canceled)
+	})
 }

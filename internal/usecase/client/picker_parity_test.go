@@ -3,6 +3,7 @@ package client
 import (
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -117,29 +118,31 @@ func TestPickerCatalogueTabRows(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			catalogue, _ := pickerTestCatalogue(t)
-			require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{tt.daemon}}))
-			for _, lines := range [][]protocol.PickerLine{catalogue.Lines(), catalogue.RecentLines()} {
-				header, ok := pickerLineByLabel(lines, tt.session)
-				require.True(t, ok)
-				require.Equal(t, protocol.PickerLineSession, header.Kind)
-				require.False(t, header.Focusable, "a tabbed session header is not a destination")
-				require.Zero(t, header.Actions)
-				require.Equal(t, tt.wantHeaderBel, header.Attention, "the header rings when any tab does")
+			synctest.Test(t, func(t *testing.T) {
+				catalogue, _ := pickerTestCatalogue(t)
+				require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{tt.daemon}}))
+				for _, lines := range [][]protocol.PickerLine{catalogue.Lines(), catalogue.RecentLines()} {
+					header, ok := pickerLineByLabel(lines, tt.session)
+					require.True(t, ok)
+					require.Equal(t, protocol.PickerLineSession, header.Kind)
+					require.False(t, header.Focusable, "a tabbed session header is not a destination")
+					require.Zero(t, header.Actions)
+					require.Equal(t, tt.wantHeaderBel, header.Attention, "the header rings when any tab does")
 
-				tabs := pickerLinesOfKind(lines, protocol.PickerLineTab)
-				require.Len(t, tabs, len(tt.wantTabs))
-				for i, want := range tt.wantTabs {
-					got := tabs[i]
-					require.Equal(t, want.Label, got.Label)
-					require.Equal(t, want.Detail, got.Detail)
-					require.Equal(t, want.Attention, got.Attention)
-					require.Equal(t, want.Actions, got.Actions, "tab %q actions", got.Label)
-					require.Equal(t, want.Stopped, got.Stopped)
-					require.True(t, got.Focusable, "every tab row is reachable")
-					require.NotEqual(t, header.Key, got.Key)
+					tabs := pickerLinesOfKind(lines, protocol.PickerLineTab)
+					require.Len(t, tabs, len(tt.wantTabs))
+					for i, want := range tt.wantTabs {
+						got := tabs[i]
+						require.Equal(t, want.Label, got.Label)
+						require.Equal(t, want.Detail, got.Detail)
+						require.Equal(t, want.Attention, got.Attention)
+						require.Equal(t, want.Actions, got.Actions, "tab %q actions", got.Label)
+						require.Equal(t, want.Stopped, got.Stopped)
+						require.True(t, got.Focusable, "every tab row is reachable")
+						require.NotEqual(t, header.Key, got.Key)
+					}
 				}
-			}
+			})
 		})
 	}
 }
@@ -203,21 +206,23 @@ func TestPickerCatalogueResolvesTabTargets(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			catalogue, _ := pickerTestCatalogue(t)
-			require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{tt.daemon}}))
-			key := pickerTabKey(t, catalogue.Lines(), tt.session, tt.tab)
-			if tt.after != nil {
-				require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 2, Daemons: []ports.BrokerDaemonObservation{*tt.after}}))
-			}
-			request, tab, err := catalogue.ResolveTarget(key, pickerTestBase())
-			if tt.wantErr != 0 {
-				require.True(t, pickerCatalogueErrorIs(err, tt.wantErr), "want %v, got %v", tt.wantErr, err)
-				return
-			}
-			require.NoError(t, err)
-			require.Equal(t, ports.BrokerAdmissionExact, request.Admission)
-			require.Equal(t, lifecycle, request.Target.LifecycleID)
-			require.Equal(t, tt.want, tab)
+			synctest.Test(t, func(t *testing.T) {
+				catalogue, _ := pickerTestCatalogue(t)
+				require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{tt.daemon}}))
+				key := pickerTabKey(t, catalogue.Lines(), tt.session, tt.tab)
+				if tt.after != nil {
+					require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 2, Daemons: []ports.BrokerDaemonObservation{*tt.after}}))
+				}
+				request, tab, err := catalogue.ResolveTarget(key, pickerTestBase())
+				if tt.wantErr != 0 {
+					require.True(t, pickerCatalogueErrorIs(err, tt.wantErr), "want %v, got %v", tt.wantErr, err)
+					return
+				}
+				require.NoError(t, err)
+				require.Equal(t, ports.BrokerAdmissionExact, request.Admission)
+				require.Equal(t, lifecycle, request.Target.LifecycleID)
+				require.Equal(t, tt.want, tab)
+			})
 		})
 	}
 }
@@ -251,8 +256,10 @@ func TestPickerCatalogueRecentAndGroupedProjections(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.wantSessions, pickerSessionLabels(tt.lines))
-			require.Equal(t, tt.wantSections, pickerSectionLabels(tt.lines))
+			synctest.Test(t, func(t *testing.T) {
+				require.Equal(t, tt.wantSessions, pickerSessionLabels(tt.lines))
+				require.Equal(t, tt.wantSections, pickerSectionLabels(tt.lines))
+			})
 		})
 	}
 	actions := func(lines []protocol.PickerLine) map[string]protocol.PickerLineActions {
@@ -296,15 +303,17 @@ func TestPickerCatalogueCursorStartsOnCurrent(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			catalogue, _ := pickerTestCatalogue(t)
-			catalogue.SetCurrent(tt.current)
-			require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{local, remote}}))
-			recent, grouped := catalogue.projections()
-			for _, projection := range []protocol.PickerProjection{recent, grouped} {
-				want := pickerTabKey(t, projection.Lines, tt.wantSession, tt.wantTab)
-				require.Equal(t, want, projection.Cursor.Key)
-				require.Equal(t, want, projection.Lines[projection.Cursor.Index].Key)
-			}
+			synctest.Test(t, func(t *testing.T) {
+				catalogue, _ := pickerTestCatalogue(t)
+				catalogue.SetCurrent(tt.current)
+				require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{local, remote}}))
+				recent, grouped := catalogue.projections()
+				for _, projection := range []protocol.PickerProjection{recent, grouped} {
+					want := pickerTabKey(t, projection.Lines, tt.wantSession, tt.wantTab)
+					require.Equal(t, want, projection.Cursor.Key)
+					require.Equal(t, want, projection.Lines[projection.Cursor.Index].Key)
+				}
+			})
 		})
 	}
 }
@@ -312,17 +321,19 @@ func TestPickerCatalogueCursorStartsOnCurrent(t *testing.T) {
 // TestPickerControllerOverlayOpensOnCurrentTab pins that SetCurrent restarts
 // the presentation on the attached tab and drops a leftover search.
 func TestPickerControllerOverlayOpensOnCurrentTab(t *testing.T) {
-	controller, clock := pickerTestController(t)
-	controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{pickerTestLocalObservation(clock.port.Now(),
-		pickerTestTabbed("alpha", 1, catalogue_Up, 1, "a1", pickerTestTab("a1", "one", "", false), pickerTestTab("a2", "two", "", false)),
-		pickerTestTabbed("beta", 2, catalogue_Up, 9, "b1", pickerTestTab("b1", "one", "", false)),
-	)}})
-	require.True(t, controller.ConsumeTerminalRead([]byte("/on")))
-	require.True(t, controller.modelSearchActive(t))
+	synctest.Test(t, func(t *testing.T) {
+		controller, clock := pickerTestController(t)
+		controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{pickerTestLocalObservation(clock.port.Now(),
+			pickerTestTabbed("alpha", 1, catalogue_Up, 1, "a1", pickerTestTab("a1", "one", "", false), pickerTestTab("a2", "two", "", false)),
+			pickerTestTabbed("beta", 2, catalogue_Up, 9, "b1", pickerTestTab("b1", "one", "", false)),
+		)}})
+		require.True(t, controller.ConsumeTerminalRead([]byte("/on")))
+		require.True(t, controller.modelSearchActive(t))
 
-	controller.SetCurrent(pickerCurrent{known: true, local: true, lifecycle: pickerTestLifecycle(1), tab: "a2"})
-	require.False(t, controller.modelSearchActive(t), "a fresh overlay starts without the previous search")
-	require.Equal(t, pickerTabKey(t, controller.Catalogue().RecentLines(), "alpha", "two"), mustCursorKey(t, controller))
+		controller.SetCurrent(pickerCurrent{known: true, local: true, lifecycle: pickerTestLifecycle(1), tab: "a2"})
+		require.False(t, controller.modelSearchActive(t), "a fresh overlay starts without the previous search")
+		require.Equal(t, pickerTabKey(t, controller.Catalogue().RecentLines(), "alpha", "two"), mustCursorKey(t, controller))
+	})
 }
 
 // TestPickerControllerSearchesTabNamesAndPaneTitles pins that tab rows are
@@ -338,16 +349,18 @@ func TestPickerControllerSearchesTabNamesAndPaneTitles(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			controller, clock := pickerTestController(t)
-			controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{pickerTestLocalObservation(clock.port.Now(),
-				pickerTestTabbed("work", 1, catalogue_Up, 1, "w1",
-					pickerTestTab("w1", "shell", "(zsh)", false),
-					pickerTestTab("w2", "deploy", "(ansible)", false),
-					pickerTestTab("w3", "monitor", "(htop)", false),
-				),
-			)}})
-			require.True(t, controller.ConsumeTerminalRead([]byte("/"+tt.query)))
-			require.Equal(t, pickerTabKey(t, controller.Catalogue().RecentLines(), "work", tt.want), mustCursorKey(t, controller))
+			synctest.Test(t, func(t *testing.T) {
+				controller, clock := pickerTestController(t)
+				controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{pickerTestLocalObservation(clock.port.Now(),
+					pickerTestTabbed("work", 1, catalogue_Up, 1, "w1",
+						pickerTestTab("w1", "shell", "(zsh)", false),
+						pickerTestTab("w2", "deploy", "(ansible)", false),
+						pickerTestTab("w3", "monitor", "(htop)", false),
+					),
+				)}})
+				require.True(t, controller.ConsumeTerminalRead([]byte("/"+tt.query)))
+				require.Equal(t, pickerTabKey(t, controller.Catalogue().RecentLines(), "work", tt.want), mustCursorKey(t, controller))
+			})
 		})
 	}
 }
@@ -355,39 +368,41 @@ func TestPickerControllerSearchesTabNamesAndPaneTitles(t *testing.T) {
 // TestPickerControllerSortToggleSwitchesProjection pins that `s` switches
 // between the distinct Recent and Grouped projections.
 func TestPickerControllerSortToggleSwitchesProjection(t *testing.T) {
-	controller, clock := pickerTestController(t)
-	controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{
-		pickerTestLocalObservation(clock.port.Now(), pickerTestTabbed("alpha", 1, catalogue_Up, 5, ""), pickerTestTabbed("gamma", 3, catalogue_Down, 1, "")),
-		pickerTestRemoteObservation("user@arch", 1, 1, clock.port.Now(), pickerTestTabbed("remote-a", 5, catalogue_Up, 0, "")),
-	}})
-	order := func() []string {
-		frame := string(controller.Render(domain.Size{Cols: 100, Rows: 30}))
-		positions := map[string]int{}
-		for _, label := range []string{"alpha", "gamma", "remote-a"} {
-			positions[label] = strings.Index(frame, label)
-			require.GreaterOrEqual(t, positions[label], 0, "%q is rendered", label)
-		}
-		labels := []string{"alpha", "gamma", "remote-a"}
-		for i := range labels {
-			for j := i + 1; j < len(labels); j++ {
-				if positions[labels[j]] < positions[labels[i]] {
-					labels[i], labels[j] = labels[j], labels[i]
+	synctest.Test(t, func(t *testing.T) {
+		controller, clock := pickerTestController(t)
+		controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{
+			pickerTestLocalObservation(clock.port.Now(), pickerTestTabbed("alpha", 1, catalogue_Up, 5, ""), pickerTestTabbed("gamma", 3, catalogue_Down, 1, "")),
+			pickerTestRemoteObservation("user@arch", 1, 1, clock.port.Now(), pickerTestTabbed("remote-a", 5, catalogue_Up, 0, "")),
+		}})
+		order := func() []string {
+			frame := string(controller.Render(domain.Size{Cols: 100, Rows: 30}))
+			positions := map[string]int{}
+			for _, label := range []string{"alpha", "gamma", "remote-a"} {
+				positions[label] = strings.Index(frame, label)
+				require.GreaterOrEqual(t, positions[label], 0, "%q is rendered", label)
+			}
+			labels := []string{"alpha", "gamma", "remote-a"}
+			for i := range labels {
+				for j := i + 1; j < len(labels); j++ {
+					if positions[labels[j]] < positions[labels[i]] {
+						labels[i], labels[j] = labels[j], labels[i]
+					}
 				}
 			}
+			return labels
 		}
-		return labels
-	}
-	grouped := []string{"alpha", "gamma", "remote-a"}
-	recent := []string{"alpha", "remote-a", "gamma"}
-	require.Equal(t, grouped, order(), "default grouped: local section, then remote")
-	require.True(t, controller.ConsumeTerminalRead([]byte("s")))
-	require.Equal(t, recent, order(), "recent: live, remote, stopped")
+		grouped := []string{"alpha", "gamma", "remote-a"}
+		recent := []string{"alpha", "remote-a", "gamma"}
+		require.Equal(t, grouped, order(), "default grouped: local section, then remote")
+		require.True(t, controller.ConsumeTerminalRead([]byte("s")))
+		require.Equal(t, recent, order(), "recent: live, remote, stopped")
 
-	// Reopening the picker keeps this client's chosen sort.
-	controller.SetCurrent(pickerCurrent{})
-	require.Equal(t, recent, order(), "sort survives a reopen")
-	require.True(t, controller.ConsumeTerminalRead([]byte("s")))
-	require.Equal(t, grouped, order())
+		// Reopening the picker keeps this client's chosen sort.
+		controller.SetCurrent(pickerCurrent{})
+		require.Equal(t, recent, order(), "sort survives a reopen")
+		require.True(t, controller.ConsumeTerminalRead([]byte("s")))
+		require.Equal(t, grouped, order())
+	})
 }
 
 // TestPickerControllerRendersBellsAndRepaintsOnPublication ports main's
@@ -395,17 +410,19 @@ func TestPickerControllerSortToggleSwitchesProjection(t *testing.T) {
 // TestAttentionPulseRepublishesTheOpenPickerSource: a bell raised by a later
 // publication reaches the rendered picker.
 func TestPickerControllerRendersBellsAndRepaintsOnPublication(t *testing.T) {
-	controller, clock := pickerTestController(t)
-	quiet := pickerTestLocalObservation(clock.port.Now(), pickerTestTabbed("work", 1, catalogue_Up, 1, "t1", pickerTestTab("t1", "shell", "", false)))
-	controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{quiet}})
-	bell := string(ui.AttentionGlyph)
-	require.NotContains(t, string(controller.Render(domain.Size{Cols: 100, Rows: 30})), bell)
+	synctest.Test(t, func(t *testing.T) {
+		controller, clock := pickerTestController(t)
+		quiet := pickerTestLocalObservation(clock.port.Now(), pickerTestTabbed("work", 1, catalogue_Up, 1, "t1", pickerTestTab("t1", "shell", "", false)))
+		controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{quiet}})
+		bell := string(ui.AttentionGlyph)
+		require.NotContains(t, string(controller.Render(domain.Size{Cols: 100, Rows: 30})), bell)
 
-	ringing := pickerTestLocalObservation(clock.port.Now(), pickerTestTabbed("work", 1, catalogue_Up, 1, "t1", pickerTestTab("t1", "shell", "", true)))
-	controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 2, Daemons: []ports.BrokerDaemonObservation{ringing}})
-	controller.invalidatePresentation()
-	frame := string(controller.Render(domain.Size{Cols: 100, Rows: 30}))
-	require.Equal(t, 2, strings.Count(frame, bell), "the header and its tab row both ring")
+		ringing := pickerTestLocalObservation(clock.port.Now(), pickerTestTabbed("work", 1, catalogue_Up, 1, "t1", pickerTestTab("t1", "shell", "", true)))
+		controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 2, Daemons: []ports.BrokerDaemonObservation{ringing}})
+		controller.invalidatePresentation()
+		frame := string(controller.Render(domain.Size{Cols: 100, Rows: 30}))
+		require.Equal(t, 2, strings.Count(frame, bell), "the header and its tab row both ring")
+	})
 }
 
 // TestPickerCatalogueResolveKill pins which rows `x` may destroy: local live
@@ -441,23 +458,25 @@ func TestPickerCatalogueResolveKill(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			catalogue, _ := pickerTestCatalogue(t)
-			require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{tt.daemon}}))
-			line, ok := pickerLineByLabel(catalogue.Lines(), tt.label)
-			require.True(t, ok)
-			if tt.after != nil {
-				require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 2, Daemons: []ports.BrokerDaemonObservation{*tt.after}}))
-			}
-			target, err := catalogue.ResolveKill(line.Key)
-			if tt.wantErr != 0 {
-				require.True(t, pickerCatalogueErrorIs(err, tt.wantErr), "want %v, got %v", tt.wantErr, err)
-				return
-			}
-			require.NoError(t, err)
-			require.Equal(t, BrokerOperationRoute{Epoch: 3, Destination: ports.BrokerEndpointFence{Local: true}}, target.route)
-			require.NoError(t, target.route.Validate())
-			require.Equal(t, tt.label, target.name)
-			require.Equal(t, tt.wantStopped, target.stopped)
+			synctest.Test(t, func(t *testing.T) {
+				catalogue, _ := pickerTestCatalogue(t)
+				require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{tt.daemon}}))
+				line, ok := pickerLineByLabel(catalogue.Lines(), tt.label)
+				require.True(t, ok)
+				if tt.after != nil {
+					require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 2, Daemons: []ports.BrokerDaemonObservation{*tt.after}}))
+				}
+				target, err := catalogue.ResolveKill(line.Key)
+				if tt.wantErr != 0 {
+					require.True(t, pickerCatalogueErrorIs(err, tt.wantErr), "want %v, got %v", tt.wantErr, err)
+					return
+				}
+				require.NoError(t, err)
+				require.Equal(t, BrokerOperationRoute{Epoch: 3, Destination: ports.BrokerEndpointFence{Local: true}}, target.route)
+				require.NoError(t, target.route.Validate())
+				require.Equal(t, tt.label, target.name)
+				require.Equal(t, tt.wantStopped, target.stopped)
+			})
 		})
 	}
 }
@@ -485,23 +504,25 @@ func TestPickerControllerKillKeyWakesSupervisor(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			controller, clock := pickerTestController(t)
-			controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{tt.daemon(clock.port.Now())}})
-			require.True(t, controller.ConsumeTerminalRead([]byte(tt.input)))
-			if tt.wantKill {
-				select {
-				case <-controller.OpsReady():
-				default:
-					t.Fatal("a kill decision must wake the supervisor")
+			synctest.Test(t, func(t *testing.T) {
+				controller, clock := pickerTestController(t)
+				controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{tt.daemon(clock.port.Now())}})
+				require.True(t, controller.ConsumeTerminalRead([]byte(tt.input)))
+				if tt.wantKill {
+					select {
+					case <-controller.OpsReady():
+					default:
+						t.Fatal("a kill decision must wake the supervisor")
+					}
 				}
-			}
-			op, key := controller.TakeOp()
-			require.Equal(t, tt.wantKill, op.kill)
-			if tt.wantKey {
-				require.Equal(t, pickerRowKeyByLabel(t, controller, "alpha"), key)
-			} else {
-				require.Empty(t, key)
-			}
+				op, key := controller.TakeOp()
+				require.Equal(t, tt.wantKill, op.kill)
+				if tt.wantKey {
+					require.Equal(t, pickerRowKeyByLabel(t, controller, "alpha"), key)
+				} else {
+					require.Empty(t, key)
+				}
+			})
 		})
 	}
 }
@@ -509,79 +530,83 @@ func TestPickerControllerKillKeyWakesSupervisor(t *testing.T) {
 // TestPickerControllerRecoveryReplacesVisibleFailure checks that a host's
 // recovery toast replaces its failure toast and leaves other hosts' toasts.
 func TestPickerControllerRecoveryReplacesVisibleFailure(t *testing.T) {
-	controller, clock := pickerTestController(t)
-	down := pickerTestRemoteObservation("user@arch", 1, 1, clock.port.Now())
-	down.Availability = domain.RemoteAvailabilityUnreachable
-	down.FailureEpisode = 1
-	other := pickerTestRemoteObservation("user@mule", 2, 2, clock.port.Now())
-	other.Availability = domain.RemoteAvailabilityUnreachable
-	other.FailureEpisode = 1
-	controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{down, other}})
+	synctest.Test(t, func(t *testing.T) {
+		controller, clock := pickerTestController(t)
+		down := pickerTestRemoteObservation("user@arch", 1, 1, clock.port.Now())
+		down.Availability = domain.RemoteAvailabilityUnreachable
+		down.FailureEpisode = 1
+		other := pickerTestRemoteObservation("user@mule", 2, 2, clock.port.Now())
+		other.Availability = domain.RemoteAvailabilityUnreachable
+		other.FailureEpisode = 1
+		controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{down, other}})
 
-	up := pickerTestRemoteObservation("user@arch", 1, 1, clock.port.Now())
-	up.FailureEpisode = 1
-	controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 2, Daemons: []ports.BrokerDaemonObservation{up, other}})
+		up := pickerTestRemoteObservation("user@arch", 1, 1, clock.port.Now())
+		up.FailureEpisode = 1
+		controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 2, Daemons: []ports.BrokerDaemonObservation{up, other}})
 
-	messages := controller.state().notices
-	require.Len(t, messages, 2, "each host keeps one toast")
-	require.Contains(t, messages, "Remote host reconnected: user@arch")
-	for _, message := range messages {
-		require.NotContains(t, message, "Remote check failed: user@arch", "the recovery replaced the failure")
-	}
+		messages := controller.state().notices
+		require.Len(t, messages, 2, "each host keeps one toast")
+		require.Contains(t, messages, "Remote host reconnected: user@arch")
+		for _, message := range messages {
+			require.NotContains(t, message, "Remote check failed: user@arch", "the recovery replaced the failure")
+		}
+	})
 }
 
 // TestPickerControllerHostFailureToastOncePerEpisode ports main's
 // TestRemoteFailureNoticeEmittedOncePerFailureEpisode and
 // TestRemoteFailureNoticesKeepEndpointsDistinct.
 func TestPickerControllerHostFailureToastOncePerEpisode(t *testing.T) {
-	controller, clock := pickerTestController(t)
-	failing := func(endpoint string, seed byte, episode uint64, kind domain.RemoteFailureKind) ports.BrokerDaemonObservation {
-		o := pickerTestRemoteObservation(endpoint, seed, seed, clock.port.Now())
-		o.Availability = domain.RemoteAvailabilityUnreachable
-		o.ConsecutiveFailures = 1
-		o.FailureEpisode = episode
-		o.LastFailure = domain.RemoteFailure{Kind: kind}
-		return o
-	}
-	revision := ports.BrokerRevision(0)
-	apply := func(daemons ...ports.BrokerDaemonObservation) []ui.QueuedToast[ui.Toast] {
-		revision++
-		controller.mu.Lock()
-		controller.notices = ui.NewToastQueue[ui.Toast](ui.ToastQueueOptions{MaxVisible: pickerNoticeVisible})
-		controller.mu.Unlock()
-		controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: revision, Daemons: daemons})
-		controller.mu.Lock()
-		defer controller.mu.Unlock()
-		return controller.notices.Visible(clock.port.Now())
-	}
+	synctest.Test(t, func(t *testing.T) {
+		controller, clock := pickerTestController(t)
+		failing := func(endpoint string, seed byte, episode uint64, kind domain.RemoteFailureKind) ports.BrokerDaemonObservation {
+			o := pickerTestRemoteObservation(endpoint, seed, seed, clock.port.Now())
+			o.Availability = domain.RemoteAvailabilityUnreachable
+			o.ConsecutiveFailures = 1
+			o.FailureEpisode = episode
+			o.LastFailure = domain.RemoteFailure{Kind: kind}
+			return o
+		}
+		revision := ports.BrokerRevision(0)
+		apply := func(daemons ...ports.BrokerDaemonObservation) []ui.QueuedToast[ui.Toast] {
+			revision++
+			controller.mu.Lock()
+			controller.notices = ui.NewToastQueue[ui.Toast](ui.ToastQueueOptions{MaxVisible: pickerNoticeVisible})
+			controller.mu.Unlock()
+			controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: revision, Daemons: daemons})
+			controller.mu.Lock()
+			defer controller.mu.Unlock()
+			return controller.notices.Visible(clock.port.Now())
+		}
 
-	toasts := apply(failing("user@arch", 1, 1, domain.RemoteFailureTrust))
-	require.Len(t, toasts, 1)
-	require.Contains(t, toasts[0].Value.Message, "SSH host verification failed")
-	require.Contains(t, toasts[0].Value.Message, "user@arch")
-	require.Empty(t, apply(failing("user@arch", 1, 1, domain.RemoteFailureTrust)), "the same episode toasts once")
-	require.Len(t, apply(failing("user@arch", 1, 2, domain.RemoteFailureTrust)), 1, "a new episode toasts again")
+		toasts := apply(failing("user@arch", 1, 1, domain.RemoteFailureTrust))
+		require.Len(t, toasts, 1)
+		require.Contains(t, toasts[0].Value.Message, "SSH host verification failed")
+		require.Contains(t, toasts[0].Value.Message, "user@arch")
+		require.Empty(t, apply(failing("user@arch", 1, 1, domain.RemoteFailureTrust)), "the same episode toasts once")
+		require.Len(t, apply(failing("user@arch", 1, 2, domain.RemoteFailureTrust)), 1, "a new episode toasts again")
 
-	recovered := pickerTestRemoteObservation("user@arch", 1, 1, clock.port.Now().Add(time.Second))
-	recovered.FailureEpisode = 2
-	toasts = apply(recovered)
-	require.Len(t, toasts, 1, "a recovery toasts once")
-	require.Equal(t, "Remote host reconnected: user@arch", toasts[0].Value.Message)
-	require.Empty(t, apply(recovered), "a steady healthy host is silent")
+		recovered := pickerTestRemoteObservation("user@arch", 1, 1, clock.port.Now().Add(time.Second))
+		recovered.FailureEpisode = 2
+		toasts = apply(recovered)
+		require.Len(t, toasts, 1, "a recovery toasts once")
+		require.Equal(t, "Remote host reconnected: user@arch", toasts[0].Value.Message)
+		require.Empty(t, apply(recovered), "a steady healthy host is silent")
 
-	require.Len(t, apply(failing("user@arch", 1, 3, domain.RemoteFailureTimeout)), 1)
-	unknown := pickerTestRemoteObservation("user@arch", 1, 1, clock.port.Now().Add(2*time.Second))
-	unknown.Availability = domain.RemoteAvailabilityUnknown
-	unknown.FailureEpisode = 3
-	require.Empty(t, apply(unknown), "an in-between state is silent")
-	recovered = pickerTestRemoteObservation("user@arch", 1, 1, clock.port.Now().Add(3*time.Second))
-	recovered.FailureEpisode = 3
-	require.Len(t, apply(recovered), 1, "failing → unknown → reachable still reports recovery")
-	require.Len(t, apply(failing("user@arch", 1, 4, domain.RemoteFailureTimeout)), 1, "an outage after recovery toasts again")
+		require.Len(t, apply(failing("user@arch", 1, 3, domain.RemoteFailureTimeout)), 1)
+		unknown := pickerTestRemoteObservation("user@arch", 1, 1, clock.port.Now().Add(2*time.Second))
+		unknown.Availability = domain.RemoteAvailabilityUnknown
+		unknown.FailureEpisode = 3
+		require.Empty(t, apply(unknown), "an in-between state is silent")
+		recovered = pickerTestRemoteObservation("user@arch", 1, 1, clock.port.Now().Add(3*time.Second))
+		recovered.FailureEpisode = 3
+		require.Len(t, apply(recovered), 1, "failing → unknown → reachable still reports recovery")
+		require.Len(t, apply(failing("user@arch", 1, 4, domain.RemoteFailureTimeout)), 1, "an outage after recovery toasts again")
 
-	toasts = apply(failing("user@arch", 1, 4, domain.RemoteFailureTimeout), failing("user@mule", 2, 1, domain.RemoteFailureAuthentication))
-	require.Len(t, toasts, 1, "only the newly failing endpoint toasts")
-	require.Contains(t, toasts[0].Value.Message, "user@mule")
+		toasts = apply(failing("user@arch", 1, 4, domain.RemoteFailureTimeout), failing("user@mule", 2, 1, domain.RemoteFailureAuthentication))
+		require.Len(t, toasts, 1, "only the newly failing endpoint toasts")
+		require.Contains(t, toasts[0].Value.Message, "user@mule")
+	})
 }
 
 // TestPickerControllerRefusesFailingRemoteInstantly pins B4: a commit on a
@@ -599,25 +624,27 @@ func TestPickerControllerRefusesFailingRemoteInstantly(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			controller, clock := pickerTestController(t)
-			o := pickerTestRemoteObservation("user@arch", 1, 1, clock.port.Now().Add(-time.Hour), pickerTestSession("remote-a", 3, catalogue_Up))
-			o.Availability = tt.availability
-			controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{o}})
-			controller.mu.Lock()
-			controller.notices = ui.NewToastQueue[ui.Toast](ui.ToastQueueOptions{MaxVisible: pickerNoticeVisible})
-			controller.mu.Unlock()
+			synctest.Test(t, func(t *testing.T) {
+				controller, clock := pickerTestController(t)
+				o := pickerTestRemoteObservation("user@arch", 1, 1, clock.port.Now().Add(-time.Hour), pickerTestSession("remote-a", 3, catalogue_Up))
+				o.Availability = tt.availability
+				controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{o}})
+				controller.mu.Lock()
+				controller.notices = ui.NewToastQueue[ui.Toast](ui.ToastQueueOptions{MaxVisible: pickerNoticeVisible})
+				controller.mu.Unlock()
 
-			_, _, err := controller.ResolveCommit(pickerRowKeyByLabel(t, controller, "remote-a"), pickerTestBase())
-			if tt.wantNotice == "" {
-				require.NoError(t, err)
-				return
-			}
-			require.True(t, pickerCatalogueErrorIs(err, pickerCatalogueUnavailable))
-			controller.mu.Lock()
-			active := controller.notices.Visible(clock.port.Now())
-			controller.mu.Unlock()
-			require.Len(t, active, 1)
-			require.Equal(t, tt.wantNotice, active[0].Value.Message)
+				_, _, err := controller.ResolveCommit(pickerRowKeyByLabel(t, controller, "remote-a"), pickerTestBase())
+				if tt.wantNotice == "" {
+					require.NoError(t, err)
+					return
+				}
+				require.True(t, pickerCatalogueErrorIs(err, pickerCatalogueUnavailable))
+				controller.mu.Lock()
+				active := controller.notices.Visible(clock.port.Now())
+				controller.mu.Unlock()
+				require.Len(t, active, 1)
+				require.Equal(t, tt.wantNotice, active[0].Value.Message)
+			})
 		})
 	}
 }
@@ -641,17 +668,19 @@ func TestSessionAttachmentHelloCarriesTab(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			request := sessionTestRequest(tt.local)
-			provenance := SessionEnvironmentRemote
-			if tt.local {
-				provenance = SessionEnvironmentLocalPicker
-			}
-			worker, err := newSessionAttachmentWorker(sessionAttachmentConfig{Request: request, Geometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}, SessionEnvironment: SessionEnvironment{Provenance: provenance}, Tab: tt.tab})
-			require.NoError(t, err)
-			hello := worker.hello(newSessionStream(t).conn)
-			require.Equal(t, tt.wantPreferred, hello.PreferredTabID)
-			require.Equal(t, tt.wantTarget, hello.SessionTarget)
-			require.NoError(t, protocol.ValidateHello(hello))
+			synctest.Test(t, func(t *testing.T) {
+				request := sessionTestRequest(tt.local)
+				provenance := SessionEnvironmentRemote
+				if tt.local {
+					provenance = SessionEnvironmentLocalPicker
+				}
+				worker, err := newSessionAttachmentWorker(sessionAttachmentConfig{Request: request, Geometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}, SessionEnvironment: SessionEnvironment{Provenance: provenance}, Tab: tt.tab})
+				require.NoError(t, err)
+				hello := worker.hello(newSessionStream(t).conn)
+				require.Equal(t, tt.wantPreferred, hello.PreferredTabID)
+				require.Equal(t, tt.wantTarget, hello.SessionTarget)
+				require.NoError(t, protocol.ValidateHello(hello))
+			})
 		})
 	}
 }

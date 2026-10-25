@@ -2,6 +2,7 @@ package client
 
 import (
 	"testing"
+	"testing/synctest"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
@@ -26,34 +27,36 @@ func TestOutputApplyCapturedViewContext(t *testing.T) {
 	require.Equal(t, testOutputView(1), initial.context, "accepted metadata must not alias received pointers")
 	for _, scenario := range []string{"delta", "missing context", "stale publication", "invalid context", "different session", "contextual side effect", "plain side effect"} {
 		t.Run(scenario, func(t *testing.T) {
-			context := testOutputView(2)
-			output := protocol.Output{Epoch: 2, Base: 1, New: 2, ViewRevision: 3, Context: &context}
-			switch scenario {
-			case "missing context":
-				output.Context = nil
-			case "different session":
-				context.Route.Target.LifecycleID = domain.SessionLifecycleID{2}
-			case "stale publication":
-				context.Publication = 1
-			case "invalid context":
-				context.FocusedPaneID = ""
-			case "contextual side effect":
-				output.Base, output.New = 0, 0
-			case "plain side effect":
-				output.Base, output.New, output.Epoch = 0, 0, 9
-				output.Context = nil
-			}
-			next, accepted := initial.next(output)
-			switch scenario {
-			case "delta":
-				require.True(t, accepted)
-				require.Equal(t, context, next.context)
-			case "plain side effect":
-				require.True(t, accepted)
-				require.Equal(t, initial, next, "query/cleanup bytes cannot overwrite committed view identity")
-			default:
-				require.False(t, accepted)
-			}
+			synctest.Test(t, func(t *testing.T) {
+				context := testOutputView(2)
+				output := protocol.Output{Epoch: 2, Base: 1, New: 2, ViewRevision: 3, Context: &context}
+				switch scenario {
+				case "missing context":
+					output.Context = nil
+				case "different session":
+					context.Route.Target.LifecycleID = domain.SessionLifecycleID{2}
+				case "stale publication":
+					context.Publication = 1
+				case "invalid context":
+					context.FocusedPaneID = ""
+				case "contextual side effect":
+					output.Base, output.New = 0, 0
+				case "plain side effect":
+					output.Base, output.New, output.Epoch = 0, 0, 9
+					output.Context = nil
+				}
+				next, accepted := initial.next(output)
+				switch scenario {
+				case "delta":
+					require.True(t, accepted)
+					require.Equal(t, context, next.context)
+				case "plain side effect":
+					require.True(t, accepted)
+					require.Equal(t, initial, next, "query/cleanup bytes cannot overwrite committed view identity")
+				default:
+					require.False(t, accepted)
+				}
+			})
 		})
 	}
 }
@@ -76,31 +79,35 @@ func TestOutputApplyMetadataOnlyUpdates(t *testing.T) {
 		{"future output", true, 2, 5, 8, false, true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			state := initial
-			state.initialized = test.initialized
-			view := testOutputView(test.publication)
-			view.FocusedPaneID = "pane-2"
-			next, accepted, reset := state.nextView(protocol.UIViewUpdate{Epoch: test.epoch, State: test.state, Context: view})
-			require.Equal(t, test.accepted, accepted)
-			require.Equal(t, test.reset, reset)
-			if accepted {
-				require.Equal(t, initial.epoch, next.epoch)
-				require.Equal(t, initial.state, next.state)
-				require.Equal(t, initial.viewRevision, next.viewRevision)
-				require.Equal(t, view, next.context)
-			}
+			synctest.Test(t, func(t *testing.T) {
+				state := initial
+				state.initialized = test.initialized
+				view := testOutputView(test.publication)
+				view.FocusedPaneID = "pane-2"
+				next, accepted, reset := state.nextView(protocol.UIViewUpdate{Epoch: test.epoch, State: test.state, Context: view})
+				require.Equal(t, test.accepted, accepted)
+				require.Equal(t, test.reset, reset)
+				if accepted {
+					require.Equal(t, initial.epoch, next.epoch)
+					require.Equal(t, initial.state, next.state)
+					require.Equal(t, initial.viewRevision, next.viewRevision)
+					require.Equal(t, view, next.context)
+				}
+			})
 		})
 	}
 }
 
 func TestOutputUIContextUsesOnlyCapturedIdentity(t *testing.T) {
-	state := outputApplyState{epoch: 2, state: 4, viewRevision: 3, initialized: true, context: testOutputView(7)}
-	got := state.uiContext(ports.UIContext{AttachmentHandle: "public", Generation: 5}, ports.UIStatusAttached)
-	require.Equal(t, ports.UIContext{
-		AttachmentHandle: "public", Generation: 5, Route: state.context.Route,
-		TabID: state.context.TabID, FocusedPaneID: state.context.FocusedPaneID,
-		OutputEpoch: 2, OutputState: 4, ViewRevision: 3, ViewPublication: 7, Status: ports.UIStatusAttached,
-	}, got)
+	synctest.Test(t, func(t *testing.T) {
+		state := outputApplyState{epoch: 2, state: 4, viewRevision: 3, initialized: true, context: testOutputView(7)}
+		got := state.uiContext(ports.UIContext{AttachmentHandle: "public", Generation: 5}, ports.UIStatusAttached)
+		require.Equal(t, ports.UIContext{
+			AttachmentHandle: "public", Generation: 5, Route: state.context.Route,
+			TabID: state.context.TabID, FocusedPaneID: state.context.FocusedPaneID,
+			OutputEpoch: 2, OutputState: 4, ViewRevision: 3, ViewPublication: 7, Status: ports.UIStatusAttached,
+		}, got)
+	})
 }
 
 // TestOutputUIContextZeroesUnattachedMetadata pins the shape rule for the two
@@ -111,8 +118,10 @@ func TestOutputUIContextZeroesUnattachedMetadata(t *testing.T) {
 	state := outputApplyState{epoch: 2, state: 4, viewRevision: 3, initialized: true, context: testOutputView(7)}
 	for _, status := range []ports.UIPresentationStatus{ports.UIStatusPicker, ports.UIStatusConnecting} {
 		t.Run(string(status), func(t *testing.T) {
-			got := state.uiContext(ports.UIContext{AttachmentHandle: "public", Generation: 5}, status)
-			require.Equal(t, ports.UIContext{AttachmentHandle: "public", Status: status}, got)
+			synctest.Test(t, func(t *testing.T) {
+				got := state.uiContext(ports.UIContext{AttachmentHandle: "public", Generation: 5}, status)
+				require.Equal(t, ports.UIContext{AttachmentHandle: "public", Status: status}, got)
+			})
 		})
 	}
 }

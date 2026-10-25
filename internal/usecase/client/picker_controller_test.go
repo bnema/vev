@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -119,7 +120,15 @@ func pickerTestSnapshot(epoch ports.BrokerEpoch, revision ports.BrokerRevision, 
 func pickerTestController(t *testing.T) (*pickerController, *supervisorTestClock) {
 	t.Helper()
 	clock := newSupervisorTestClock(t)
-	return newPickerController(clock.port, pickerTestFreshness, terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor}), clock
+	controller := newPickerController(clock.port, pickerTestFreshness, terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor})
+	// An armed escape flush parks a goroutine on its timer; retire it so no
+	// goroutine outlives the synctest bubble.
+	t.Cleanup(func() {
+		controller.mu.Lock()
+		controller.disarmFlushLocked()
+		controller.mu.Unlock()
+	})
+	return controller, clock
 }
 
 func pickerRowKeyByLabel(t *testing.T, controller *pickerController, label string) string {
@@ -154,40 +163,44 @@ func (p *pickerController) modelSearchActive(t *testing.T) bool {
 }
 
 func TestPickerControllerRendersLatestSnapshotImmediately(t *testing.T) {
-	controller, clock := pickerTestController(t)
-	controller.ApplySnapshot(pickerTestSnapshot(3, 1, clock.port.Now(), "alpha", "beta"))
-	firstRender := controller.Render(domain.Size{Cols: 80, Rows: 24})
-	require.NotEmpty(t, firstRender)
-	alphaKey := pickerRowKeyByLabel(t, controller, "alpha")
-	require.Equal(t, alphaKey, mustCursorKey(t, controller))
+	synctest.Test(t, func(t *testing.T) {
+		controller, clock := pickerTestController(t)
+		controller.ApplySnapshot(pickerTestSnapshot(3, 1, clock.port.Now(), "alpha", "beta"))
+		firstRender := controller.Render(domain.Size{Cols: 80, Rows: 24})
+		require.NotEmpty(t, firstRender)
+		alphaKey := pickerRowKeyByLabel(t, controller, "alpha")
+		require.Equal(t, alphaKey, mustCursorKey(t, controller))
 
-	// A newer publication is folded synchronously: the very next render already
-	// reflects it, with no debounce or intervening frame.
-	controller.ApplySnapshot(pickerTestSnapshot(3, 2, clock.port.Now(), "beta"))
-	require.Equal(t, pickerRowKeyByLabel(t, controller, "beta"), mustCursorKey(t, controller))
-	require.NotEmpty(t, controller.Render(domain.Size{Cols: 80, Rows: 24}))
+		// A newer publication is folded synchronously: the very next render already
+		// reflects it, with no debounce or intervening frame.
+		controller.ApplySnapshot(pickerTestSnapshot(3, 2, clock.port.Now(), "beta"))
+		require.Equal(t, pickerRowKeyByLabel(t, controller, "beta"), mustCursorKey(t, controller))
+		require.NotEmpty(t, controller.Render(domain.Size{Cols: 80, Rows: 24}))
+	})
 }
 
 func TestPickerControllerSearchSurvivesHostUpdate(t *testing.T) {
-	controller, clock := pickerTestController(t)
-	controller.ApplySnapshot(pickerTestSnapshot(3, 1, clock.port.Now(), "alpha", "beta"))
+	synctest.Test(t, func(t *testing.T) {
+		controller, clock := pickerTestController(t)
+		controller.ApplySnapshot(pickerTestSnapshot(3, 1, clock.port.Now(), "alpha", "beta"))
 
-	spy := newPickerInputSpy(controller)
-	reader := newPickerChunkReader()
-	t.Cleanup(reader.close)
-	_ = startTerminalInputLifetime(reader, spy)
+		spy := newPickerInputSpy(controller)
+		reader := newPickerChunkReader()
+		t.Cleanup(reader.close)
+		_ = startTerminalInputLifetime(reader, spy)
 
-	reader.push([]byte("/alp"))
-	spy.await(t)
-	require.Equal(t, "alp", controller.modelQuery(t))
-	require.True(t, controller.modelSearchActive(t))
+		reader.push([]byte("/alp"))
+		spy.await(t)
+		require.Equal(t, "alp", controller.modelQuery(t))
+		require.True(t, controller.modelSearchActive(t))
 
-	// A host update while the query is typed keeps the editor and the matched
-	// cursor; it never resets the local search.
-	controller.ApplySnapshot(pickerTestSnapshot(3, 2, clock.port.Now(), "alpha", "beta", "gamma"))
-	require.Equal(t, "alp", controller.modelQuery(t))
-	require.True(t, controller.modelSearchActive(t))
-	require.Equal(t, pickerRowKeyByLabel(t, controller, "alpha"), mustCursorKey(t, controller))
+		// A host update while the query is typed keeps the editor and the matched
+		// cursor; it never resets the local search.
+		controller.ApplySnapshot(pickerTestSnapshot(3, 2, clock.port.Now(), "alpha", "beta", "gamma"))
+		require.Equal(t, "alp", controller.modelQuery(t))
+		require.True(t, controller.modelSearchActive(t))
+		require.Equal(t, pickerRowKeyByLabel(t, controller, "alpha"), mustCursorKey(t, controller))
+	})
 }
 
 // TestPickerControllerInputNeverReachesPTY feeds every input shape a picker can
@@ -195,42 +208,44 @@ func TestPickerControllerSearchSurvivesHostUpdate(t *testing.T) {
 // terminal receives no bytes, and the decisions are presentation facts, never a
 // session write.
 func TestPickerControllerInputNeverReachesPTY(t *testing.T) {
-	controller, clock := pickerTestController(t)
-	controller.ApplySnapshot(pickerTestSnapshot(3, 1, clock.port.Now(), "alpha", "beta"))
+	synctest.Test(t, func(t *testing.T) {
+		controller, clock := pickerTestController(t)
+		controller.ApplySnapshot(pickerTestSnapshot(3, 1, clock.port.Now(), "alpha", "beta"))
 
-	alphaKey := pickerRowKeyByLabel(t, controller, "alpha")
-	betaKey := pickerRowKeyByLabel(t, controller, "beta")
+		alphaKey := pickerRowKeyByLabel(t, controller, "alpha")
+		betaKey := pickerRowKeyByLabel(t, controller, "beta")
 
-	spy := newPickerInputSpy(controller)
-	reader := newPickerChunkReader()
-	t.Cleanup(reader.close)
-	terminal := &pickerRecordingTerminal{in: reader}
-	_ = startTerminalInputLifetime(terminal.In(), spy)
+		spy := newPickerInputSpy(controller)
+		reader := newPickerChunkReader()
+		t.Cleanup(reader.close)
+		terminal := &pickerRecordingTerminal{in: reader}
+		_ = startTerminalInputLifetime(terminal.In(), spy)
 
-	chunks := [][]byte{
-		[]byte("\x1b[B"),                     // Down -> beta
-		[]byte("k"),                          // up -> alpha
-		[]byte("j"),                          // down -> beta
-		[]byte("\x1b[A"),                     // Up -> alpha
-		[]byte("\x1b[<0;10;5M"),              // mouse report: consumed and dropped
-		[]byte("\x1b[200~rm -rf /\x1b[201~"), // bracketed paste: content dropped
-		[]byte("\x00\x01\x7f"),               // control bytes: consumed and dropped
-		[]byte("\x1b"),                       // lone ESC withheld for disambiguation
-	}
-	for _, chunk := range chunks {
-		reader.push(chunk)
-		spy.await(t)
-	}
-	require.Equal(t, alphaKey, mustCursorKey(t, controller), "arrow keys moved the local cursor")
-	require.False(t, controller.modelSearchActive(t), "mouse, paste, and control bytes never opened search")
-	require.Equal(t, betaKey, pickerRowKeyByLabel(t, controller, "beta"))
+		chunks := [][]byte{
+			[]byte("\x1b[B"),                     // Down -> beta
+			[]byte("k"),                          // up -> alpha
+			[]byte("j"),                          // down -> beta
+			[]byte("\x1b[A"),                     // Up -> alpha
+			[]byte("\x1b[<0;10;5M"),              // mouse report: consumed and dropped
+			[]byte("\x1b[200~rm -rf /\x1b[201~"), // bracketed paste: content dropped
+			[]byte("\x00\x01\x7f"),               // control bytes: consumed and dropped
+			[]byte("\x1b"),                       // lone ESC withheld for disambiguation
+		}
+		for _, chunk := range chunks {
+			reader.push(chunk)
+			spy.await(t)
+		}
+		require.Equal(t, alphaKey, mustCursorKey(t, controller), "arrow keys moved the local cursor")
+		require.False(t, controller.modelSearchActive(t), "mouse, paste, and control bytes never opened search")
+		require.Equal(t, betaKey, pickerRowKeyByLabel(t, controller, "beta"))
 
-	// A withheld lone ESC resolves through the bounded window as one Escape.
-	controller.FlushPending()
-	op, _ := controller.TakeOp()
-	require.True(t, op.close, "Escape retires the picker locally")
+		// A withheld lone ESC resolves through the bounded window as one Escape.
+		controller.FlushPending()
+		op, _ := controller.TakeOp()
+		require.True(t, op.close, "Escape retires the picker locally")
 
-	require.Empty(t, terminal.out.Bytes(), "the picker wrote nothing to the terminal")
+		require.Empty(t, terminal.out.Bytes(), "the picker wrote nothing to the terminal")
+	})
 }
 
 func TestPickerControllerInputRouting(t *testing.T) {
@@ -265,37 +280,39 @@ func TestPickerControllerInputRouting(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			controller, clock := pickerTestController(t)
-			controller.ApplySnapshot(pickerTestSnapshot(3, 1, clock.port.Now(), "alpha", "beta"))
-			alphaKey := pickerRowKeyByLabel(t, controller, "alpha")
-			spy := newPickerInputSpy(controller)
-			reader := newPickerChunkReader()
-			t.Cleanup(reader.close)
-			_ = startTerminalInputLifetime(reader, spy)
+			synctest.Test(t, func(t *testing.T) {
+				controller, clock := pickerTestController(t)
+				controller.ApplySnapshot(pickerTestSnapshot(3, 1, clock.port.Now(), "alpha", "beta"))
+				alphaKey := pickerRowKeyByLabel(t, controller, "alpha")
+				spy := newPickerInputSpy(controller)
+				reader := newPickerChunkReader()
+				t.Cleanup(reader.close)
+				_ = startTerminalInputLifetime(reader, spy)
 
-			reader.push(tt.chunk)
-			spy.await(t)
-			if tt.flush {
-				controller.FlushPending()
-			}
-			if tt.wantOp != (pickerOp{}) {
-				op, _ := controller.TakeOp()
-				require.Equal(t, tt.wantOp, op)
-			}
-			require.Equal(t, tt.wantSearch, controller.modelSearchActive(t))
-			if tt.wantQuery != "" {
-				require.Equal(t, tt.wantQuery, controller.modelQuery(t))
-			}
-			if tt.wantNoSelection {
-				_, ok := controller.CursorKey()
-				require.False(t, ok, "the cursor row is not a selection")
-				return
-			}
-			want := alphaKey
-			if tt.wantCursor == "beta" {
-				want = pickerRowKeyByLabel(t, controller, "beta")
-			}
-			require.Equal(t, want, mustCursorKey(t, controller))
+				reader.push(tt.chunk)
+				spy.await(t)
+				if tt.flush {
+					controller.FlushPending()
+				}
+				if tt.wantOp != (pickerOp{}) {
+					op, _ := controller.TakeOp()
+					require.Equal(t, tt.wantOp, op)
+				}
+				require.Equal(t, tt.wantSearch, controller.modelSearchActive(t))
+				if tt.wantQuery != "" {
+					require.Equal(t, tt.wantQuery, controller.modelQuery(t))
+				}
+				if tt.wantNoSelection {
+					_, ok := controller.CursorKey()
+					require.False(t, ok, "the cursor row is not a selection")
+					return
+				}
+				want := alphaKey
+				if tt.wantCursor == "beta" {
+					want = pickerRowKeyByLabel(t, controller, "beta")
+				}
+				require.Equal(t, want, mustCursorKey(t, controller))
+			})
 		})
 	}
 }
@@ -304,26 +321,30 @@ func TestPickerControllerInputRouting(t *testing.T) {
 // boundary: once the picker releases input, a read is not consumed, so a later
 // attach slice keeps its ordinary pipeline.
 func TestPickerControllerNotOwningInputLeavesReadUnconsumed(t *testing.T) {
-	controller, clock := pickerTestController(t)
-	controller.ApplySnapshot(pickerTestSnapshot(3, 1, clock.port.Now(), "alpha"))
-	controller.SetOwnsInput(false)
-	require.False(t, controller.ConsumeTerminalRead([]byte("j")))
-	controller.SetOwnsInput(true)
-	require.True(t, controller.ConsumeTerminalRead([]byte("j")))
+	synctest.Test(t, func(t *testing.T) {
+		controller, clock := pickerTestController(t)
+		controller.ApplySnapshot(pickerTestSnapshot(3, 1, clock.port.Now(), "alpha"))
+		controller.SetOwnsInput(false)
+		require.False(t, controller.ConsumeTerminalRead([]byte("j")))
+		controller.SetOwnsInput(true)
+		require.True(t, controller.ConsumeTerminalRead([]byte("j")))
+	})
 }
 
 func TestPickerControllerKeepsProgressInRowsAndSurfacesFailuresAsNotices(t *testing.T) {
-	controller, clock := pickerTestController(t)
-	checking := pickerTestRemoteObservation("user@arch", 1, 1, clock.port.Now(), pickerTestSession("alpha", 1, catalogue_Up))
-	checking.Checking = true
-	controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{checking}})
-	require.Empty(t, controller.RenderNotice(domain.Size{Cols: 80, Rows: 24}), "ordinary refreshing progress stays in the rows")
+	synctest.Test(t, func(t *testing.T) {
+		controller, clock := pickerTestController(t)
+		checking := pickerTestRemoteObservation("user@arch", 1, 1, clock.port.Now(), pickerTestSession("alpha", 1, catalogue_Up))
+		checking.Checking = true
+		controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{checking}})
+		require.Empty(t, controller.RenderNotice(domain.Size{Cols: 80, Rows: 24}), "ordinary refreshing progress stays in the rows")
 
-	unreachable := pickerTestRemoteObservation("user@arch", 1, 1, clock.port.Now())
-	unreachable.Availability = domain.RemoteAvailabilityUnreachable
-	unreachable.FailureEpisode = 1
-	controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 2, Daemons: []ports.BrokerDaemonObservation{unreachable}})
-	require.NotEmpty(t, controller.RenderNotice(domain.Size{Cols: 80, Rows: 24}), "an unavailable host is surfaced as a failure")
+		unreachable := pickerTestRemoteObservation("user@arch", 1, 1, clock.port.Now())
+		unreachable.Availability = domain.RemoteAvailabilityUnreachable
+		unreachable.FailureEpisode = 1
+		controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 2, Daemons: []ports.BrokerDaemonObservation{unreachable}})
+		require.NotEmpty(t, controller.RenderNotice(domain.Size{Cols: 80, Rows: 24}), "an unavailable host is surfaced as a failure")
+	})
 }
 
 // TestPickerControllerResolveInspectableRowStillResolvesExplicitly: a stale row
@@ -331,92 +352,100 @@ func TestPickerControllerKeepsProgressInRowsAndSurfacesFailuresAsNotices(t *test
 // because freshness is presentation information and only the destination may
 // refuse the exact identity. The informational row stays dimmed and badged.
 func TestPickerControllerResolveInspectableRowStillResolvesExplicitly(t *testing.T) {
-	controller, clock := pickerTestController(t)
-	stale := pickerTestLocalObservation(clock.port.Now().Add(-2*pickerTestFreshness), pickerTestSession("alpha", 1, catalogue_Up))
-	controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{stale}})
+	synctest.Test(t, func(t *testing.T) {
+		controller, clock := pickerTestController(t)
+		stale := pickerTestLocalObservation(clock.port.Now().Add(-2*pickerTestFreshness), pickerTestSession("alpha", 1, catalogue_Up))
+		controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{stale}})
 
-	// The stale session row stays a cursor destination and admits an explicit
-	// attempt; only the host status row itself is never committable.
-	key, ok := controller.CursorKey()
-	require.True(t, ok, "a stale session row stays a cursor destination")
-	require.NotEmpty(t, key)
-	require.False(t, controller.modelSearchActive(t))
+		// The stale session row stays a cursor destination and admits an explicit
+		// attempt; only the host status row itself is never committable.
+		key, ok := controller.CursorKey()
+		require.True(t, ok, "a stale session row stays a cursor destination")
+		require.NotEmpty(t, key)
+		require.False(t, controller.modelSearchActive(t))
 
-	request, err := controller.Resolve(pickerTestBase())
-	require.NoError(t, err)
-	require.Equal(t, ports.BrokerAdmissionExact, request.Admission)
-	require.Equal(t, "alpha", request.Target.SessionName)
+		request, err := controller.Resolve(pickerTestBase())
+		require.NoError(t, err)
+		require.Equal(t, ports.BrokerAdmissionExact, request.Admission)
+		require.Equal(t, "alpha", request.Target.SessionName)
+	})
 }
 
 // TestPickerControllerResolveUsesLatestSnapshot proves resolution revalidates
 // against the snapshot in force at resolve time, not the one displayed.
 func TestPickerControllerResolveUsesLatestSnapshot(t *testing.T) {
-	controller, clock := pickerTestController(t)
-	controller.ApplySnapshot(pickerTestSnapshot(3, 1, clock.port.Now(), "alpha"))
-	key := mustCursorKey(t, controller)
+	synctest.Test(t, func(t *testing.T) {
+		controller, clock := pickerTestController(t)
+		controller.ApplySnapshot(pickerTestSnapshot(3, 1, clock.port.Now(), "alpha"))
+		key := mustCursorKey(t, controller)
 
-	// The host disappears before the selection resolves.
-	controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 2})
+		// The host disappears before the selection resolves.
+		controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 2})
 
-	_, err := controller.Resolve(pickerTestBase())
-	require.Error(t, err)
-	require.True(t, pickerCatalogueErrorIs(err, pickerCatalogueNoSelection), "the vanished row leaves no selection")
-	_, err = controller.Catalogue().Resolve(key, pickerTestBase())
-	require.Error(t, err)
-	require.True(t, pickerCatalogueErrorIs(err, pickerCatalogueGone))
-	require.NotEmpty(t, controller.RenderNotice(domain.Size{Cols: 80, Rows: 24}), "the refusal is surfaced as a bounded notice")
+		_, err := controller.Resolve(pickerTestBase())
+		require.Error(t, err)
+		require.True(t, pickerCatalogueErrorIs(err, pickerCatalogueNoSelection), "the vanished row leaves no selection")
+		_, err = controller.Catalogue().Resolve(key, pickerTestBase())
+		require.Error(t, err)
+		require.True(t, pickerCatalogueErrorIs(err, pickerCatalogueGone))
+		require.NotEmpty(t, controller.RenderNotice(domain.Size{Cols: 80, Rows: 24}), "the refusal is surfaced as a bounded notice")
+	})
 }
 
 func TestPickerControllerResolveReturnsExactRequest(t *testing.T) {
-	controller, clock := pickerTestController(t)
-	controller.ApplySnapshot(pickerTestSnapshot(3, 1, clock.port.Now(), "alpha"))
+	synctest.Test(t, func(t *testing.T) {
+		controller, clock := pickerTestController(t)
+		controller.ApplySnapshot(pickerTestSnapshot(3, 1, clock.port.Now(), "alpha"))
 
-	request, err := controller.Resolve(pickerTestBase())
-	require.NoError(t, err)
-	require.NoError(t, request.Validate())
-	require.Equal(t, ports.BrokerAdmissionExact, request.Admission)
-	require.Equal(t, ports.BrokerStreamAttachment, request.Purpose)
-	require.Equal(t, "alpha", request.Target.SessionName)
+		request, err := controller.Resolve(pickerTestBase())
+		require.NoError(t, err)
+		require.NoError(t, request.Validate())
+		require.Equal(t, ports.BrokerAdmissionExact, request.Admission)
+		require.Equal(t, ports.BrokerStreamAttachment, request.Purpose)
+		require.Equal(t, "alpha", request.Target.SessionName)
+	})
 }
 
 // TestPickerControllerConcurrentUpdatesAndInput exercises the mutex boundaries
 // under -race: publications, input consumption, rendering, and resolution run
 // concurrently and must not race or panic.
 func TestPickerControllerConcurrentUpdatesAndInput(t *testing.T) {
-	const iterations = 200
-	controller, clock := pickerTestController(t)
-	controller.ApplySnapshot(pickerTestSnapshot(3, 1, clock.port.Now(), "alpha"))
+	synctest.Test(t, func(t *testing.T) {
+		const iterations = 200
+		controller, clock := pickerTestController(t)
+		controller.ApplySnapshot(pickerTestSnapshot(3, 1, clock.port.Now(), "alpha"))
 
-	var wait sync.WaitGroup
-	wait.Add(3)
+		var wait sync.WaitGroup
+		wait.Add(3)
 
-	go func() {
-		defer wait.Done()
-		for revision := ports.BrokerRevision(2); revision < 2+iterations; revision++ {
-			controller.ApplySnapshot(pickerTestSnapshot(3, revision, clock.port.Now(), "alpha", "beta"))
-		}
-	}()
+		go func() {
+			defer wait.Done()
+			for revision := ports.BrokerRevision(2); revision < 2+iterations; revision++ {
+				controller.ApplySnapshot(pickerTestSnapshot(3, revision, clock.port.Now(), "alpha", "beta"))
+			}
+		}()
 
-	go func() {
-		defer wait.Done()
-		for range iterations {
-			controller.ConsumeTerminalRead([]byte("\x1b[B\x1b[Aj"))
-			controller.FlushPending()
-			controller.TakeOp()
-		}
-	}()
+		go func() {
+			defer wait.Done()
+			for range iterations {
+				controller.ConsumeTerminalRead([]byte("\x1b[B\x1b[Aj"))
+				controller.FlushPending()
+				controller.TakeOp()
+			}
+		}()
 
-	go func() {
-		defer wait.Done()
-		for range iterations {
-			_ = controller.Render(domain.Size{Cols: 80, Rows: 24})
-			_ = controller.RenderNotice(domain.Size{Cols: 80, Rows: 24})
-			_, _ = controller.Resolve(pickerTestBase())
-			_, _ = controller.CursorKey()
-		}
-	}()
+		go func() {
+			defer wait.Done()
+			for range iterations {
+				_ = controller.Render(domain.Size{Cols: 80, Rows: 24})
+				_ = controller.RenderNotice(domain.Size{Cols: 80, Rows: 24})
+				_, _ = controller.Resolve(pickerTestBase())
+				_, _ = controller.CursorKey()
+			}
+		}()
 
-	wait.Wait()
+		wait.Wait()
+	})
 }
 
 // TestSupervisorPickerFoldsPublicationsAndInput proves the supervisor wiring:
@@ -425,42 +454,44 @@ func TestPickerControllerConcurrentUpdatesAndInput(t *testing.T) {
 // single input lifetime the supervisor uses for EOF, never written to the
 // terminal.
 func TestSupervisorPickerFoldsPublicationsAndInput(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 
-	clock := newSupervisorTestClock(t)
-	reader := newPickerChunkReader()
-	t.Cleanup(reader.close)
-	terminal := &pickerRecordingTerminal{in: reader}
-	connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) {
-		service := newSupervisorTestService(t, ports.BrokerConnectionID{1})
-		service.hub.publish(pickerTestSnapshot(3, 1, clock.port.Now(), "alpha", "beta"))
-		return service.port, nil
+		clock := newSupervisorTestClock(t)
+		reader := newPickerChunkReader()
+		t.Cleanup(reader.close)
+		terminal := &pickerRecordingTerminal{in: reader}
+		connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) {
+			service := newSupervisorTestService(t, ports.BrokerConnectionID{1})
+			service.hub.publish(pickerTestSnapshot(3, 1, clock.port.Now(), "alpha", "beta"))
+			return service.port, nil
+		})
+		controller := newPickerController(clock.port, pickerTestFreshness, terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor})
+		sup := mustSupervisor(t, SupervisorConfig{Connector: connector, Terminal: terminal, Clock: clock.port, Picker: controller})
+
+		runErr := make(chan error, 1)
+		go func() { runErr <- sup.Run(ctx) }()
+
+		synctest.Wait()
+		require.True(t, controller.Catalogue().Epoch() == 3, "the supervisor folds the committed publication into the picker")
+		require.Equal(t, []string{"alpha", "beta"}, pickerSessionLabels(controller.Catalogue().Lines()))
+		require.True(t, controller.OwnsInput())
+
+		// The same input lifetime the supervisor uses for EOF delivers the read to
+		// the picker: the cursor moves locally and nothing is written anywhere.
+		betaKey := pickerRowKeyByLabel(t, controller, "beta")
+		reader.push([]byte("\x1b[B"))
+		synctest.Wait()
+		require.True(t, func() bool {
+			key, ok := controller.CursorKey()
+			return ok && key == betaKey
+		}(), "the picker consumed the terminal read")
+
+		cancel()
+		require.ErrorIs(t, <-runErr, context.Canceled)
+		require.Empty(t, terminal.out.Bytes(), "the picker never wrote a session or terminal byte")
 	})
-	controller := newPickerController(clock.port, pickerTestFreshness, terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor})
-	sup := mustSupervisor(t, SupervisorConfig{Connector: connector, Terminal: terminal, Clock: clock.port, Picker: controller})
-
-	runErr := make(chan error, 1)
-	go func() { runErr <- sup.Run(ctx) }()
-
-	require.Eventually(t, func() bool {
-		return controller.Catalogue().Epoch() == 3
-	}, time.Second, time.Millisecond, "the supervisor folds the committed publication into the picker")
-	require.Equal(t, []string{"alpha", "beta"}, pickerSessionLabels(controller.Catalogue().Lines()))
-	require.True(t, controller.OwnsInput())
-
-	// The same input lifetime the supervisor uses for EOF delivers the read to
-	// the picker: the cursor moves locally and nothing is written anywhere.
-	betaKey := pickerRowKeyByLabel(t, controller, "beta")
-	reader.push([]byte("\x1b[B"))
-	require.Eventually(t, func() bool {
-		key, ok := controller.CursorKey()
-		return ok && key == betaKey
-	}, time.Second, time.Millisecond, "the picker consumed the terminal read")
-
-	cancel()
-	require.ErrorIs(t, <-runErr, context.Canceled)
-	require.Empty(t, terminal.out.Bytes(), "the picker never wrote a session or terminal byte")
 }
 
 // TestSupervisorPickerFoldsLaterPublication covers the second-and-later
@@ -469,68 +500,70 @@ func TestSupervisorPickerFoldsPublicationsAndInput(t *testing.T) {
 // core of P5.2b and the fake hub's non-blocking, never-replaced channel is what
 // keeps it from busy-spinning.
 func TestSupervisorPickerFoldsLaterPublication(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 
-	clock := newSupervisorTestClock(t)
-	reader := newPickerChunkReader()
-	t.Cleanup(reader.close)
-	terminal := &pickerRecordingTerminal{in: reader}
+		clock := newSupervisorTestClock(t)
+		reader := newPickerChunkReader()
+		t.Cleanup(reader.close)
+		terminal := &pickerRecordingTerminal{in: reader}
 
-	service := newSupervisorTestService(t, ports.BrokerConnectionID{1})
-	connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) {
-		service.hub.publish(pickerTestSnapshot(3, 1, clock.port.Now(), "alpha"))
-		return service.port, nil
+		service := newSupervisorTestService(t, ports.BrokerConnectionID{1})
+		connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) {
+			service.hub.publish(pickerTestSnapshot(3, 1, clock.port.Now(), "alpha"))
+			return service.port, nil
+		})
+		controller := newPickerController(clock.port, pickerTestFreshness, terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor})
+		sup := mustSupervisor(t, SupervisorConfig{Connector: connector, Terminal: terminal, Clock: clock.port, Picker: controller})
+
+		runErr := make(chan error, 1)
+		go func() { runErr <- sup.Run(ctx) }()
+
+		synctest.Wait()
+		require.True(t, controller.Catalogue().Revision() == 1, "the first committed publication reaches the picker")
+		require.Equal(t, []string{"alpha"}, pickerSessionLabels(controller.Catalogue().Lines()))
+
+		service.publishSnapshot(pickerTestSnapshot(3, 2, clock.port.Now(), "alpha", "beta"))
+		synctest.Wait()
+		require.True(t, controller.Catalogue().Revision() == 2, "a publication delivered after the connection is established reaches the picker")
+		require.Equal(t, []string{"alpha", "beta"}, pickerSessionLabels(controller.Catalogue().Lines()))
+
+		cancel()
+		require.ErrorIs(t, <-runErr, context.Canceled)
 	})
-	controller := newPickerController(clock.port, pickerTestFreshness, terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor})
-	sup := mustSupervisor(t, SupervisorConfig{Connector: connector, Terminal: terminal, Clock: clock.port, Picker: controller})
-
-	runErr := make(chan error, 1)
-	go func() { runErr <- sup.Run(ctx) }()
-
-	require.Eventually(t, func() bool {
-		return controller.Catalogue().Revision() == 1
-	}, time.Second, time.Millisecond, "the first committed publication reaches the picker")
-	require.Equal(t, []string{"alpha"}, pickerSessionLabels(controller.Catalogue().Lines()))
-
-	service.publishSnapshot(pickerTestSnapshot(3, 2, clock.port.Now(), "alpha", "beta"))
-	require.Eventually(t, func() bool {
-		return controller.Catalogue().Revision() == 2
-	}, time.Second, time.Millisecond, "a publication delivered after the connection is established reaches the picker")
-	require.Equal(t, []string{"alpha", "beta"}, pickerSessionLabels(controller.Catalogue().Lines()))
-
-	cancel()
-	require.ErrorIs(t, <-runErr, context.Canceled)
 }
 
 // TestPickerControllerResolveKeyUsesCommittedRow proves commit and resolve are
 // one action: the key captured with the commit decision resolves the committed
 // row even when a concurrent publication moved the cursor afterwards.
 func TestPickerControllerResolveKeyUsesCommittedRow(t *testing.T) {
-	controller, clock := pickerTestController(t)
-	controller.ApplySnapshot(pickerTestSnapshot(3, 1, clock.port.Now(), "alpha", "beta"))
-	alphaKey := pickerRowKeyByLabel(t, controller, "alpha")
+	synctest.Test(t, func(t *testing.T) {
+		controller, clock := pickerTestController(t)
+		controller.ApplySnapshot(pickerTestSnapshot(3, 1, clock.port.Now(), "alpha", "beta"))
+		alphaKey := pickerRowKeyByLabel(t, controller, "alpha")
 
-	// The user commits the row under the cursor.
-	require.True(t, controller.ConsumeTerminalRead([]byte("\r")))
-	op, committedKey := controller.TakeOp()
-	require.True(t, op.commit)
-	require.Equal(t, alphaKey, committedKey)
+		// The user commits the row under the cursor.
+		require.True(t, controller.ConsumeTerminalRead([]byte("\r")))
+		op, committedKey := controller.TakeOp()
+		require.True(t, op.commit)
+		require.Equal(t, alphaKey, committedKey)
 
-	// A concurrent publication moves the cursor to another row, and the driver
-	// commits a row different from the one the user selected.
-	controller.ApplySnapshot(pickerTestSnapshot(3, 2, clock.port.Now(), "alpha", "beta", "gamma"))
-	require.True(t, controller.ConsumeTerminalRead([]byte("j")))
+		// A concurrent publication moves the cursor to another row, and the driver
+		// commits a row different from the one the user selected.
+		controller.ApplySnapshot(pickerTestSnapshot(3, 2, clock.port.Now(), "alpha", "beta", "gamma"))
+		require.True(t, controller.ConsumeTerminalRead([]byte("j")))
 
-	// Plain Resolve describes the row displayed now...
-	displayed, err := controller.Resolve(pickerTestBase())
-	require.NoError(t, err)
-	require.Equal(t, "beta", displayed.Target.SessionName)
+		// Plain Resolve describes the row displayed now...
+		displayed, err := controller.Resolve(pickerTestBase())
+		require.NoError(t, err)
+		require.Equal(t, "beta", displayed.Target.SessionName)
 
-	// ...while the captured key resolves exactly the committed row.
-	committed, _, err := controller.ResolveCommit(committedKey, pickerTestBase())
-	require.NoError(t, err)
-	require.Equal(t, "alpha", committed.Target.SessionName)
+		// ...while the captured key resolves exactly the committed row.
+		committed, _, err := controller.ResolveCommit(committedKey, pickerTestBase())
+		require.NoError(t, err)
+		require.Equal(t, "alpha", committed.Target.SessionName)
+	})
 }
 
 // TestPickerControllerCommittedKeySurvivesConcurrentApply runs the commit path
@@ -538,59 +571,63 @@ func TestPickerControllerResolveKeyUsesCommittedRow(t *testing.T) {
 // always resolve the row the user committed, never the row a publication left
 // under the cursor.
 func TestPickerControllerCommittedKeySurvivesConcurrentApply(t *testing.T) {
-	controller, clock := pickerTestController(t)
-	controller.ApplySnapshot(pickerTestSnapshot(3, 1, clock.port.Now(), "alpha", "beta"))
+	synctest.Test(t, func(t *testing.T) {
+		controller, clock := pickerTestController(t)
+		controller.ApplySnapshot(pickerTestSnapshot(3, 1, clock.port.Now(), "alpha", "beta"))
 
-	stop := make(chan struct{})
-	var applying sync.WaitGroup
-	applying.Add(1)
-	go func() {
-		defer applying.Done()
-		revision := ports.BrokerRevision(2)
-		for {
-			select {
-			case <-stop:
-				return
-			default:
+		stop := make(chan struct{})
+		var applying sync.WaitGroup
+		applying.Add(1)
+		go func() {
+			defer applying.Done()
+			revision := ports.BrokerRevision(2)
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				controller.ApplySnapshot(pickerTestSnapshot(3, revision, clock.port.Now(), "alpha", "beta"))
+				revision++
 			}
-			controller.ApplySnapshot(pickerTestSnapshot(3, revision, clock.port.Now(), "alpha", "beta"))
-			revision++
-		}
-	}()
+		}()
 
-	for range 200 {
-		require.True(t, controller.ConsumeTerminalRead([]byte("\r")))
-		op, key := controller.TakeOp()
-		if !op.commit || key == "" {
-			continue
+		for range 200 {
+			require.True(t, controller.ConsumeTerminalRead([]byte("\r")))
+			op, key := controller.TakeOp()
+			if !op.commit || key == "" {
+				continue
+			}
+			request, _, err := controller.ResolveCommit(key, pickerTestBase())
+			if err != nil {
+				continue
+			}
+			require.Equal(t, "alpha", request.Target.SessionName, "the committed key must never resolve another row")
 		}
-		request, _, err := controller.ResolveCommit(key, pickerTestBase())
-		if err != nil {
-			continue
-		}
-		require.Equal(t, "alpha", request.Target.SessionName, "the committed key must never resolve another row")
-	}
-	close(stop)
-	applying.Wait()
+		close(stop)
+		applying.Wait()
+	})
 }
 
 // TestPickerControllerApplySnapshotRejectsInvalidSnapshot proves the controller
 // keeps the previous projection and surfaces a bounded notice when a publication
 // fails the broker snapshot contract.
 func TestPickerControllerApplySnapshotRejectsInvalidSnapshot(t *testing.T) {
-	controller, clock := pickerTestController(t)
-	controller.ApplySnapshot(pickerTestSnapshot(3, 1, clock.port.Now(), "alpha"))
-	before := controller.Catalogue().Lines()
+	synctest.Test(t, func(t *testing.T) {
+		controller, clock := pickerTestController(t)
+		controller.ApplySnapshot(pickerTestSnapshot(3, 1, clock.port.Now(), "alpha"))
+		before := controller.Catalogue().Lines()
 
-	invalid := pickerTestSnapshot(3, 2, clock.port.Now(), "beta")
-	invalid.Daemons[0].Availability = 0
-	controller.ApplySnapshot(invalid)
+		invalid := pickerTestSnapshot(3, 2, clock.port.Now(), "beta")
+		invalid.Daemons[0].Availability = 0
+		controller.ApplySnapshot(invalid)
 
-	require.Equal(t, before, controller.Catalogue().Lines(), "the previous projection is kept")
-	require.Equal(t, ports.BrokerRevision(1), controller.Catalogue().Revision())
+		require.Equal(t, before, controller.Catalogue().Lines(), "the previous projection is kept")
+		require.Equal(t, ports.BrokerRevision(1), controller.Catalogue().Revision())
 
-	active := controller.state().notices
-	require.Equal(t, []string{"broker catalogue update rejected"}, active)
+		active := controller.state().notices
+		require.Equal(t, []string{"broker catalogue update rejected"}, active)
+	})
 }
 
 // TestPickerControllerUnobservedDaemonIsRefreshingNotVersionMismatch pins the
@@ -598,16 +635,18 @@ func TestPickerControllerApplySnapshotRejectsInvalidSnapshot(t *testing.T) {
 // daemon (Availability Unknown, ProtocolVersion 0) keeps refreshing on its
 // row and surfaces no failure toast.
 func TestPickerControllerUnobservedDaemonIsRefreshingNotVersionMismatch(t *testing.T) {
-	controller, clock := pickerTestController(t)
-	unobserved := pickerTestUnobservedObservation(clock.port.Now())
-	controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{unobserved}})
+	synctest.Test(t, func(t *testing.T) {
+		controller, clock := pickerTestController(t)
+		unobserved := pickerTestUnobservedObservation(clock.port.Now())
+		controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{unobserved}})
 
-	require.Empty(t, controller.state().notices)
-	lines := controller.Catalogue().Lines()
-	host, ok := pickerHostLine(lines)
-	require.True(t, ok)
-	require.Equal(t, domain.RemoteReasonRefreshing, host.StatusDetail)
-	require.NotEqual(t, domain.RemoteReasonVersionMismatch, host.StatusDetail)
+		require.Empty(t, controller.state().notices)
+		lines := controller.Catalogue().Lines()
+		host, ok := pickerHostLine(lines)
+		require.True(t, ok)
+		require.Equal(t, domain.RemoteReasonRefreshing, host.StatusDetail)
+		require.NotEqual(t, domain.RemoteReasonVersionMismatch, host.StatusDetail)
+	})
 }
 
 // TestPickerControllerRenderNoticeStacksQueuesAndBlanks pins the picker notice
@@ -633,28 +672,30 @@ func TestPickerControllerRenderNoticeStacksQueuesAndBlanks(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			controller, clock := pickerTestController(t)
-			for _, msg := range tt.notices {
-				controller.Notify(notice(msg))
-			}
-			first := string(controller.RenderNotice(size))
-			if tt.advance > 0 {
-				clock.mu.Lock()
-				clock.now = clock.now.Add(tt.advance)
-				clock.mu.Unlock()
-			}
-			got := first
-			if tt.advance > 0 {
-				got = string(controller.RenderNotice(size))
-			}
-			for _, msg := range tt.wantShown {
-				require.Contains(t, got, msg)
-			}
-			for _, msg := range tt.wantHidden {
-				require.NotContains(t, got, msg)
-			}
-			blank := strings.Repeat(" ", ui.ToastBounds(size, ui.Toast{Message: "killed session 1", Anchor: domain.AnchorTopRight}).Width)
-			require.Equal(t, tt.wantBlanked, tt.advance > 0 && strings.Contains(got, blank))
+			synctest.Test(t, func(t *testing.T) {
+				controller, clock := pickerTestController(t)
+				for _, msg := range tt.notices {
+					controller.Notify(notice(msg))
+				}
+				first := string(controller.RenderNotice(size))
+				if tt.advance > 0 {
+					clock.mu.Lock()
+					clock.now = clock.now.Add(tt.advance)
+					clock.mu.Unlock()
+				}
+				got := first
+				if tt.advance > 0 {
+					got = string(controller.RenderNotice(size))
+				}
+				for _, msg := range tt.wantShown {
+					require.Contains(t, got, msg)
+				}
+				for _, msg := range tt.wantHidden {
+					require.NotContains(t, got, msg)
+				}
+				blank := strings.Repeat(" ", ui.ToastBounds(size, ui.Toast{Message: "killed session 1", Anchor: domain.AnchorTopRight}).Width)
+				require.Equal(t, tt.wantBlanked, tt.advance > 0 && strings.Contains(got, blank))
+			})
 		})
 	}
 }

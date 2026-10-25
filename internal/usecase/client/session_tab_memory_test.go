@@ -2,6 +2,7 @@ package client
 
 import (
 	"testing"
+	"testing/synctest"
 
 	"github.com/stretchr/testify/require"
 
@@ -32,7 +33,9 @@ func TestSessionTabMemoryIsolation(t *testing.T) {
 		{name: "no memory", authority: local, target: target},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.want, tt.memory.preferred(tt.authority, tt.target, tt.explicit))
+			synctest.Test(t, func(t *testing.T) {
+				require.Equal(t, tt.want, tt.memory.preferred(tt.authority, tt.target, tt.explicit))
+			})
 		})
 	}
 }
@@ -44,90 +47,94 @@ func TestSessionTabMemorySurvivesAttachmentSwap(t *testing.T) {
 			name = "local"
 		}
 		t.Run(name, func(t *testing.T) {
-			terminal := newWorkerTestTerminal()
-			supervisor := &Supervisor{
-				cfg: SupervisorConfig{Terminal: terminal}, clientID: [16]byte{1},
-				attachments: &attachmentHost{geometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}, geometryValid: true},
-			}
-			request := sessionTestRequest(local)
-			environment := sessionTestWorkerConfig(request).SessionEnvironment
-			worker, err := supervisor.newAttachmentWorker(request, attachmentTab{}, nil, environment)
-			require.NoError(t, err)
-			view := *sessionTestOutput(1, "").Context
-			view.TabID = "t_second"
-			worker.(*sessionAttachmentWorker).noteCommitted(nil, view)
-			other := view
-			other.Route.Target = protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{2}, SessionName: "beta"}
-			other.TabID = "t_beta"
-			worker.(*sessionAttachmentWorker).noteCommitted(nil, other)
-
-			for _, explicit := range []domain.TabStableID{"", "t_explicit"} {
-				stream := newSessionStream(t)
-				attachments := newSessionTestAttachments()
-				next, err := supervisor.newAttachmentWorker(request, attachmentTab{preferred: explicit}, nil, environment)
-				require.NoError(t, err)
-				host := newWorkerTestHost(t, terminal, nil, attachments.record)
-				events := make(chan AttachmentEvent, 1)
-				go func() {
-					event, _ := host.Run(t.Context(), AttachmentToken{Generation: 1, Attempt: 1}, next, stream.conn)
-					events <- event
-				}()
-				hello := awaitHello(t, stream)
-				want := explicit
-				if want == "" {
-					want = "t_second"
+			synctest.Test(t, func(t *testing.T) {
+				terminal := newWorkerTestTerminal()
+				supervisor := &Supervisor{
+					cfg: SupervisorConfig{Terminal: terminal}, clientID: [16]byte{1},
+					attachments: &attachmentHost{geometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}, geometryValid: true},
 				}
-				require.Equal(t, want, hello.PreferredTabID)
-				require.NoError(t, protocol.ValidateHello(hello))
-				require.NoError(t, stream.conn.Close())
-				<-events
-			}
+				request := sessionTestRequest(local)
+				environment := sessionTestWorkerConfig(request).SessionEnvironment
+				worker, err := supervisor.newAttachmentWorker(request, attachmentTab{}, nil, environment)
+				require.NoError(t, err)
+				view := *sessionTestOutput(1, "").Context
+				view.TabID = "t_second"
+				worker.(*sessionAttachmentWorker).noteCommitted(nil, view)
+				other := view
+				other.Route.Target = protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{2}, SessionName: "beta"}
+				other.TabID = "t_beta"
+				worker.(*sessionAttachmentWorker).noteCommitted(nil, other)
+
+				for _, explicit := range []domain.TabStableID{"", "t_explicit"} {
+					stream := newSessionStream(t)
+					attachments := newSessionTestAttachments()
+					next, err := supervisor.newAttachmentWorker(request, attachmentTab{preferred: explicit}, nil, environment)
+					require.NoError(t, err)
+					host := newWorkerTestHost(t, terminal, nil, attachments.record)
+					events := make(chan AttachmentEvent, 1)
+					go func() {
+						event, _ := host.Run(t.Context(), AttachmentToken{Generation: 1, Attempt: 1}, next, stream.conn)
+						events <- event
+					}()
+					hello := awaitHello(t, stream)
+					want := explicit
+					if want == "" {
+						want = "t_second"
+					}
+					require.Equal(t, want, hello.PreferredTabID)
+					require.NoError(t, protocol.ValidateHello(hello))
+					require.NoError(t, stream.conn.Close())
+					<-events
+				}
+			})
 		})
 	}
 }
 
 func TestSessionTabMemorySamePeerRoundTrip(t *testing.T) {
-	stream := newSessionStream(t)
-	terminal := newWorkerTestTerminal()
-	attachments := newSessionTestAttachments()
-	var memory sessionTabMemory
-	cfg := sessionTestWorkerConfig(sessionTestRequest(true))
-	cfg.Tabs = &memory
-	events := sessionTestRun(t, stream.conn, terminal, cfg, attachments)
-	t.Cleanup(func() { _ = stream.conn.Close(); <-events })
-	awaitHello(t, stream)
-	stream.deliver(protocol.Welcome{SessionName: "alpha"})
-	initial := sessionTestOutput(1, "initial")
-	initial.Context.TabID = "t_second"
-	stream.deliver(initial)
-	attachments.token(t)
-	alpha := initial.Context.Route.Target
-	beta := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{2}, SessionName: "beta"}
-	stream.deliver(protocol.AttachTarget{Session: "beta", Intent: protocol.IntentAttach, ExactTarget: &beta, SamePeer: true, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned})
-	first := awaitSent(t, stream, "SamePeerSwitchRequest", isSent[protocol.SamePeerSwitchRequest]).(protocol.SamePeerSwitchRequest)
-	require.Empty(t, first.PreferredTabID)
-	output := sessionTestOutput(2, "beta")
-	output.Epoch = 2
-	output.Context.Route.Target = beta
-	output.Context.TabID = "t_beta"
-	stream.deliver(output)
-	awaitSent(t, stream, "Ack", func(message protocol.ClientMessage) bool {
-		ack, ok := message.(protocol.Ack)
-		return ok && ack.Epoch == output.Epoch
+	synctest.Test(t, func(t *testing.T) {
+		stream := newSessionStream(t)
+		terminal := newWorkerTestTerminal()
+		attachments := newSessionTestAttachments()
+		var memory sessionTabMemory
+		cfg := sessionTestWorkerConfig(sessionTestRequest(true))
+		cfg.Tabs = &memory
+		events := sessionTestRun(t, stream.conn, terminal, cfg, attachments)
+		t.Cleanup(func() { _ = stream.conn.Close(); <-events })
+		awaitHello(t, stream)
+		stream.deliver(protocol.Welcome{SessionName: "alpha"})
+		initial := sessionTestOutput(1, "initial")
+		initial.Context.TabID = "t_second"
+		stream.deliver(initial)
+		attachments.token(t)
+		alpha := initial.Context.Route.Target
+		beta := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{2}, SessionName: "beta"}
+		stream.deliver(protocol.AttachTarget{Session: "beta", Intent: protocol.IntentAttach, ExactTarget: &beta, SamePeer: true, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned})
+		first := awaitSent(t, stream, "SamePeerSwitchRequest", isSent[protocol.SamePeerSwitchRequest]).(protocol.SamePeerSwitchRequest)
+		require.Empty(t, first.PreferredTabID)
+		output := sessionTestOutput(2, "beta")
+		output.Epoch = 2
+		output.Context.Route.Target = beta
+		output.Context.TabID = "t_beta"
+		stream.deliver(output)
+		awaitSent(t, stream, "Ack", func(message protocol.ClientMessage) bool {
+			ack, ok := message.(protocol.Ack)
+			return ok && ack.Epoch == output.Epoch
+		})
+		stream.deliver(protocol.AttachTarget{Session: "alpha", Intent: protocol.IntentAttach, ExactTarget: &alpha, SamePeer: true, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned})
+		second := awaitSent(t, stream, "return switch", func(message protocol.ClientMessage) bool {
+			request, ok := message.(protocol.SamePeerSwitchRequest)
+			return ok && request.RequestID == 2
+		}).(protocol.SamePeerSwitchRequest)
+		require.Equal(t, domain.TabStableID("t_second"), second.PreferredTabID)
+		stream.deliver(protocol.SamePeerSwitchFailure{RequestID: 2, Code: protocol.SamePeerSwitchStaleTarget})
+		stream.deliver(protocol.AttachTarget{Session: "alpha", Intent: protocol.IntentAttach, ExactTarget: &alpha, SamePeer: true, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned, PreferredTabID: "t_explicit"})
+		third := awaitSent(t, stream, "explicit switch", func(message protocol.ClientMessage) bool {
+			request, ok := message.(protocol.SamePeerSwitchRequest)
+			return ok && request.RequestID == 3
+		}).(protocol.SamePeerSwitchRequest)
+		require.Equal(t, domain.TabStableID("t_explicit"), third.PreferredTabID)
 	})
-	stream.deliver(protocol.AttachTarget{Session: "alpha", Intent: protocol.IntentAttach, ExactTarget: &alpha, SamePeer: true, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned})
-	second := awaitSent(t, stream, "return switch", func(message protocol.ClientMessage) bool {
-		request, ok := message.(protocol.SamePeerSwitchRequest)
-		return ok && request.RequestID == 2
-	}).(protocol.SamePeerSwitchRequest)
-	require.Equal(t, domain.TabStableID("t_second"), second.PreferredTabID)
-	stream.deliver(protocol.SamePeerSwitchFailure{RequestID: 2, Code: protocol.SamePeerSwitchStaleTarget})
-	stream.deliver(protocol.AttachTarget{Session: "alpha", Intent: protocol.IntentAttach, ExactTarget: &alpha, SamePeer: true, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned, PreferredTabID: "t_explicit"})
-	third := awaitSent(t, stream, "explicit switch", func(message protocol.ClientMessage) bool {
-		request, ok := message.(protocol.SamePeerSwitchRequest)
-		return ok && request.RequestID == 3
-	}).(protocol.SamePeerSwitchRequest)
-	require.Equal(t, domain.TabStableID("t_explicit"), third.PreferredTabID)
 }
 
 func TestSessionTabMemoryLifecycleCleanup(t *testing.T) {
@@ -158,19 +165,21 @@ func TestSessionTabMemoryLifecycleCleanup(t *testing.T) {
 }
 
 func TestSessionTabMemoryPreservesStoppedRemoteSelector(t *testing.T) {
-	request := sessionTestRequest(false)
-	var memory sessionTabMemory
-	memory.remember(requestAuthority(request), request.Target, "t_remembered")
-	selector := protocol.SessionAttachTarget{LifecycleID: request.Target.LifecycleID, SessionName: request.Target.SessionName, Stopped: true, TabID: "t_explicit", TabIndex: protocol.NoTabIndex}
-	cfg := sessionTestWorkerConfig(request)
-	cfg.Tabs = &memory
-	cfg.Tab = attachmentTab{stopped: &selector}
-	cfg.SessionEnvironment = SessionEnvironment{Provenance: SessionEnvironmentRemote}
-	stream := newSessionStream(t)
-	events := sessionTestRun(t, stream.conn, newWorkerTestTerminal(), cfg, newSessionTestAttachments())
-	t.Cleanup(func() { _ = stream.conn.Close(); <-events })
-	hello := awaitHello(t, stream)
-	require.Equal(t, &selector, hello.SessionTarget)
-	require.Empty(t, hello.PreferredTabID)
-	require.NoError(t, protocol.ValidateHello(hello))
+	synctest.Test(t, func(t *testing.T) {
+		request := sessionTestRequest(false)
+		var memory sessionTabMemory
+		memory.remember(requestAuthority(request), request.Target, "t_remembered")
+		selector := protocol.SessionAttachTarget{LifecycleID: request.Target.LifecycleID, SessionName: request.Target.SessionName, Stopped: true, TabID: "t_explicit", TabIndex: protocol.NoTabIndex}
+		cfg := sessionTestWorkerConfig(request)
+		cfg.Tabs = &memory
+		cfg.Tab = attachmentTab{stopped: &selector}
+		cfg.SessionEnvironment = SessionEnvironment{Provenance: SessionEnvironmentRemote}
+		stream := newSessionStream(t)
+		events := sessionTestRun(t, stream.conn, newWorkerTestTerminal(), cfg, newSessionTestAttachments())
+		t.Cleanup(func() { _ = stream.conn.Close(); <-events })
+		hello := awaitHello(t, stream)
+		require.Equal(t, &selector, hello.SessionTarget)
+		require.Empty(t, hello.PreferredTabID)
+		require.NoError(t, protocol.ValidateHello(hello))
+	})
 }

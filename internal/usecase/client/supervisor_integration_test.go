@@ -160,8 +160,9 @@ func startIntegrationBroker(t *testing.T) (*integrationAuthority, ports.BrokerLi
 
 // integrationSupervisor builds one autonomous supervisor over the production
 // connector and a pinned clock with a controlled terminal.
-func integrationSupervisor(t *testing.T, path string) (*Supervisor, *supervisorTestClock, *supervisorTestTerminal) {
+func integrationSupervisor(t *testing.T, path string) (*Supervisor, *supervisorTestClock, *supervisorTestTerminal, <-chan State) {
 	t.Helper()
+	states := make(chan State, 64)
 	clock := newSupervisorTestClock(t)
 	reader := newSupervisorTestReader()
 	t.Cleanup(reader.unblock)
@@ -171,8 +172,29 @@ func integrationSupervisor(t *testing.T, path string) (*Supervisor, *supervisorT
 		Terminal:  terminal,
 		Clock:     clock.port,
 		Jitter:    func() float64 { return 0 },
+		Render: func(state State) {
+			select {
+			case states <- state:
+			default:
+			}
+		},
 	})
-	return sup, clock, terminal
+	return sup, clock, terminal, states
+}
+
+// awaitIntegrationState blocks on the supervisor's published states until one
+// satisfies match. The guard is a single bounded failure deadline: the broker
+// endpoint is a real socket, so progress arrives on a channel, never by polling.
+func awaitIntegrationState(t *testing.T, sup *Supervisor, states <-chan State, match func(State) bool) {
+	t.Helper()
+	deadline := time.After(5 * time.Second)
+	for !match(sup.State()) {
+		select {
+		case <-states:
+		case <-deadline:
+			t.Fatalf("supervisor never reached the expected state, last %+v", sup.State())
+		}
+	}
 }
 
 // TestSupervisorRealConnectorReadinessAndLoss pins the readiness handshake and
@@ -180,16 +202,17 @@ func integrationSupervisor(t *testing.T, path string) (*Supervisor, *supervisorT
 // supervisor becomes Ready only after the broker publishes the admitted
 // connection's epoch, and a retired connection is observed through Done/Err and
 // retried with a typed unavailable cause.
+// real I/O: the broker endpoint is a real AF_UNIX socket, which cannot block durably in a bubble.
 func TestSupervisorRealConnectorReadinessAndLoss(t *testing.T) {
 	_, listener, path := startIntegrationBroker(t)
-	sup, _, terminal := integrationSupervisor(t, path)
+	sup, _, terminal, states := integrationSupervisor(t, path)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	runErr := make(chan error, 1)
 	go func() { runErr <- sup.Run(ctx) }()
 
-	require.Eventually(t, func() bool { return sup.State().Connectivity == ConnectivityReady }, 5*time.Second, time.Millisecond)
+	awaitIntegrationState(t, sup, states, func(st State) bool { return st.Connectivity == ConnectivityReady })
 	require.Equal(t, uint64(1), sup.State().Generation)
 	require.Equal(t, uint64(0), sup.State().Attempt)
 	require.NoError(t, sup.State().Err)
@@ -200,7 +223,7 @@ func TestSupervisorRealConnectorReadinessAndLoss(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, server.Close())
 
-	require.Eventually(t, func() bool { return sup.State().Connectivity == ConnectivityRetryWait }, 5*time.Second, time.Millisecond)
+	awaitIntegrationState(t, sup, states, func(st State) bool { return st.Connectivity == ConnectivityRetryWait })
 	var typed ports.BrokerError
 	require.ErrorAs(t, sup.State().Err, &typed)
 	require.Equal(t, ports.BrokerErrorUnavailable, typed.Code)
@@ -213,15 +236,16 @@ func TestSupervisorRealConnectorReadinessAndLoss(t *testing.T) {
 // TestSupervisorRealConnectorCancelClosesConnection pins the cancellation
 // lifetime: cancelling the run closes the supervisor's adopted connection, ends
 // the broker-side session, and retires the admitted core exactly once.
+// real I/O: the broker endpoint is a real AF_UNIX socket, which cannot block durably in a bubble.
 func TestSupervisorRealConnectorCancelClosesConnection(t *testing.T) {
 	authority, _, path := startIntegrationBroker(t)
-	sup, _, terminal := integrationSupervisor(t, path)
+	sup, _, terminal, states := integrationSupervisor(t, path)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	runErr := make(chan error, 1)
 	go func() { runErr <- sup.Run(ctx) }()
 
-	require.Eventually(t, func() bool { return sup.State().Connectivity == ConnectivityReady }, 5*time.Second, time.Millisecond)
+	awaitIntegrationState(t, sup, states, func(st State) bool { return st.Connectivity == ConnectivityReady })
 	core := authority.lastCore()
 	require.NotNil(t, core, "the broker must have admitted the connection")
 

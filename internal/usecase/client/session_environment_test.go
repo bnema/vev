@@ -3,6 +3,7 @@ package client
 import (
 	"strings"
 	"testing"
+	"testing/synctest"
 
 	"github.com/stretchr/testify/require"
 
@@ -51,44 +52,52 @@ func TestSessionEnvironmentValidate(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := tc.env.Validate()
-			if tc.wantErr {
-				require.Error(t, err)
-			} else {
-				require.NoError(t, err)
-			}
+			synctest.Test(t, func(t *testing.T) {
+				err := tc.env.Validate()
+				if tc.wantErr {
+					require.Error(t, err)
+				} else {
+					require.NoError(t, err)
+				}
+			})
 		})
 	}
 }
 
 func TestSessionEnvironmentClone(t *testing.T) {
 	t.Run("nil stays nil", func(t *testing.T) {
-		orig := SessionEnvironment{Provenance: SessionEnvironmentLocalCLI}
-		require.Nil(t, orig.Env)
-		cloned := orig.Clone()
-		require.Nil(t, cloned.Env)
-		require.Equal(t, orig, cloned)
+		synctest.Test(t, func(t *testing.T) {
+			orig := SessionEnvironment{Provenance: SessionEnvironmentLocalCLI}
+			require.Nil(t, orig.Env)
+			cloned := orig.Clone()
+			require.Nil(t, cloned.Env)
+			require.Equal(t, orig, cloned)
+		})
 	})
 
 	t.Run("empty stays non-nil empty", func(t *testing.T) {
-		orig := SessionEnvironment{Provenance: SessionEnvironmentLocalCLI, Env: []string{}}
-		require.NotNil(t, orig.Env)
-		cloned := orig.Clone()
-		require.NotNil(t, cloned.Env)
-		require.Empty(t, cloned.Env)
+		synctest.Test(t, func(t *testing.T) {
+			orig := SessionEnvironment{Provenance: SessionEnvironmentLocalCLI, Env: []string{}}
+			require.NotNil(t, orig.Env)
+			cloned := orig.Clone()
+			require.NotNil(t, cloned.Env)
+			require.Empty(t, cloned.Env)
+		})
 	})
 
 	t.Run("deep copy isolates", func(t *testing.T) {
-		orig := SessionEnvironment{
-			Provenance: SessionEnvironmentLocalPicker,
-			Env:        []string{"A=1", "B=2"},
-			Cwd:        "/tmp",
-		}
-		cloned := orig.Clone()
-		require.Equal(t, orig, cloned)
-		cloned.Env[0] = "MUTATED=x"
-		require.Equal(t, "A=1", orig.Env[0])
-		orig.Env[1] = "MUTATED=y"
-		require.Equal(t, "B=2", cloned.Env[1])
+		synctest.Test(t, func(t *testing.T) {
+			orig := SessionEnvironment{
+				Provenance: SessionEnvironmentLocalPicker,
+				Env:        []string{"A=1", "B=2"},
+				Cwd:        "/tmp",
+			}
+			cloned := orig.Clone()
+			require.Equal(t, orig, cloned)
+			cloned.Env[0] = "MUTATED=x"
+			require.Equal(t, "A=1", orig.Env[0])
+			orig.Env[1] = "MUTATED=y"
+			require.Equal(t, "B=2", cloned.Env[1])
+		})
 	})
 }

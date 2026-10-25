@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
@@ -103,6 +104,10 @@ type resizeRenderRecorder struct {
 
 	mu  sync.Mutex
 	all []resizeRenderSample
+	// gate, when set, parks every render until it is closed. A parked render
+	// blocks durably, so synctest.Wait reaches quiescence while the supervisor
+	// holds no lock.
+	gate chan struct{}
 }
 
 func newResizeRenderRecorder(terminal *resizeTestTerminal) *resizeRenderRecorder {
@@ -115,6 +120,12 @@ func newResizeRenderRecorder(terminal *resizeTestTerminal) *resizeRenderRecorder
 const resizeRenderPaint = "<picker-frame>"
 
 func (r *resizeRenderRecorder) render(state State) {
+	r.mu.Lock()
+	gate := r.gate
+	r.mu.Unlock()
+	if gate != nil {
+		<-gate
+	}
 	geometry, _ := r.terminal.port.Geometry()
 	sample := resizeRenderSample{state: state, geometry: geometry}
 	r.mu.Lock()
@@ -236,7 +247,7 @@ func startResizeHarness(t *testing.T, options resizeHarnessOptions) *resizeSuper
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	clock := newSupervisorTestClock(t)
-	reader := newAttachTestReader()
+	reader := newAttachTestReader(t)
 	geometry := options.geometry
 	if geometry == (domain.Geometry{}) {
 		geometry = domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}
@@ -325,11 +336,12 @@ func (r *resizeStreamRegistry) open(context.Context, ports.BrokerOpenStreamReque
 // stream waits until the index-th stream was admitted and returns it.
 func (r *resizeStreamRegistry) stream(t *testing.T, index int) *streamLog {
 	t.Helper()
-	require.Eventually(t, func() bool {
+	synctest.Wait()
+	require.True(t, func() bool {
 		r.mu.Lock()
 		defer r.mu.Unlock()
 		return len(r.streams) > index
-	}, 5*time.Second, time.Millisecond, "the supervisor never admitted stream %d", index)
+	}(), "the supervisor never admitted stream %d", index)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.streams[index]
@@ -349,8 +361,8 @@ func streamResizes(stream *streamLog) []protocol.Resize {
 // awaitStreamResizes waits until the stream sent at least want resize messages.
 func awaitStreamResizes(t *testing.T, stream *streamLog, want int) []protocol.Resize {
 	t.Helper()
-	require.Eventually(t, func() bool { return len(streamResizes(stream)) >= want }, 5*time.Second, time.Millisecond,
-		"the attachment stream never sent %d resize messages", want)
+	synctest.Wait()
+	require.True(t, len(streamResizes(stream)) >= want, "the attachment stream never sent %d resize messages", want)
 	return streamResizes(stream)
 }
 
@@ -361,41 +373,48 @@ func awaitStreamResizes(t *testing.T, stream *streamLog, want int) []protocol.Re
 // repaint that follows must sample the latest Terminal.Geometry: no render may
 // observe an intermediate size.
 func TestSupervisorResizeBurstCoalescesAndRenderObservesLatestGeometry(t *testing.T) {
-	picker := newAttachTestPicker()
-	harness := startResizeHarness(t, resizeHarnessOptions{picker: picker})
-	require.Eventually(t, func() bool { return harness.sup.State().Connectivity == ConnectivityReady }, 5*time.Second, time.Millisecond)
-	harness.recorder.drain()
-	baseline := harness.recorder.count()
+	synctest.Test(t, func(t *testing.T) {
+		picker := newAttachTestPicker()
+		harness := startResizeHarness(t, resizeHarnessOptions{picker: picker})
+		synctest.Wait()
+		require.True(t, harness.sup.State().Connectivity == ConnectivityReady)
+		harness.recorder.drain()
+		baseline := harness.recorder.count()
 
-	burst := []domain.Geometry{
-		{Size: domain.Size{Cols: 90, Rows: 30}},
-		{Size: domain.Size{Cols: 100, Rows: 35}},
-		{Size: domain.Size{Cols: 120, Rows: 40}},
-	}
-	var pending int
-	func() {
-		harness.sup.mu.Lock()
-		defer harness.sup.mu.Unlock()
+		burst := []domain.Geometry{
+			{Size: domain.Size{Cols: 90, Rows: 30}},
+			{Size: domain.Size{Cols: 100, Rows: 35}},
+			{Size: domain.Size{Cols: 120, Rows: 40}},
+		}
+		// Park the repaint so the burst lands while the supervisor is not
+		// rendering, then release it and observe the coalesced result.
+		gate := make(chan struct{})
+		harness.recorder.mu.Lock()
+		harness.recorder.gate = gate
+		harness.recorder.mu.Unlock()
 		for _, geometry := range burst {
 			harness.terminal.resize(geometry)
 		}
-		require.Eventually(t, func() bool {
-			return harness.sup.attachments.geometryProgress() == uint64(len(burst))
-		}, 5*time.Second, time.Millisecond, "the collector records every geometry of the burst")
-		pending = harness.sup.attachments.pendingPresentationSignals()
-	}()
-	require.Equal(t, 1, pending,
-		"a resize burst coalesces into exactly one pending presentation invalidation")
+		synctest.Wait()
+		require.True(t, harness.sup.attachments.geometryProgress() == uint64(len(burst)), "the collector records every geometry of the burst")
+		harness.recorder.mu.Lock()
+		harness.recorder.gate = nil
+		harness.recorder.mu.Unlock()
+		close(gate)
 
-	latest := burst[len(burst)-1]
-	require.Eventually(t, func() bool { return harness.recorder.count() > baseline }, 5*time.Second, time.Millisecond,
-		"the coalesced burst produces a repaint")
-	for _, sample := range harness.recorder.samples()[baseline:] {
-		require.Equal(t, PresentPicker, sample.state.Presentation)
-		require.Equal(t, latest.Size, sample.geometry.Size,
-			"every repaint after the burst observes the latest Terminal.Geometry")
-	}
-	require.Equal(t, latest.Size, harness.recorder.last().geometry.Size)
+		latest := burst[len(burst)-1]
+		synctest.Wait()
+		require.Zero(t, harness.sup.attachments.pendingPresentationSignals(), "the coalesced burst is fully consumed")
+		require.True(t, harness.recorder.count() > baseline, "the coalesced burst produces a repaint")
+		require.LessOrEqual(t, harness.recorder.count()-baseline, 2,
+			"a resize burst coalesces into at most one parked repaint plus one pending invalidation")
+		for _, sample := range harness.recorder.samples()[baseline:] {
+			require.Equal(t, PresentPicker, sample.state.Presentation)
+			require.Equal(t, latest.Size, sample.geometry.Size,
+				"every repaint after the burst observes the latest Terminal.Geometry")
+		}
+		require.Equal(t, latest.Size, harness.recorder.last().geometry.Size)
+	})
 }
 
 // TestSupervisorIdlePickerRepaintsOnResizeWithoutInputOrPublication proves the
@@ -403,25 +422,28 @@ func TestSupervisorResizeBurstCoalescesAndRenderObservesLatestGeometry(t *testin
 // repaints the picker even though no terminal input arrived and no broker
 // snapshot was published.
 func TestSupervisorIdlePickerRepaintsOnResizeWithoutInputOrPublication(t *testing.T) {
-	picker := newAttachTestPicker()
-	harness := startResizeHarness(t, resizeHarnessOptions{picker: picker})
-	require.Eventually(t, func() bool { return harness.sup.State().Connectivity == ConnectivityReady }, 5*time.Second, time.Millisecond)
+	synctest.Test(t, func(t *testing.T) {
+		picker := newAttachTestPicker()
+		harness := startResizeHarness(t, resizeHarnessOptions{picker: picker})
+		synctest.Wait()
+		require.True(t, harness.sup.State().Connectivity == ConnectivityReady)
 
-	revision := harness.service.hub.current().Revision
-	harness.recorder.drain()
+		revision := harness.service.hub.current().Revision
+		harness.recorder.drain()
 
-	resized := domain.Geometry{Size: domain.Size{Cols: 132, Rows: 43}}
-	harness.terminal.resize(resized)
+		resized := domain.Geometry{Size: domain.Size{Cols: 132, Rows: 43}}
+		harness.terminal.resize(resized)
 
-	sample := awaitResizeRender(t, harness.recorder, func(sample resizeRenderSample) bool {
-		return sample.state.Presentation == PresentPicker && sample.state.Connectivity == ConnectivityReady
+		sample := awaitResizeRender(t, harness.recorder, func(sample resizeRenderSample) bool {
+			return sample.state.Presentation == PresentPicker && sample.state.Connectivity == ConnectivityReady
+		})
+		require.Equal(t, State{Presentation: PresentPicker, Connectivity: ConnectivityReady, Generation: 1}, sample.state,
+			"a resize repaint reports the untouched ready state")
+		require.Equal(t, resized.Size, sample.geometry.Size, "the render samples the latest terminal geometry")
+		require.Equal(t, revision, harness.service.hub.current().Revision, "a resize repaint must not need a broker publication")
+		require.Zero(t, picker.consumedCount(), "a resize repaint must not consume terminal input")
+		require.Zero(t, harness.sup.attachments.pendingPresentationSignals(), "the coalesced invalidation was consumed")
 	})
-	require.Equal(t, State{Presentation: PresentPicker, Connectivity: ConnectivityReady, Generation: 1}, sample.state,
-		"a resize repaint reports the untouched ready state")
-	require.Equal(t, resized.Size, sample.geometry.Size, "the render samples the latest terminal geometry")
-	require.Equal(t, revision, harness.service.hub.current().Revision, "a resize repaint must not need a broker publication")
-	require.Zero(t, picker.consumedCount(), "a resize repaint must not consume terminal input")
-	require.Zero(t, harness.sup.attachments.pendingPresentationSignals(), "the coalesced invalidation was consumed")
 }
 
 // TestSupervisorResizeRepaintsConnectingRetryAndNonRetryableWaiting proves the
@@ -472,10 +494,11 @@ func TestSupervisorResizeRepaintsConnectingRetryAndNonRetryableWaiting(t *testin
 				harness := startResizeHarness(t, resizeHarnessOptions{
 					connect: func(context.Context, int) (ports.BrokerNavigator, error) { return nil, incompatible },
 				})
-				require.Eventually(t, func() bool {
+				synctest.Wait()
+				require.True(t, func() bool {
 					state := harness.sup.State()
 					return state.Connectivity == ConnectivityDisconnected && state.Err != nil
-				}, 5*time.Second, time.Millisecond)
+				}())
 				return harness, State{Presentation: PresentPicker, Connectivity: ConnectivityDisconnected, Generation: 1, Err: incompatible}
 			},
 		},
@@ -483,33 +506,35 @@ func TestSupervisorResizeRepaintsConnectingRetryAndNonRetryableWaiting(t *testin
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			harness, want := tt.start(t)
-			require.Equal(t, want, harness.sup.State(), "the supervisor is parked exactly on the wait under test")
-			harness.recorder.drain()
+			synctest.Test(t, func(t *testing.T) {
+				harness, want := tt.start(t)
+				require.Equal(t, want, harness.sup.State(), "the supervisor is parked exactly on the wait under test")
+				harness.recorder.drain()
 
-			var retryTimer *supervisorTestTimer
-			if tt.name == "retry cadence wait" {
-				retryTimer = harness.clock.snapshotTimers()[0]
-				require.Equal(t, 1, harness.clock.timerCount())
-				require.Equal(t, 1, harness.clock.liveTimers())
-			}
+				var retryTimer *supervisorTestTimer
+				if tt.name == "retry cadence wait" {
+					retryTimer = harness.clock.snapshotTimers()[0]
+					require.Equal(t, 1, harness.clock.timerCount())
+					require.Equal(t, 1, harness.clock.liveTimers())
+				}
 
-			resized := domain.Geometry{Size: domain.Size{Cols: 111, Rows: 41}}
-			harness.terminal.resize(resized)
+				resized := domain.Geometry{Size: domain.Size{Cols: 111, Rows: 41}}
+				harness.terminal.resize(resized)
 
-			sample := awaitResizeRender(t, harness.recorder, func(sample resizeRenderSample) bool {
-				return sample.state.Presentation == PresentPicker
+				sample := awaitResizeRender(t, harness.recorder, func(sample resizeRenderSample) bool {
+					return sample.state.Presentation == PresentPicker
+				})
+				require.Equal(t, want, sample.state, "a resize repaint reports the parked state unchanged")
+				require.Equal(t, resized.Size, sample.geometry.Size, "the render samples the latest terminal geometry")
+				require.Zero(t, harness.sup.attachments.pendingPresentationSignals(), "the coalesced invalidation was consumed")
+				require.Equal(t, want.Connectivity, harness.sup.State().Connectivity, "a repaint never advances connectivity")
+				if retryTimer != nil {
+					require.Equal(t, 1, harness.clock.timerCount(), "resize must not replace the retry timer")
+					require.Equal(t, 1, harness.clock.liveTimers(), "the original retry timer remains live")
+					retryTimer.fire()
+					require.Equal(t, 2, harness.connector.awaitStart(t), "the original timer advances the next attempt")
+				}
 			})
-			require.Equal(t, want, sample.state, "a resize repaint reports the parked state unchanged")
-			require.Equal(t, resized.Size, sample.geometry.Size, "the render samples the latest terminal geometry")
-			require.Zero(t, harness.sup.attachments.pendingPresentationSignals(), "the coalesced invalidation was consumed")
-			require.Equal(t, want.Connectivity, harness.sup.State().Connectivity, "a repaint never advances connectivity")
-			if retryTimer != nil {
-				require.Equal(t, 1, harness.clock.timerCount(), "resize must not replace the retry timer")
-				require.Equal(t, 1, harness.clock.liveTimers(), "the original retry timer remains live")
-				retryTimer.fire()
-				require.Equal(t, 2, harness.connector.awaitStart(t), "the original timer advances the next attempt")
-			}
 		})
 	}
 }
@@ -520,49 +545,50 @@ func TestSupervisorResizeRepaintsConnectingRetryAndNonRetryableWaiting(t *testin
 // still advances to the latest geometry, and draining the presentation signal
 // cannot steal the attachment's own geometry wakeup.
 func TestAttachmentHostResizeBurstCoalescesAndKeepsGeometryWakeupsIndependent(t *testing.T) {
-	resizes := make(chan domain.Geometry, 8)
-	host := newAttachmentHost(attachmentHostConfig{})
-	host.resizes = resizes
-	host.ownerBoundary = true
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	host.startGeometry(ctx)
-	defer host.stopGeometry()
+	synctest.Test(t, func(t *testing.T) {
+		resizes := make(chan domain.Geometry, 8)
+		host := newAttachmentHost(attachmentHostConfig{})
+		host.resizes = resizes
+		host.ownerBoundary = true
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		host.startGeometry(ctx)
+		defer host.stopGeometry()
 
-	fg := host.newForeground(AttachmentToken{Generation: 1, Attempt: 1}, newSessionStream(t).conn)
-	require.True(t, host.authority.grant(fg))
+		fg := host.newForeground(AttachmentToken{Generation: 1, Attempt: 1}, newSessionStream(t).conn)
+		require.True(t, host.authority.grant(fg))
 
-	burst := []domain.Geometry{
-		{Size: domain.Size{Cols: 90, Rows: 30}},
-		{Size: domain.Size{Cols: 100, Rows: 35}},
-		{Size: domain.Size{Cols: 120, Rows: 40}},
-	}
-	for _, geometry := range burst {
-		resizes <- geometry
-	}
-	require.Eventually(t, func() bool {
-		return host.geometryProgress() == uint64(len(burst)) && host.pendingPresentationSignals() == 1
-	}, 5*time.Second, time.Millisecond, "a resize burst must coalesce into one presentation invalidation")
-	require.Equal(t, 1, host.pendingGeometrySignals(), "the attachment geometry wakeup coalesces independently")
+		burst := []domain.Geometry{
+			{Size: domain.Size{Cols: 90, Rows: 30}},
+			{Size: domain.Size{Cols: 100, Rows: 35}},
+			{Size: domain.Size{Cols: 120, Rows: 40}},
+		}
+		for _, geometry := range burst {
+			resizes <- geometry
+		}
+		synctest.Wait()
+		require.True(t, host.geometryProgress() == uint64(len(burst)) && host.pendingPresentationSignals() == 1, "a resize burst must coalesce into one presentation invalidation")
+		require.Equal(t, 1, host.pendingGeometrySignals(), "the attachment geometry wakeup coalesces independently")
 
-	latest, ok := host.latestGeometry()
-	require.True(t, ok)
-	require.Equal(t, burst[len(burst)-1].Size, latest.Size, "the latest geometry wins the coalesced burst")
+		latest, ok := host.latestGeometry()
+		require.True(t, ok)
+		require.Equal(t, burst[len(burst)-1].Size, latest.Size, "the latest geometry wins the coalesced burst")
 
-	// Draining the presentation invalidation must not touch the attachment's
-	// geometry wakeup: the foreground still receives the latest geometry.
-	<-host.presentationUpdate
-	geometry, ok := fg.Resize(context.Background())
-	require.True(t, ok)
-	require.Equal(t, burst[len(burst)-1].Size, geometry.Size)
+		// Draining the presentation invalidation must not touch the attachment's
+		// geometry wakeup: the foreground still receives the latest geometry.
+		<-host.presentationUpdate
+		geometry, ok := fg.Resize(context.Background())
+		require.True(t, ok)
+		require.Equal(t, burst[len(burst)-1].Size, geometry.Size)
 
-	next := domain.Geometry{Size: domain.Size{Cols: 132, Rows: 43}}
-	resizes <- next
-	geometry, ok = fg.Resize(context.Background())
-	require.True(t, ok)
-	require.Equal(t, next.Size, geometry.Size)
-	require.Equal(t, 1, host.pendingPresentationSignals(), "every resize still raises a coalesced invalidation")
-	fg.finish()
+		next := domain.Geometry{Size: domain.Size{Cols: 132, Rows: 43}}
+		resizes <- next
+		geometry, ok = fg.Resize(context.Background())
+		require.True(t, ok)
+		require.Equal(t, next.Size, geometry.Size)
+		require.Equal(t, 1, host.pendingPresentationSignals(), "every resize still raises a coalesced invalidation")
+		fg.finish()
+	})
 }
 
 // TestSupervisorResizeDuringAttachmentSettlementPreservesSessionOutput pins the
@@ -575,56 +601,57 @@ func TestAttachmentHostResizeBurstCoalescesAndKeepsGeometryWakeupsIndependent(t 
 // with a repaint at the latest geometry only once the attachment returns to the
 // picker.
 func TestSupervisorResizeDuringAttachmentSettlementPreservesSessionOutput(t *testing.T) {
-	picker := newAttachTestPicker()
-	harness := startResizeHarness(t, resizeHarnessOptions{picker: picker})
-	registry := &resizeStreamRegistry{t: t}
-	harness.service.setOpenStream(registry.open)
+	synctest.Test(t, func(t *testing.T) {
+		picker := newAttachTestPicker()
+		harness := startResizeHarness(t, resizeHarnessOptions{picker: picker})
+		registry := &resizeStreamRegistry{t: t}
+		harness.service.setOpenStream(registry.open)
 
-	picker.commit(sessionTestRequest(true))
-	stream := registry.stream(t, 0)
-	require.Eventually(t, func() bool {
-		return harness.sup.State().Presentation == PresentConnecting
-	}, 5*time.Second, time.Millisecond, "attachment settlement exposes connecting presentation")
-	harness.recorder.drain()
+		picker.commit(sessionTestRequest(true))
+		stream := registry.stream(t, 0)
+		synctest.Wait()
+		require.True(t, harness.sup.State().Presentation == PresentConnecting, "attachment settlement exposes connecting presentation")
+		harness.recorder.drain()
 
-	resized := domain.Geometry{Size: domain.Size{Cols: 109, Rows: 39}}
-	harness.terminal.resize(resized)
-	require.Eventually(t, func() bool { return harness.sup.attachments.pendingPresentationSignals() == 1 },
-		5*time.Second, time.Millisecond, "the collector still records the resize while connecting")
+		resized := domain.Geometry{Size: domain.Size{Cols: 109, Rows: 39}}
+		harness.terminal.resize(resized)
+		synctest.Wait()
+		require.True(t, harness.sup.attachments.pendingPresentationSignals() == 1, "the collector still records the resize while connecting")
 
-	// The admitted foreground commits its initial publication through the same
-	// terminal. The supervisor must not have painted over it, and the resize must
-	// not have driven a connecting repaint at the new geometry.
-	deliverReadyStream(t, stream)
-	awaitAttachedState(t, harness.sup)
-	// The attached worker's palette query draws nothing; strip it.
-	written := strings.ReplaceAll(harness.terminal.written(), paletteColorBatch, "")
-	at := strings.Index(written, "\x1b[Hready")
-	require.GreaterOrEqual(t, at, 0, "the admitted foreground committed its initial publication")
-	require.Equal(t, "\x1b[Hready", written[at:],
-		"a resize during settlement must not append picker bytes over session output")
-	for _, sample := range harness.recorder.samples() {
-		require.False(t, sample.state.Presentation == PresentConnecting && sample.geometry.Size == resized.Size,
-			"a resize during settlement must not invoke the picker renderer for the connecting presentation")
-	}
-	require.Equal(t, 1, harness.sup.attachments.pendingPresentationSignals(),
-		"the invalidation stays buffered through connecting and attached")
+		// The admitted foreground commits its initial publication through the same
+		// terminal. The supervisor must not have painted over it, and the resize must
+		// not have driven a connecting repaint at the new geometry.
+		deliverReadyStream(t, stream)
+		awaitAttachedState(t, harness.sup)
+		// The attached worker's palette query draws nothing; strip it.
+		written := strings.ReplaceAll(harness.terminal.written(), paletteColorBatch, "")
+		at := strings.Index(written, "\x1b[Hready")
+		require.GreaterOrEqual(t, at, 0, "the admitted foreground committed its initial publication")
+		require.Equal(t, "\x1b[Hready", written[at:],
+			"a resize during settlement must not append picker bytes over session output")
+		for _, sample := range harness.recorder.samples() {
+			require.False(t, sample.state.Presentation == PresentConnecting && sample.geometry.Size == resized.Size,
+				"a resize during settlement must not invoke the picker renderer for the connecting presentation")
+		}
+		require.Equal(t, 1, harness.sup.attachments.pendingPresentationSignals(),
+			"the invalidation stays buffered through connecting and attached")
 
-	// Back at the picker the preserved invalidation is consumed and repaints at
-	// the latest geometry. The transition back to the picker renders once; the
-	// consumed invalidation renders once more, so exactly two picker renders at
-	// the resized geometry follow the attachment. A run that never emitted the
-	// invalidation cannot reach this point, and a run that consumed it without a
-	// repaint leaves only one.
-	stream.deliver(protocol.Detached{Reason: protocol.ReasonSessionKilled})
-	awaitPickerState(t, harness.sup)
-	pickerAtResize := func(sample resizeRenderSample) bool {
-		return sample.state.Presentation == PresentPicker && sample.geometry.Size == resized.Size
-	}
-	awaitResizeRender(t, harness.recorder, pickerAtResize)
-	awaitResizeRender(t, harness.recorder, pickerAtResize)
-	require.Eventually(t, func() bool { return harness.sup.attachments.pendingPresentationSignals() == 0 },
-		5*time.Second, time.Millisecond, "the picker wait consumes the preserved invalidation")
+		// Back at the picker the preserved invalidation is consumed and repaints at
+		// the latest geometry. The transition back to the picker renders once; the
+		// consumed invalidation renders once more, so exactly two picker renders at
+		// the resized geometry follow the attachment. A run that never emitted the
+		// invalidation cannot reach this point, and a run that consumed it without a
+		// repaint leaves only one.
+		stream.deliver(protocol.Detached{Reason: protocol.ReasonSessionKilled})
+		awaitPickerState(t, harness.sup)
+		pickerAtResize := func(sample resizeRenderSample) bool {
+			return sample.state.Presentation == PresentPicker && sample.geometry.Size == resized.Size
+		}
+		awaitResizeRender(t, harness.recorder, pickerAtResize)
+		awaitResizeRender(t, harness.recorder, pickerAtResize)
+		synctest.Wait()
+		require.True(t, harness.sup.attachments.pendingPresentationSignals() == 0, "the picker wait consumes the preserved invalidation")
+	})
 }
 
 // TestSupervisorResizeConnectingBurstStaysCoalescedAndBuffered proves the
@@ -633,45 +660,45 @@ func TestSupervisorResizeDuringAttachmentSettlementPreservesSessionOutput(t *tes
 // exactly one pending signal, and the whole burst is then consumed by the picker
 // wait after the attachment ends without any intermediate repaint.
 func TestSupervisorResizeConnectingBurstStaysCoalescedAndBuffered(t *testing.T) {
-	picker := newAttachTestPicker()
-	harness := startResizeHarness(t, resizeHarnessOptions{picker: picker})
-	registry := &resizeStreamRegistry{t: t}
-	harness.service.setOpenStream(registry.open)
+	synctest.Test(t, func(t *testing.T) {
+		picker := newAttachTestPicker()
+		harness := startResizeHarness(t, resizeHarnessOptions{picker: picker})
+		registry := &resizeStreamRegistry{t: t}
+		harness.service.setOpenStream(registry.open)
 
-	picker.commit(sessionTestRequest(true))
-	stream := registry.stream(t, 0)
-	require.Eventually(t, func() bool {
-		return harness.sup.State().Presentation == PresentConnecting
-	}, 5*time.Second, time.Millisecond)
+		picker.commit(sessionTestRequest(true))
+		stream := registry.stream(t, 0)
+		synctest.Wait()
+		require.True(t, harness.sup.State().Presentation == PresentConnecting)
 
-	burst := []domain.Geometry{
-		{Size: domain.Size{Cols: 90, Rows: 30}},
-		{Size: domain.Size{Cols: 100, Rows: 35}},
-		{Size: domain.Size{Cols: 120, Rows: 40}},
-	}
-	for _, geometry := range burst {
-		harness.terminal.resize(geometry)
-	}
-	require.Eventually(t, func() bool {
-		return harness.sup.attachments.geometryProgress() == uint64(len(burst))
-	}, 5*time.Second, time.Millisecond, "the collector records every geometry of the burst")
-	require.Eventually(t, func() bool { return harness.sup.attachments.pendingPresentationSignals() == 1 },
-		5*time.Second, time.Millisecond, "a connecting resize burst coalesces into one buffered invalidation")
+		burst := []domain.Geometry{
+			{Size: domain.Size{Cols: 90, Rows: 30}},
+			{Size: domain.Size{Cols: 100, Rows: 35}},
+			{Size: domain.Size{Cols: 120, Rows: 40}},
+		}
+		for _, geometry := range burst {
+			harness.terminal.resize(geometry)
+		}
+		synctest.Wait()
+		require.True(t, harness.sup.attachments.geometryProgress() == uint64(len(burst)), "the collector records every geometry of the burst")
+		synctest.Wait()
+		require.True(t, harness.sup.attachments.pendingPresentationSignals() == 1, "a connecting resize burst coalesces into one buffered invalidation")
 
-	deliverReadyStream(t, stream)
-	awaitAttachedState(t, harness.sup)
-	require.Equal(t, 1, harness.sup.attachments.pendingPresentationSignals(),
-		"the coalesced burst is preserved through connecting and attached")
+		deliverReadyStream(t, stream)
+		awaitAttachedState(t, harness.sup)
+		require.Equal(t, 1, harness.sup.attachments.pendingPresentationSignals(),
+			"the coalesced burst is preserved through connecting and attached")
 
-	stream.deliver(protocol.Detached{Reason: protocol.ReasonSessionKilled})
-	awaitPickerState(t, harness.sup)
-	pickerAtLatest := func(sample resizeRenderSample) bool {
-		return sample.state.Presentation == PresentPicker && sample.geometry.Size == burst[len(burst)-1].Size
-	}
-	awaitResizeRender(t, harness.recorder, pickerAtLatest)
-	awaitResizeRender(t, harness.recorder, pickerAtLatest)
-	require.Eventually(t, func() bool { return harness.sup.attachments.pendingPresentationSignals() == 0 },
-		5*time.Second, time.Millisecond, "the coalesced burst is consumed by the picker wait, once")
+		stream.deliver(protocol.Detached{Reason: protocol.ReasonSessionKilled})
+		awaitPickerState(t, harness.sup)
+		pickerAtLatest := func(sample resizeRenderSample) bool {
+			return sample.state.Presentation == PresentPicker && sample.geometry.Size == burst[len(burst)-1].Size
+		}
+		awaitResizeRender(t, harness.recorder, pickerAtLatest)
+		awaitResizeRender(t, harness.recorder, pickerAtLatest)
+		synctest.Wait()
+		require.True(t, harness.sup.attachments.pendingPresentationSignals() == 0, "the coalesced burst is consumed by the picker wait, once")
+	})
 }
 
 // awaitAttachedSettlement waits until the supervisor's live attachment has
@@ -682,15 +709,16 @@ func TestSupervisorResizeConnectingBurstStaysCoalescedAndBuffered(t *testing.T) 
 // this point must stay buffered for the picker instead of being consumed.
 func awaitAttachedSettlement(t *testing.T, harness *resizeSupervisorHarness) {
 	t.Helper()
-	require.Eventually(t, func() bool {
+	synctest.Wait()
+	require.True(t, func() bool {
 		harness.sup.mu.Lock()
 		attachedPresentation := harness.sup.state.Presentation == PresentAttached
 		harness.sup.mu.Unlock()
 		foreground := harness.sup.attachments.authority.foreground()
 		return attachedPresentation && foreground != nil && foreground.Attached()
-	}, 5*time.Second, time.Millisecond, "the attachment never claimed the attached boundary")
-	require.Eventually(t, func() bool { return harness.sup.attachments.pendingPresentationSignals() == 0 },
-		5*time.Second, time.Millisecond, "a pre-resize invalidation was not drained before the boundary")
+	}(), "the attachment never claimed the attached boundary")
+	synctest.Wait()
+	require.True(t, harness.sup.attachments.pendingPresentationSignals() == 0, "a pre-resize invalidation was not drained before the boundary")
 }
 
 // TestSupervisorAttachedResizeKeepsGeometryWakeupAndPreservesRepaint proves an
@@ -699,42 +727,44 @@ func awaitAttachedSettlement(t *testing.T, harness *resizeSupervisorHarness) {
 // presentation invalidation stays buffered for the picker, and is then consumed
 // by the supervisor's next picker wait.
 func TestSupervisorAttachedResizeKeepsGeometryWakeupAndPreservesRepaint(t *testing.T) {
-	picker := newAttachTestPicker()
-	harness := startResizeHarness(t, resizeHarnessOptions{picker: picker})
-	registry := &resizeStreamRegistry{t: t}
-	harness.service.setOpenStream(registry.open)
+	synctest.Test(t, func(t *testing.T) {
+		picker := newAttachTestPicker()
+		harness := startResizeHarness(t, resizeHarnessOptions{picker: picker})
+		registry := &resizeStreamRegistry{t: t}
+		harness.service.setOpenStream(registry.open)
 
-	picker.commit(sessionTestRequest(true))
-	stream := registry.stream(t, 0)
-	deliverReadyStream(t, stream)
-	// Settle the attached boundary before the resize: the presentation is
-	// attached and the live foreground has claimed attached, and every earlier
-	// invalidation is drained, so the resize below lands unambiguously on an
-	// attached settlement wait.
-	awaitAttachedSettlement(t, harness)
-	harness.recorder.drain()
-	baseline := harness.recorder.count()
+		picker.commit(sessionTestRequest(true))
+		stream := registry.stream(t, 0)
+		deliverReadyStream(t, stream)
+		// Settle the attached boundary before the resize: the presentation is
+		// attached and the live foreground has claimed attached, and every earlier
+		// invalidation is drained, so the resize below lands unambiguously on an
+		// attached settlement wait.
+		awaitAttachedSettlement(t, harness)
+		harness.recorder.drain()
+		baseline := harness.recorder.count()
 
-	resized := domain.Geometry{Size: domain.Size{Cols: 100, Rows: 40}}
-	harness.terminal.resize(resized)
+		resized := domain.Geometry{Size: domain.Size{Cols: 100, Rows: 40}}
+		harness.terminal.resize(resized)
 
-	resizes := awaitStreamResizes(t, stream, 1)
-	require.Equal(t, resized.Size, resizes[0].Size, "the live attachment still receives its geometry wakeup")
-	// The attachment geometry wakeup and the presentation invalidation are
-	// pushed by the collector independently, and the worker can observe the new
-	// geometry through the recorded sequence before the invalidation is pushed.
-	// Wait for the coalesced token to be buffered; a supervisor that wrongly
-	// consumed it while attached could never make this count return to one, so
-	// this stays a behavioral check rather than a sleep.
-	require.Eventually(t, func() bool { return harness.sup.attachments.pendingPresentationSignals() == 1 },
-		5*time.Second, time.Millisecond, "the supervisor does not consume the invalidation while attached")
-	require.Equal(t, baseline, harness.recorder.count(), "an attached presentation is never painted over")
-	require.Equal(t, 1, harness.sup.attachments.pendingPresentationSignals(), "the invalidation stays buffered until the picker wait")
+		resizes := awaitStreamResizes(t, stream, 1)
+		require.Equal(t, resized.Size, resizes[0].Size, "the live attachment still receives its geometry wakeup")
+		// The attachment geometry wakeup and the presentation invalidation are
+		// pushed by the collector independently, and the worker can observe the new
+		// geometry through the recorded sequence before the invalidation is pushed.
+		// Wait for the coalesced token to be buffered; a supervisor that wrongly
+		// consumed it while attached could never make this count return to one, so
+		// this stays a behavioral check rather than a sleep.
+		synctest.Wait()
+		require.True(t, harness.sup.attachments.pendingPresentationSignals() == 1, "the supervisor does not consume the invalidation while attached")
+		require.Equal(t, baseline, harness.recorder.count(), "an attached presentation is never painted over")
+		require.Equal(t, 1, harness.sup.attachments.pendingPresentationSignals(), "the invalidation stays buffered until the picker wait")
 
-	stream.deliver(protocol.Detached{Reason: protocol.ReasonSessionKilled})
-	awaitPickerState(t, harness.sup)
-	require.Eventually(t, func() bool { return harness.sup.attachments.pendingPresentationSignals() == 0 }, 5*time.Second, time.Millisecond,
-		"the preserved invalidation is consumed by the picker wait")
+		stream.deliver(protocol.Detached{Reason: protocol.ReasonSessionKilled})
+		awaitPickerState(t, harness.sup)
+		synctest.Wait()
+		require.True(t, harness.sup.attachments.pendingPresentationSignals() == 0, "the preserved invalidation is consumed by the picker wait")
+	})
 }
 
 // TestSupervisorResizeAfterDetachReachesOnlyReplacementAttachment proves a
@@ -744,59 +774,61 @@ func TestSupervisorAttachedResizeKeepsGeometryWakeupAndPreservesRepaint(t *testi
 // the replacement inherits the gap geometry and receives only its own later
 // resize under its own (generation, attempt) identity.
 func TestSupervisorResizeAfterDetachReachesOnlyReplacementAttachment(t *testing.T) {
-	picker := newAttachTestPicker()
-	harness := startResizeHarness(t, resizeHarnessOptions{picker: picker})
-	registry := &resizeStreamRegistry{t: t}
-	harness.service.setOpenStream(registry.open)
+	synctest.Test(t, func(t *testing.T) {
+		picker := newAttachTestPicker()
+		harness := startResizeHarness(t, resizeHarnessOptions{picker: picker})
+		registry := &resizeStreamRegistry{t: t}
+		harness.service.setOpenStream(registry.open)
 
-	picker.commit(sessionTestRequest(true))
-	first := registry.stream(t, 0)
-	deliverReadyStream(t, first)
-	awaitAttachedState(t, harness.sup)
-	require.Equal(t, AttachmentToken{Generation: 1, Attempt: 1}, authorityToken(&harness.sup.attachments.authority))
+		picker.commit(sessionTestRequest(true))
+		first := registry.stream(t, 0)
+		deliverReadyStream(t, first)
+		awaitAttachedState(t, harness.sup)
+		require.Equal(t, AttachmentToken{Generation: 1, Attempt: 1}, authorityToken(&harness.sup.attachments.authority))
 
-	firstResize := domain.Geometry{Size: domain.Size{Cols: 101, Rows: 41}}
-	harness.terminal.resize(firstResize)
-	firstResizes := awaitStreamResizes(t, first, 1)
-	require.Equal(t, firstResize.Size, firstResizes[0].Size)
+		firstResize := domain.Geometry{Size: domain.Size{Cols: 101, Rows: 41}}
+		harness.terminal.resize(firstResize)
+		firstResizes := awaitStreamResizes(t, first, 1)
+		require.Equal(t, firstResize.Size, firstResizes[0].Size)
 
-	// The attachment detaches: its generation is retired before any replacement
-	// exists.
-	first.deliver(protocol.Detached{Reason: protocol.ReasonSessionKilled})
-	awaitPickerState(t, harness.sup)
-	require.True(t, authorityToken(&harness.sup.attachments.authority).IsZero(), "the retired token no longer owns the foreground")
+		// The attachment detaches: its generation is retired before any replacement
+		// exists.
+		first.deliver(protocol.Detached{Reason: protocol.ReasonSessionKilled})
+		awaitPickerState(t, harness.sup)
+		require.True(t, authorityToken(&harness.sup.attachments.authority).IsZero(), "the retired token no longer owns the foreground")
 
-	// A resize in the detach/reattach gap: no attachment owns the foreground, so
-	// the retired stream must not receive it, only the picker repaints, and the
-	// signal is consumed by the picker wait.
-	harness.recorder.drain()
-	gapResize := domain.Geometry{Size: domain.Size{Cols: 110, Rows: 45}}
-	harness.terminal.resize(gapResize)
-	gapSample := awaitResizeRender(t, harness.recorder, func(sample resizeRenderSample) bool {
-		return sample.state.Presentation == PresentPicker && sample.geometry.Size == gapResize.Size
+		// A resize in the detach/reattach gap: no attachment owns the foreground, so
+		// the retired stream must not receive it, only the picker repaints, and the
+		// signal is consumed by the picker wait.
+		harness.recorder.drain()
+		gapResize := domain.Geometry{Size: domain.Size{Cols: 110, Rows: 45}}
+		harness.terminal.resize(gapResize)
+		gapSample := awaitResizeRender(t, harness.recorder, func(sample resizeRenderSample) bool {
+			return sample.state.Presentation == PresentPicker && sample.geometry.Size == gapResize.Size
+		})
+		require.Equal(t, gapResize.Size, gapSample.geometry.Size, "a gap resize repaints the picker")
+		synctest.Wait()
+		require.True(t, harness.sup.attachments.pendingPresentationSignals() == 0, "the gap invalidation is consumed by the picker wait")
+		require.Len(t, streamResizes(first), 1, "the retired attachment token must not receive a gap resize")
+
+		// A replacement attachment claims the next attempt identity. It carries the
+		// latest geometry in its own session state, which is the gap resize, so the
+		// only stream that ever observes it is the valid replacement.
+		picker.commit(sessionTestRequest(true))
+		second := registry.stream(t, 1)
+		deliverReadyStream(t, second)
+		awaitAttachedState(t, harness.sup)
+		require.Equal(t, AttachmentToken{Generation: 1, Attempt: 2}, authorityToken(&harness.sup.attachments.authority))
+		inherited := awaitStreamResizes(t, second, 1)
+		require.Equal(t, gapResize.Size, inherited[0].Size, "the replacement inherits the latest geometry")
+
+		// The replacement's own resize reaches it and nothing else.
+		secondResize := domain.Geometry{Size: domain.Size{Cols: 120, Rows: 50}}
+		harness.terminal.resize(secondResize)
+		replacement := awaitStreamResizes(t, second, 2)
+		require.Equal(t, secondResize.Size, replacement[1].Size, "only the replacement token receives its resize")
+		require.Len(t, streamResizes(first), 1, "a retired attachment token must never receive a replacement's resize")
 	})
-	require.Equal(t, gapResize.Size, gapSample.geometry.Size, "a gap resize repaints the picker")
-	require.Eventually(t, func() bool { return harness.sup.attachments.pendingPresentationSignals() == 0 }, 5*time.Second, time.Millisecond,
-		"the gap invalidation is consumed by the picker wait")
-	require.Len(t, streamResizes(first), 1, "the retired attachment token must not receive a gap resize")
-
-	// A replacement attachment claims the next attempt identity. It carries the
-	// latest geometry in its own session state, which is the gap resize, so the
-	// only stream that ever observes it is the valid replacement.
-	picker.commit(sessionTestRequest(true))
-	second := registry.stream(t, 1)
-	deliverReadyStream(t, second)
-	awaitAttachedState(t, harness.sup)
-	require.Equal(t, AttachmentToken{Generation: 1, Attempt: 2}, authorityToken(&harness.sup.attachments.authority))
-	inherited := awaitStreamResizes(t, second, 1)
-	require.Equal(t, gapResize.Size, inherited[0].Size, "the replacement inherits the latest geometry")
-
-	// The replacement's own resize reaches it and nothing else.
-	secondResize := domain.Geometry{Size: domain.Size{Cols: 120, Rows: 50}}
-	harness.terminal.resize(secondResize)
-	replacement := awaitStreamResizes(t, second, 2)
-	require.Equal(t, secondResize.Size, replacement[1].Size, "only the replacement token receives its resize")
-	require.Len(t, streamResizes(first), 1, "a retired attachment token must never receive a replacement's resize")
 }
 
 // TestResizeCollectorAndSupervisorJoinOnClosedEventsAndCancellation proves the
@@ -805,54 +837,59 @@ func TestSupervisorResizeAfterDetachReachesOnlyReplacementAttachment(t *testing.
 // closed or abandoned channel.
 func TestResizeCollectorAndSupervisorJoinOnClosedEventsAndCancellation(t *testing.T) {
 	t.Run("collector joins a closed ResizeEvents channel", func(t *testing.T) {
-		closed := make(chan domain.Geometry)
-		close(closed)
-		host := newAttachmentHost(attachmentHostConfig{})
-		host.resizes = closed
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		host.startGeometry(ctx)
-		select {
-		case <-host.geometryDone:
-		case <-time.After(5 * time.Second):
-			t.Fatal("the collector did not end on closed resize events")
-		}
-		host.stopGeometry()
-		require.Nil(t, host.geometryDone)
-		require.Nil(t, host.geometryCancel)
+		synctest.Test(t, func(t *testing.T) {
+			closed := make(chan domain.Geometry)
+			close(closed)
+			host := newAttachmentHost(attachmentHostConfig{})
+			host.resizes = closed
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			host.startGeometry(ctx)
+			select {
+			case <-host.geometryDone:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the collector did not end on closed resize events")
+			}
+			host.stopGeometry()
+			require.Nil(t, host.geometryDone)
+			require.Nil(t, host.geometryCancel)
 
-		// The host can be started again with a live channel and joined by
-		// cancellation, even with a coalesced invalidation still pending.
-		resizes := make(chan domain.Geometry, 2)
-		host.resizes = resizes
-		host.startGeometry(ctx)
-		resizes <- domain.Geometry{Size: domain.Size{Cols: 90, Rows: 30}}
-		resizes <- domain.Geometry{Size: domain.Size{Cols: 91, Rows: 31}}
-		require.Eventually(t, func() bool { return host.pendingPresentationSignals() == 1 }, 5*time.Second, time.Millisecond)
-		cancel()
-		select {
-		case <-host.geometryDone:
-		case <-time.After(5 * time.Second):
-			t.Fatal("the collector did not end on cancellation")
-		}
-		host.stopGeometry()
-		require.Nil(t, host.geometryDone)
+			// The host can be started again with a live channel and joined by
+			// cancellation, even with a coalesced invalidation still pending.
+			resizes := make(chan domain.Geometry, 2)
+			host.resizes = resizes
+			host.startGeometry(ctx)
+			resizes <- domain.Geometry{Size: domain.Size{Cols: 90, Rows: 30}}
+			resizes <- domain.Geometry{Size: domain.Size{Cols: 91, Rows: 31}}
+			synctest.Wait()
+			require.True(t, host.pendingPresentationSignals() == 1)
+			cancel()
+			select {
+			case <-host.geometryDone:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the collector did not end on cancellation")
+			}
+			host.stopGeometry()
+			require.Nil(t, host.geometryDone)
+		})
 	})
 
 	t.Run("supervisor run joins on closed ResizeEvents and cancellation", func(t *testing.T) {
-		harness := startResizeHarness(t, resizeHarnessOptions{
-			closeResizes: true,
-			connect: func(context.Context, int) (ports.BrokerNavigator, error) {
-				return nil, ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: "down"}
-			},
+		synctest.Test(t, func(t *testing.T) {
+			harness := startResizeHarness(t, resizeHarnessOptions{
+				closeResizes: true,
+				connect: func(context.Context, int) (ports.BrokerNavigator, error) {
+					return nil, ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: "down"}
+				},
+			})
+			require.Equal(t, 1, harness.connector.awaitStart(t))
+			harness.cancel()
+			require.ErrorIs(t, harness.waitRun(t), context.Canceled)
+			_, _, restores := harness.terminal.counts()
+			require.Equal(t, 1, restores, "raw mode is restored exactly once")
+			require.Nil(t, harness.sup.attachments.geometryDone, "Run joined the geometry collector")
+			require.Nil(t, harness.sup.attachments.geometryCancel)
 		})
-		require.Equal(t, 1, harness.connector.awaitStart(t))
-		harness.cancel()
-		require.ErrorIs(t, harness.waitRun(t), context.Canceled)
-		_, _, restores := harness.terminal.counts()
-		require.Equal(t, 1, restores, "raw mode is restored exactly once")
-		require.Nil(t, harness.sup.attachments.geometryDone, "Run joined the geometry collector")
-		require.Nil(t, harness.sup.attachments.geometryCancel)
 	})
 }
 
@@ -864,7 +901,7 @@ func TestResizeCollectorAndSupervisorJoinOnClosedEventsAndCancellation(t *testin
 // a connecting repaint would change the renderer count and append picker bytes
 // over the session output. A supervisor without a renderer is a no-op.
 func TestSupervisorResizeInvalidationRendersOnlyPickerPresentations(t *testing.T) {
-	terminal := newResizeTestTerminal(t, newAttachTestReader(), domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
+	terminal := newResizeTestTerminal(t, newAttachTestReader(t), domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
 	recorder := newResizeRenderRecorder(terminal)
 	sup := mustSupervisor(t, SupervisorConfig{
 		Connector: newSupervisorTestConnector(nil),
@@ -885,26 +922,28 @@ func TestSupervisorResizeInvalidationRendersOnlyPickerPresentations(t *testing.T
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// A session frame as an admitted foreground would have written it, so
-			// any picker repaint for a refused presentation is observable.
-			const session = "\x1b[Hsession output"
-			terminal.setWritten(session)
-			sup.mu.Lock()
-			sup.state = State{Presentation: tt.presentation, Connectivity: ConnectivityReady}
-			sup.mu.Unlock()
-			recorder.drain()
-			baseline := recorder.count()
+			synctest.Test(t, func(t *testing.T) {
+				// A session frame as an admitted foreground would have written it, so
+				// any picker repaint for a refused presentation is observable.
+				const session = "\x1b[Hsession output"
+				terminal.setWritten(session)
+				sup.mu.Lock()
+				sup.state = State{Presentation: tt.presentation, Connectivity: ConnectivityReady}
+				sup.mu.Unlock()
+				recorder.drain()
+				baseline := recorder.count()
 
-			sup.renderResizeInvalidation()
+				sup.renderResizeInvalidation()
 
-			if tt.wantRender {
-				sample := awaitResizeRender(t, recorder, func(resizeRenderSample) bool { return true })
-				require.Equal(t, tt.presentation, sample.state.Presentation)
-				return
-			}
-			require.Equal(t, baseline, recorder.count(), "presentation %s must not be repainted by a resize", tt.presentation)
-			require.Equal(t, session, terminal.written(),
-				"presentation %s must never overpaint session output", tt.presentation)
+				if tt.wantRender {
+					sample := awaitResizeRender(t, recorder, func(resizeRenderSample) bool { return true })
+					require.Equal(t, tt.presentation, sample.state.Presentation)
+					return
+				}
+				require.Equal(t, baseline, recorder.count(), "presentation %s must not be repainted by a resize", tt.presentation)
+				require.Equal(t, session, terminal.written(),
+					"presentation %s must never overpaint session output", tt.presentation)
+			})
 		})
 	}
 
@@ -922,102 +961,108 @@ func TestSupervisorResizeInvalidationRendersOnlyPickerPresentations(t *testing.T
 // remaining signals instead of dereferencing a nil host.
 func TestSupervisorPresentationInvalidationNilHostIsSafe(t *testing.T) {
 	t.Run("helper returns nil without a host", func(t *testing.T) {
-		var nilSupervisor *Supervisor
-		require.Nil(t, nilSupervisor.presentationInvalidation(), "a nil receiver exposes no invalidation")
+		synctest.Test(t, func(t *testing.T) {
+			var nilSupervisor *Supervisor
+			require.Nil(t, nilSupervisor.presentationInvalidation(), "a nil receiver exposes no invalidation")
 
-		zero := &Supervisor{}
-		require.Nil(t, zero.presentationInvalidation(), "a zero-value supervisor exposes no invalidation")
+			zero := &Supervisor{}
+			require.Nil(t, zero.presentationInvalidation(), "a zero-value supervisor exposes no invalidation")
 
-		// A fully built supervisor exposes its host's signal; once the host is
-		// gone the helper must fall back to nil rather than panic.
-		terminal := newResizeTestTerminal(t, newAttachTestReader(), domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
-		sup := mustSupervisor(t, SupervisorConfig{
-			Connector: newSupervisorTestConnector(nil),
-			Terminal:  terminal.port,
-			Clock:     newSupervisorTestClock(t).port,
+			// A fully built supervisor exposes its host's signal; once the host is
+			// gone the helper must fall back to nil rather than panic.
+			terminal := newResizeTestTerminal(t, newAttachTestReader(t), domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
+			sup := mustSupervisor(t, SupervisorConfig{
+				Connector: newSupervisorTestConnector(nil),
+				Terminal:  terminal.port,
+				Clock:     newSupervisorTestClock(t).port,
+			})
+			require.NotNil(t, sup.presentationInvalidation(), "a live host exposes its coalesced invalidation")
+			sup.attachments = nil
+			require.Nil(t, sup.presentationInvalidation(), "a detached host exposes no invalidation")
 		})
-		require.NotNil(t, sup.presentationInvalidation(), "a live host exposes its coalesced invalidation")
-		sup.attachments = nil
-		require.Nil(t, sup.presentationInvalidation(), "a detached host exposes no invalidation")
 	})
 
 	t.Run("a wait with a nil host still settles", func(t *testing.T) {
-		terminal := newResizeTestTerminal(t, newAttachTestReader(), domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
-		clock := newSupervisorTestClock(t)
-		sup := mustSupervisor(t, SupervisorConfig{
-			Connector: newSupervisorTestConnector(nil),
-			Terminal:  terminal.port,
-			Clock:     clock.port,
-			Jitter:    func() float64 { return 0 },
-		})
-		sup.attachments = nil
-		require.Nil(t, sup.presentationInvalidation())
-		// One transient failure makes the cadence non-zero, so waitBackoff
-		// arms a real timer.
-		sup.transition(supervisorEvent{kind: supervisorTransientFailure})
+		synctest.Test(t, func(t *testing.T) {
+			terminal := newResizeTestTerminal(t, newAttachTestReader(t), domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
+			clock := newSupervisorTestClock(t)
+			sup := mustSupervisor(t, SupervisorConfig{
+				Connector: newSupervisorTestConnector(nil),
+				Terminal:  terminal.port,
+				Clock:     clock.port,
+				Jitter:    func() float64 { return 0 },
+			})
+			sup.attachments = nil
+			require.Nil(t, sup.presentationInvalidation())
+			// One transient failure makes the cadence non-zero, so waitBackoff
+			// arms a real timer.
+			sup.transition(supervisorEvent{kind: supervisorTransientFailure})
 
-		// The reader never yields, so the EOF arm stays closed and the timer is
-		// the only signal that can settle this wait.
-		reader := newAttachTestReader()
-		lifetime := startTerminalInputLifetime(reader, nil)
-		t.Cleanup(func() {
-			reader.close()
-			lifetime.stop()
-		})
+			// The reader never yields, so the EOF arm stays closed and the timer is
+			// the only signal that can settle this wait.
+			reader := newAttachTestReader(t)
+			lifetime := startTerminalInputLifetime(reader, nil)
+			t.Cleanup(func() {
+				reader.close()
+				lifetime.stop()
+			})
 
-		settled := make(chan struct{})
-		var terminated bool
-		var waitErr error
-		go func() {
-			defer close(settled)
-			terminated, waitErr = sup.waitBackoff(context.Background(), lifetime)
-		}()
-		timer := clock.awaitTimer(t)
-		timer.fire()
-		select {
-		case <-settled:
-		case <-time.After(5 * time.Second):
-			t.Fatal("a nil-host backoff wait never settled on its timer")
-		}
-		require.False(t, terminated)
-		require.NoError(t, waitErr)
+			settled := make(chan struct{})
+			var terminated bool
+			var waitErr error
+			go func() {
+				defer close(settled)
+				terminated, waitErr = sup.waitBackoff(context.Background(), lifetime)
+			}()
+			timer := clock.awaitTimer(t)
+			timer.fire()
+			select {
+			case <-settled:
+			case <-time.After(5 * time.Second):
+				t.Fatal("a nil-host backoff wait never settled on its timer")
+			}
+			require.False(t, terminated)
+			require.NoError(t, waitErr)
+		})
 	})
 
 	t.Run("a wait with a nil host settles on cancellation", func(t *testing.T) {
-		terminal := newResizeTestTerminal(t, newAttachTestReader(), domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
-		clock := newSupervisorTestClock(t)
-		sup := mustSupervisor(t, SupervisorConfig{
-			Connector: newSupervisorTestConnector(nil),
-			Terminal:  terminal.port,
-			Clock:     clock.port,
-			Jitter:    func() float64 { return 0 },
-		})
-		sup.attachments = nil
-		sup.transition(supervisorEvent{kind: supervisorTransientFailure})
+		synctest.Test(t, func(t *testing.T) {
+			terminal := newResizeTestTerminal(t, newAttachTestReader(t), domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
+			clock := newSupervisorTestClock(t)
+			sup := mustSupervisor(t, SupervisorConfig{
+				Connector: newSupervisorTestConnector(nil),
+				Terminal:  terminal.port,
+				Clock:     clock.port,
+				Jitter:    func() float64 { return 0 },
+			})
+			sup.attachments = nil
+			sup.transition(supervisorEvent{kind: supervisorTransientFailure})
 
-		reader := newAttachTestReader()
-		lifetime := startTerminalInputLifetime(reader, nil)
-		t.Cleanup(func() {
-			reader.close()
-			lifetime.stop()
-		})
+			reader := newAttachTestReader(t)
+			lifetime := startTerminalInputLifetime(reader, nil)
+			t.Cleanup(func() {
+				reader.close()
+				lifetime.stop()
+			})
 
-		ctx, cancel := context.WithCancel(context.Background())
-		settled := make(chan struct{})
-		var terminated bool
-		var waitErr error
-		go func() {
-			defer close(settled)
-			terminated, waitErr = sup.waitBackoff(ctx, lifetime)
-		}()
-		clock.awaitTimer(t)
-		cancel()
-		select {
-		case <-settled:
-		case <-time.After(5 * time.Second):
-			t.Fatal("a nil-host backoff wait never settled on cancellation")
-		}
-		require.True(t, terminated)
-		require.ErrorIs(t, waitErr, context.Canceled)
+			ctx, cancel := context.WithCancel(context.Background())
+			settled := make(chan struct{})
+			var terminated bool
+			var waitErr error
+			go func() {
+				defer close(settled)
+				terminated, waitErr = sup.waitBackoff(ctx, lifetime)
+			}()
+			clock.awaitTimer(t)
+			cancel()
+			select {
+			case <-settled:
+			case <-time.After(5 * time.Second):
+				t.Fatal("a nil-host backoff wait never settled on cancellation")
+			}
+			require.True(t, terminated)
+			require.ErrorIs(t, waitErr, context.Canceled)
+		})
 	})
 }

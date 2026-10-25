@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/bnema/vev/internal/ports"
@@ -29,7 +30,8 @@ func pushKeys(t *testing.T, h *attachTestHarness, keys string) {
 	for _, b := range []byte(keys) {
 		h.reader.push([]byte{b})
 	}
-	require.Eventually(t, func() bool { return len(h.reader.chunks) == 0 }, 5*time.Second, time.Millisecond)
+	synctest.Wait()
+	require.True(t, len(h.reader.chunks) == 0)
 }
 
 // TestResumeReplaysKeysHeldWhileConnecting types while a lost attachment waits
@@ -50,66 +52,69 @@ func TestResumeReplaysKeysHeldWhileConnecting(t *testing.T) {
 		{name: "kept across a failed open", openKeys: "HELD_ONE", failFirst: true, retryKeys: "HELD_TWO\r"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			picker := newAttachTestPicker()
-			h := startAttachHarnessConfig(t, picker, func(cfg *SupervisorConfig) { cfg.Jitter = resumeTestJitter })
-			first := newSessionStream(t)
-			second := newSessionStream(t)
-			opened := make(chan int, 4)
-			failed := make(chan struct{})
-			release := make(chan struct{})
-			count := 0
-			h.service.setOpenStream(func(ctx context.Context, _ ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-				count++
-				switch {
-				case count == 1:
-					return first.conn, nil
-				case tt.failFirst && count == 2:
+			synctest.Test(t, func(t *testing.T) {
+				picker := newAttachTestPicker()
+				h := startAttachHarnessConfig(t, picker, func(cfg *SupervisorConfig) { cfg.Jitter = resumeTestJitter })
+				first := newSessionStream(t)
+				second := newSessionStream(t)
+				opened := make(chan int, 4)
+				failed := make(chan struct{})
+				release := make(chan struct{})
+				count := 0
+				h.service.setOpenStream(func(ctx context.Context, _ ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+					count++
+					switch {
+					case count == 1:
+						return first.conn, nil
+					case tt.failFirst && count == 2:
+						opened <- count
+						select {
+						case <-failed:
+						case <-ctx.Done():
+						}
+						return nil, ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: "route down"}
+					}
 					opened <- count
 					select {
-					case <-failed:
+					case <-release:
 					case <-ctx.Done():
+						return nil, ctx.Err()
 					}
-					return nil, ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: "route down"}
+					return second.conn, nil
+				})
+				awaitOpen := func() {
+					select {
+					case <-opened:
+					case <-time.After(5 * time.Second):
+						t.Fatal("resume did not open")
+					}
 				}
-				opened <- count
-				select {
-				case <-release:
-				case <-ctx.Done():
-					return nil, ctx.Err()
-				}
-				return second.conn, nil
-			})
-			awaitOpen := func() {
-				select {
-				case <-opened:
-				case <-time.After(5 * time.Second):
-					t.Fatal("resume did not open")
-				}
-			}
-			picker.commit(sessionTestRequest(false))
-			deliverReadyStream(t, first)
-			awaitAttachedState(t, h.sup)
-			first.fail(testStreamLoss())
+				picker.commit(sessionTestRequest(false))
+				deliverReadyStream(t, first)
+				awaitAttachedState(t, h.sup)
+				first.fail(testStreamLoss())
 
-			require.Eventually(t, func() bool { return h.sup.State().Presentation == PresentConnecting }, 5*time.Second, time.Millisecond)
-			pushKeys(t, h, tt.backoffKeys)
-			fireResumeTimerAfter(t, h.clock, 1, func() {})
-			awaitOpen()
-			pushKeys(t, h, tt.openKeys)
-			if tt.failFirst {
-				close(failed)
-				fireResumeTimerAfter(t, h.clock, 2, func() {})
+				synctest.Wait()
+				require.True(t, h.sup.State().Presentation == PresentConnecting)
+				pushKeys(t, h, tt.backoffKeys)
+				fireResumeTimerAfter(t, h.clock, 1, func() {})
 				awaitOpen()
-				pushKeys(t, h, tt.retryKeys)
-			}
-			close(release)
-			deliverReadyStream(t, second)
-			awaitAttachedState(t, h.sup)
+				pushKeys(t, h, tt.openKeys)
+				if tt.failFirst {
+					close(failed)
+					fireResumeTimerAfter(t, h.clock, 2, func() {})
+					awaitOpen()
+					pushKeys(t, h, tt.retryKeys)
+				}
+				close(release)
+				deliverReadyStream(t, second)
+				awaitAttachedState(t, h.sup)
 
-			want := tt.backoffKeys + tt.openKeys + tt.retryKeys
-			require.Eventually(t, func() bool { return sentInput(second) == want }, 5*time.Second, time.Millisecond,
-				"resumed session input = %q, want %q", sentInput(second), want)
-			require.Empty(t, sentInput(first))
+				want := tt.backoffKeys + tt.openKeys + tt.retryKeys
+				synctest.Wait()
+				require.True(t, sentInput(second) == want, "resumed session input = %q, want %q", sentInput(second), want)
+				require.Empty(t, sentInput(first))
+			})
 		})
 	}
 }

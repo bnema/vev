@@ -3,6 +3,7 @@ package client
 import (
 	"fmt"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -46,34 +47,36 @@ func TestPickerCommitResolvesTheCommittedRow(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			controller, _ := pickerTestController(t)
-			controller.ApplySnapshot(tabbed(1, "shell", "build"))
-			key := pickerTabKey(t, controller.Catalogue().RecentLines(), "work", tt.row)
-			for i := 0; i < 16; i++ {
-				if current, ok := controller.CursorKey(); ok && current == key {
-					break
+			synctest.Test(t, func(t *testing.T) {
+				controller, _ := pickerTestController(t)
+				controller.ApplySnapshot(tabbed(1, "shell", "build"))
+				key := pickerTabKey(t, controller.Catalogue().RecentLines(), "work", tt.row)
+				for i := 0; i < 16; i++ {
+					if current, ok := controller.CursorKey(); ok && current == key {
+						break
+					}
+					require.True(t, controller.ConsumeTerminalRead([]byte("j")))
 				}
-				require.True(t, controller.ConsumeTerminalRead([]byte("j")))
-			}
-			require.True(t, controller.ConsumeTerminalRead([]byte("\r")))
-			op, committed := controller.TakeOp()
-			require.True(t, op.commit)
-			require.Equal(t, key, committed, "the commit captures the row under the cursor")
+				require.True(t, controller.ConsumeTerminalRead([]byte("\r")))
+				op, committed := controller.TakeOp()
+				require.True(t, op.commit)
+				require.Equal(t, key, committed, "the commit captures the row under the cursor")
 
-			if tt.republished != nil {
-				controller.ApplySnapshot(*tt.republished)
-			}
-			request, tab, err := controller.ResolveCommit(committed, pickerTestBase())
+				if tt.republished != nil {
+					controller.ApplySnapshot(*tt.republished)
+				}
+				request, tab, err := controller.ResolveCommit(committed, pickerTestBase())
 
-			if tt.wantErr != 0 {
-				require.True(t, pickerCatalogueErrorIs(err, tt.wantErr), "want %v, got %v", tt.wantErr, err)
-				return
-			}
-			require.NoError(t, err)
-			require.Equal(t, ports.BrokerAdmissionExact, request.Admission)
-			require.Equal(t, "work", request.Target.SessionName)
-			require.Equal(t, pickerTestBase().Stream, request.Stream)
-			require.Equal(t, tt.wantTab, tab.preferred)
+				if tt.wantErr != 0 {
+					require.True(t, pickerCatalogueErrorIs(err, tt.wantErr), "want %v, got %v", tt.wantErr, err)
+					return
+				}
+				require.NoError(t, err)
+				require.Equal(t, ports.BrokerAdmissionExact, request.Admission)
+				require.Equal(t, "work", request.Target.SessionName)
+				require.Equal(t, pickerTestBase().Stream, request.Stream)
+				require.Equal(t, tt.wantTab, tab.preferred)
+			})
 		})
 	}
 }
@@ -98,26 +101,28 @@ func TestPickerCatalogueResolveTargetKinds(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			catalogue, _ := pickerTestCatalogue(t)
-			require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{observation}}))
-			key := "missing"
-			if tt.ref.kind != 0 {
-				key = "injected"
-				tt.ref.epoch = 3
-				tt.ref.local = true
-				catalogue.mu.Lock()
-				catalogue.refs[key] = tt.ref
-				catalogue.mu.Unlock()
-			}
+			synctest.Test(t, func(t *testing.T) {
+				catalogue, _ := pickerTestCatalogue(t)
+				require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{observation}}))
+				key := "missing"
+				if tt.ref.kind != 0 {
+					key = "injected"
+					tt.ref.epoch = 3
+					tt.ref.local = true
+					catalogue.mu.Lock()
+					catalogue.refs[key] = tt.ref
+					catalogue.mu.Unlock()
+				}
 
-			request, _, err := catalogue.ResolveTarget(key, pickerTestBase())
+				request, _, err := catalogue.ResolveTarget(key, pickerTestBase())
 
-			if tt.wantErr != 0 {
-				require.True(t, pickerCatalogueErrorIs(err, tt.wantErr), "want %v, got %v", tt.wantErr, err)
-				return
-			}
-			require.NoError(t, err)
-			require.Equal(t, tt.wantAdmission, request.Admission)
+				if tt.wantErr != 0 {
+					require.True(t, pickerCatalogueErrorIs(err, tt.wantErr), "want %v, got %v", tt.wantErr, err)
+					return
+				}
+				require.NoError(t, err)
+				require.Equal(t, tt.wantAdmission, request.Admission)
+			})
 		})
 	}
 }

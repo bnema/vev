@@ -3,6 +3,7 @@ package client
 import (
 	"regexp"
 	"testing"
+	"testing/synctest"
 
 	"github.com/stretchr/testify/require"
 
@@ -13,17 +14,19 @@ import (
 )
 
 func TestPickerStaysLegibleInReducedColor(t *testing.T) {
-	loop := pickerLoopFixture(t)
-	size := domain.Size{Cols: 100, Rows: 30}
+	synctest.Test(t, func(t *testing.T) {
+		loop := pickerLoopFixture(t)
+		size := domain.Size{Cols: 100, Rows: 30}
 
-	ansi16 := string(newPickerRenderer(ansirenderer.ColorProfileANSI16).render(loop, size, emptyPickerPreview()))
-	require.NotRegexp(t, `(?:38|48|58);[25];`, ansi16, "ansi16 picker emitted extended colors")
-	require.Regexp(t, `\x1b\[0;[0-9;]*7`, ansi16, "the selected row must stay reverse video")
+		ansi16 := string(newPickerRenderer(ansirenderer.ColorProfileANSI16).render(loop, size, emptyPickerPreview()))
+		require.NotRegexp(t, `(?:38|48|58);[25];`, ansi16, "ansi16 picker emitted extended colors")
+		require.Regexp(t, `\x1b\[0;[0-9;]*7`, ansi16, "the selected row must stay reverse video")
 
-	mono := string(newPickerRenderer(ansirenderer.ColorProfileMonochrome).render(loop, size, emptyPickerPreview()))
-	require.NotRegexp(t, `\x1b\[[0-9;:]*(?:38|48|58|3[0-7]|4[0-7]|9[0-7]|10[0-7])[;:m]`, mono, "monochrome picker emitted a color")
-	require.Regexp(t, `\x1b\[0;[0-9;]*7`, mono, "the selected row must stay reverse video")
-	require.Contains(t, mono, "work")
+		mono := string(newPickerRenderer(ansirenderer.ColorProfileMonochrome).render(loop, size, emptyPickerPreview()))
+		require.NotRegexp(t, `\x1b\[[0-9;:]*(?:38|48|58|3[0-7]|4[0-7]|9[0-7]|10[0-7])[;:m]`, mono, "monochrome picker emitted a color")
+		require.Regexp(t, `\x1b\[0;[0-9;]*7`, mono, "the selected row must stay reverse video")
+		require.Contains(t, mono, "work")
+	})
 }
 
 func TestToastBorderFollowsColorProfile(t *testing.T) {
@@ -45,7 +48,9 @@ func TestToastBorderFollowsColorProfile(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.want, toastBorderSGRFor(tt.severity, tt.profile))
+			synctest.Test(t, func(t *testing.T) {
+				require.Equal(t, tt.want, toastBorderSGRFor(tt.severity, tt.profile))
+			})
 		})
 	}
 	// Monochrome borders are closed with normal intensity, not default color.
@@ -86,18 +91,20 @@ func TestPickerProblemDotsKeepMeaningPerProfile(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			loop := pickerLoopFromSnapshot(snapshot, protocol.PickerIntentNavigation, picker.SortRecent)
-			out := string(newPickerRenderer(tt.profile).render(loop, domain.Size{Cols: 100, Rows: 30}, emptyPickerPreview()))
-			for label, want := range tt.want {
-				got := dot(out, label)
-				if want == "" {
-					// ANSI-16 colors are chosen by the renderer's quantizer: only
-					// require a basic or bright palette slot, never extended color.
-					require.Regexp(t, `^\x1b\[0;(3[0-7]|9[0-7])m$`, got, label)
-					continue
+			synctest.Test(t, func(t *testing.T) {
+				loop := pickerLoopFromSnapshot(snapshot, protocol.PickerIntentNavigation, picker.SortRecent)
+				out := string(newPickerRenderer(tt.profile).render(loop, domain.Size{Cols: 100, Rows: 30}, emptyPickerPreview()))
+				for label, want := range tt.want {
+					got := dot(out, label)
+					if want == "" {
+						// ANSI-16 colors are chosen by the renderer's quantizer: only
+						// require a basic or bright palette slot, never extended color.
+						require.Regexp(t, `^\x1b\[0;(3[0-7]|9[0-7])m$`, got, label)
+						continue
+					}
+					require.Equal(t, want, got, label)
 				}
-				require.Equal(t, want, got, label)
-			}
+			})
 		})
 	}
 }

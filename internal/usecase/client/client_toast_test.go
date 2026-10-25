@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"regexp"
 	"testing"
+	"testing/synctest"
 
 	"github.com/stretchr/testify/require"
 
@@ -30,11 +31,13 @@ func TestDrawClientToastPlacement(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var out bytes.Buffer
-			bounds, err := drawClientToast(&out, size, "SSH authentication failed", tt.anchor, domain.NoticeInfo)
-			require.NoError(t, err)
-			require.NotZero(t, out.Len())
-			tt.check(t, bounds)
+			synctest.Test(t, func(t *testing.T) {
+				var out bytes.Buffer
+				bounds, err := drawClientToast(&out, size, "SSH authentication failed", tt.anchor, domain.NoticeInfo)
+				require.NoError(t, err)
+				require.NotZero(t, out.Len())
+				tt.check(t, bounds)
+			})
 		})
 	}
 }
@@ -52,14 +55,16 @@ func TestClientToastLinesKeepExactWidth(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			bounds := ui.ToastBounds(domain.Size{Cols: 100, Rows: 30}, ui.Toast{Message: tt.message, Anchor: domain.AnchorTopRight})
-			for i, line := range clientToastLines(bounds, tt.message, tt.border) {
-				width := 0
-				for _, r := range sgr.ReplaceAllString(line, "") {
-					width += renderer.RuneWidth(r)
+			synctest.Test(t, func(t *testing.T) {
+				bounds := ui.ToastBounds(domain.Size{Cols: 100, Rows: 30}, ui.Toast{Message: tt.message, Anchor: domain.AnchorTopRight})
+				for i, line := range clientToastLines(bounds, tt.message, tt.border) {
+					width := 0
+					for _, r := range sgr.ReplaceAllString(line, "") {
+						width += renderer.RuneWidth(r)
+					}
+					require.Equal(t, bounds.Width, width, "row %d width", i)
 				}
-				require.Equal(t, bounds.Width, width, "row %d width", i)
-			}
+			})
 		})
 	}
 }
@@ -77,15 +82,17 @@ func TestDrawClientToastSeverityBorder(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var out bytes.Buffer
-			_, err := drawClientToast(&out, size, "host down", domain.AnchorTopRight, tt.severity)
-			require.NoError(t, err)
-			if tt.want == "" {
-				require.NotContains(t, out.String(), "\x1b[38;5;")
-				return
-			}
-			require.Contains(t, out.String(), tt.want)
-			require.Contains(t, out.String(), "host down")
+			synctest.Test(t, func(t *testing.T) {
+				var out bytes.Buffer
+				_, err := drawClientToast(&out, size, "host down", domain.AnchorTopRight, tt.severity)
+				require.NoError(t, err)
+				if tt.want == "" {
+					require.NotContains(t, out.String(), "\x1b[38;5;")
+					return
+				}
+				require.Contains(t, out.String(), tt.want)
+				require.Contains(t, out.String(), "host down")
+			})
 		})
 	}
 }

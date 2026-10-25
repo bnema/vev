@@ -3,6 +3,7 @@ package client
 import (
 	"fmt"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -94,14 +95,16 @@ func TestRouteLedgerOrdering(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ledger := newRouteLedger()
-			for _, visit := range tt.visits {
-				ledger.build(tt.build, visit)
-			}
-			snapshot, _ := ledger.build(tt.build, tt.active)
-			require.NoError(t, snapshot.Validate())
-			require.Equal(t, tt.want, routeEntryNames(snapshot))
-			require.Equal(t, tt.active.target, snapshot.ActiveEntry.Target, "the attached lifecycle is metadata only")
+			synctest.Test(t, func(t *testing.T) {
+				ledger := newRouteLedger()
+				for _, visit := range tt.visits {
+					ledger.build(tt.build, visit)
+				}
+				snapshot, _ := ledger.build(tt.build, tt.active)
+				require.NoError(t, snapshot.Validate())
+				require.Equal(t, tt.want, routeEntryNames(snapshot))
+				require.Equal(t, tt.active.target, snapshot.ActiveEntry.Target, "the attached lifecycle is metadata only")
+			})
 		})
 	}
 }
@@ -126,69 +129,73 @@ func TestRouteLedgerActivePreviousAndHome(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ledger := newRouteLedger()
-			// Visit the other kind first so Previous names it.
-			if tt.active.authority.local {
-				ledger.build(build, routeTestActive(false, "r", 3))
-			} else {
-				ledger.build(build, routeTestActive(true, "a", 1))
-			}
-			snapshot, changed := ledger.build(build, tt.active)
-			require.True(t, changed)
-			require.NoError(t, snapshot.Validate())
-			require.Equal(t, tt.wantKind, snapshot.ActiveEntry.Kind)
-			require.Equal(t, tt.wantLabel, snapshot.ActiveEntry.HostLabel)
-			require.Equal(t, snapshot.Active, protocol.RouteRef{Key: snapshot.ActiveEntry.Key, Generation: snapshot.ActiveEntry.Generation})
-			if tt.wantHome {
-				require.Equal(t, snapshot.Active, snapshot.Home)
-			} else {
-				require.True(t, snapshot.Home.IsZero())
-			}
-			previous, ok := ledger.resolve(snapshot.Previous)
-			require.True(t, ok)
-			require.Equal(t, tt.wantPrevious, previous.target.SessionName)
-			require.True(t, snapshot.ActiveEntry.Visited)
-			var visited []string
-			for _, entry := range snapshot.Entries {
-				if entry.Visited {
-					visited = append(visited, entry.Name)
+			synctest.Test(t, func(t *testing.T) {
+				ledger := newRouteLedger()
+				// Visit the other kind first so Previous names it.
+				if tt.active.authority.local {
+					ledger.build(build, routeTestActive(false, "r", 3))
+				} else {
+					ledger.build(build, routeTestActive(true, "a", 1))
 				}
-			}
-			require.Equal(t, []string{tt.wantPrevious}, visited, "only attached routes are visited")
-			kinds := make([]protocol.RouteKind, 0, len(snapshot.Hosts))
-			for _, host := range snapshot.Hosts {
-				kinds = append(kinds, host.Kind)
-				resolved, ok := ledger.resolve(protocol.RouteRef{Key: host.Key, Generation: host.Generation})
+				snapshot, changed := ledger.build(build, tt.active)
+				require.True(t, changed)
+				require.NoError(t, snapshot.Validate())
+				require.Equal(t, tt.wantKind, snapshot.ActiveEntry.Kind)
+				require.Equal(t, tt.wantLabel, snapshot.ActiveEntry.HostLabel)
+				require.Equal(t, snapshot.Active, protocol.RouteRef{Key: snapshot.ActiveEntry.Key, Generation: snapshot.ActiveEntry.Generation})
+				if tt.wantHome {
+					require.Equal(t, snapshot.Active, snapshot.Home)
+				} else {
+					require.True(t, snapshot.Home.IsZero())
+				}
+				previous, ok := ledger.resolve(snapshot.Previous)
 				require.True(t, ok)
-				require.True(t, resolved.host)
-				require.NotEqual(t, tt.active.authority, resolved.authority, "the serving daemon is never a host row")
-			}
-			require.Equal(t, tt.wantHosts, kinds)
+				require.Equal(t, tt.wantPrevious, previous.target.SessionName)
+				require.True(t, snapshot.ActiveEntry.Visited)
+				var visited []string
+				for _, entry := range snapshot.Entries {
+					if entry.Visited {
+						visited = append(visited, entry.Name)
+					}
+				}
+				require.Equal(t, []string{tt.wantPrevious}, visited, "only attached routes are visited")
+				kinds := make([]protocol.RouteKind, 0, len(snapshot.Hosts))
+				for _, host := range snapshot.Hosts {
+					kinds = append(kinds, host.Kind)
+					resolved, ok := ledger.resolve(protocol.RouteRef{Key: host.Key, Generation: host.Generation})
+					require.True(t, ok)
+					require.True(t, resolved.host)
+					require.NotEqual(t, tt.active.authority, resolved.authority, "the serving daemon is never a host row")
+				}
+				require.Equal(t, tt.wantHosts, kinds)
+			})
 		})
 	}
 }
 
 func TestRouteLedgerStableReferencesAndGeneration(t *testing.T) {
-	ledger := newRouteLedger()
-	active := routeTestActive(true, "here", 4)
-	first, changed := ledger.build(routeTestSnapshot(routeTestLocal(routeTestLive("a", 1, 1), routeTestLive("here", 4, 2))), active)
-	require.True(t, changed)
-	require.Equal(t, uint64(1), first.Generation)
+	synctest.Test(t, func(t *testing.T) {
+		ledger := newRouteLedger()
+		active := routeTestActive(true, "here", 4)
+		first, changed := ledger.build(routeTestSnapshot(routeTestLocal(routeTestLive("a", 1, 1), routeTestLive("here", 4, 2))), active)
+		require.True(t, changed)
+		require.Equal(t, uint64(1), first.Generation)
 
-	same, changed := ledger.build(routeTestSnapshot(routeTestLocal(routeTestLive("a", 1, 1), routeTestLive("here", 4, 2))), active)
-	require.False(t, changed, "an unchanged publication never advances the generation")
-	require.Equal(t, first, same)
+		same, changed := ledger.build(routeTestSnapshot(routeTestLocal(routeTestLive("a", 1, 1), routeTestLive("here", 4, 2))), active)
+		require.False(t, changed, "an unchanged publication never advances the generation")
+		require.Equal(t, first, same)
 
-	grown, changed := ledger.build(routeTestSnapshot(routeTestLocal(routeTestLive("a", 1, 1), routeTestLive("b", 2, 3), routeTestLive("here", 4, 2))), active)
-	require.True(t, changed)
-	require.Equal(t, uint64(2), grown.Generation)
-	require.Equal(t, first.Active, grown.Active, "a lifecycle keeps its reference")
-	require.Equal(t, first.Entries[0].Key, grown.Entries[1].Key)
+		grown, changed := ledger.build(routeTestSnapshot(routeTestLocal(routeTestLive("a", 1, 1), routeTestLive("b", 2, 3), routeTestLive("here", 4, 2))), active)
+		require.True(t, changed)
+		require.Equal(t, uint64(2), grown.Generation)
+		require.Equal(t, first.Active, grown.Active, "a lifecycle keeps its reference")
+		require.Equal(t, first.Entries[0].Key, grown.Entries[1].Key)
 
-	replaced, _ := ledger.build(routeTestSnapshot(routeTestLocal(routeTestLive("a", 5, 1), routeTestLive("here", 4, 2))), active)
-	require.NotEqual(t, first.Entries[0].Key, replaced.Entries[0].Key, "a new lifecycle of the same name is a new reference")
-	_, ok := ledger.resolve(protocol.RouteRef{Key: first.Entries[0].Key, Generation: 1})
-	require.False(t, ok, "a retired lifecycle no longer resolves")
+		replaced, _ := ledger.build(routeTestSnapshot(routeTestLocal(routeTestLive("a", 5, 1), routeTestLive("here", 4, 2))), active)
+		require.NotEqual(t, first.Entries[0].Key, replaced.Entries[0].Key, "a new lifecycle of the same name is a new reference")
+		_, ok := ledger.resolve(protocol.RouteRef{Key: first.Entries[0].Key, Generation: 1})
+		require.False(t, ok, "a retired lifecycle no longer resolves")
+	})
 }
 
 // TestRouteLedgerAttention ports main's local and remote attention
@@ -235,23 +242,25 @@ func TestRouteLedgerAttention(t *testing.T) {
 	ledger := newRouteLedger()
 	for _, step := range steps {
 		t.Run(step.name, func(t *testing.T) {
-			snapshot, _ := ledger.build(step.build, active)
-			require.NoError(t, snapshot.Validate())
-			got := map[string]bool{}
-			seq := map[string]uint64{}
-			for _, entry := range snapshot.Entries {
-				got[entry.Name] = entry.Attention
-				if entry.Attention {
-					require.NotZero(t, entry.AttentionSeq)
-					seq[entry.Name] = entry.AttentionSeq
-				} else {
-					require.Zero(t, entry.AttentionSeq)
+			synctest.Test(t, func(t *testing.T) {
+				snapshot, _ := ledger.build(step.build, active)
+				require.NoError(t, snapshot.Validate())
+				got := map[string]bool{}
+				seq := map[string]uint64{}
+				for _, entry := range snapshot.Entries {
+					got[entry.Name] = entry.Attention
+					if entry.Attention {
+						require.NotZero(t, entry.AttentionSeq)
+						seq[entry.Name] = entry.AttentionSeq
+					} else {
+						require.Zero(t, entry.AttentionSeq)
+					}
 				}
-			}
-			require.Equal(t, step.want, got)
-			for i := 1; i < len(step.order); i++ {
-				require.Less(t, seq[step.order[i-1]], seq[step.order[i]], "%s rang before %s", step.order[i-1], step.order[i])
-			}
+				require.Equal(t, step.want, got)
+				for i := 1; i < len(step.order); i++ {
+					require.Less(t, seq[step.order[i-1]], seq[step.order[i]], "%s rang before %s", step.order[i-1], step.order[i])
+				}
+			})
 		})
 	}
 }
@@ -279,31 +288,35 @@ func TestRouteLedgerVisitedPrefixPrecedesRingingRoutes(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ledger := newRouteLedger()
-			ledger.build(tt.build, tt.visited)
-			snapshot, _ := ledger.build(tt.build, routeTestActive(true, "here", 4))
-			require.NoError(t, snapshot.Validate())
-			require.Len(t, snapshot.Entries, 2)
-			require.True(t, snapshot.Entries[0].Visited, "the visited route leads")
-			require.Equal(t, tt.visited.target.SessionName, snapshot.Entries[0].Name)
-			require.False(t, snapshot.Entries[1].Visited)
-			require.True(t, snapshot.Entries[1].Attention, "the ringing route follows")
-			require.Equal(t, "loud", snapshot.Entries[1].Name)
+			synctest.Test(t, func(t *testing.T) {
+				ledger := newRouteLedger()
+				ledger.build(tt.build, tt.visited)
+				snapshot, _ := ledger.build(tt.build, routeTestActive(true, "here", 4))
+				require.NoError(t, snapshot.Validate())
+				require.Len(t, snapshot.Entries, 2)
+				require.True(t, snapshot.Entries[0].Visited, "the visited route leads")
+				require.Equal(t, tt.visited.target.SessionName, snapshot.Entries[0].Name)
+				require.False(t, snapshot.Entries[1].Visited)
+				require.True(t, snapshot.Entries[1].Attention, "the ringing route follows")
+				require.Equal(t, "loud", snapshot.Entries[1].Name)
+			})
 		})
 	}
 }
 
 func TestRouteLedgerBounds(t *testing.T) {
-	sessions := make([]catalogue.RemoteCatalogSession, 0, protocol.RouteSnapshotMaxEntries+5)
-	for i := 0; i < protocol.RouteSnapshotMaxEntries+5; i++ {
-		sessions = append(sessions, routeTestLive(fmt.Sprintf("s%02d", i), byte(i+10), uint64(i)))
-	}
-	incompatible := pickerTestRemoteObservation("old@box", 3, 4, time.Unix(1000, 0))
-	incompatible.Availability = domain.RemoteAvailabilityIncompatible
-	ledger := newRouteLedger()
-	snapshot, changed := ledger.build(routeTestSnapshot(routeTestLocal(sessions...), incompatible), routeTestActive(true, "s00", 10))
-	require.True(t, changed)
-	require.NoError(t, snapshot.Validate())
-	require.Len(t, snapshot.Entries, protocol.RouteSnapshotMaxEntries)
-	require.Empty(t, snapshot.Hosts, "an incompatible daemon is never a creation host")
+	synctest.Test(t, func(t *testing.T) {
+		sessions := make([]catalogue.RemoteCatalogSession, 0, protocol.RouteSnapshotMaxEntries+5)
+		for i := 0; i < protocol.RouteSnapshotMaxEntries+5; i++ {
+			sessions = append(sessions, routeTestLive(fmt.Sprintf("s%02d", i), byte(i+10), uint64(i)))
+		}
+		incompatible := pickerTestRemoteObservation("old@box", 3, 4, time.Unix(1000, 0))
+		incompatible.Availability = domain.RemoteAvailabilityIncompatible
+		ledger := newRouteLedger()
+		snapshot, changed := ledger.build(routeTestSnapshot(routeTestLocal(sessions...), incompatible), routeTestActive(true, "s00", 10))
+		require.True(t, changed)
+		require.NoError(t, snapshot.Validate())
+		require.Len(t, snapshot.Entries, protocol.RouteSnapshotMaxEntries)
+		require.Empty(t, snapshot.Hosts, "an incompatible daemon is never a creation host")
+	})
 }

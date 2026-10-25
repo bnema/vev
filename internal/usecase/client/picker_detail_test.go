@@ -2,6 +2,7 @@ package client
 
 import (
 	"testing"
+	"testing/synctest"
 
 	"github.com/stretchr/testify/require"
 
@@ -24,7 +25,9 @@ func TestPickerShortDetails(t *testing.T) {
 	}
 	for _, tt := range sessions {
 		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.want, pickerSessionDetail(tt.session))
+			synctest.Test(t, func(t *testing.T) {
+				require.Equal(t, tt.want, pickerSessionDetail(tt.session))
+			})
 		})
 	}
 	require.Equal(t, "…", pickerHostDetail(ports.BrokerDaemonObservation{Availability: domain.RemoteAvailabilityUnknown}))

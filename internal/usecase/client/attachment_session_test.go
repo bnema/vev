@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/mock"
@@ -94,27 +95,29 @@ func (s *blockingSendSessionStream) send(protocol.ClientMessage) error {
 }
 
 func TestSessionAttachmentSendCancellationClosesStreamAndJoinsSend(t *testing.T) {
-	stream := newBlockingSendSessionStream(t)
-	fg := &attachmentForeground{done: make(chan struct{})}
-	ctx, cancel := context.WithCancel(context.Background())
-	returned := make(chan error, 1)
-	go func() {
-		returned <- (&sessionAttachmentWorker{}).send(ctx, fg, stream.conn, protocol.Detach{})
-	}()
+	synctest.Test(t, func(t *testing.T) {
+		stream := newBlockingSendSessionStream(t)
+		fg := &attachmentForeground{done: make(chan struct{})}
+		ctx, cancel := context.WithCancel(context.Background())
+		returned := make(chan error, 1)
+		go func() {
+			returned <- (&sessionAttachmentWorker{}).send(ctx, fg, stream.conn, protocol.Detach{})
+		}()
 
-	<-stream.entered
-	cancel()
-	require.ErrorIs(t, <-returned, context.Canceled)
-	select {
-	case <-stream.conn.Done():
-	default:
-		t.Fatal("cancellation did not close stream")
-	}
-	select {
-	case <-stream.finished:
-	default:
-		t.Fatal("send goroutine was not joined")
-	}
+		<-stream.entered
+		cancel()
+		require.ErrorIs(t, <-returned, context.Canceled)
+		select {
+		case <-stream.conn.Done():
+		default:
+			t.Fatal("cancellation did not close stream")
+		}
+		select {
+		case <-stream.finished:
+		default:
+			t.Fatal("send goroutine was not joined")
+		}
+	})
 }
 
 func TestSessionAttachmentSettleReportsClosedProcess(t *testing.T) {
@@ -128,21 +131,23 @@ func TestSessionAttachmentSettleReportsClosedProcess(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			stream := newSessionStream(t)
-			ctx, cancel := context.WithCancelCause(context.Background())
-			cancel(tt.cause)
-			w := &sessionAttachmentWorker{cfg: sessionAttachmentConfig{Clock: systemClock{}}}
+			synctest.Test(t, func(t *testing.T) {
+				stream := newSessionStream(t)
+				ctx, cancel := context.WithCancelCause(context.Background())
+				cancel(tt.cause)
+				w := &sessionAttachmentWorker{cfg: sessionAttachmentConfig{Clock: systemClock{}}}
 
-			event := w.settle(ctx, &attachmentForeground{done: make(chan struct{})}, stream.conn, AttachmentToken{}, nil)
+				event := w.settle(ctx, &attachmentForeground{done: make(chan struct{})}, stream.conn, AttachmentToken{}, nil)
 
-			require.Equal(t, AttachmentEventFailed, event.Kind)
-			stream.mu.Lock()
-			defer stream.mu.Unlock()
-			if tt.wantClosed {
-				require.Equal(t, []protocol.ClientMessage{protocol.Detach{Closed: true}}, stream.sent)
-			} else {
-				require.Empty(t, stream.sent)
-			}
+				require.Equal(t, AttachmentEventFailed, event.Kind)
+				stream.mu.Lock()
+				defer stream.mu.Unlock()
+				if tt.wantClosed {
+					require.Equal(t, []protocol.ClientMessage{protocol.Detach{Closed: true}}, stream.sent)
+				} else {
+					require.Empty(t, stream.sent)
+				}
+			})
 		})
 	}
 }
@@ -319,58 +324,61 @@ func awaitHello(t *testing.T, stream *streamLog) protocol.Hello {
 // never attachment: only a validated, committed initial publication marks
 // attached, and the frame is written and flushed through the UI transaction.
 func TestSessionAttachmentWorkerStaysConnectingUntilPublication(t *testing.T) {
-	stream := newSessionStream(t)
-	terminal := newWorkerTestTerminal()
-	attached := newSessionTestAttachments()
-	events := sessionTestRun(t, stream.conn, terminal, sessionTestWorkerConfig(sessionTestRequest(true)), attached)
+	synctest.Test(t, func(t *testing.T) {
+		stream := newSessionStream(t)
+		terminal := newWorkerTestTerminal()
+		attached := newSessionTestAttachments()
+		events := sessionTestRun(t, stream.conn, terminal, sessionTestWorkerConfig(sessionTestRequest(true)), attached)
 
-	hello := awaitHello(t, stream)
-	require.Equal(t, protocol.Version, hello.Version)
-	require.Equal(t, protocol.IntentAttach, hello.Intent)
-	require.NotNil(t, hello.ExactTarget)
-	require.False(t, hello.Remote)
-	// An exact attach carries its target's session name: the strict Hello
-	// contract requires Name to equal the exact target's name, so an empty Name
-	// would be rejected before the daemon ever routes it.
-	require.Equal(t, hello.ExactTarget.SessionName, hello.Name)
-	require.NoError(t, protocol.ValidateHello(hello))
+		hello := awaitHello(t, stream)
+		require.Equal(t, protocol.Version, hello.Version)
+		require.Equal(t, protocol.IntentAttach, hello.Intent)
+		require.NotNil(t, hello.ExactTarget)
+		require.False(t, hello.Remote)
+		// An exact attach carries its target's session name: the strict Hello
+		// contract requires Name to equal the exact target's name, so an empty Name
+		// would be rejected before the daemon ever routes it.
+		require.Equal(t, hello.ExactTarget.SessionName, hello.Name)
+		require.NoError(t, protocol.ValidateHello(hello))
 
-	stream.deliver(protocol.Welcome{SessionName: "alpha"})
-	// Welcome alone must not attach, write, or publish.
-	require.Never(t, attached.attached, 20*time.Millisecond, 2*time.Millisecond, "Welcome alone must never attach")
-	require.Zero(t, terminal.flushCount(), "Welcome alone writes nothing")
-	require.Empty(t, terminal.publications(), "Welcome alone publishes nothing")
+		stream.deliver(protocol.Welcome{SessionName: "alpha"})
+		// Welcome alone must not attach, write, or publish.
+		require.Never(t, attached.attached, 20*time.Millisecond, 2*time.Millisecond, "Welcome alone must never attach")
+		require.Zero(t, terminal.flushCount(), "Welcome alone writes nothing")
+		require.Empty(t, terminal.publications(), "Welcome alone publishes nothing")
 
-	stream.deliver(sessionTestOutput(1, "\x1b[Hready"))
-	require.Equal(t, AttachmentToken{Generation: 4, Attempt: 1}, attached.token(t))
-	require.Equal(t, "\x1b[Hready", terminal.written())
-	require.Equal(t, 1, terminal.flushCount())
-	require.Len(t, terminal.publications(), 2)
-	// The frame commits the pre-attach Connecting presentation with a public
-	// generation of zero, then the committed Attached presentation carries the
-	// real action generation without writing a second frame.
-	require.Equal(t, ports.UIStatusConnecting, terminal.publications()[0].Status)
-	require.Zero(t, terminal.publications()[0].Generation)
-	require.Equal(t, ports.UIStatusAttached, terminal.publications()[1].Status)
-	require.Equal(t, uint64(4), terminal.publications()[1].Generation)
-	require.Equal(t, 1, terminal.flushCount(), "the attached presentation writes no second frame")
-	require.Eventually(t, func() bool {
-		for _, message := range stream.messages() {
-			if ack, ok := message.(protocol.Ack); ok {
-				return ack == (protocol.Ack{Epoch: 1, State: 1})
+		stream.deliver(sessionTestOutput(1, "\x1b[Hready"))
+		require.Equal(t, AttachmentToken{Generation: 4, Attempt: 1}, attached.token(t))
+		require.Equal(t, "\x1b[Hready", terminal.written())
+		require.Equal(t, 1, terminal.flushCount())
+		require.Len(t, terminal.publications(), 2)
+		// The frame commits the pre-attach Connecting presentation with a public
+		// generation of zero, then the committed Attached presentation carries the
+		// real action generation without writing a second frame.
+		require.Equal(t, ports.UIStatusConnecting, terminal.publications()[0].Status)
+		require.Zero(t, terminal.publications()[0].Generation)
+		require.Equal(t, ports.UIStatusAttached, terminal.publications()[1].Status)
+		require.Equal(t, uint64(4), terminal.publications()[1].Generation)
+		require.Equal(t, 1, terminal.flushCount(), "the attached presentation writes no second frame")
+		synctest.Wait()
+		require.True(t, func() bool {
+			for _, message := range stream.messages() {
+				if ack, ok := message.(protocol.Ack); ok {
+					return ack == (protocol.Ack{Epoch: 1, State: 1})
+				}
 			}
-		}
-		return false
-	}, time.Second, time.Millisecond, "committed initial output must release the daemon output window")
+			return false
+		}(), "committed initial output must release the daemon output window")
 
-	require.NoError(t, stream.conn.Close())
-	select {
-	case event := <-events:
-		require.Equal(t, AttachmentEventEnded, event.Kind)
-		require.Equal(t, AttachmentToken{Generation: 4, Attempt: 1}, event.Token)
-	case <-time.After(5 * time.Second):
-		t.Fatal("the worker never settled after the stream closed")
-	}
+		require.NoError(t, stream.conn.Close())
+		select {
+		case event := <-events:
+			require.Equal(t, AttachmentEventEnded, event.Kind)
+			require.Equal(t, AttachmentToken{Generation: 4, Attempt: 1}, event.Token)
+		case <-time.After(5 * time.Second):
+			t.Fatal("the worker never settled after the stream closed")
+		}
+	})
 }
 
 // TestSessionAttachmentWorkerFailureStages is the EOF/refusal coverage table:
@@ -481,37 +489,39 @@ func TestSessionAttachmentWorkerFailureStages(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			stream := newSessionStream(t)
-			terminal := newWorkerTestTerminal()
-			attached := newSessionTestAttachments()
-			events := sessionTestRun(t, stream.conn, terminal, sessionTestWorkerConfig(sessionTestRequest(true)), attached)
-			awaitHello(t, stream)
+			synctest.Test(t, func(t *testing.T) {
+				stream := newSessionStream(t)
+				terminal := newWorkerTestTerminal()
+				attached := newSessionTestAttachments()
+				events := sessionTestRun(t, stream.conn, terminal, sessionTestWorkerConfig(sessionTestRequest(true)), attached)
+				awaitHello(t, stream)
 
-			tt.script(stream, terminal, attached)
+				tt.script(stream, terminal, attached)
 
-			var event AttachmentEvent
-			select {
-			case event = <-events:
-			case <-time.After(5 * time.Second):
-				t.Fatal("the worker never settled")
-			}
-			require.Equal(t, AttachmentToken{Generation: 4, Attempt: 1}, event.Token)
-			require.Equal(t, tt.wantKind, event.Kind, "event error: %v", event.Err)
-			if tt.wantErr != nil {
-				require.ErrorIs(t, event.Err, tt.wantErr)
-			}
-			if tt.wantProtocolCode != 0 {
-				var protocolErr *ProtocolError
-				require.ErrorAs(t, event.Err, &protocolErr)
-				require.Equal(t, tt.wantProtocolCode, protocolErr.Code)
-			}
-			require.Equal(t, tt.wantAttached, attached.attached())
-			if !tt.wantAttached {
-				// A frame that never committed was never written or flushed; the
-				// UI transaction still observed its own boundary.
-				require.Empty(t, terminal.written(), "an uncommitted frame must not be written")
-				require.Zero(t, terminal.flushCount(), "an uncommitted frame must not be flushed")
-			}
+				var event AttachmentEvent
+				select {
+				case event = <-events:
+				case <-time.After(5 * time.Second):
+					t.Fatal("the worker never settled")
+				}
+				require.Equal(t, AttachmentToken{Generation: 4, Attempt: 1}, event.Token)
+				require.Equal(t, tt.wantKind, event.Kind, "event error: %v", event.Err)
+				if tt.wantErr != nil {
+					require.ErrorIs(t, event.Err, tt.wantErr)
+				}
+				if tt.wantProtocolCode != 0 {
+					var protocolErr *ProtocolError
+					require.ErrorAs(t, event.Err, &protocolErr)
+					require.Equal(t, tt.wantProtocolCode, protocolErr.Code)
+				}
+				require.Equal(t, tt.wantAttached, attached.attached())
+				if !tt.wantAttached {
+					// A frame that never committed was never written or flushed; the
+					// UI transaction still observed its own boundary.
+					require.Empty(t, terminal.written(), "an uncommitted frame must not be written")
+					require.Zero(t, terminal.flushCount(), "an uncommitted frame must not be flushed")
+				}
+			})
 		})
 	}
 }
@@ -529,26 +539,28 @@ func TestSessionAttachmentWorkerHelloEnvironment(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			stream := newSessionStream(t)
-			terminal := newWorkerTestTerminal()
-			attached := newSessionTestAttachments()
-			supervisor := &Supervisor{cfg: SupervisorConfig{Terminal: terminal, AttachmentEnvironment: tt.env}, clientID: [16]byte{1}}
-			request := sessionTestRequest(true)
-			worker, err := supervisor.newAttachmentWorker(request, attachmentTab{}, nil, SessionEnvironment{Provenance: SessionEnvironmentLocalCLI, Cwd: tt.env.Cwd, Env: append([]string(nil), request.Env...)})
-			require.NoError(t, err)
-			events := make(chan AttachmentEvent, 1)
-			host := newWorkerTestHost(t, terminal, nil, attached.record)
-			go func() {
-				event, _ := host.Run(context.Background(), AttachmentToken{Generation: 1, Attempt: 1}, worker, stream.conn)
-				events <- event
-			}()
+			synctest.Test(t, func(t *testing.T) {
+				stream := newSessionStream(t)
+				terminal := newWorkerTestTerminal()
+				attached := newSessionTestAttachments()
+				supervisor := &Supervisor{cfg: SupervisorConfig{Terminal: terminal, AttachmentEnvironment: tt.env}, clientID: [16]byte{1}}
+				request := sessionTestRequest(true)
+				worker, err := supervisor.newAttachmentWorker(request, attachmentTab{}, nil, SessionEnvironment{Provenance: SessionEnvironmentLocalCLI, Cwd: tt.env.Cwd, Env: append([]string(nil), request.Env...)})
+				require.NoError(t, err)
+				events := make(chan AttachmentEvent, 1)
+				host := newWorkerTestHost(t, terminal, nil, attached.record)
+				go func() {
+					event, _ := host.Run(context.Background(), AttachmentToken{Generation: 1, Attempt: 1}, worker, stream.conn)
+					events <- event
+				}()
 
-			hello := awaitHello(t, stream)
-			require.Equal(t, tt.env.TermEnv, hello.TermEnv)
-			require.Equal(t, tt.env.Cwd, hello.Cwd)
-			require.Equal(t, tt.want, hello.Color)
-			require.NoError(t, stream.conn.Close())
-			<-events
+				hello := awaitHello(t, stream)
+				require.Equal(t, tt.env.TermEnv, hello.TermEnv)
+				require.Equal(t, tt.env.Cwd, hello.Cwd)
+				require.Equal(t, tt.want, hello.Color)
+				require.NoError(t, stream.conn.Close())
+				<-events
+			})
 		})
 	}
 }
@@ -563,22 +575,25 @@ func TestSessionAttachmentWorkerHandlesProtocolErrorAfterWelcome(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			stream := newSessionStream(t)
-			terminal := newWorkerTestTerminal()
-			attachments := newSessionTestAttachments()
-			events := sessionTestRun(t, stream.conn, terminal, sessionTestWorkerConfig(sessionTestRequest(true)), attachments)
-			awaitHello(t, stream)
-			stream.deliver(protocol.Welcome{SessionName: "alpha"})
-			if tt.attached {
-				stream.deliver(sessionTestOutput(1, "initial"))
-				require.Eventually(t, attachments.attached, time.Second, time.Millisecond)
-			}
-			stream.deliver(protocol.ErrorMsg{Code: 42, Text: "refused"})
-			event := <-events
-			var protocolErr *ProtocolError
-			require.ErrorAs(t, event.Err, &protocolErr)
-			require.Equal(t, uint16(42), protocolErr.Code)
-			require.Equal(t, "refused", protocolErr.Text)
+			synctest.Test(t, func(t *testing.T) {
+				stream := newSessionStream(t)
+				terminal := newWorkerTestTerminal()
+				attachments := newSessionTestAttachments()
+				events := sessionTestRun(t, stream.conn, terminal, sessionTestWorkerConfig(sessionTestRequest(true)), attachments)
+				awaitHello(t, stream)
+				stream.deliver(protocol.Welcome{SessionName: "alpha"})
+				if tt.attached {
+					stream.deliver(sessionTestOutput(1, "initial"))
+					synctest.Wait()
+					require.True(t, attachments.attached())
+				}
+				stream.deliver(protocol.ErrorMsg{Code: 42, Text: "refused"})
+				event := <-events
+				var protocolErr *ProtocolError
+				require.ErrorAs(t, event.Err, &protocolErr)
+				require.Equal(t, uint16(42), protocolErr.Code)
+				require.Equal(t, "refused", protocolErr.Text)
+			})
 		})
 	}
 }
@@ -613,27 +628,30 @@ func TestSessionAttachmentWorkerValidatesIdentityByAdmission(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			stream := newSessionStream(t)
-			terminal := newWorkerTestTerminal()
-			attached := newSessionTestAttachments()
-			events := sessionTestRun(t, stream.conn, terminal, sessionTestWorkerConfig(tt.request), attached)
-			awaitHello(t, stream)
-			stream.deliver(tt.welcome)
-			if tt.output.Context != nil {
-				stream.deliver(tt.output)
-			}
-			if tt.wantErr {
-				event := <-events
-				var identityErr *AttachmentIdentityError
-				require.ErrorAs(t, event.Err, &identityErr)
-				require.False(t, attached.attached())
-				require.Empty(t, terminal.written())
-				return
-			}
-			require.Eventually(t, attached.attached, time.Second, time.Millisecond)
-			require.Equal(t, "ok", terminal.written())
-			require.NoError(t, stream.conn.Close())
-			<-events
+			synctest.Test(t, func(t *testing.T) {
+				stream := newSessionStream(t)
+				terminal := newWorkerTestTerminal()
+				attached := newSessionTestAttachments()
+				events := sessionTestRun(t, stream.conn, terminal, sessionTestWorkerConfig(tt.request), attached)
+				awaitHello(t, stream)
+				stream.deliver(tt.welcome)
+				if tt.output.Context != nil {
+					stream.deliver(tt.output)
+				}
+				if tt.wantErr {
+					event := <-events
+					var identityErr *AttachmentIdentityError
+					require.ErrorAs(t, event.Err, &identityErr)
+					require.False(t, attached.attached())
+					require.Empty(t, terminal.written())
+					return
+				}
+				synctest.Wait()
+				require.True(t, attached.attached())
+				require.Equal(t, "ok", terminal.written())
+				require.NoError(t, stream.conn.Close())
+				<-events
+			})
 		})
 	}
 }
@@ -642,54 +660,58 @@ func TestSessionAttachmentWorkerValidatesIdentityByAdmission(t *testing.T) {
 // remote Hello from a remote request: the typed-preamble rules stay per
 // logical stream, and no endpoint is rewritten.
 func TestSessionAttachmentWorkerRemoteHello(t *testing.T) {
-	stream := newSessionStream(t)
-	terminal := newWorkerTestTerminal()
-	attached := newSessionTestAttachments()
-	request := sessionTestRequest(false)
-	events := sessionTestRun(t, stream.conn, terminal, sessionTestWorkerConfig(request), attached)
+	synctest.Test(t, func(t *testing.T) {
+		stream := newSessionStream(t)
+		terminal := newWorkerTestTerminal()
+		attached := newSessionTestAttachments()
+		request := sessionTestRequest(false)
+		events := sessionTestRun(t, stream.conn, terminal, sessionTestWorkerConfig(request), attached)
 
-	hello := awaitHello(t, stream)
-	require.True(t, hello.Remote)
-	require.Equal(t, protocol.EnvironmentPolicyClientOwned, hello.EnvironmentPolicy)
-	require.Equal(t, protocol.IntentAttach, hello.Intent)
-	require.NotNil(t, hello.ExactTarget)
-	require.Equal(t, "alpha", hello.ExactTarget.SessionName)
+		hello := awaitHello(t, stream)
+		require.True(t, hello.Remote)
+		require.Equal(t, protocol.EnvironmentPolicyClientOwned, hello.EnvironmentPolicy)
+		require.Equal(t, protocol.IntentAttach, hello.Intent)
+		require.NotNil(t, hello.ExactTarget)
+		require.Equal(t, "alpha", hello.ExactTarget.SessionName)
 
-	require.NoError(t, stream.conn.Close())
-	select {
-	case event := <-events:
-		require.Equal(t, AttachmentEventEnded, event.Kind)
-	case <-time.After(5 * time.Second):
-		t.Fatal("the worker never settled")
-	}
+		require.NoError(t, stream.conn.Close())
+		select {
+		case event := <-events:
+			require.Equal(t, AttachmentEventEnded, event.Kind)
+		case <-time.After(5 * time.Second):
+			t.Fatal("the worker never settled")
+		}
+	})
 }
 
 // TestSessionAttachmentWorkerNeverReadsTerminalInput proves the worker has no
 // path to terminal input: it consumes no bytes and sends no Input frame while
 // the foreground owns no input source.
 func TestSessionAttachmentWorkerNeverReadsTerminalInput(t *testing.T) {
-	stream := newSessionStream(t)
-	terminal := newWorkerTestTerminal()
-	attached := newSessionTestAttachments()
-	events := sessionTestRun(t, stream.conn, terminal, sessionTestWorkerConfig(sessionTestRequest(true)), attached)
+	synctest.Test(t, func(t *testing.T) {
+		stream := newSessionStream(t)
+		terminal := newWorkerTestTerminal()
+		attached := newSessionTestAttachments()
+		events := sessionTestRun(t, stream.conn, terminal, sessionTestWorkerConfig(sessionTestRequest(true)), attached)
 
-	awaitHello(t, stream)
-	stream.deliver(protocol.Welcome{SessionName: "alpha"})
-	stream.deliver(sessionTestOutput(1, "\x1b[Hready"))
-	_ = attached.token(t)
+		awaitHello(t, stream)
+		stream.deliver(protocol.Welcome{SessionName: "alpha"})
+		stream.deliver(sessionTestOutput(1, "\x1b[Hready"))
+		_ = attached.token(t)
 
-	for _, message := range stream.messages() {
-		_, isInput := message.(protocol.Input)
-		require.False(t, isInput, "the worker must never send terminal input in P5.3b")
-	}
-	require.Equal(t, "\x1b[Hready", terminal.written(), "only session output reaches the terminal")
+		for _, message := range stream.messages() {
+			_, isInput := message.(protocol.Input)
+			require.False(t, isInput, "the worker must never send terminal input in P5.3b")
+		}
+		require.Equal(t, "\x1b[Hready", terminal.written(), "only session output reaches the terminal")
 
-	require.NoError(t, stream.conn.Close())
-	select {
-	case <-events:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the worker never settled")
-	}
+		require.NoError(t, stream.conn.Close())
+		select {
+		case <-events:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the worker never settled")
+		}
+	})
 }
 
 func newBlockingSendSessionStream(t *testing.T) *blockingSendSessionStream {

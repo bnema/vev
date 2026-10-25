@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -176,12 +177,14 @@ func localDaemonSnapshot(epoch ports.BrokerEpoch, revision ports.BrokerRevision)
 }
 
 func TestPickerCatalogueEmptySnapshot(t *testing.T) {
-	catalogue, _ := pickerTestCatalogue(t)
-	require.False(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 0, Revision: 1}), "an invalid snapshot is never applied")
-	require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 5, Revision: 1}))
-	require.Empty(t, catalogue.Lines())
-	require.Equal(t, ports.BrokerEpoch(5), catalogue.Epoch())
-	require.Equal(t, ports.BrokerRevision(1), catalogue.Revision())
+	synctest.Test(t, func(t *testing.T) {
+		catalogue, _ := pickerTestCatalogue(t)
+		require.False(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 0, Revision: 1}), "an invalid snapshot is never applied")
+		require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 5, Revision: 1}))
+		require.Empty(t, catalogue.Lines())
+		require.Equal(t, ports.BrokerEpoch(5), catalogue.Epoch())
+		require.Equal(t, ports.BrokerRevision(1), catalogue.Revision())
+	})
 }
 
 func TestPickerCatalogueProjectionCases(t *testing.T) {
@@ -318,69 +321,73 @@ func TestPickerCatalogueProjectionCases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			catalogue, _ := pickerTestCatalogue(t)
-			require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 7, Revision: 1, Daemons: tt.daemons}))
-			lines := catalogue.Lines()
-			require.Equal(t, tt.wantSections, pickerSectionLabels(lines))
-			require.Equal(t, tt.wantSessions, pickerSessionLabels(lines))
-			hostLine, hasHost := pickerHostLine(lines)
-			require.Equal(t, tt.wantHostRow, hasHost, "a host status row is published only when it adds information")
-			if tt.wantNoDaemon {
-				require.Equal(t, protocol.PickerLineStatusNoDaemon, hostLine.Status)
-				require.Equal(t, protocol.PickerCanNavigate, hostLine.Actions, "Enter creates an ephemeral session on this host")
-				require.True(t, hostLine.Focusable)
-				require.Contains(t, hostLine.StatusDetail, "no_daemon")
-			}
-			for label, actions := range tt.wantActions {
-				line, ok := pickerLineByLabel(lines, label)
-				require.True(t, ok, "session %q must be projected", label)
-				require.True(t, line.Focusable, "a projected row is always a cursor destination")
-				require.Equal(t, actions, line.Actions, "row %q actions", label)
-			}
-			for label, status := range tt.wantStatus {
-				line, ok := pickerLineByLabel(lines, label)
-				require.True(t, ok, "row %q must be projected", label)
-				require.Equal(t, status, line.Status, "row %q badge", label)
-			}
-			for label, status := range tt.wantSection {
-				line, ok := pickerSectionByLabel(lines, label)
-				require.True(t, ok, "section %q must be projected", label)
-				require.Equal(t, status, line.Status, "section %q problem dot", label)
-			}
-			for label, dim := range tt.wantDim {
-				line, ok := pickerLineByLabel(lines, label)
-				require.True(t, ok)
-				require.Equal(t, dim, line.Dim, "row %q dim", label)
-			}
+			synctest.Test(t, func(t *testing.T) {
+				catalogue, _ := pickerTestCatalogue(t)
+				require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 7, Revision: 1, Daemons: tt.daemons}))
+				lines := catalogue.Lines()
+				require.Equal(t, tt.wantSections, pickerSectionLabels(lines))
+				require.Equal(t, tt.wantSessions, pickerSessionLabels(lines))
+				hostLine, hasHost := pickerHostLine(lines)
+				require.Equal(t, tt.wantHostRow, hasHost, "a host status row is published only when it adds information")
+				if tt.wantNoDaemon {
+					require.Equal(t, protocol.PickerLineStatusNoDaemon, hostLine.Status)
+					require.Equal(t, protocol.PickerCanNavigate, hostLine.Actions, "Enter creates an ephemeral session on this host")
+					require.True(t, hostLine.Focusable)
+					require.Contains(t, hostLine.StatusDetail, "no_daemon")
+				}
+				for label, actions := range tt.wantActions {
+					line, ok := pickerLineByLabel(lines, label)
+					require.True(t, ok, "session %q must be projected", label)
+					require.True(t, line.Focusable, "a projected row is always a cursor destination")
+					require.Equal(t, actions, line.Actions, "row %q actions", label)
+				}
+				for label, status := range tt.wantStatus {
+					line, ok := pickerLineByLabel(lines, label)
+					require.True(t, ok, "row %q must be projected", label)
+					require.Equal(t, status, line.Status, "row %q badge", label)
+				}
+				for label, status := range tt.wantSection {
+					line, ok := pickerSectionByLabel(lines, label)
+					require.True(t, ok, "section %q must be projected", label)
+					require.Equal(t, status, line.Status, "section %q problem dot", label)
+				}
+				for label, dim := range tt.wantDim {
+					line, ok := pickerLineByLabel(lines, label)
+					require.True(t, ok)
+					require.Equal(t, dim, line.Dim, "row %q dim", label)
+				}
+			})
 		})
 	}
 }
 
 func TestPickerCatalogueMonotonicUpdates(t *testing.T) {
-	clock := newSupervisorTestClock(t)
-	now := clock.port.Now()
-	catalogue, _ := pickerTestCatalogue(t)
+	synctest.Test(t, func(t *testing.T) {
+		clock := newSupervisorTestClock(t)
+		now := clock.port.Now()
+		catalogue, _ := pickerTestCatalogue(t)
 
-	newer := ports.BrokerSnapshot{Epoch: 3, Revision: 4, Daemons: []ports.BrokerDaemonObservation{
-		pickerTestLocalObservation(now, pickerTestSession("alpha", 1, catalogue_Up)),
-	}}
-	require.True(t, catalogue.Apply(newer))
-	before := catalogue.Lines()
+		newer := ports.BrokerSnapshot{Epoch: 3, Revision: 4, Daemons: []ports.BrokerDaemonObservation{
+			pickerTestLocalObservation(now, pickerTestSession("alpha", 1, catalogue_Up)),
+		}}
+		require.True(t, catalogue.Apply(newer))
+		before := catalogue.Lines()
 
-	// A lower revision in the same epoch never supersedes and never regresses.
-	older := ports.BrokerSnapshot{Epoch: 3, Revision: 2, Daemons: []ports.BrokerDaemonObservation{
-		pickerTestLocalObservation(now, pickerTestSession("beta", 2, catalogue_Up)),
-	}}
-	require.False(t, catalogue.Apply(older))
-	require.Equal(t, before, catalogue.Lines())
-	require.Equal(t, ports.BrokerRevision(4), catalogue.Revision())
+		// A lower revision in the same epoch never supersedes and never regresses.
+		older := ports.BrokerSnapshot{Epoch: 3, Revision: 2, Daemons: []ports.BrokerDaemonObservation{
+			pickerTestLocalObservation(now, pickerTestSession("beta", 2, catalogue_Up)),
+		}}
+		require.False(t, catalogue.Apply(older))
+		require.Equal(t, before, catalogue.Lines())
+		require.Equal(t, ports.BrokerRevision(4), catalogue.Revision())
 
-	// A new epoch is a full resynchronization and replaces every row.
-	epoch := ports.BrokerSnapshot{Epoch: 4, Revision: 1, Daemons: []ports.BrokerDaemonObservation{
-		pickerTestLocalObservation(now, pickerTestSession("gamma", 3, catalogue_Up)),
-	}}
-	require.True(t, catalogue.Apply(epoch))
-	require.Equal(t, []string{"gamma"}, pickerSessionLabels(catalogue.Lines()))
+		// A new epoch is a full resynchronization and replaces every row.
+		epoch := ports.BrokerSnapshot{Epoch: 4, Revision: 1, Daemons: []ports.BrokerDaemonObservation{
+			pickerTestLocalObservation(now, pickerTestSession("gamma", 3, catalogue_Up)),
+		}}
+		require.True(t, catalogue.Apply(epoch))
+		require.Equal(t, []string{"gamma"}, pickerSessionLabels(catalogue.Lines()))
+	})
 }
 
 // catalogue_Up/Broken keep the tables above short without importing the
@@ -392,45 +399,49 @@ const (
 )
 
 func TestPickerCatalogueSlowObservationKeepsNewerState(t *testing.T) {
-	clock := newSupervisorTestClock(t)
-	now := clock.port.Now()
-	catalogue, _ := pickerTestCatalogue(t)
+	synctest.Test(t, func(t *testing.T) {
+		clock := newSupervisorTestClock(t)
+		now := clock.port.Now()
+		catalogue, _ := pickerTestCatalogue(t)
 
-	fresh := pickerTestRemoteObservation("user@arch", 1, 1, now, pickerTestSession("alpha", 1, catalogue_Up))
-	require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 2, Daemons: []ports.BrokerDaemonObservation{fresh}}))
+		fresh := pickerTestRemoteObservation("user@arch", 1, 1, now, pickerTestSession("alpha", 1, catalogue_Up))
+		require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 2, Daemons: []ports.BrokerDaemonObservation{fresh}}))
 
-	regressed := pickerTestRemoteObservation("user@arch", 1, 1, now.Add(-time.Minute), pickerTestSession("beta", 2, catalogue_Up))
-	require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 3, Daemons: []ports.BrokerDaemonObservation{regressed}}), "the publication supersedes")
+		regressed := pickerTestRemoteObservation("user@arch", 1, 1, now.Add(-time.Minute), pickerTestSession("beta", 2, catalogue_Up))
+		require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 3, Daemons: []ports.BrokerDaemonObservation{regressed}}), "the publication supersedes")
 
-	require.Equal(t, []string{"alpha"}, pickerSessionLabels(catalogue.Lines()), "an older observed inventory never regresses a row")
+		require.Equal(t, []string{"alpha"}, pickerSessionLabels(catalogue.Lines()), "an older observed inventory never regresses a row")
+	})
 }
 
 func TestPickerCatalogueIdentityReplacement(t *testing.T) {
-	clock := newSupervisorTestClock(t)
-	now := clock.port.Now()
-	catalogue, _ := pickerTestCatalogue(t)
+	synctest.Test(t, func(t *testing.T) {
+		clock := newSupervisorTestClock(t)
+		now := clock.port.Now()
+		catalogue, _ := pickerTestCatalogue(t)
 
-	original := ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{
-		pickerTestRemoteObservation("user@arch", 1, 1, now, pickerTestSession("alpha", 1, catalogue_Up)),
-	}}
-	require.True(t, catalogue.Apply(original))
-	oldLine, ok := pickerLineByLabel(catalogue.Lines(), "alpha")
-	require.True(t, ok)
-	oldKey := oldLine.Key
+		original := ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{
+			pickerTestRemoteObservation("user@arch", 1, 1, now, pickerTestSession("alpha", 1, catalogue_Up)),
+		}}
+		require.True(t, catalogue.Apply(original))
+		oldLine, ok := pickerLineByLabel(catalogue.Lines(), "alpha")
+		require.True(t, ok)
+		oldKey := oldLine.Key
 
-	replaced := ports.BrokerSnapshot{Epoch: 3, Revision: 2, Daemons: []ports.BrokerDaemonObservation{
-		pickerTestRemoteObservation("user@arch", 2, 2, now, pickerTestSession("alpha", 9, catalogue_Up)),
-	}}
-	require.True(t, catalogue.Apply(replaced))
-	newLine, ok := pickerLineByLabel(catalogue.Lines(), "alpha")
-	require.True(t, ok)
-	require.NotEqual(t, oldKey, newLine.Key, "a replaced identity gets a new opaque key")
+		replaced := ports.BrokerSnapshot{Epoch: 3, Revision: 2, Daemons: []ports.BrokerDaemonObservation{
+			pickerTestRemoteObservation("user@arch", 2, 2, now, pickerTestSession("alpha", 9, catalogue_Up)),
+		}}
+		require.True(t, catalogue.Apply(replaced))
+		newLine, ok := pickerLineByLabel(catalogue.Lines(), "alpha")
+		require.True(t, ok)
+		require.NotEqual(t, oldKey, newLine.Key, "a replaced identity gets a new opaque key")
 
-	// The old key is still recognized and refused as a replacement, not silently
-	// re-bound to the new session.
-	_, err := catalogue.Resolve(oldKey, pickerTestBase())
-	require.Error(t, err)
-	require.True(t, pickerCatalogueErrorIs(err, pickerCatalogueReplaced), "same endpoint with a new incarnation is a replacement")
+		// The old key is still recognized and refused as a replacement, not silently
+		// re-bound to the new session.
+		_, err := catalogue.Resolve(oldKey, pickerTestBase())
+		require.Error(t, err)
+		require.True(t, pickerCatalogueErrorIs(err, pickerCatalogueReplaced), "same endpoint with a new incarnation is a replacement")
+	})
 }
 
 // TestPickerCatalogueRegistrationGenerationChangeRequiresFreshSelection pins the
@@ -439,63 +450,69 @@ func TestPickerCatalogueIdentityReplacement(t *testing.T) {
 // incarnation is a replacement, so the displayed row cannot silently re-bind
 // to changed authority.
 func TestPickerCatalogueRegistrationGenerationChangeRequiresFreshSelection(t *testing.T) {
-	clock := newSupervisorTestClock(t)
-	now := clock.port.Now()
-	catalogue, _ := pickerTestCatalogue(t)
+	synctest.Test(t, func(t *testing.T) {
+		clock := newSupervisorTestClock(t)
+		now := clock.port.Now()
+		catalogue, _ := pickerTestCatalogue(t)
 
-	require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{
-		pickerTestRemoteObservation("user@arch", 1, 1, now, pickerTestSession("alpha", 1, catalogue_Up)),
-	}}))
-	line, ok := pickerLineByLabel(catalogue.Lines(), "alpha")
-	require.True(t, ok)
+		require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{
+			pickerTestRemoteObservation("user@arch", 1, 1, now, pickerTestSession("alpha", 1, catalogue_Up)),
+		}}))
+		line, ok := pickerLineByLabel(catalogue.Lines(), "alpha")
+		require.True(t, ok)
 
-	advanced := pickerTestRemoteObservation("user@arch", 1, 1, now, pickerTestSession("alpha", 1, catalogue_Up))
-	advanced.Registration.Generation = 2
-	require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 2, Daemons: []ports.BrokerDaemonObservation{advanced}}))
+		advanced := pickerTestRemoteObservation("user@arch", 1, 1, now, pickerTestSession("alpha", 1, catalogue_Up))
+		advanced.Registration.Generation = 2
+		require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 2, Daemons: []ports.BrokerDaemonObservation{advanced}}))
 
-	_, err := catalogue.Resolve(line.Key, pickerTestBase())
-	require.Error(t, err)
-	require.True(t, pickerCatalogueErrorIs(err, pickerCatalogueReplaced), "an advanced generation is a replacement: %v", err)
+		_, err := catalogue.Resolve(line.Key, pickerTestBase())
+		require.Error(t, err)
+		require.True(t, pickerCatalogueErrorIs(err, pickerCatalogueReplaced), "an advanced generation is a replacement: %v", err)
+	})
 }
 
 func TestPickerCatalogueStableRowOrder(t *testing.T) {
-	clock := newSupervisorTestClock(t)
-	now := clock.port.Now()
-	catalogue, _ := pickerTestCatalogue(t)
+	synctest.Test(t, func(t *testing.T) {
+		clock := newSupervisorTestClock(t)
+		now := clock.port.Now()
+		catalogue, _ := pickerTestCatalogue(t)
 
-	first := ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{
-		pickerTestLocalObservation(now, pickerTestSession("alpha", 1, catalogue_Up)),
-		pickerTestRemoteObservation("host-a", 1, 1, now, pickerTestSession("a-one", 2, catalogue_Up)),
-		pickerTestRemoteObservation("host-b", 2, 2, now, pickerTestSession("b-one", 3, catalogue_Up)),
-	}}
-	require.True(t, catalogue.Apply(first))
-	require.Equal(t, []string{"local", "host-a", "host-b"}, pickerSectionLabels(catalogue.Lines()))
+		first := ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{
+			pickerTestLocalObservation(now, pickerTestSession("alpha", 1, catalogue_Up)),
+			pickerTestRemoteObservation("host-a", 1, 1, now, pickerTestSession("a-one", 2, catalogue_Up)),
+			pickerTestRemoteObservation("host-b", 2, 2, now, pickerTestSession("b-one", 3, catalogue_Up)),
+		}}
+		require.True(t, catalogue.Apply(first))
+		require.Equal(t, []string{"local", "host-a", "host-b"}, pickerSectionLabels(catalogue.Lines()))
 
-	// The publication reorders the remote hosts and changes one unrelated
-	// session; the first-seen order never reshuffles. The local daemon stays
-	// first, as every valid broker publication requires.
-	second := ports.BrokerSnapshot{Epoch: 3, Revision: 2, Daemons: []ports.BrokerDaemonObservation{
-		pickerTestLocalObservation(now, pickerTestSession("alpha", 1, catalogue_Up)),
-		pickerTestRemoteObservation("host-b", 2, 2, now, pickerTestSession("b-one", 3, catalogue_Up), pickerTestSession("b-two", 4, catalogue_Up)),
-		pickerTestRemoteObservation("host-a", 1, 1, now, pickerTestSession("a-one", 2, catalogue_Up)),
-	}}
-	require.True(t, catalogue.Apply(second))
-	require.Equal(t, []string{"local", "host-a", "host-b"}, pickerSectionLabels(catalogue.Lines()))
-	require.Equal(t, []string{"alpha", "a-one", "b-one", "b-two"}, pickerSessionLabels(catalogue.Lines()))
+		// The publication reorders the remote hosts and changes one unrelated
+		// session; the first-seen order never reshuffles. The local daemon stays
+		// first, as every valid broker publication requires.
+		second := ports.BrokerSnapshot{Epoch: 3, Revision: 2, Daemons: []ports.BrokerDaemonObservation{
+			pickerTestLocalObservation(now, pickerTestSession("alpha", 1, catalogue_Up)),
+			pickerTestRemoteObservation("host-b", 2, 2, now, pickerTestSession("b-one", 3, catalogue_Up), pickerTestSession("b-two", 4, catalogue_Up)),
+			pickerTestRemoteObservation("host-a", 1, 1, now, pickerTestSession("a-one", 2, catalogue_Up)),
+		}}
+		require.True(t, catalogue.Apply(second))
+		require.Equal(t, []string{"local", "host-a", "host-b"}, pickerSectionLabels(catalogue.Lines()))
+		require.Equal(t, []string{"alpha", "a-one", "b-one", "b-two"}, pickerSessionLabels(catalogue.Lines()))
+	})
 }
 
 func TestPickerCatalogueDeterministicKeys(t *testing.T) {
-	clock := newSupervisorTestClock(t)
-	now := clock.port.Now()
-	daemons := []ports.BrokerDaemonObservation{
-		pickerTestLocalObservation(now, pickerTestSession("alpha", 1, catalogue_Up)),
-		pickerTestRemoteObservation("host-a", 1, 1, now, pickerTestSession("a-one", 2, catalogue_Up)),
-	}
-	first, _ := pickerTestCatalogue(t)
-	second, _ := pickerTestCatalogue(t)
-	require.True(t, first.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: daemons}))
-	require.True(t, second.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: daemons}))
-	require.Equal(t, first.Lines(), second.Lines())
+	synctest.Test(t, func(t *testing.T) {
+		clock := newSupervisorTestClock(t)
+		now := clock.port.Now()
+		daemons := []ports.BrokerDaemonObservation{
+			pickerTestLocalObservation(now, pickerTestSession("alpha", 1, catalogue_Up)),
+			pickerTestRemoteObservation("host-a", 1, 1, now, pickerTestSession("a-one", 2, catalogue_Up)),
+		}
+		first, _ := pickerTestCatalogue(t)
+		second, _ := pickerTestCatalogue(t)
+		require.True(t, first.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: daemons}))
+		require.True(t, second.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: daemons}))
+		require.Equal(t, first.Lines(), second.Lines())
+	})
 }
 
 func TestPickerCatalogueSelectionResolution(t *testing.T) {
@@ -665,51 +682,57 @@ func TestPickerCatalogueSelectionResolution(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			catalogue, clock := pickerTestCatalogue(t)
-			key := tt.build(t, catalogue, clock)
-			request, err := catalogue.Resolve(key, base)
-			if tt.wantErr != 0 {
-				require.Error(t, err)
-				require.True(t, pickerCatalogueErrorIs(err, tt.wantErr), "want %v, got %v", tt.wantErr, err)
-				return
-			}
-			require.NoError(t, err)
-			require.NoError(t, request.Validate(), "a resolved request always validates")
-			require.Equal(t, ports.BrokerStreamAttachment, request.Purpose)
-			require.Equal(t, tt.wantAdmission, request.Admission)
-			require.Equal(t, tt.wantLocal, request.Local)
-			require.Equal(t, ports.BrokerEpoch(3), request.Epoch)
-			require.Equal(t, base.Connection, request.Connection)
-			require.Equal(t, base.Stream, request.Stream)
+			synctest.Test(t, func(t *testing.T) {
+				catalogue, clock := pickerTestCatalogue(t)
+				key := tt.build(t, catalogue, clock)
+				request, err := catalogue.Resolve(key, base)
+				if tt.wantErr != 0 {
+					require.Error(t, err)
+					require.True(t, pickerCatalogueErrorIs(err, tt.wantErr), "want %v, got %v", tt.wantErr, err)
+					return
+				}
+				require.NoError(t, err)
+				require.NoError(t, request.Validate(), "a resolved request always validates")
+				require.Equal(t, ports.BrokerStreamAttachment, request.Purpose)
+				require.Equal(t, tt.wantAdmission, request.Admission)
+				require.Equal(t, tt.wantLocal, request.Local)
+				require.Equal(t, ports.BrokerEpoch(3), request.Epoch)
+				require.Equal(t, base.Connection, request.Connection)
+				require.Equal(t, base.Stream, request.Stream)
+			})
 		})
 	}
 }
 
 func TestPickerCatalogueRemoteSelectionCarriesExactIdentity(t *testing.T) {
-	clock := newSupervisorTestClock(t)
-	now := clock.port.Now()
-	catalogue, _ := pickerTestCatalogue(t)
-	registration := pickerTestRegistration("user@arch", 1)
-	lifecycle := pickerTestLifecycle(2)
-	require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{
-		pickerTestRemoteObservation("user@arch", 1, 1, now, pickerTestSession("remote-a", 2, catalogue_Up)),
-	}}))
-	line, ok := pickerLineByLabel(catalogue.Lines(), "remote-a")
-	require.True(t, ok)
+	synctest.Test(t, func(t *testing.T) {
+		clock := newSupervisorTestClock(t)
+		now := clock.port.Now()
+		catalogue, _ := pickerTestCatalogue(t)
+		registration := pickerTestRegistration("user@arch", 1)
+		lifecycle := pickerTestLifecycle(2)
+		require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{
+			pickerTestRemoteObservation("user@arch", 1, 1, now, pickerTestSession("remote-a", 2, catalogue_Up)),
+		}}))
+		line, ok := pickerLineByLabel(catalogue.Lines(), "remote-a")
+		require.True(t, ok)
 
-	request, err := catalogue.Resolve(line.Key, pickerTestBase())
-	require.NoError(t, err)
-	require.Equal(t, "user@arch", request.Endpoint)
-	require.Equal(t, registration, request.Registration)
-	require.Equal(t, protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "remote-a"}, request.Target)
-	require.Equal(t, pickerTestPolicy(), request.Policy)
+		request, err := catalogue.Resolve(line.Key, pickerTestBase())
+		require.NoError(t, err)
+		require.Equal(t, "user@arch", request.Endpoint)
+		require.Equal(t, registration, request.Registration)
+		require.Equal(t, protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "remote-a"}, request.Target)
+		require.Equal(t, pickerTestPolicy(), request.Policy)
+	})
 }
 
 func TestPickerCatalogueUnknownKeyRefused(t *testing.T) {
-	catalogue, _ := pickerTestCatalogue(t)
-	_, err := catalogue.Resolve("missing", pickerTestBase())
-	require.Error(t, err)
-	require.True(t, pickerCatalogueErrorIs(err, pickerCatalogueUnknown))
+	synctest.Test(t, func(t *testing.T) {
+		catalogue, _ := pickerTestCatalogue(t)
+		_, err := catalogue.Resolve("missing", pickerTestBase())
+		require.Error(t, err)
+		require.True(t, pickerCatalogueErrorIs(err, pickerCatalogueUnknown))
+	})
 }
 
 // TestPickerCatalogueEpochFenceOnCapturedRef pins the selection revision: a
@@ -717,88 +740,94 @@ func TestPickerCatalogueUnknownKeyRefused(t *testing.T) {
 // resolve it after the broker process was replaced, even when the endpoint and
 // session lifecycle happen to look the same.
 func TestPickerCatalogueEpochFenceOnCapturedRef(t *testing.T) {
-	clock := newSupervisorTestClock(t)
-	now := clock.port.Now()
-	catalogue, _ := pickerTestCatalogue(t)
-	require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{
-		pickerTestLocalObservation(now, pickerTestSession("alpha", 1, catalogue_Up)),
-	}}))
-	line, ok := pickerLineByLabel(catalogue.Lines(), "alpha")
-	require.True(t, ok)
-	ref, ok := catalogue.Ref(line.Key)
-	require.True(t, ok)
+	synctest.Test(t, func(t *testing.T) {
+		clock := newSupervisorTestClock(t)
+		now := clock.port.Now()
+		catalogue, _ := pickerTestCatalogue(t)
+		require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{
+			pickerTestLocalObservation(now, pickerTestSession("alpha", 1, catalogue_Up)),
+		}}))
+		line, ok := pickerLineByLabel(catalogue.Lines(), "alpha")
+		require.True(t, ok)
+		ref, ok := catalogue.Ref(line.Key)
+		require.True(t, ok)
 
-	// A new broker epoch resynchronizes the catalogue; the captured identity is
-	// fenced even though its key is recomputed identically.
-	require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 4, Revision: 1, Daemons: []ports.BrokerDaemonObservation{
-		pickerTestLocalObservation(now, pickerTestSession("alpha", 1, catalogue_Up)),
-	}}))
-	_, err := catalogue.ResolveRef(ref, pickerTestBase())
-	require.Error(t, err)
-	require.True(t, pickerCatalogueErrorIs(err, pickerCatalogueEpochStale))
+		// A new broker epoch resynchronizes the catalogue; the captured identity is
+		// fenced even though its key is recomputed identically.
+		require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 4, Revision: 1, Daemons: []ports.BrokerDaemonObservation{
+			pickerTestLocalObservation(now, pickerTestSession("alpha", 1, catalogue_Up)),
+		}}))
+		_, err := catalogue.ResolveRef(ref, pickerTestBase())
+		require.Error(t, err)
+		require.True(t, pickerCatalogueErrorIs(err, pickerCatalogueEpochStale))
+	})
 }
 
 func TestPickerCatalogueRetiredRefFenceIsBounded(t *testing.T) {
-	catalogue, _ := pickerTestCatalogue(t)
-	base := pickerTestBase()
-	const inserted = pickerCatalogueMaxRetiredRefs + 8
-	keys := make([]string, 0, inserted)
-	for i := range inserted {
-		name := fmt.Sprintf("s-%d", i)
-		session := pickerTestSession(name, byte(i%200+1), catalogue_Up)
-		require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: ports.BrokerRevision(i + 1), Daemons: []ports.BrokerDaemonObservation{
-			pickerTestLocalObservation(time.Unix(1000, 0), session),
-		}}))
-		line, ok := pickerLineByLabel(catalogue.Lines(), name)
-		require.True(t, ok)
-		keys = append(keys, line.Key)
-	}
-	// The fence holds the exact bound: only the newest retired keys survive.
-	require.Len(t, catalogue.retired, pickerCatalogueMaxRetiredRefs)
-	require.Len(t, catalogue.retiredOrder, pickerCatalogueMaxRetiredRefs)
+	synctest.Test(t, func(t *testing.T) {
+		catalogue, _ := pickerTestCatalogue(t)
+		base := pickerTestBase()
+		const inserted = pickerCatalogueMaxRetiredRefs + 8
+		keys := make([]string, 0, inserted)
+		for i := range inserted {
+			name := fmt.Sprintf("s-%d", i)
+			session := pickerTestSession(name, byte(i%200+1), catalogue_Up)
+			require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: ports.BrokerRevision(i + 1), Daemons: []ports.BrokerDaemonObservation{
+				pickerTestLocalObservation(time.Unix(1000, 0), session),
+			}}))
+			line, ok := pickerLineByLabel(catalogue.Lines(), name)
+			require.True(t, ok)
+			keys = append(keys, line.Key)
+		}
+		// The fence holds the exact bound: only the newest retired keys survive.
+		require.Len(t, catalogue.retired, pickerCatalogueMaxRetiredRefs)
+		require.Len(t, catalogue.retiredOrder, pickerCatalogueMaxRetiredRefs)
 
-	// A retained retired key still classifies as gone: its lifecycle left the
-	// projection and no same-name replacement exists.
-	retainedKey := keys[len(keys)-2]
-	_, err := catalogue.Resolve(retainedKey, base)
-	require.Error(t, err)
-	require.True(t, pickerCatalogueErrorIs(err, pickerCatalogueGone), "a retained retired key must classify as gone: %v", err)
+		// A retained retired key still classifies as gone: its lifecycle left the
+		// projection and no same-name replacement exists.
+		retainedKey := keys[len(keys)-2]
+		_, err := catalogue.Resolve(retainedKey, base)
+		require.Error(t, err)
+		require.True(t, pickerCatalogueErrorIs(err, pickerCatalogueGone), "a retained retired key must classify as gone: %v", err)
 
-	// The oldest key was evicted from the bounded fence and is now unknown.
-	evictedKey := keys[0]
-	_, err = catalogue.Resolve(evictedKey, base)
-	require.Error(t, err)
-	require.True(t, pickerCatalogueErrorIs(err, pickerCatalogueUnknown), "an evicted retired key must classify as unknown: %v", err)
+		// The oldest key was evicted from the bounded fence and is now unknown.
+		evictedKey := keys[0]
+		_, err = catalogue.Resolve(evictedKey, base)
+		require.Error(t, err)
+		require.True(t, pickerCatalogueErrorIs(err, pickerCatalogueUnknown), "an evicted retired key must classify as unknown: %v", err)
+	})
 }
 
 // TestPickerCatalogueRetiredRefFenceConcurrentApply exercises the retired-ref
 // fence under -race: many goroutines fold distinct publications concurrently
 // and the fence may never exceed its bound.
 func TestPickerCatalogueRetiredRefFenceConcurrentApply(t *testing.T) {
-	catalogue, _ := pickerTestCatalogue(t)
-	const (
-		workers   = 8
-		perWorker = 64
-	)
-	var wait sync.WaitGroup
-	for worker := range workers {
-		wait.Add(1)
-		go func(worker int) {
-			defer wait.Done()
-			for i := range perWorker {
-				var lifecycle domain.SessionLifecycleID
-				lifecycle[0] = byte(i + 1)
-				lifecycle[1] = byte(worker + 1)
-				session := pickerTestSessionWithLifecycle(fmt.Sprintf("w%d-%d", worker, i), lifecycle)
-				catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: ports.BrokerRevision(worker*perWorker + i + 1), Daemons: []ports.BrokerDaemonObservation{
-					pickerTestLocalObservation(time.Unix(1000, 0), session),
-				}})
-			}
-		}(worker)
-	}
-	wait.Wait()
-	require.LessOrEqual(t, len(catalogue.retired), pickerCatalogueMaxRetiredRefs)
-	require.LessOrEqual(t, len(catalogue.retiredOrder), pickerCatalogueMaxRetiredRefs)
+	synctest.Test(t, func(t *testing.T) {
+		catalogue, _ := pickerTestCatalogue(t)
+		const (
+			workers   = 8
+			perWorker = 64
+		)
+		var wait sync.WaitGroup
+		for worker := range workers {
+			wait.Add(1)
+			go func(worker int) {
+				defer wait.Done()
+				for i := range perWorker {
+					var lifecycle domain.SessionLifecycleID
+					lifecycle[0] = byte(i + 1)
+					lifecycle[1] = byte(worker + 1)
+					session := pickerTestSessionWithLifecycle(fmt.Sprintf("w%d-%d", worker, i), lifecycle)
+					catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: ports.BrokerRevision(worker*perWorker + i + 1), Daemons: []ports.BrokerDaemonObservation{
+						pickerTestLocalObservation(time.Unix(1000, 0), session),
+					}})
+				}
+			}(worker)
+		}
+		wait.Wait()
+		require.LessOrEqual(t, len(catalogue.retired), pickerCatalogueMaxRetiredRefs)
+		require.LessOrEqual(t, len(catalogue.retiredOrder), pickerCatalogueMaxRetiredRefs)
+	})
 }
 
 // TestPickerCatalogueAvailabilityClassifiedBeforeCompatibility pins the
@@ -847,8 +876,10 @@ func TestPickerCatalogueAvailabilityClassifiedBeforeCompatibility(t *testing.T) 
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.wantStatus, pickerObservationStatus(tt.observation, tt.fresh))
-			require.Equal(t, tt.wantReason, pickerObservationReason(tt.observation, tt.fresh))
+			synctest.Test(t, func(t *testing.T) {
+				require.Equal(t, tt.wantStatus, pickerObservationStatus(tt.observation, tt.fresh))
+				require.Equal(t, tt.wantReason, pickerObservationReason(tt.observation, tt.fresh))
+			})
 		})
 	}
 }
@@ -969,51 +1000,53 @@ func TestPickerCatalogueResolutionAdmission(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			catalogue, _ := pickerTestCatalogue(t)
-			require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{tt.daemon}}))
-			lines := catalogue.Lines()
-			line, ok := pickerLineByLabel(lines, "alpha")
-			if tt.hostRow {
-				line, ok = pickerHostLine(lines)
-			}
-			if tt.create {
-				require.True(t, ok, "the no-daemon host row is visible")
-				ref, exists := catalogue.Ref(line.Key)
-				require.True(t, exists)
-				request, err := resolvePickerRequest(catalogue.snapshot.Epoch, pickerAuthorityInSnapshot(catalogue.snapshot, ref), ref, pickerTestBase())
+			synctest.Test(t, func(t *testing.T) {
+				catalogue, _ := pickerTestCatalogue(t)
+				require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{tt.daemon}}))
+				lines := catalogue.Lines()
+				line, ok := pickerLineByLabel(lines, "alpha")
+				if tt.hostRow {
+					line, ok = pickerHostLine(lines)
+				}
+				if tt.create {
+					require.True(t, ok, "the no-daemon host row is visible")
+					ref, exists := catalogue.Ref(line.Key)
+					require.True(t, exists)
+					request, err := resolvePickerRequest(catalogue.snapshot.Epoch, pickerAuthorityInSnapshot(catalogue.snapshot, ref), ref, pickerTestBase())
+					require.NoError(t, err)
+					require.Equal(t, ports.BrokerAdmissionCreateEphemeral, request.Admission)
+					require.Equal(t, ports.BrokerDaemonStartIfNeeded, request.StartMode)
+					return
+				}
+				if tt.named {
+					ref := pickerSelectionRef{kind: pickerSelectionAttachNamed, epoch: catalogue.snapshot.Epoch, endpoint: tt.daemon.Endpoint,
+						registration: tt.daemon.Registration, name: "restored"}
+					request, err := resolvePickerRequest(catalogue.snapshot.Epoch, pickerAuthorityInSnapshot(catalogue.snapshot, ref), ref, pickerTestBase())
+					require.NoError(t, err)
+					require.Equal(t, ports.BrokerAdmissionAttachNamed, request.Admission)
+					require.Equal(t, ports.BrokerDaemonStartIfNeeded, request.StartMode)
+					return
+				}
+				if tt.exact {
+					ref := pickerSelectionRef{kind: pickerSelectionExact, epoch: catalogue.snapshot.Epoch, endpoint: tt.daemon.Endpoint,
+						registration: tt.daemon.Registration, lifecycle: domain.SessionLifecycleID{1}, name: "absent"}
+					_, err := resolvePickerRequest(catalogue.snapshot.Epoch, pickerAuthorityInSnapshot(catalogue.snapshot, ref), ref, pickerTestBase())
+					require.Error(t, err)
+					require.True(t, pickerCatalogueErrorIs(err, tt.wantErr), "want %v, got %v", tt.wantErr, err)
+					return
+				}
+				require.True(t, ok)
+				if tt.wantErr != 0 {
+					_, err := catalogue.Resolve(line.Key, pickerTestBase())
+					require.Error(t, err)
+					require.True(t, pickerCatalogueErrorIs(err, tt.wantErr), "want %v, got %v", tt.wantErr, err)
+					return
+				}
+				request, err := catalogue.Resolve(line.Key, pickerTestBase())
 				require.NoError(t, err)
-				require.Equal(t, ports.BrokerAdmissionCreateEphemeral, request.Admission)
-				require.Equal(t, ports.BrokerDaemonStartIfNeeded, request.StartMode)
-				return
-			}
-			if tt.named {
-				ref := pickerSelectionRef{kind: pickerSelectionAttachNamed, epoch: catalogue.snapshot.Epoch, endpoint: tt.daemon.Endpoint,
-					registration: tt.daemon.Registration, name: "restored"}
-				request, err := resolvePickerRequest(catalogue.snapshot.Epoch, pickerAuthorityInSnapshot(catalogue.snapshot, ref), ref, pickerTestBase())
-				require.NoError(t, err)
-				require.Equal(t, ports.BrokerAdmissionAttachNamed, request.Admission)
-				require.Equal(t, ports.BrokerDaemonStartIfNeeded, request.StartMode)
-				return
-			}
-			if tt.exact {
-				ref := pickerSelectionRef{kind: pickerSelectionExact, epoch: catalogue.snapshot.Epoch, endpoint: tt.daemon.Endpoint,
-					registration: tt.daemon.Registration, lifecycle: domain.SessionLifecycleID{1}, name: "absent"}
-				_, err := resolvePickerRequest(catalogue.snapshot.Epoch, pickerAuthorityInSnapshot(catalogue.snapshot, ref), ref, pickerTestBase())
-				require.Error(t, err)
-				require.True(t, pickerCatalogueErrorIs(err, tt.wantErr), "want %v, got %v", tt.wantErr, err)
-				return
-			}
-			require.True(t, ok)
-			if tt.wantErr != 0 {
-				_, err := catalogue.Resolve(line.Key, pickerTestBase())
-				require.Error(t, err)
-				require.True(t, pickerCatalogueErrorIs(err, tt.wantErr), "want %v, got %v", tt.wantErr, err)
-				return
-			}
-			request, err := catalogue.Resolve(line.Key, pickerTestBase())
-			require.NoError(t, err)
-			require.NoError(t, request.Validate())
-			require.Equal(t, ports.BrokerDaemonStartIfNeeded, request.StartMode, "an explicit attempt keeps the start authorization")
+				require.NoError(t, request.Validate())
+				require.Equal(t, ports.BrokerDaemonStartIfNeeded, request.StartMode, "an explicit attempt keeps the start authorization")
+			})
 		})
 	}
 }
@@ -1022,17 +1055,19 @@ func TestPickerCatalogueResolutionAdmission(t *testing.T) {
 // boundary: a snapshot that fails its own contract is refused and the previous
 // projection is kept intact.
 func TestPickerCatalogueRejectsInvalidSnapshot(t *testing.T) {
-	catalogue, clock := pickerTestCatalogue(t)
-	valid := pickerTestSnapshot(3, 1, clock.port.Now(), "alpha")
-	require.True(t, catalogue.Apply(valid))
-	validLines := catalogue.Lines()
-	require.Equal(t, ports.BrokerRevision(1), catalogue.Revision())
+	synctest.Test(t, func(t *testing.T) {
+		catalogue, clock := pickerTestCatalogue(t)
+		valid := pickerTestSnapshot(3, 1, clock.port.Now(), "alpha")
+		require.True(t, catalogue.Apply(valid))
+		validLines := catalogue.Lines()
+		require.Equal(t, ports.BrokerRevision(1), catalogue.Revision())
 
-	invalid := pickerTestSnapshot(3, 2, clock.port.Now(), "beta")
-	invalid.Daemons[0].Availability = 0 // out of range: availability is never zero
-	require.False(t, catalogue.Apply(invalid), "an invalid snapshot is refused")
-	require.Equal(t, ports.BrokerRevision(1), catalogue.Revision(), "the previous projection is kept")
-	require.Equal(t, validLines, catalogue.Lines())
+		invalid := pickerTestSnapshot(3, 2, clock.port.Now(), "beta")
+		invalid.Daemons[0].Availability = 0 // out of range: availability is never zero
+		require.False(t, catalogue.Apply(invalid), "an invalid snapshot is refused")
+		require.Equal(t, ports.BrokerRevision(1), catalogue.Revision(), "the previous projection is kept")
+		require.Equal(t, validLines, catalogue.Lines())
+	})
 }
 
 // TestPickerCatalogueUnobservedDaemonProjects proves an unobserved daemon
@@ -1040,33 +1075,37 @@ func TestPickerCatalogueRejectsInvalidSnapshot(t *testing.T) {
 // section and host row, classified as stale/refreshing rather than as a version
 // mismatch.
 func TestPickerCatalogueUnobservedDaemonProjects(t *testing.T) {
-	catalogue, _ := pickerTestCatalogue(t)
-	unobserved := pickerTestUnobservedObservation(time.Unix(1000, 0), pickerTestSession("alpha", 1, catalogue_Up))
-	require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{unobserved}}))
+	synctest.Test(t, func(t *testing.T) {
+		catalogue, _ := pickerTestCatalogue(t)
+		unobserved := pickerTestUnobservedObservation(time.Unix(1000, 0), pickerTestSession("alpha", 1, catalogue_Up))
+		require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{unobserved}}))
 
-	lines := catalogue.Lines()
-	require.Equal(t, []string{"local"}, pickerSectionLabels(lines))
-	require.Equal(t, []string{"alpha"}, pickerSessionLabels(lines))
-	_, hasHost := pickerHostLine(lines)
-	require.False(t, hasHost, "the session rows already carry the host state")
-	session, ok := pickerLineByLabel(lines, "alpha")
-	require.True(t, ok)
-	require.True(t, session.Focusable)
-	require.Equal(t, protocol.PickerCanNavigate|protocol.PickerCanKill, session.Actions, "an unobserved daemon may still be attempted explicitly")
-	require.True(t, session.Dim)
-	require.Equal(t, domain.RemoteReasonRefreshing, session.StatusDetail, "an unobserved daemon refreshes, it is not a version mismatch")
+		lines := catalogue.Lines()
+		require.Equal(t, []string{"local"}, pickerSectionLabels(lines))
+		require.Equal(t, []string{"alpha"}, pickerSessionLabels(lines))
+		_, hasHost := pickerHostLine(lines)
+		require.False(t, hasHost, "the session rows already carry the host state")
+		session, ok := pickerLineByLabel(lines, "alpha")
+		require.True(t, ok)
+		require.True(t, session.Focusable)
+		require.Equal(t, protocol.PickerCanNavigate|protocol.PickerCanKill, session.Actions, "an unobserved daemon may still be attempted explicitly")
+		require.True(t, session.Dim)
+		require.Equal(t, domain.RemoteReasonRefreshing, session.StatusDetail, "an unobserved daemon refreshes, it is not a version mismatch")
+	})
 }
 
 // TestPickerCatalogueOriginLabelNeverShowsRawEndpoint proves display labels
 // never fall back to a raw endpoint.
 func TestPickerCatalogueOriginLabelNeverShowsRawEndpoint(t *testing.T) {
-	raw := pickerTestRemoteObservation("user@arch", 1, 1, time.Unix(1000, 0))
-	raw.DisplayOrigin = ""
-	require.Equal(t, pickerCatalogueOriginFallback, pickerOriginLabel(raw))
-	require.NotContains(t, pickerOriginLabel(raw), "user@arch")
+	synctest.Test(t, func(t *testing.T) {
+		raw := pickerTestRemoteObservation("user@arch", 1, 1, time.Unix(1000, 0))
+		raw.DisplayOrigin = ""
+		require.Equal(t, pickerCatalogueOriginFallback, pickerOriginLabel(raw))
+		require.NotContains(t, pickerOriginLabel(raw), "user@arch")
 
-	require.Equal(t, "local", pickerOriginLabel(pickerTestUnobservedObservation(time.Unix(1000, 0))))
-	require.Equal(t, "user@arch", pickerOriginLabel(pickerTestRemoteObservation("user@arch", 1, 1, time.Unix(1000, 0))))
+		require.Equal(t, "local", pickerOriginLabel(pickerTestUnobservedObservation(time.Unix(1000, 0))))
+		require.Equal(t, "user@arch", pickerOriginLabel(pickerTestRemoteObservation("user@arch", 1, 1, time.Unix(1000, 0))))
+	})
 }
 
 func TestPickerHostHealthNotice(t *testing.T) {
@@ -1099,11 +1138,13 @@ func TestPickerHostHealthNotice(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			n := pickerHostHealthNotice(tt.host, tt.event)
-			require.Equal(t, domain.NoticeRemoteObservation, n.Code)
-			require.Equal(t, "host-key", n.Scope, "failure and recovery share the host subject")
-			require.Equal(t, tt.severity, n.Severity)
-			require.Equal(t, tt.message, n.Message)
+			synctest.Test(t, func(t *testing.T) {
+				n := pickerHostHealthNotice(tt.host, tt.event)
+				require.Equal(t, domain.NoticeRemoteObservation, n.Code)
+				require.Equal(t, "host-key", n.Scope, "failure and recovery share the host subject")
+				require.Equal(t, tt.severity, n.Severity)
+				require.Equal(t, tt.message, n.Message)
+			})
 		})
 	}
 }
