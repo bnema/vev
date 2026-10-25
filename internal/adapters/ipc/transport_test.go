@@ -62,33 +62,37 @@ func TestTransportSendRecvBothDirections(t *testing.T) {
 }
 
 func TestTransportEOFOnClose(t *testing.T) {
-	c1, c2 := net.Pipe()
-	server := NewTransport(c2)
-	defer func() { _ = server.Close() }()
+	synctest.Test(t, func(t *testing.T) {
+		c1, c2 := net.Pipe()
+		server := NewTransport(c2)
+		defer func() { _ = server.Close() }()
 
-	if err := c1.Close(); err != nil {
-		t.Fatalf("c1.Close() error = %v", err)
-	}
+		if err := c1.Close(); err != nil {
+			t.Fatalf("c1.Close() error = %v", err)
+		}
 
-	_, err := server.Recv()
-	if !errors.Is(err, io.EOF) {
-		t.Fatalf("server.Recv() error = %v, want io.EOF", err)
-	}
+		_, err := server.Recv()
+		if !errors.Is(err, io.EOF) {
+			t.Fatalf("server.Recv() error = %v, want io.EOF", err)
+		}
+	})
 }
 
 func TestTransportCloseClosesUnderlyingConn(t *testing.T) {
-	c1, c2 := net.Pipe()
-	client := NewTransport(c1)
-	defer func() { _ = c2.Close() }()
+	synctest.Test(t, func(t *testing.T) {
+		c1, c2 := net.Pipe()
+		client := NewTransport(c1)
+		defer func() { _ = c2.Close() }()
 
-	if err := client.Close(); err != nil {
-		t.Fatalf("Close() error = %v", err)
-	}
+		if err := client.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
 
-	// Writing to the closed end should now fail.
-	if _, err := c1.Write([]byte("x")); err == nil {
-		t.Fatalf("expected write on closed conn to fail")
-	}
+		// Writing to the closed end should now fail.
+		if _, err := c1.Write([]byte("x")); err == nil {
+			t.Fatalf("expected write on closed conn to fail")
+		}
+	})
 }
 
 // real I/O: net.Pipe transport whose synchronous Send borrows streamframe's pooled result channel, which cannot be used inside a synctest bubble.
@@ -441,53 +445,55 @@ func fillAsyncEgress(t *testing.T, async wire.AsyncTransport, timeout time.Durat
 }
 
 func TestTransportAsyncEgressIsBoundedAndCloseInterruptsWorkers(t *testing.T) {
-	serverConn, clientConn := net.Pipe()
-	defer func() { _ = clientConn.Close() }()
+	synctest.Test(t, func(t *testing.T) {
+		serverConn, clientConn := net.Pipe()
+		defer func() { _ = clientConn.Close() }()
 
-	tr := NewTransport(serverConn)
-	defer closeTransport(t, tr)
-	async, ok := tr.(wire.AsyncTransport)
-	if !ok {
-		t.Fatal("IPC transport does not implement AsyncTransport")
-	}
+		tr := NewTransport(serverConn)
+		defer closeTransport(t, tr)
+		async, ok := tr.(wire.AsyncTransport)
+		if !ok {
+			t.Fatal("IPC transport does not implement AsyncTransport")
+		}
 
-	// The first write blocks in net.Pipe because the peer never drains it.
-	if err := async.SendAsync(wire.Envelope{Payload: []byte("blocked")}); err != nil {
-		t.Fatalf("SendAsync blocked frame: %v", err)
-	}
-	var backpressure error
-	for i := 0; i < 64; i++ {
-		err := async.SendAsync(wire.Envelope{Payload: []byte("queued")})
-		if errors.Is(err, ErrBackpressure) {
-			backpressure = err
-			break
+		// The first write blocks in net.Pipe because the peer never drains it.
+		if err := async.SendAsync(wire.Envelope{Payload: []byte("blocked")}); err != nil {
+			t.Fatalf("SendAsync blocked frame: %v", err)
 		}
-		if err != nil {
-			t.Fatalf("SendAsync unexpected error: %v", err)
+		var backpressure error
+		for i := 0; i < 64; i++ {
+			err := async.SendAsync(wire.Envelope{Payload: []byte("queued")})
+			if errors.Is(err, ErrBackpressure) {
+				backpressure = err
+				break
+			}
+			if err != nil {
+				t.Fatalf("SendAsync unexpected error: %v", err)
+			}
 		}
-	}
-	if !errors.Is(backpressure, ErrBackpressure) {
-		t.Fatalf("SendAsync never reported bounded backpressure, got %v", backpressure)
-	}
+		if !errors.Is(backpressure, ErrBackpressure) {
+			t.Fatalf("SendAsync never reported bounded backpressure, got %v", backpressure)
+		}
 
-	recvDone := make(chan error, 1)
-	go func() {
-		_, err := tr.Recv()
-		recvDone <- err
-	}()
-	closeTransport(t, tr)
-	select {
-	case err := <-recvDone:
-		if err == nil {
-			t.Fatal("Recv succeeded after Close")
+		recvDone := make(chan error, 1)
+		go func() {
+			_, err := tr.Recv()
+			recvDone <- err
+		}()
+		closeTransport(t, tr)
+		select {
+		case err := <-recvDone:
+			if err == nil {
+				t.Fatal("Recv succeeded after Close")
+			}
+		case <-time.After(time.Second):
+			t.Fatal("Close did not interrupt Recv")
 		}
-	case <-time.After(time.Second):
-		t.Fatal("Close did not interrupt Recv")
-	}
-	// Close waits for the sole writer to stop, so admission is closed for good.
-	if err := async.SendAsync(wire.Envelope{Payload: []byte("after close")}); !errors.Is(err, errClosed) {
-		t.Fatalf("SendAsync after Close = %v, want errClosed", err)
-	}
+		// Close waits for the sole writer to stop, so admission is closed for good.
+		if err := async.SendAsync(wire.Envelope{Payload: []byte("after close")}); !errors.Is(err, errClosed) {
+			t.Fatalf("SendAsync after Close = %v, want errClosed", err)
+		}
+	})
 }
 
 // TestTransportRecvBoundedEnforcesCallerLimit proves the IPC transport exposes
