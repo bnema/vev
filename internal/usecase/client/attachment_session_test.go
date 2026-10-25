@@ -289,10 +289,11 @@ func (a *sessionTestAttachments) attached() bool { return a.count.Load() > 0 }
 
 func (a *sessionTestAttachments) token(t *testing.T) AttachmentToken {
 	t.Helper()
+	synctest.Wait()
 	select {
 	case token := <-a.tokens:
 		return token
-	case <-time.After(5 * time.Second):
+	default:
 		t.Fatal("the worker never attached")
 		return AttachmentToken{}
 	}

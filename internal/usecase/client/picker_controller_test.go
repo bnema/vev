@@ -72,9 +72,10 @@ func (s *pickerInputSpy) ConsumeTerminalRead(data []byte) bool {
 
 func (s *pickerInputSpy) await(t *testing.T) {
 	t.Helper()
+	synctest.Wait()
 	select {
 	case <-s.done:
-	case <-time.After(5 * time.Second):
+	default:
 		t.Fatal("terminal input was not consumed")
 	}
 }

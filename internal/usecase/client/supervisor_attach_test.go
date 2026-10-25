@@ -503,9 +503,10 @@ func startAttachHarnessConfig(t *testing.T, picker pickerHost, configure func(*S
 
 	t.Cleanup(func() {
 		cancel()
+		synctest.Wait()
 		select {
 		case <-harness.runDone:
-		case <-time.After(5 * time.Second):
+		default:
 			t.Error("the supervisor did not stop")
 		}
 	})
@@ -515,9 +516,10 @@ func startAttachHarnessConfig(t *testing.T, picker pickerHost, configure func(*S
 // waitRun joins the supervisor and returns its terminal error.
 func (h *attachTestHarness) waitRun(t *testing.T) error {
 	t.Helper()
+	synctest.Wait()
 	select {
 	case <-h.runDone:
-	case <-time.After(5 * time.Second):
+	default:
 		t.Fatal("the supervisor did not stop")
 	}
 	h.runMu.Lock()

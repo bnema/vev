@@ -121,9 +121,10 @@ func assertHeldKeysDroppedAtPicker(t *testing.T, cancel bool) {
 		h.reader.push([]byte("\x03"))
 	} else {
 		fireResumeTimerAfter(t, h.clock, 1, func() {})
+		synctest.Wait()
 		select {
 		case <-opened:
-		case <-time.After(5 * time.Second):
+		default:
 			t.Fatal("resume did not open")
 		}
 		close(refuse)
