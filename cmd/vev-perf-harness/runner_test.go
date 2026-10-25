@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/mock"
+
 	"github.com/bnema/vev/pkg/safedir"
 )
 
@@ -216,9 +218,9 @@ func TestHarnessRejectsExistingRunDirectoryBeforeLaunchingRoles(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(stale, "preserve"), []byte("stale"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	launcher := &fakeLauncher{}
+	launcher := &launcherState{}
 	h := defaultHarness()
-	h.clock, h.launcher = newClockMock(t), launcher
+	h.clock, h.launcher = newClockMock(t), newLauncherMock(t, launcher)
 	_, err = h.runOne(options{out: out, duration: minimumDuration}, manifest{}, s, 1, raw)
 	if err == nil || !strings.Contains(err.Error(), "create isolated run directory") {
 		t.Fatalf("existing run directory error = %v", err)
@@ -274,9 +276,9 @@ func TestHarnessFakeRunnerRoutesClientToPeerAndCleansEveryRole(t *testing.T) {
 				t.Fatal(err)
 			}
 			closeTestFile(t, raw)
-			l := &fakeLauncher{}
+			l := &launcherState{}
 			h := defaultHarness()
-			h.clock, h.launcher = newClockMock(t), l
+			h.clock, h.launcher = newClockMock(t), newLauncherMock(t, l)
 			s := scenario{ID: "routed", Transport: tc.transport, Roles: []string{"daemon", "client", tc.peer}}
 			if _, err := h.runOne(options{out: dir, warmup: time.Second, duration: minimumDuration, repetitions: minimumRepetitions}, manifest{}, s, 1, raw); err != nil {
 				t.Fatal(err)
@@ -429,6 +431,7 @@ func (w *resizeOrderingWriter) Write(p []byte) (int, error) {
 	return w.Buffer.Write(p)
 }
 
+// resizeOrderingProcess also implements the anonymous Resize interface; no generated mock covers it.
 type resizeOrderingProcess struct {
 	order    *[]string
 	inputs   [][]byte
@@ -463,13 +466,15 @@ func (p *resizeOrderingProcess) Measure(input []byte, injected, flushed func() e
 
 func (*resizeOrderingProcess) Close() error { return nil }
 
-type resizeOrderingLauncher struct{ client *resizeOrderingProcess }
-
-func (l resizeOrderingLauncher) Launch(m processMapping, _ roleCommand) (launchedProcess, error) {
-	if m.Role == "client" {
-		return l.client, nil
-	}
-	return &fakeProcess{}, nil
+func resizeOrderingLauncher(t *testing.T, client *resizeOrderingProcess) *mocklauncher {
+	return newLauncherMock(t, &launcherState{}, func(l *mocklauncher) {
+		l.EXPECT().Launch(mock.Anything, mock.Anything).RunAndReturn(func(m processMapping, _ roleCommand) (launchedProcess, error) {
+			if m.Role == "client" {
+				return client, nil
+			}
+			return newProcessMock(t, &processState{}), nil
+		})
+	})
 }
 
 func TestResizeBoundaryPrecedesWorkloadWriteAndMarker(t *testing.T) {
@@ -477,7 +482,7 @@ func TestResizeBoundaryPrecedesWorkloadWriteAndMarker(t *testing.T) {
 	order := []string{}
 	client := &resizeOrderingProcess{order: &order}
 	h := defaultHarness()
-	h.clock, h.launcher = newClockMock(t), resizeOrderingLauncher{client: client}
+	h.clock, h.launcher = newClockMock(t), resizeOrderingLauncher(t, client)
 	raw := &resizeOrderingWriter{order: &order}
 	_, err := h.runOne(options{out: dir, warmup: time.Second, duration: minimumDuration}, manifest{}, scenario{ID: "resize", Workload: "resize_sweep", Roles: []string{"daemon", "client"}}, 1, raw)
 	if err != nil {
@@ -523,7 +528,7 @@ func TestHarnessRawRecordsContainEveryMarkWhileSamplesRemainFiltered(t *testing.
 		t.Fatal(err)
 	}
 	h := defaultHarness()
-	h.clock, h.launcher = newClockMock(t), &fakeLauncher{}
+	h.clock, h.launcher = newClockMock(t), newLauncherMock(t, &launcherState{})
 	result, err := h.runOne(options{out: dir, warmup: time.Second, duration: minimumDuration}, manifest{}, scenario{ID: "raw-complete", Roles: []string{"daemon", "client"}}, 1, raw)
 	if err != nil {
 		t.Fatal(err)
@@ -555,7 +560,7 @@ func TestHarnessPersistsFailedFlushDiagnostics(t *testing.T) {
 	}
 	failure := errors.New("flush failed")
 	h := defaultHarness()
-	h.clock, h.launcher = newClockMock(t), failedFlushLauncher{err: failure}
+	h.clock, h.launcher = newClockMock(t), failedFlushLauncher(t, failure)
 	_, err = h.runOne(options{out: dir, warmup: time.Second, duration: minimumDuration}, manifest{}, scenario{ID: "failed-flush", Roles: []string{"daemon", "client"}}, 1, raw)
 	if !errors.Is(err, failure) {
 		t.Fatalf("run error=%v, want failed flush", err)
@@ -581,7 +586,7 @@ func TestHarnessSchedulesMeasuredEventsAcrossFullInterval(t *testing.T) {
 	}
 	closeTestFile(t, raw)
 	h := defaultHarness()
-	h.clock, h.launcher = newClockMock(t), &fakeLauncher{}
+	h.clock, h.launcher = newClockMock(t), newLauncherMock(t, &launcherState{})
 	result, err := h.runOne(options{out: dir, warmup: time.Second, duration: minimumDuration}, manifest{}, scenario{ID: "schedule", Roles: []string{"daemon", "client"}}, 1, raw)
 	if err != nil {
 		t.Fatal(err)
@@ -610,12 +615,12 @@ func TestHarnessPreservesWorkloadAndCleanupErrors(t *testing.T) {
 	closeTestFile(t, raw)
 	primary := errors.New("primary workload failure")
 	cleanup := errors.New("daemon cleanup failure")
-	launcher := &fakeLauncher{
+	launcher := &launcherState{
 		measureErr: map[string]error{"client": primary},
 		closeErr:   map[string]error{"daemon": cleanup},
 	}
 	h := defaultHarness()
-	h.clock, h.launcher = newClockMock(t), launcher
+	h.clock, h.launcher = newClockMock(t), newLauncherMock(t, launcher)
 	_, err = h.runOne(options{out: dir, warmup: time.Second, duration: minimumDuration, repetitions: minimumRepetitions}, manifest{}, scenario{ID: "errors", Roles: []string{"daemon", "client"}}, 1, raw)
 	if !errors.Is(err, primary) || !errors.Is(err, cleanup) {
 		t.Fatalf("workload and cleanup errors were not both preserved: %v", err)
@@ -637,11 +642,11 @@ func TestHarnessCleansRunDirectoryOnProcessFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	closeTestFile(t, raw)
-	launcher := &fakeLauncher{}
+	launcher := &launcherState{}
 	h := defaultHarness()
 	h.clock = newClockMock(t)
 	// The client is the second role and fails after the daemon has started.
-	h.launcher = &failingLauncher{fakeLauncher: launcher}
+	h.launcher = failingLauncher(t, launcher)
 	o := options{vevBin: "ignored", out: dir, warmup: time.Second, duration: minimumDuration, repetitions: minimumRepetitions}
 	if _, err := h.runOne(o, manifest{}, scenario{ID: "cleanup", Roles: []string{"daemon", "client"}}, 1, raw); err == nil {
 		t.Fatal("failed process accepted")

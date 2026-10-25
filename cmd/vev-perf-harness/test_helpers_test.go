@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -25,100 +24,112 @@ func newClockMock(t *testing.T) *mockclock {
 	return c
 }
 
-type fakeProcess struct {
-	fail       bool
-	measureErr error
-	closeErr   error
-	warmups    [][]byte
-	measures   [][]byte
-	closed     bool
+// processState records observations without implementing launchedProcess.
+type processState struct {
+	fail                 bool
+	measureErr, closeErr error
+	warmups, measures    [][]byte
+	closed               bool
 }
 
-func (p *fakeProcess) Warmup(input []byte) error {
-	p.warmups = append(p.warmups, append([]byte(nil), input...))
-	return nil
-}
+type processOption func(*mocklaunchedProcess)
 
-func (p *fakeProcess) Measure(input []byte, injected, flush func() error) error {
-	p.measures = append(p.measures, append([]byte(nil), input...))
-	if p.measureErr != nil {
-		return p.measureErr
+func newProcessMock(t *testing.T, p *processState, opts ...processOption) *mocklaunchedProcess {
+	t.Helper()
+	m := newMocklaunchedProcess(t)
+	for _, opt := range opts {
+		opt(m)
 	}
-	if p.fail {
-		return errors.New("measure failure")
-	}
-	if err := injected(); err != nil {
-		return err
-	}
-	return flush()
+	m.EXPECT().Warmup(mock.Anything).RunAndReturn(func(input []byte) error {
+		p.warmups = append(p.warmups, append([]byte(nil), input...))
+		return nil
+	}).Maybe()
+	m.EXPECT().Measure(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(func(input []byte, injected, flush func() error) error {
+		p.measures = append(p.measures, append([]byte(nil), input...))
+		if p.measureErr != nil {
+			return p.measureErr
+		}
+		if p.fail {
+			return errors.New("measure failure")
+		}
+		if err := injected(); err != nil {
+			return err
+		}
+		return flush()
+	}).Maybe()
+	m.EXPECT().Close().RunAndReturn(func() error { p.closed = true; return p.closeErr }).Maybe()
+	return m
 }
 
-func (p *fakeProcess) Close() error { p.closed = true; return p.closeErr }
-
-type fakeLauncher struct {
-	mappings        []processMapping
-	args            [][]string
-	commands        []roleCommand
-	process         []*fakeProcess
-	measureErr      map[string]error
-	closeErr        map[string]error
-	manifestPresent bool
+type launcherState struct {
+	mappings             []processMapping
+	args                 [][]string
+	commands             []roleCommand
+	process              []*processState
+	measureErr, closeErr map[string]error
+	manifestPresent      bool
 }
 
-func (l *fakeLauncher) Launch(m processMapping, command roleCommand) (launchedProcess, error) {
+type launcherOption func(*mocklauncher)
+
+func newLauncherMock(t *testing.T, l *launcherState, opts ...launcherOption) *mocklauncher {
+	t.Helper()
+	m := newMocklauncher(t)
+	for _, opt := range opts {
+		opt(m)
+	}
+	m.EXPECT().Launch(mock.Anything, mock.Anything).RunAndReturn(func(mapping processMapping, command roleCommand) (launchedProcess, error) {
+		return launchRecordedProcess(t, l, mapping, command)
+	}).Maybe()
+	return m
+}
+
+func launchRecordedProcess(t *testing.T, l *launcherState, m processMapping, command roleCommand, opts ...processOption) (launchedProcess, error) {
 	l.mappings = append(l.mappings, m)
 	l.args = append(l.args, append([]string(nil), command.Args...))
 	l.commands = append(l.commands, command)
 	_, e := os.Stat(filepath.Join(filepath.Dir(m.TracePath), "manifest.json"))
 	l.manifestPresent = e == nil
-	p := &fakeProcess{measureErr: l.measureErr[m.Role], closeErr: l.closeErr[m.Role]}
+	p := &processState{measureErr: l.measureErr[m.Role], closeErr: l.closeErr[m.Role]}
 	l.process = append(l.process, p)
-	return p, nil
+	return newProcessMock(t, p, opts...), nil
 }
 
-type lateFlushProcess struct{ clock *mockclock }
-
-func (*lateFlushProcess) Warmup([]byte) error { return nil }
-
-func (p *lateFlushProcess) Measure(_ []byte, injected, flushed func() error) error {
-	if err := injected(); err != nil {
-		return err
-	}
-	p.clock.Sleep(minimumDuration)
-	return flushed()
+func insufficientEventLauncher(t *testing.T, clock *mockclock) *mocklauncher {
+	return newLauncherMock(t, &launcherState{}, func(l *mocklauncher) {
+		l.EXPECT().Launch(mock.Anything, mock.Anything).RunAndReturn(func(m processMapping, _ roleCommand) (launchedProcess, error) {
+			if m.Role != "client" {
+				return newProcessMock(t, &processState{}), nil
+			}
+			return newProcessMock(t, &processState{}, func(p *mocklaunchedProcess) {
+				p.EXPECT().Measure(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(func(_ []byte, injected, flushed func() error) error {
+					if err := injected(); err != nil {
+						return err
+					}
+					clock.Sleep(minimumDuration)
+					return flushed()
+				})
+			}), nil
+		})
+	})
 }
 
-func (*lateFlushProcess) Close() error { return nil }
-
-type insufficientEventLauncher struct{ clock *mockclock }
-
-func (l insufficientEventLauncher) Launch(m processMapping, _ roleCommand) (launchedProcess, error) {
-	if m.Role == "client" {
-		return &lateFlushProcess{clock: l.clock}, nil
-	}
-	return &fakeProcess{}, nil
-}
-
-type failedFlushProcess struct{ err error }
-
-func (*failedFlushProcess) Warmup([]byte) error { return nil }
-
-func (p *failedFlushProcess) Measure(_ []byte, injected, _ func() error) error {
-	if err := injected(); err != nil {
-		return err
-	}
-	return p.err
-}
-
-func (*failedFlushProcess) Close() error { return nil }
-
-type failedFlushLauncher struct{ err error }
-
-func (l failedFlushLauncher) Launch(m processMapping, _ roleCommand) (launchedProcess, error) {
-	if m.Role == "client" {
-		return &failedFlushProcess{err: l.err}, nil
-	}
-	return &fakeProcess{}, nil
+func failedFlushLauncher(t *testing.T, failure error) *mocklauncher {
+	return newLauncherMock(t, &launcherState{}, func(l *mocklauncher) {
+		l.EXPECT().Launch(mock.Anything, mock.Anything).RunAndReturn(func(m processMapping, _ roleCommand) (launchedProcess, error) {
+			if m.Role != "client" {
+				return newProcessMock(t, &processState{}), nil
+			}
+			return newProcessMock(t, &processState{}, func(p *mocklaunchedProcess) {
+				p.EXPECT().Measure(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(func(_ []byte, injected, _ func() error) error {
+					if err := injected(); err != nil {
+						return err
+					}
+					return failure
+				})
+			}), nil
+		})
+	})
 }
 
 func closeTestFile(t *testing.T, f *os.File) {
@@ -225,21 +236,16 @@ func (o *orderedOutput) Close() error {
 	return nil
 }
 
-type failingLauncher struct{ *fakeLauncher }
-
-func (l *failingLauncher) Launch(m processMapping, command roleCommand) (launchedProcess, error) {
-	p, err := l.fakeLauncher.Launch(m, command)
-	if err != nil {
-		return nil, err
-	}
-	if m.Role == "client" {
-		fake, ok := p.(*fakeProcess)
-		if !ok {
-			return nil, fmt.Errorf("fake launcher returned %T, want *fakeProcess", p)
-		}
-		fake.fail = true
-	}
-	return p, nil
+func failingLauncher(t *testing.T, state *launcherState) *mocklauncher {
+	return newLauncherMock(t, state, func(l *mocklauncher) {
+		l.EXPECT().Launch(mock.Anything, mock.Anything).RunAndReturn(func(m processMapping, command roleCommand) (launchedProcess, error) {
+			p, err := launchRecordedProcess(t, state, m, command)
+			if m.Role == "client" {
+				state.process[len(state.process)-1].fail = true
+			}
+			return p, err
+		})
+	})
 }
 
 func equalStrings(a, b []string) bool {
@@ -254,62 +260,52 @@ func equalStrings(a, b []string) bool {
 	return true
 }
 
-type traceLauncher struct{ fakeLauncher }
-
-func (l *traceLauncher) Launch(m processMapping, command roleCommand) (launchedProcess, error) {
-	p, err := l.fakeLauncher.Launch(m, command)
-	if err != nil {
-		return nil, err
-	}
-	f, err := os.OpenFile(m.TracePath, os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return nil, err
-	}
-	for i, pair := range spanPairs {
-		for n, kind := range []string{pair.start, pair.end} {
-			b, err := json.Marshal(traceRecord{ProcessID: m.ProcessID, Component: m.Role, Scenario: m.Scenario, Run: uint64(m.Run), Sequence: uint64(i + 1), RequestID: 1, Epoch: 1, Kind: kind, Tick: int64(i*20 + n*5), Valid: true})
+func traceLauncher(t *testing.T, state *launcherState) *mocklauncher {
+	return newLauncherMock(t, state, func(l *mocklauncher) {
+		l.EXPECT().Launch(mock.Anything, mock.Anything).RunAndReturn(func(m processMapping, command roleCommand) (launchedProcess, error) {
+			p, err := launchRecordedProcess(t, state, m, command)
 			if err != nil {
-				return nil, errors.Join(err, f.Close())
+				return nil, err
 			}
-			if _, err := f.Write(append(b, '\n')); err != nil {
-				return nil, errors.Join(err, f.Close())
+			f, err := os.OpenFile(m.TracePath, os.O_WRONLY|os.O_APPEND, 0o600)
+			if err != nil {
+				return nil, err
 			}
-		}
-	}
-	if err := f.Close(); err != nil {
-		return nil, err
-	}
-	return p, nil
+			for i, pair := range spanPairs {
+				for n, kind := range []string{pair.start, pair.end} {
+					b, err := json.Marshal(traceRecord{ProcessID: m.ProcessID, Component: m.Role, Scenario: m.Scenario, Run: uint64(m.Run), Sequence: uint64(i + 1), RequestID: 1, Epoch: 1, Kind: kind, Tick: int64(i*20 + n*5), Valid: true})
+					if err != nil {
+						return nil, errors.Join(err, f.Close())
+					}
+					if _, err := f.Write(append(b, '\n')); err != nil {
+						return nil, errors.Join(err, f.Close())
+					}
+				}
+			}
+			if err := f.Close(); err != nil {
+				return nil, err
+			}
+			return p, nil
+		})
+	})
 }
 
-type closeTraceProcess struct {
-	*fakeProcess
-	traceEnd func() error
-}
-
-func (p *closeTraceProcess) Close() error {
-	p.closed = true
-	return errors.Join(p.closeErr, p.traceEnd())
-}
-
-type closeTraceLauncher struct{ fakeLauncher }
-
-func (l *closeTraceLauncher) Launch(m processMapping, command roleCommand) (launchedProcess, error) {
-	p, err := l.fakeLauncher.Launch(m, command)
-	if err != nil {
-		return nil, err
-	}
-	start := traceRecord{ProcessID: m.ProcessID, Component: m.Role, Scenario: m.Scenario, Run: uint64(m.Run), Sequence: 1, RequestID: 1, Epoch: 1, Kind: "adapter_receive_start", Tick: 10, Valid: true}
-	if err := appendTraceRecord(m.TracePath, start); err != nil {
-		return nil, err
-	}
-	fake, ok := p.(*fakeProcess)
-	if !ok {
-		return nil, fmt.Errorf("fake launcher returned %T, want *fakeProcess", p)
-	}
-	return &closeTraceProcess{fakeProcess: fake, traceEnd: func() error {
-		return appendTraceRecord(m.TracePath, traceRecord{ProcessID: m.ProcessID, Component: m.Role, Scenario: m.Scenario, Run: uint64(m.Run), Sequence: 1, RequestID: 1, Epoch: 1, Kind: "adapter_receive_end", Tick: 20, Valid: true})
-	}}, nil
+func closeTraceLauncher(t *testing.T, state *launcherState) *mocklauncher {
+	return newLauncherMock(t, state, func(l *mocklauncher) {
+		l.EXPECT().Launch(mock.Anything, mock.Anything).RunAndReturn(func(m processMapping, command roleCommand) (launchedProcess, error) {
+			start := traceRecord{ProcessID: m.ProcessID, Component: m.Role, Scenario: m.Scenario, Run: uint64(m.Run), Sequence: 1, RequestID: 1, Epoch: 1, Kind: "adapter_receive_start", Tick: 10, Valid: true}
+			if err := appendTraceRecord(m.TracePath, start); err != nil {
+				return nil, err
+			}
+			return launchRecordedProcess(t, state, m, command, func(p *mocklaunchedProcess) {
+				recorded := state.process[len(state.process)-1]
+				p.EXPECT().Close().RunAndReturn(func() error {
+					recorded.closed = true
+					return errors.Join(recorded.closeErr, appendTraceRecord(m.TracePath, traceRecord{ProcessID: m.ProcessID, Component: m.Role, Scenario: m.Scenario, Run: uint64(m.Run), Sequence: 1, RequestID: 1, Epoch: 1, Kind: "adapter_receive_end", Tick: 20, Valid: true}))
+				})
+			})
+		})
+	})
 }
 
 func appendTraceRecord(path string, record traceRecord) error {

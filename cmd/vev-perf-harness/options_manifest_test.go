@@ -24,7 +24,7 @@ func TestHarnessScenarioSelectionKeepsCanonicalManifestValidation(t *testing.T) 
 	}
 	selected := m.Scenarios[0]
 	h := defaultHarness()
-	h.clock, h.launcher = newClockMock(t), &fakeLauncher{}
+	h.clock, h.launcher = newClockMock(t), newLauncherMock(t, &launcherState{})
 	out := filepath.Join(t.TempDir(), "out")
 	if err := run([]string{"--vev-bin", "ignored", "--manifest", manifestPath, "--out", out, "--scenario", selected.ID, "--warmup", "0s", "--duration", "30s", "--repetitions", "10"}, h); err != nil {
 		t.Fatal(err)
@@ -59,9 +59,9 @@ func TestHarnessScenarioSelectionRejectsIncompleteCanonicalManifest(t *testing.T
 	if err := os.WriteFile(manifestPath, []byte(mustJSON(m)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	launcher := &fakeLauncher{}
+	launcher := &launcherState{}
 	h := defaultHarness()
-	h.clock, h.launcher = newClockMock(t), launcher
+	h.clock, h.launcher = newClockMock(t), newLauncherMock(t, launcher)
 	out := filepath.Join(dir, "out")
 	err = run([]string{"--vev-bin", "ignored", "--manifest", manifestPath, "--out", out, "--scenario", selected.ID, "--warmup", "0s", "--duration", "30s", "--repetitions", "10"}, h)
 	if err == nil || !strings.Contains(err.Error(), "missing scenario or inapplicable reason") {
@@ -223,10 +223,10 @@ func TestHarnessCreatesExclusiveTraceManifestAndEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	closeTestFile(t, raw)
-	launcher := &fakeLauncher{}
+	launcher := &launcherState{}
 	h := defaultHarness()
 	h.clock = newClockMock(t)
-	h.launcher = launcher
+	h.launcher = newLauncherMock(t, launcher)
 	o := options{vevBin: "ignored", out: dir, warmup: time.Second, duration: minimumDuration, repetitions: minimumRepetitions}
 	r, err := h.runOne(o, manifest{}, scenario{ID: "4x4-local", Roles: []string{"daemon", "client"}}, 1, raw)
 	if err != nil {

@@ -118,7 +118,7 @@ func TestHarnessRunRejectsStraddlingEventsAsInsufficient(t *testing.T) {
 	})
 	clock := newClockMock(t)
 	h := defaultHarness()
-	h.clock, h.launcher = clock, insufficientEventLauncher{clock: clock}
+	h.clock, h.launcher = clock, insufficientEventLauncher(t, clock)
 	_, err = h.runOne(options{out: dir, warmup: time.Second, duration: minimumDuration}, manifest{}, scenario{ID: "late", Roles: []string{"daemon", "client"}}, 1, raw)
 	if err == nil || !strings.Contains(err.Error(), "insufficient in-interval event samples") {
 		t.Fatalf("straddling run error=%v, want insufficient in-interval sample rejection", err)
@@ -184,9 +184,9 @@ func TestHarnessClosesRolesBeforeMergingReceiveSpans(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	launcher := &closeTraceLauncher{}
+	launcher := &launcherState{}
 	h := defaultHarness()
-	h.clock, h.launcher = newClockMock(t), launcher
+	h.clock, h.launcher = newClockMock(t), closeTraceLauncher(t, launcher)
 	result, err := h.runOne(options{out: dir, warmup: time.Second, duration: minimumDuration, repetitions: minimumRepetitions}, manifest{}, scenario{ID: "receive-cleanup", Roles: []string{"daemon", "client"}}, 1, raw)
 	if err != nil {
 		t.Fatal(err)
@@ -222,10 +222,10 @@ func TestHarnessWritesRequiredEvidenceWithSufficientSpans(t *testing.T) {
 	if err := os.WriteFile(manifestPath, []byte(mustJSON(base)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	l := &traceLauncher{}
+	l := &launcherState{}
 	h := defaultHarness()
 	h.clock = newClockMock(t)
-	h.launcher = l
+	h.launcher = traceLauncher(t, l)
 	h.gitSHA = func() string { return "harness-sha" }
 	h.vevGitSHA = func(path string) string {
 		if !filepath.IsAbs(path) {
