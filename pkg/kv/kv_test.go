@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// real I/O: reads and writes real files in temp directories.
 func TestSyncCrashBoundaries(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -57,6 +58,7 @@ func TestSyncCrashBoundaries(t *testing.T) {
 	}
 }
 
+// real I/O: persists the store to a real file in a temp directory.
 func TestSyncIsAtomicAcrossKeys(t *testing.T) {
 	t.Parallel()
 	path := privateStorePath(t)
@@ -78,6 +80,7 @@ func TestSyncIsAtomicAcrossKeys(t *testing.T) {
 	require.True(t, hasNew)
 }
 
+// real I/O: reads and writes real files in temp directories.
 func TestOpenFailsClosedWithoutMutation(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -117,6 +120,7 @@ func TestOpenFailsClosedWithoutMutation(t *testing.T) {
 	}
 }
 
+// real I/O: persists the store to a real file in a temp directory.
 func TestCloseSyncsDirtyStore(t *testing.T) {
 	t.Parallel()
 	path := privateStorePath(t)
@@ -133,6 +137,7 @@ func TestCloseSyncsDirtyStore(t *testing.T) {
 	require.Equal(t, []byte("v"), got)
 }
 
+// real I/O: persists the store to a real file in a temp directory.
 func TestStoreCopiesValuesAndRangesInKeyOrder(t *testing.T) {
 	t.Parallel()
 	store, err := Open(privateStorePath(t))
@@ -157,6 +162,7 @@ func TestStoreCopiesValuesAndRangesInKeyOrder(t *testing.T) {
 	require.Equal(t, []string{"a", "b"}, keys)
 }
 
+// real I/O: persists the store to a real file in a temp directory.
 func TestStoreLockAndClosedErrors(t *testing.T) {
 	t.Parallel()
 	path := privateStorePath(t)
@@ -204,6 +210,7 @@ func TestDecodeRejectsDuplicateKeysAndTrailingData(t *testing.T) {
 	require.True(t, errors.Is(err, ErrCorrupt))
 }
 
+// real I/O: persists the store to a real file in a temp directory.
 func TestCloseWithoutSyncPreventsLaterCloseFromSyncing(t *testing.T) {
 	t.Parallel()
 	path := privateStorePath(t)
