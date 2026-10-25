@@ -1,0 +1,25 @@
+# zut d9588df redraw at 80x24: parent turn yielded, running and queued resident subagents listed below the input
+---
+▌ question 27
+▌
+
+  answer 27 with some words
+
+▌
+▌ question 28
+▌
+
+  answer 28 with some words
+
+▌
+▌ spawn two workers
+▌
+
+  Delegated both tasks; waiting for their completion updates.
+
+  [1] gpt-5.4  ctx0%/272k
+  ~/demo
+
+▌
+  ⠋ worker · running · activity 3s ago · 1m05s       ↑12k ↓3.4k $0.042 8.1%/272k
+  … reviewer · queued · activity 40s ago · 40s

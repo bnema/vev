@@ -1,0 +1,19 @@
+# zut d9588df redraw at 40x24: narrow pane truncates the resident subagent row
+---
+▌
+▌ question 28
+▌
+
+  answer 28 with some words
+
+▌
+▌ question 29
+▌
+
+  answer 29 with some words
+
+  [1] gpt-5.4  ctx0%/272k
+  ~/demo
+
+▌
+  ⠋ worker · running · activity 3s ...

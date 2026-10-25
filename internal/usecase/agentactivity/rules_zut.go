@@ -11,6 +11,11 @@ import "regexp"
 // which Window skips. Its working line sits directly above or below the
 // input, alone or as the status bar prefix, so it is always near the bottom
 // of the content.
+//
+// Resident subagents run in the background after the parent turn ends, so
+// the parent shows no working line while they work. zut lists each queued or
+// running child directly below the input instead
+// (modes/resident_subagent_indicator.go); a running child counts as working.
 var (
 	// The confirm dialog is a floating pane. Wide panes box it, so its
 	// header "╭──── confirm tool call ────╮" and body rows "│  1. yes …│"
@@ -29,11 +34,20 @@ var (
 	// The busy prefix while a tool call waits for confirmation. It stays
 	// visible when a tall pane centres the dialog above the window.
 	zutApprovalRe = regexp.MustCompile(`^\s*` + zutFrame + ` Waiting for approval: .* - ` + zutElapsed)
+	// A running resident child: "<spinner> <name> · <activity> · activity
+	// <age> ago · <age>", where activity is "running" or, while the child
+	// waits for its model, one frame of "Zzzz". Usage metadata may follow
+	// on the row. Queued children show "… <name> · queued" and do not
+	// match. Narrow panes cut the row and end it with "...".
+	zutSubagentRe = regexp.MustCompile(`^\s*` + zutFrame + ` .+? · (?:running|Zzzz|zZzz|zzZz|zzzZ) · (?:activity ` + zutAge + ` ago · ` + zutAge + `(?:\s|$)|.*\.\.\.$)`)
 )
 
 const (
 	zutFrame   = `[^\s\w•◦*+\-·>#|┃│✓✔✗✘⏺]{1,2}`
 	zutElapsed = `(?:\d+h)?(?:\d+m)?\d+s(?:\s|$)`
+	// A resident child age: "12s", "1m05s", "2h03m", "1d02h", or "-" when
+	// unknown.
+	zutAge = `(?:\d+s|\d+m\d{2}s|\d+h\d{2}m|\d+d\d{2}h|-)`
 )
 
 var zutTable = table{
@@ -46,6 +60,9 @@ var zutTable = table{
 		)},
 		{signal: blocked("zut.approval"), all: conds(line(8, zutApprovalRe))},
 		{signal: working("zut.busy"), all: conds(line(8, zutWorkingRe))},
+		// Each child takes one row plus wrapped usage rows, so a running
+		// child may sit above several queued ones.
+		{signal: working("zut.subagent"), all: conds(line(12, zutSubagentRe))},
 		{signal: idle("zut.quiet")},
 	},
 }

@@ -72,6 +72,9 @@ var classifyCases = map[Agent][]classifyCase{
 		{"working-status-prefix", working("zut.busy")},
 		{"working-fresh", working("zut.busy")},
 		{"working-narrow-split", working("zut.busy")},
+		{"working-subagent", working("zut.subagent")},
+		{"working-subagent-model", working("zut.subagent")},
+		{"working-subagent-narrow", working("zut.subagent")},
 		{"blocked-confirm", blocked("zut.confirm")},
 		{"blocked-confirm-drawer", blocked("zut.confirm")},
 		{"blocked-approval", blocked("zut.approval")},
@@ -82,6 +85,8 @@ var classifyCases = map[Agent][]classifyCase{
 		{"user-typed", idle("zut.quiet")},
 		{"quoted-confirm", idle("zut.quiet")},
 		{"chat-checkmarks", idle("zut.quiet")},
+		{"chat-subagent", idle("zut.quiet")},
+		{"subagent-queued", idle("zut.quiet")},
 	},
 }
 
@@ -297,6 +302,30 @@ var inlineCases = []struct {
 		agent: Zut,
 		lines: []string{"  ⣾ Compacting conversation history - 1h2m3s"},
 		want:  working("zut.busy"),
+	},
+	{
+		name:  "zut parent waiting on a subagent spawn",
+		agent: Zut,
+		lines: []string{"  ⠙ Running tool: subagent - 2m14s  [1] gpt-5.4  ctx0%/272k"},
+		want:  working("zut.busy"),
+	},
+	{
+		name:  "zut subagent waiting for its model",
+		agent: Zut,
+		lines: []string{"  ⣾ explorer · zzzZ · activity 1d02h ago · 1d02h"},
+		want:  working("zut.subagent"),
+	},
+	{
+		name:  "zut subagent overflow line alone",
+		agent: Zut,
+		lines: []string{"  … 4 more active subagents"},
+		want:  idle("zut.quiet"),
+	},
+	{
+		name:  "zut subagent typed into the input",
+		agent: Zut,
+		lines: []string{"▌ ⠋ worker · running · activity 3s ago · 5s"},
+		want:  idle("zut.quiet"),
 	},
 	{
 		name:  "none classifies nothing",

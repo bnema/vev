@@ -1,0 +1,22 @@
+# zut d9588df redraw at 80x24: resident subagent waiting for its model, usage wrapped below, status bar below the input
+---
+▌
+▌ question 28
+▌
+
+  answer 28 with some words
+
+▌
+▌ spawn a worker
+▌
+
+  Delegated the task; waiting for its completion update.
+
+▌
+  ⠙ explorer · zZzz · activity 12s ago · 2h03m
+    ↑1.2M ↓48k R900k/ C75.0% $1.204 (sub) 41.3%/272k
+  ⠚ engineer · running · activity - ago · -
+  … 3 more active subagents
+
+  [1] gpt-5.4  ctx0%/272k
+  ~/demo
