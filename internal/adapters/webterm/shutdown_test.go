@@ -48,10 +48,12 @@ func TestShutdownAdmissionRace(t *testing.T) {
 }
 
 func TestCanceledServerRejectsAdmission(t *testing.T) {
-	ctx, cancel := context.WithCancel(t.Context())
-	server, err := NewServer(ctx, Settings{}, strings.Repeat("e", 43), func(context.Context, *Terminal) error { return nil })
-	require.NoError(t, err)
-	cancel()
-	require.False(t, server.admit())
-	server.Wait()
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		server, err := NewServer(ctx, Settings{}, strings.Repeat("e", 43), func(context.Context, *Terminal) error { return nil })
+		require.NoError(t, err)
+		cancel()
+		require.False(t, server.admit())
+		server.Wait()
+	})
 }
