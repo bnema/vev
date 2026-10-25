@@ -5,6 +5,8 @@ import (
 	"regexp"
 	"strconv"
 	"testing"
+
+	"github.com/stretchr/testify/mock"
 )
 
 func TestRegistryCodesAndSlugsAreUniqueInOrder(t *testing.T) {
@@ -69,8 +71,8 @@ func TestMoveCommandsExposeExactRegistryContracts(t *testing.T) {
 			if !cmd.PaletteVisible || !cmd.Scriptable || cmd.Target != tt.target || cmd.Scope != CommandScopeCrossSession {
 				t.Fatalf("command visibility/target/scope = palette:%v scriptable:%v target:%v scope:%v", cmd.PaletteVisible, cmd.Scriptable, cmd.Target, cmd.Scope)
 			}
-			ctx := &controlSpy{}
-			if _, err := cmd.Control(ctx, tt.args, ControlOptions{}); err != nil {
+			ctx := &controlCalls{}
+			if _, err := cmd.Control(newControlCallsMock(t, ctx), tt.args, ControlOptions{}); err != nil {
 				t.Fatalf("Control(%v): %v", tt.args, err)
 			}
 			if ctx.call != tt.wantCall {
@@ -98,8 +100,8 @@ func TestMoveControlHandlersRequireExactArguments(t *testing.T) {
 			if !ok {
 				t.Fatalf("BySlug(%q) missing", tt.slug)
 			}
-			ctx := &controlSpy{}
-			if _, err := cmd.Control(ctx, tt.args, ControlOptions{}); !errors.Is(err, ErrInvalidArguments) {
+			ctx := &controlCalls{}
+			if _, err := cmd.Control(newControlCallsMock(t, ctx), tt.args, ControlOptions{}); !errors.Is(err, ErrInvalidArguments) {
 				t.Fatalf("Control(%v) error = %v, want ErrInvalidArguments", tt.args, err)
 			}
 			if ctx.call != "" {
@@ -197,8 +199,8 @@ func TestSessionRecoveryCommand(t *testing.T) {
 		{args: nil, wantErr: ErrInvalidArguments},
 	}
 	for _, test := range tests {
-		ctx := &controlSpy{recoveryOutput: "recovery output"}
-		got, err := cmd.Control(ctx, test.args, ControlOptions{})
+		ctx := &controlCalls{recoveryOutput: "recovery output"}
+		got, err := cmd.Control(newControlCallsMock(t, ctx), test.args, ControlOptions{})
 		wantOutput := ""
 		if test.wantCall != "" {
 			wantOutput = ctx.recoveryOutput
@@ -235,8 +237,8 @@ func TestRemoteCatalogCommand(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx := &controlSpy{catalogOutput: `{"protocol_version":19,"sessions":[]}` + "\n"}
-			got, err := cmd.Control(ctx, tt.args, tt.opts)
+			ctx := &controlCalls{catalogOutput: `{"protocol_version":19,"sessions":[]}` + "\n"}
+			got, err := cmd.Control(newControlCallsMock(t, ctx), tt.args, tt.opts)
 			wantOutput := ""
 			if tt.wantCall != "" {
 				wantOutput = ctx.catalogOutput
@@ -284,8 +286,8 @@ func TestControlHandlersValidateAndDelegate(t *testing.T) {
 			if !ok {
 				t.Fatalf("BySlug(%q) missing", tt.slug)
 			}
-			ctx := &controlSpy{}
-			got, err := cmd.Control(ctx, tt.args, tt.opts)
+			ctx := &controlCalls{}
+			got, err := cmd.Control(newControlCallsMock(t, ctx), tt.args, tt.opts)
 			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("Control() error = %v, want %v", err, tt.wantErr)
 			}
@@ -296,68 +298,13 @@ func TestControlHandlersValidateAndDelegate(t *testing.T) {
 	}
 }
 
-type controlSpy struct {
+type controlCalls struct {
 	call           string
 	recoveryOutput string
 	catalogOutput  string
 }
 
-func (s *controlSpy) record(call string) error          { s.call = call; return nil }
-func (s *controlSpy) CreateTab() error                  { return s.record("new-tab") }
-func (s *controlSpy) CreateSessionNamed(v string) error { return s.record("new-session:" + v) }
-func (s *controlSpy) CloseTab() error                   { return s.record("close-tab") }
-func (s *controlSpy) ClosePane() error                  { return s.record("close-pane") }
-func (s *controlSpy) MovePane(session, tab string) error {
-	return s.record("move-pane:" + session + ":" + tab)
-}
-func (s *controlSpy) MoveTab(session string) error   { return s.record("move-tab:" + session) }
-func (s *controlSpy) SplitRight() error              { return s.record("split-right") }
-func (s *controlSpy) SplitLeft() error               { return s.record("split-left") }
-func (s *controlSpy) SplitUp() error                 { return s.record("split-up") }
-func (s *controlSpy) SplitDown() error               { return s.record("split-down") }
-func (s *controlSpy) ConsumeOrExpelPaneLeft() error  { return s.record("consume-or-expel-pane-left") }
-func (s *controlSpy) ConsumeOrExpelPaneRight() error { return s.record("consume-or-expel-pane-right") }
-func (s *controlSpy) StackPane() error               { return s.record("stack-pane") }
-func (s *controlSpy) ToggleStack() error             { return s.record("toggle-stack") }
-func (s *controlSpy) GrowPaneWidth() error           { return s.record("grow-pane-width") }
-func (s *controlSpy) ShrinkPaneWidth() error         { return s.record("shrink-pane-width") }
-func (s *controlSpy) GrowPaneHeight() error          { return s.record("grow-pane-height") }
-func (s *controlSpy) ShrinkPaneHeight() error        { return s.record("shrink-pane-height") }
-func (s *controlSpy) EqualizePanes() error           { return s.record("equalize-panes") }
-func (s *controlSpy) FocusPaneLeft() error           { return s.record("focus-pane-left") }
-func (s *controlSpy) FocusPaneRight() error          { return s.record("focus-pane-right") }
-func (s *controlSpy) FocusPaneUp() error             { return s.record("focus-pane-up") }
-func (s *controlSpy) FocusPaneDown() error           { return s.record("focus-pane-down") }
-func (s *controlSpy) NextTab() error                 { return s.record("next-tab") }
-func (s *controlSpy) PrevTab() error                 { return s.record("previous-tab") }
-func (s *controlSpy) RenameSessionTo(v string) error { return s.record("rename-session:" + v) }
-func (s *controlSpy) RenameTabTo(v string) error     { return s.record("rename-tab:" + v) }
-func (s *controlSpy) Toast(level, message string) error {
-	return s.record("toast:" + level + ":" + message)
-}
-func (s *controlSpy) SessionRecovery(action string) (string, error) {
-	return s.recoveryOutput, s.record("session-recovery:" + action)
-}
-func (s *controlSpy) ListSessions(json bool) (string, error) {
-	_ = s.record("list-sessions:" + strconv.FormatBool(json))
-	return "sessions", nil
-}
-func (s *controlSpy) ListTabs(json bool) (string, error) {
-	_ = s.record("list-tabs:" + strconv.FormatBool(json))
-	return "tabs", nil
-}
-func (s *controlSpy) ListPanes(json bool) (string, error) {
-	_ = s.record("list-panes:" + strconv.FormatBool(json))
-	return "panes", nil
-}
-func (s *controlSpy) SessionEnvironment(json bool) (string, error) {
-	_ = s.record("env:" + strconv.FormatBool(json))
-	return "env", nil
-}
-func (s *controlSpy) RemoteCatalog(json bool) (string, error) {
-	_ = s.record("remote-catalog:" + strconv.FormatBool(json))
-	return s.catalogOutput, nil
-}
+func (s *controlCalls) record(call string) error { s.call = call; return nil }
 
 func TestRegistryIncludesFloatingPaneToggle(t *testing.T) {
 	cmd, ok := ByCode("TFP")
@@ -467,4 +414,65 @@ func TestCommandRunCallsMatchingContextMethod(t *testing.T) {
 			}
 		})
 	}
+}
+
+func newControlCallsMock(t *testing.T, s *controlCalls) *MockControlContext {
+	t.Helper()
+	m := NewMockControlContext(t)
+	m.EXPECT().CreateTab().RunAndReturn(func() error { return s.record("new-tab") }).Maybe()
+	m.EXPECT().CreateSessionNamed(mock.Anything).RunAndReturn(func(v string) error { return s.record("new-session:" + v) }).Maybe()
+	m.EXPECT().CloseTab().RunAndReturn(func() error { return s.record("close-tab") }).Maybe()
+	m.EXPECT().ClosePane().RunAndReturn(func() error { return s.record("close-pane") }).Maybe()
+	m.EXPECT().MovePane(mock.Anything, mock.Anything).RunAndReturn(func(session, tab string) error {
+		return s.record("move-pane:" + session + ":" + tab)
+	}).Maybe()
+	m.EXPECT().MoveTab(mock.Anything).RunAndReturn(func(session string) error { return s.record("move-tab:" + session) }).Maybe()
+	m.EXPECT().SplitRight().RunAndReturn(func() error { return s.record("split-right") }).Maybe()
+	m.EXPECT().SplitLeft().RunAndReturn(func() error { return s.record("split-left") }).Maybe()
+	m.EXPECT().SplitUp().RunAndReturn(func() error { return s.record("split-up") }).Maybe()
+	m.EXPECT().SplitDown().RunAndReturn(func() error { return s.record("split-down") }).Maybe()
+	m.EXPECT().ConsumeOrExpelPaneLeft().RunAndReturn(func() error { return s.record("consume-or-expel-pane-left") }).Maybe()
+	m.EXPECT().ConsumeOrExpelPaneRight().RunAndReturn(func() error { return s.record("consume-or-expel-pane-right") }).Maybe()
+	m.EXPECT().StackPane().RunAndReturn(func() error { return s.record("stack-pane") }).Maybe()
+	m.EXPECT().ToggleStack().RunAndReturn(func() error { return s.record("toggle-stack") }).Maybe()
+	m.EXPECT().GrowPaneWidth().RunAndReturn(func() error { return s.record("grow-pane-width") }).Maybe()
+	m.EXPECT().ShrinkPaneWidth().RunAndReturn(func() error { return s.record("shrink-pane-width") }).Maybe()
+	m.EXPECT().GrowPaneHeight().RunAndReturn(func() error { return s.record("grow-pane-height") }).Maybe()
+	m.EXPECT().ShrinkPaneHeight().RunAndReturn(func() error { return s.record("shrink-pane-height") }).Maybe()
+	m.EXPECT().EqualizePanes().RunAndReturn(func() error { return s.record("equalize-panes") }).Maybe()
+	m.EXPECT().FocusPaneLeft().RunAndReturn(func() error { return s.record("focus-pane-left") }).Maybe()
+	m.EXPECT().FocusPaneRight().RunAndReturn(func() error { return s.record("focus-pane-right") }).Maybe()
+	m.EXPECT().FocusPaneUp().RunAndReturn(func() error { return s.record("focus-pane-up") }).Maybe()
+	m.EXPECT().FocusPaneDown().RunAndReturn(func() error { return s.record("focus-pane-down") }).Maybe()
+	m.EXPECT().NextTab().RunAndReturn(func() error { return s.record("next-tab") }).Maybe()
+	m.EXPECT().PrevTab().RunAndReturn(func() error { return s.record("previous-tab") }).Maybe()
+	m.EXPECT().RenameSessionTo(mock.Anything).RunAndReturn(func(v string) error { return s.record("rename-session:" + v) }).Maybe()
+	m.EXPECT().RenameTabTo(mock.Anything).RunAndReturn(func(v string) error { return s.record("rename-tab:" + v) }).Maybe()
+	m.EXPECT().Toast(mock.Anything, mock.Anything).RunAndReturn(func(level, message string) error {
+		return s.record("toast:" + level + ":" + message)
+	}).Maybe()
+	m.EXPECT().SessionRecovery(mock.Anything).RunAndReturn(func(action string) (string, error) {
+		return s.recoveryOutput, s.record("session-recovery:" + action)
+	}).Maybe()
+	m.EXPECT().ListSessions(mock.Anything).RunAndReturn(func(json bool) (string, error) {
+		_ = s.record("list-sessions:" + strconv.FormatBool(json))
+		return "sessions", nil
+	}).Maybe()
+	m.EXPECT().ListTabs(mock.Anything).RunAndReturn(func(json bool) (string, error) {
+		_ = s.record("list-tabs:" + strconv.FormatBool(json))
+		return "tabs", nil
+	}).Maybe()
+	m.EXPECT().ListPanes(mock.Anything).RunAndReturn(func(json bool) (string, error) {
+		_ = s.record("list-panes:" + strconv.FormatBool(json))
+		return "panes", nil
+	}).Maybe()
+	m.EXPECT().SessionEnvironment(mock.Anything).RunAndReturn(func(json bool) (string, error) {
+		_ = s.record("env:" + strconv.FormatBool(json))
+		return "env", nil
+	}).Maybe()
+	m.EXPECT().RemoteCatalog(mock.Anything).RunAndReturn(func(json bool) (string, error) {
+		_ = s.record("remote-catalog:" + strconv.FormatBool(json))
+		return s.catalogOutput, nil
+	}).Maybe()
+	return m
 }
