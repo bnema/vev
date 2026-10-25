@@ -888,7 +888,7 @@ func (s *mockStoreState) record(t *testing.T, name string) persist.Record {
 	t.Helper()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	records, err := persist.New(newStaticStore(s.data)).LoadAll()
+	records, err := persist.New(newStaticStore(t, s.data)).LoadAll()
 	require.NoError(t, err)
 	for _, r := range records {
 		if r.Name == name {
@@ -899,30 +899,34 @@ func (s *mockStoreState) record(t *testing.T, name string) persist.Record {
 	return persist.Record{}
 }
 
-type newStaticStore map[string][]byte
-
-func (s newStaticStore) Get(key []byte) ([]byte, bool) {
-	v, ok := s[string(key)]
-	return append([]byte(nil), v...), ok
-}
-func (s newStaticStore) Set(key, value []byte) error {
-	s[string(key)] = append([]byte(nil), value...)
-	return nil
-}
-func (s newStaticStore) Delete(key []byte) error {
-	delete(s, string(key))
-	return nil
-}
-func (s newStaticStore) Range(fn func(k, v []byte) bool) {
-	for k, v := range s {
-		if !fn([]byte(k), append([]byte(nil), v...)) {
-			return
+// newStaticStore serves data read-write through a generated store mock.
+func newStaticStore(t testing.TB, data map[string][]byte) *portsmocks.MockStore {
+	t.Helper()
+	store := portsmocks.NewMockStore(t)
+	store.EXPECT().Get(mock.Anything).RunAndReturn(func(key []byte) ([]byte, bool) {
+		v, ok := data[string(key)]
+		return append([]byte(nil), v...), ok
+	}).Maybe()
+	store.EXPECT().Set(mock.Anything, mock.Anything).RunAndReturn(func(key, value []byte) error {
+		data[string(key)] = append([]byte(nil), value...)
+		return nil
+	}).Maybe()
+	store.EXPECT().Delete(mock.Anything).RunAndReturn(func(key []byte) error {
+		delete(data, string(key))
+		return nil
+	}).Maybe()
+	store.EXPECT().Range(mock.Anything).RunAndReturn(func(fn func(k, v []byte) bool) {
+		for k, v := range data {
+			if !fn([]byte(k), append([]byte(nil), v...)) {
+				return
+			}
 		}
-	}
+	}).Maybe()
+	store.EXPECT().Sync().Return(nil).Maybe()
+	store.EXPECT().CloseWithoutSync().Return(nil).Maybe()
+	store.EXPECT().Close().Return(nil).Maybe()
+	return store
 }
-func (s newStaticStore) Sync() error             { return nil }
-func (s newStaticStore) CloseWithoutSync() error { return nil }
-func (s newStaticStore) Close() error            { return nil }
 
 func TestNamedSessionCreationIsAllowedWithNilStore(t *testing.T) {
 	pty, release := newBlockingPTY(t)
@@ -1224,7 +1228,7 @@ func TestEphemeralPromotionAssignsAndPersistsLifecycleIdentity(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
 	store, state := newMockStore(t)
-	clock := &lifecycleClock{t: t, nows: []time.Time{time.Unix(0, 100)}}
+	clock := newLifecycleClock(t, time.Unix(0, 100))
 	d := newTestDaemon(t, newFactory(t, p), clock)
 	WithStore(t, store)(d)
 
@@ -1250,7 +1254,7 @@ func TestEphemeralPromotionLifecyclePreventsStaleSameNamePaletteTarget(t *testin
 
 	d, from, ac, _ := newManualSessionWithPTYs(t, fromPTY)
 	store, _ := newMockStore(t)
-	clock := &lifecycleClock{t: t, nows: []time.Time{time.Unix(0, 100), time.Unix(0, 100)}}
+	clock := newLifecycleClock(t, time.Unix(0, 100), time.Unix(0, 100))
 	d.clock = clock
 	d.ptys = newFactorySeq(t, firstPTY, secondPTY)
 	WithStore(t, store)(d)
@@ -1305,7 +1309,7 @@ func TestEphemeralPromotionLifecycleFailuresLeaveStateRollbackSafe(t *testing.T)
 			return errors.New("disk full")
 		}).Once()
 		store.EXPECT().Delete([]byte("named")).Return(nil).Once()
-		clock := &lifecycleClock{t: t, nows: []time.Time{time.Unix(0, 100), time.Unix(0, 100)}}
+		clock := newLifecycleClock(t, time.Unix(0, 100), time.Unix(0, 100))
 		d := newTestDaemon(t, newFactory(t, p), clock)
 		WithStore(t, store)(d)
 
@@ -1318,7 +1322,7 @@ func TestEphemeralPromotionLifecycleFailuresLeaveStateRollbackSafe(t *testing.T)
 		require.True(t, sess.ephemeral)
 		require.Zero(t, sess.createdAt)
 		require.Equal(t, int64(100), d.lastAllocatedCreatedAt, "a failed durable write may be ambiguous, so its lifecycle identity remains reserved")
-		records, err := persist.New(newStaticStore(attempted)).LoadAll()
+		records, err := persist.New(newStaticStore(t, attempted)).LoadAll()
 		require.NoError(t, err)
 		require.Len(t, records, 1)
 		require.Equal(t, int64(100), records[0].CreatedAt, "a promotion must never attempt to persist a zero lifecycle identity")
@@ -1828,19 +1832,23 @@ func TestShellFromEnvironmentFallsBackOnlyWhenAbsentOrEmpty(t *testing.T) {
 	}
 }
 
-type lifecycleClock struct {
-	t testing.TB
-
-	nows []time.Time
-	next int
+// newLifecycleClock returns a clock whose successive Now calls report nows, then
+// repeat the last value; timers never fire.
+func newLifecycleClock(t testing.TB, nows ...time.Time) *portsmocks.MockClock {
+	t.Helper()
+	var mu sync.Mutex
+	next := 0
+	clock := portsmocks.NewMockClock(t)
+	clock.EXPECT().Now().RunAndReturn(func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		i := min(next, len(nows)-1)
+		next++
+		return nows[i]
+	}).Maybe()
+	clock.EXPECT().NewTimer(mock.Anything).Return(newStubTimer(t)).Maybe()
+	return clock
 }
-
-func (c *lifecycleClock) Now() time.Time {
-	i := min(c.next, len(c.nows)-1)
-	c.next++
-	return c.nows[i]
-}
-func (c *lifecycleClock) NewTimer(time.Duration) ports.Timer { return newStubTimer(c.t) }
 
 func TestNamedSessionLifecycleTimestampsAreMonotonicAcrossClockRegression(t *testing.T) {
 	ptys := make([]ports.PTY, 3)
@@ -1851,7 +1859,7 @@ func TestNamedSessionLifecycleTimestampsAreMonotonicAcrossClockRegression(t *tes
 		releases = append(releases, release)
 	}
 	defer releaseAll(releases)
-	clock := &lifecycleClock{t: t, nows: []time.Time{time.Unix(0, 100), time.Unix(0, 100), time.Unix(0, 50)}}
+	clock := newLifecycleClock(t, time.Unix(0, 100), time.Unix(0, 100), time.Unix(0, 50))
 	d := newTestDaemon(t, newFactorySeq(t, ptys...), clock)
 	sz := domain.Size{Cols: 80, Rows: 24}
 
@@ -1925,7 +1933,7 @@ func TestNamedSessionLifecycleTimestampStartsAfterPersistedHighWaterMark(t *test
 
 	p, release := newBlockingPTY(t)
 	defer release()
-	clock := &lifecycleClock{t: t, nows: []time.Time{time.Unix(0, 100)}}
+	clock := newLifecycleClock(t, time.Unix(0, 100))
 	// Constructing with persistence must establish the lifecycle high-water mark.
 	d := New(newFactory(t, p), clock, slog.New(slog.NewTextHandler(io.Discard, nil)), WithStore(t, store))
 	d.serveCtx, d.serveCancel = context.WithCancel(context.Background())
