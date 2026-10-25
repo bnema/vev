@@ -19,6 +19,7 @@ import (
 	"github.com/bnema/vev/pkg/safedir"
 )
 
+// real I/O: exercises OS process inspection, subprocesses or file-backed terminal I/O.
 func TestHarnessCanonicalLocalRolesAreIsolatedAcrossRepetitions(t *testing.T) {
 	if testing.Short() {
 		t.Skip("public CLI repetition lifecycle")
@@ -115,6 +116,7 @@ func TestHarnessCanonicalLocalRolesAreIsolatedAcrossRepetitions(t *testing.T) {
 	}
 }
 
+// real I/O: exercises OS process inspection, subprocesses or file-backed terminal I/O.
 func TestHarnessResolvesCanonicalRelativePathsBeforeRoleCWDChanges(t *testing.T) {
 	if testing.Short() {
 		t.Skip("public CLI relative-path lifecycle")

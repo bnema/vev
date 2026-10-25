@@ -169,6 +169,7 @@ func readHarnessMarks(t *testing.T, path string) []harnessMark {
 	return marks
 }
 
+// fakePTY implements only stdlib io.ReadWriteCloser, not ports.PTY.
 type fakePTY struct{ writes [][]byte }
 
 func (p *fakePTY) Read([]byte) (int, error) { return 0, os.ErrClosed }

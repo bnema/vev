@@ -33,6 +33,7 @@ type fakeFDPTY struct {
 
 func (p *fakeFDPTY) Fd() uintptr { return p.fd }
 
+// real I/O: exercises OS process inspection, subprocesses or file-backed terminal I/O.
 func TestCLILauncherSetsCanonicalClientGeometryBeforeStart(t *testing.T) {
 	original := setPTYWinsize
 	t.Cleanup(func() { setPTYWinsize = original })
@@ -177,6 +178,7 @@ func TestCLIProcessCloseDrainsQueuedTerminalOutputBeforeClientExit(t *testing.T)
 	})
 }
 
+// real I/O: exercises OS process inspection, subprocesses or file-backed terminal I/O.
 func TestCLIProcessCloseKeepsTerminalDrainActiveUntilClientExit(t *testing.T) {
 	pty, err := os.CreateTemp(t.TempDir(), "pty")
 	if err != nil {
@@ -345,6 +347,7 @@ func TestCLIProcessCloseEscalationOutcome(t *testing.T) {
 	}
 }
 
+// real I/O: exercises OS process inspection, subprocesses or file-backed terminal I/O.
 func TestCLIProcessWaitReadyRunsJSONProbe(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -376,6 +379,7 @@ func TestCLIProcessWaitReadyRunsJSONProbe(t *testing.T) {
 	}
 }
 
+// real I/O: exercises OS process inspection, subprocesses or file-backed terminal I/O.
 func TestCLILauncherIsolatesRoleXDGEnvironmentAcrossRepetitions(t *testing.T) {
 	captureDir := t.TempDir()
 	t.Setenv("CAPTURE_DIR", captureDir)
@@ -483,6 +487,7 @@ func TestCLIProcessCloseUsesPublicDaemonShutdown(t *testing.T) {
 	})
 }
 
+// real I/O: exercises OS process inspection, subprocesses or file-backed terminal I/O.
 func TestHarnessCanonicalLocalSmokeRealRoles(t *testing.T) {
 	if testing.Short() {
 		t.Skip("public CLI smoke")
