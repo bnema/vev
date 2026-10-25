@@ -46,8 +46,7 @@ func TestSessionCorePreservesLocalIdentityAndPromotedMutex(t *testing.T) {
 	sess.mu.Unlock()
 }
 
-// Not a synctest bubble: a goroutine blocked on sync.Mutex is not durably
-// blocked, so the bubble clock could never settle the negative check below.
+//testpolicy:realtime a goroutine blocked on sync.Mutex is not durably blocked, so no bubble can settle the negative check below
 func TestSessionSnapshotViewUsesPromotedMutexForLocalTabAndRoleState(t *testing.T) {
 	sess := &session{
 		sessionCore: sessionCore{id: domain.SessionID("local"), name: "work"},
@@ -182,6 +181,7 @@ func requireQueuedFrame(t *testing.T, ch <-chan wire.Envelope, want string) wire
 	}
 }
 
+//testpolicy:realtime mutex-blocked goroutines are invisible to synctest
 // receiveBounded is for tests that cannot run in a synctest bubble (goroutines
 // blocked on sync.Mutex never become durably blocked): one bounded failure
 // guard, no polling.

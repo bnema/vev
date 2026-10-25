@@ -12,58 +12,38 @@ import (
 	"github.com/bnema/vev/internal/protocol"
 )
 
+// The await helpers below run inside synctest bubbles: after quiescence the
+// asserted state must already hold.
 func awaitMoveTeardownState(t *testing.T, sess *session, reservations, waiters uint) {
 	t.Helper()
-	for {
-		sess.teardownMu.Lock()
-		gotReservations := sess.moveReservations
-		gotWaiters := sess.teardownWaiters
-		changed := sess.teardownChangeLocked()
-		sess.teardownMu.Unlock()
-		if gotReservations == reservations && gotWaiters == waiters {
-			return
-		}
-		select {
-		case <-changed:
-		case <-time.After(testWaitTimeout):
-			t.Fatalf("move reservations/waiters = %d/%d, want %d/%d", gotReservations, gotWaiters, reservations, waiters)
-		}
+	synctest.Wait()
+	sess.teardownMu.Lock()
+	gotReservations, gotWaiters := sess.moveReservations, sess.teardownWaiters
+	sess.teardownMu.Unlock()
+	if gotReservations != reservations || gotWaiters != waiters {
+		t.Fatalf("move reservations/waiters = %d/%d, want %d/%d", gotReservations, gotWaiters, reservations, waiters)
 	}
 }
 
 func awaitDaemonMoveActive(t *testing.T, d *Daemon, want uint) {
 	t.Helper()
-	for {
-		d.moveLifecycleMu.Lock()
-		active := d.moveLifecycleActive
-		changed := d.moveLifecycleChangeLocked()
-		d.moveLifecycleMu.Unlock()
-		if active == want {
-			return
-		}
-		select {
-		case <-changed:
-		case <-time.After(testWaitTimeout):
-			t.Fatalf("active move lifecycles = %d, want %d", active, want)
-		}
+	synctest.Wait()
+	d.moveLifecycleMu.Lock()
+	active := d.moveLifecycleActive
+	d.moveLifecycleMu.Unlock()
+	if active != want {
+		t.Fatalf("active move lifecycles = %d, want %d", active, want)
 	}
 }
 
 func awaitDaemonMoveClosing(t *testing.T, d *Daemon) {
 	t.Helper()
-	for {
-		d.moveLifecycleMu.Lock()
-		closing := d.moveLifecycleClosing
-		changed := d.moveLifecycleChangeLocked()
-		d.moveLifecycleMu.Unlock()
-		if closing {
-			return
-		}
-		select {
-		case <-changed:
-		case <-time.After(testWaitTimeout):
-			t.Fatal("daemon move lifecycle gate did not begin closing")
-		}
+	synctest.Wait()
+	d.moveLifecycleMu.Lock()
+	closing := d.moveLifecycleClosing
+	d.moveLifecycleMu.Unlock()
+	if !closing {
+		t.Fatal("daemon move lifecycle gate did not begin closing")
 	}
 }
 
@@ -91,7 +71,7 @@ func TestMoveLifecycleReservationMakesTeardownWait(t *testing.T) {
 	})
 }
 
-// Not a synctest bubble: goroutines blocked on sync.Mutex are not durably blocked.
+//testpolicy:realtime goroutines blocked on sync.Mutex are not durably blocked, so no bubble
 func TestMoveLifecycleReservationsUseStableSessionOrder(t *testing.T) {
 	d := newTestDaemon(t, nil, newStubClock(t))
 	first := &session{sessionCore: sessionCore{id: "a"}}
@@ -114,7 +94,20 @@ func TestMoveLifecycleReservationsUseStableSessionOrder(t *testing.T) {
 			errs <- err
 		}()
 	}
-	awaitDaemonMoveActive(t, d, 2)
+	for {
+		d.moveLifecycleMu.Lock()
+		active := d.moveLifecycleActive
+		changed := d.moveLifecycleChangeLocked()
+		d.moveLifecycleMu.Unlock()
+		if active == 2 {
+			break
+		}
+		select {
+		case <-changed:
+		case <-time.After(testWaitTimeout):
+			t.Fatalf("active move lifecycles = %d, want 2", active)
+		}
+	}
 	for range 2 {
 		receiveBounded(t, beforeTeardownLocks, "move did not reach ordered teardown-lock admission")
 	}
