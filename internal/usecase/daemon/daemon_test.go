@@ -168,26 +168,17 @@ func newQuietPTY(t testing.TB) *portsmocks.MockPTY {
 	return p
 }
 
-// blockingOpenFactory keeps activation tests deterministically in Warming
-// without starting pane reader/scheduler goroutines.
-type blockingOpenFactory struct {
-	release chan struct{}
-	once    sync.Once
-}
-
-func newBlockingOpenFactory(t *testing.T, d *Daemon) *blockingOpenFactory {
+// newBlockingOpenFactory keeps activation tests deterministically in Warming.
+func newBlockingOpenFactory(t *testing.T, d *Daemon) *portsmocks.MockPTYFactory {
 	t.Helper()
-	f := &blockingOpenFactory{release: make(chan struct{})}
-	t.Cleanup(func() {
-		f.once.Do(func() { close(f.release) })
-		d.sessWg.Wait()
-	})
-	return f
-}
-
-func (f *blockingOpenFactory) Open(_ context.Context, _ string, _ []string, _ []string, _ string, _ domain.Geometry) (ports.PTY, error) {
-	<-f.release
-	return nil, io.ErrClosedPipe
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release); d.sessWg.Wait() })
+	factory := portsmocks.NewMockPTYFactory(t)
+	factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(func(context.Context, string, []string, []string, string, domain.Geometry) (ports.PTY, error) {
+		<-release
+		return nil, io.ErrClosedPipe
+	}).Maybe()
+	return factory
 }
 
 // newFactory keeps the supplied fixture for normal panes. Floating prewarms
