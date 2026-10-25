@@ -213,35 +213,12 @@ func terminalCompositionCommittedTarget(request ports.BrokerOpenStreamRequest) p
 	return protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: name}
 }
 
-// terminalCompositionTerminal is the terminal double: it records written bytes,
-// flushes, raw-mode entries/restores, and every UI publication so a test can
-// prove a committed attachment published a real frame.
-type terminalCompositionTerminal struct {
-	mu       sync.Mutex
-	out      []byte
-	flushes  int
-	restores int
-	statuses []ports.UIPresentationStatus
-	changes  chan struct{}
-	input    *terminalCompositionInput
-}
+// blockingTerminalInput is the supervisor's single terminal reader. It yields
+// bytes only when a test pushes them and reaches EOF when it closes, so a
+// client with no pushed input stays live until the test ends the run.
+type blockingTerminalInput struct{ chunks chan []byte }
 
-func newTerminalCompositionTerminal() *terminalCompositionTerminal {
-	return &terminalCompositionTerminal{changes: make(chan struct{}), input: newTerminalCompositionInput()}
-}
-
-// terminalCompositionInput is the supervisor's single terminal reader. It
-// yields bytes only when a test pushes them and reaches EOF when it closes, so
-// a client with no pushed input stays live until the test ends the run.
-type terminalCompositionInput struct {
-	chunks chan []byte
-}
-
-func newTerminalCompositionInput() *terminalCompositionInput {
-	return &terminalCompositionInput{chunks: make(chan []byte)}
-}
-
-func (i *terminalCompositionInput) Read(buffer []byte) (int, error) {
+func (i blockingTerminalInput) Read(buffer []byte) (int, error) {
 	chunk, ok := <-i.chunks
 	if !ok {
 		return 0, io.EOF
@@ -249,64 +226,37 @@ func (i *terminalCompositionInput) Read(buffer []byte) (int, error) {
 	return copy(buffer, chunk), nil
 }
 
-func (t *terminalCompositionTerminal) EnableKittyKeyboard(int) error { return nil }
-
-func (t *terminalCompositionTerminal) EnterRaw() (func() error, error) {
-	return func() error {
-		t.mu.Lock()
-		t.restores++
-		t.mu.Unlock()
-		return nil
-	}, nil
+// terminalCompositionTerminal is the composition terminal: the generated
+// terminal mock records written bytes, flushes and raw-mode restores, and the
+// generated transaction mock records every UI publication, so a test can prove
+// a committed attachment published a real frame.
+type terminalCompositionTerminal struct {
+	// terminal is the production observedTerminal pairing of the two mocks.
+	terminal ports.Terminal
+	output   *terminalState
+	ui       *transactionState
 }
 
-func (t *terminalCompositionTerminal) Geometry() (domain.Geometry, error) {
-	return domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}, nil
-}
-
-func (t *terminalCompositionTerminal) ResizeEvents() <-chan domain.Geometry { return nil }
-
-// In blocks until the run ends: the supervisor owns exactly one terminal read
-// lifetime, and an immediately-empty reader would look like a terminal EOF and
-// end an otherwise live client.
-func (t *terminalCompositionTerminal) In() io.Reader { return t.input }
-
-func (t *terminalCompositionTerminal) Out() io.Writer { return t }
-
-func (t *terminalCompositionTerminal) Write(data []byte) (int, error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.out = append(t.out, data...)
-	return len(data), nil
-}
-
-func (t *terminalCompositionTerminal) Flush() error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.flushes++
-	return nil
-}
-
-func (t *terminalCompositionTerminal) BeginOutput(ports.UIContext) {}
-func (t *terminalCompositionTerminal) EndOutput(bool)              {}
-
-func (t *terminalCompositionTerminal) PublishContext(context ports.UIContext) error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.statuses = append(t.statuses, context.Status)
-	return nil
+func newTerminalCompositionTerminal(t *testing.T) *terminalCompositionTerminal {
+	t.Helper()
+	physical, output := newTerminalMock(t, domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}, func(terminal *portsmocks.MockTerminal, _ *terminalState) {
+		// ResizeEvents is nil and In blocks until the run ends: the supervisor
+		// owns exactly one terminal read lifetime, and an immediately-empty
+		// reader would look like a terminal EOF and end an otherwise live client.
+		terminal.EXPECT().ResizeEvents().Return(nil).Maybe()
+		terminal.EXPECT().In().Return(blockingTerminalInput{chunks: make(chan []byte)}).Maybe()
+	})
+	transaction, ui := newUITransactionMock(t)
+	return &terminalCompositionTerminal{terminal: observedTerminal{Terminal: physical, UIOutputTransaction: transaction}, output: output, ui: ui}
 }
 
 func (t *terminalCompositionTerminal) written() string {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return string(t.out)
+	written, _ := t.output.written()
+	return written
 }
 
 func (t *terminalCompositionTerminal) publishes() []ports.UIPresentationStatus {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return append([]ports.UIPresentationStatus(nil), t.statuses...)
+	return t.ui.publishes()
 }
 
 // startTerminalComposition drives the real runAttach entry point over one
@@ -354,14 +304,14 @@ func startTerminalCompositionWithDaemon(t *testing.T, intent uint8, name, remote
 	// drives the broker composition with it unset.
 	t.Setenv("VEV", "")
 	service, serviceState := newTerminalCompositionService(t, snapshot, daemonSessions)
-	terminal := newTerminalCompositionTerminal()
+	terminal := newTerminalCompositionTerminal(t)
 	previousConnect := connectProductionClientBroker
 	previousTerminal := terminalForAttach
 	previousCallbacks := terminalBrokerCallbacks
 	connectProductionClientBroker = func(context.Context) (ports.BrokerService, error) {
 		return service, nil
 	}
-	terminalForAttach = func() ports.Terminal { return terminal }
+	terminalForAttach = func() ports.Terminal { return terminal.terminal }
 
 	run := &terminalCompositionRun{
 		service:  serviceState,
@@ -599,9 +549,7 @@ func TestTerminalCompositionPublishesRealSessionOutput(t *testing.T) {
 }
 
 func (r *terminalCompositionRun) terminalCounts() (int, int, int) {
-	r.terminal.mu.Lock()
-	defer r.terminal.mu.Unlock()
-	return len(r.terminal.out), r.terminal.flushes, r.terminal.restores
+	return r.terminal.output.counts()
 }
 
 // TestTerminalCompositionRefusedTargetOpensNothingAndKeepsThePicker pins the
@@ -722,13 +670,13 @@ func TestTerminalCompositionCapturesSessionEnvironmentDefensively(t *testing.T) 
 	require.NotEqual(t, snapshot.Env, clone.Env)
 	servicesnapshot := terminalCompositionSnapshot([]string{"work"}, nil)
 	service, _ := newTerminalCompositionService(t, servicesnapshot, nil)
-	terminal := newTerminalCompositionTerminal()
+	terminal := newTerminalCompositionTerminal(t)
 	navigation := localEphemeralNavigation()
 	connector := portsmocks.NewMockBrokerConnector(t)
 	connector.EXPECT().Connect(mock.Anything).Return(service, nil).Maybe()
 	_, err := client.NewSupervisor(client.SupervisorConfig{
 		Connector: connector,
-		Terminal:  terminal,
+		Terminal:  terminal.terminal,
 		Clock:     clock.New(),
 		// The picker is omitted: creation alone proves the snapshot does not
 		// fail supervisor validation.
@@ -746,10 +694,10 @@ func TestTerminalCompositionReportsBrokerFailureInThePicker(t *testing.T) {
 	t.Setenv("VEV", "")
 	startupErr := errors.New("broker not reachable")
 	previousConnect := connectProductionClientBroker
-	terminal := newTerminalCompositionTerminal()
+	terminal := newTerminalCompositionTerminal(t)
 	previousTerminal := terminalForAttach
 	connectProductionClientBroker = func(context.Context) (ports.BrokerService, error) { return nil, startupErr }
-	terminalForAttach = func() ports.Terminal { return terminal }
+	terminalForAttach = func() ports.Terminal { return terminal.terminal }
 	t.Cleanup(func() {
 		connectProductionClientBroker = previousConnect
 		terminalForAttach = previousTerminal
@@ -816,9 +764,7 @@ func TestRunAttachNestedSessionBehavior(t *testing.T) {
 }
 
 func terminalCounts(terminal *terminalCompositionTerminal) (int, int, int) {
-	terminal.mu.Lock()
-	defer terminal.mu.Unlock()
-	return len(terminal.out), terminal.flushes, terminal.restores
+	return terminal.output.counts()
 }
 
 // TestTerminalCompositionUsesTheBrokerConnector pins the production terminal
@@ -898,7 +844,7 @@ func TestTerminalCompositionExactAttachReportsMissingLocalInventory(t *testing.T
 	ctx, cancel := context.WithTimeout(context.Background(), brokerTestWait)
 	defer cancel()
 
-	terminal := newTerminalCompositionTerminal()
+	terminal := newTerminalCompositionTerminal(t)
 	notices := make(chan client.LifecycleNotice, 16)
 	failures := make(chan error, 16)
 	var lifecycleID domain.SessionLifecycleID
@@ -915,7 +861,7 @@ func TestTerminalCompositionExactAttachReportsMissingLocalInventory(t *testing.T
 	go func() {
 		done <- runBrokerClient(ctx, brokerClientConfig{
 			Connector:          brokeripc.NewConnector(fixture.socket, brokeripc.Config{}).Navigator(),
-			Terminal:           terminal,
+			Terminal:           terminal.terminal,
 			InitialNavigation:  navigation,
 			SessionEnvironment: client.SessionEnvironment{Provenance: client.SessionEnvironmentLocalCLI},
 			OnFailure: func(err error) {
