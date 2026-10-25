@@ -6,31 +6,38 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 )
 
-type manualMouseClock struct {
-	t   testing.TB
-	now time.Time
+// mouseClock is the settable time behind newMouseClockMock.
+type mouseClock struct{ now time.Time }
+
+func (c *mouseClock) advance(d time.Duration) { c.now = c.now.Add(d) }
+
+// newMouseClockMock returns a MockClock reading c.now whose timers never fire.
+func newMouseClockMock(t testing.TB, c *mouseClock) *portsmocks.MockClock {
+	t.Helper()
+	m := portsmocks.NewMockClock(t)
+	m.EXPECT().Now().RunAndReturn(func() time.Time { return c.now }).Maybe()
+	m.EXPECT().NewTimer(mock.Anything).RunAndReturn(func(time.Duration) ports.Timer { return newStubTimer(t) }).Maybe()
+	return m
 }
 
-func (c *manualMouseClock) Now() time.Time                     { return c.now }
-func (c *manualMouseClock) Advance(d time.Duration)            { c.now = c.now.Add(d) }
-func (c *manualMouseClock) NewTimer(time.Duration) ports.Timer { return newStubTimer(c.t) }
-
-func mouseCopyHarness(t *testing.T, rows ...string) (*Daemon, *session, *attachedClient, *manualMouseClock) {
+func mouseCopyHarness(t *testing.T, rows ...string) (*Daemon, *session, *attachedClient, *mouseClock) {
 	t.Helper()
 	p, release := newBlockingPTY(t)
 	t.Cleanup(release)
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
 	stopOverlayTimersAtCleanup(t, ac)
-	clock := &manualMouseClock{t: t, now: time.Unix(1, 0)}
-	d.clock = clock
+	clock := &mouseClock{now: time.Unix(1, 0)}
+	d.clock = newMouseClockMock(t, clock)
 	pane := testAttachmentTab(sess).focusedPane()
 	for i, row := range rows {
 		writeTestRow(pane.screen, i, row)
@@ -56,7 +63,7 @@ func TestCopyDoubleClick(t *testing.T) {
 
 			// SGR column 3 is the continuation cell of the wide glyph at column 2.
 			copyMouseInput(d, sess, ac, "\x1b[<0;3;2M\x1b[<0;3;2m")
-			clock.Advance(copyDoubleClickInterval)
+			clock.advance(copyDoubleClickInterval)
 			copyMouseInput(d, sess, ac, "\x1b[<0;3;2M")
 
 			ac.overlays.copyMu.Lock()
@@ -81,7 +88,7 @@ func TestCopyDoubleClick(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				d, sess, ac, clock := mouseCopyHarness(t, "alpha")
 				copyMouseInput(d, sess, ac, "\x1b[<0;1;2M\x1b[<0;1;2m")
-				clock.Advance(tc.advance)
+				clock.advance(tc.advance)
 				copyMouseInput(d, sess, ac, tc.second)
 				ac.overlays.copyMu.Lock()
 				selection := ac.overlays.copyMode.Selection()
@@ -93,7 +100,7 @@ func TestCopyDoubleClick(t *testing.T) {
 
 	t.Run("different pane is not a double click", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			d := newTestDaemon(t, nil, &manualMouseClock{t: t, now: time.Unix(1, 0)})
+			d := newTestDaemon(t, nil, newMouseClockMock(t, &mouseClock{now: time.Unix(1, 0)}))
 			rt := newOverlayRuntime(&attachedClient{})
 			p1 := newPane("one", nil, domain.Size{Cols: 4, Rows: 1})
 			p2 := newPane("two", nil, domain.Size{Cols: 4, Rows: 1})
@@ -114,7 +121,7 @@ func TestCopyDoubleClick(t *testing.T) {
 					d.enterCopyMode(sess, ac)
 				}
 				copyMouseInput(d, sess, ac, "\x1b[<0;6;2M\x1b[<0;6;2m")
-				clock.Advance(time.Millisecond)
+				clock.advance(time.Millisecond)
 				copyMouseInput(d, sess, ac, "\x1b[<0;6;2M")
 				ac.overlays.copyMu.Lock()
 				selection := ac.overlays.copyMode.Selection()
@@ -129,7 +136,7 @@ func TestCopyDoubleClick(t *testing.T) {
 			d, sess, ac, clock := mouseCopyHarness(t, "alpha beta")
 			d.exitCopyMode(ac)
 			copyMouseInput(d, sess, ac, "\x1b[<0;1;2M\x1b[<0;1;2m")
-			clock.Advance(time.Millisecond)
+			clock.advance(time.Millisecond)
 			copyMouseInput(d, sess, ac, "\x1b[<0;1;2M\x1b[<32;7;2M")
 			ac.overlays.copyMu.Lock()
 			selection := ac.overlays.copyMode.Selection()
@@ -146,7 +153,7 @@ func TestCopyDoubleClick(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			d, sess, ac, clock := mouseCopyHarness(t, "alpha")
 			copyMouseInput(d, sess, ac, "\x1b[<0;1;2M\x1b[<32;2;2M\x1b[<0;2;2m")
-			clock.Advance(time.Millisecond)
+			clock.advance(time.Millisecond)
 			copyMouseInput(d, sess, ac, "\x1b[<0;1;2M")
 			ac.overlays.copyMu.Lock()
 			selection := ac.overlays.copyMode.Selection()
@@ -180,7 +187,7 @@ func TestCopyWordDragKeepsWordAnchorOnFirstMotion(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			d, sess, ac, clock := mouseCopyHarness(t, "alpha beta")
 			copyMouseInput(d, sess, ac, "\x1b[<0;"+strconv.Itoa(tc.pressCol)+";2M\x1b[<0;"+strconv.Itoa(tc.pressCol)+";2m")
-			clock.Advance(time.Millisecond)
+			clock.advance(time.Millisecond)
 			copyMouseInput(d, sess, ac, "\x1b[<0;"+strconv.Itoa(tc.pressCol)+";2M\x1b[<32;"+strconv.Itoa(tc.motionCol)+";2M")
 
 			ac.overlays.copyMu.Lock()
@@ -265,7 +272,7 @@ func TestNormalScreenPassiveDoubleClickSetsMappedCursor(t *testing.T) {
 				}
 
 				copyMouseInput(d, sess, ac, "\x1b[<0;6;2M\x1b[<0;6;2m")
-				clock.Advance(time.Millisecond)
+				clock.advance(time.Millisecond)
 				copyMouseInput(d, sess, ac, "\x1b[<0;6;2M")
 
 				ac.overlays.copyMu.Lock()
@@ -283,7 +290,7 @@ func TestNormalScreenPassiveDoubleClickSetsMappedCursor(t *testing.T) {
 func TestCopyWordDragAndOSC52(t *testing.T) {
 	d, sess, ac, clock := mouseCopyHarness(t, "alpha beta", "gamma delta")
 	copyMouseInput(d, sess, ac, "\x1b[<0;1;2M\x1b[<0;1;2m")
-	clock.Advance(time.Millisecond)
+	clock.advance(time.Millisecond)
 	copyMouseInput(d, sess, ac, "\x1b[<0;1;2M\x1b[<32;2;3M\x1b[<0;2;3m")
 
 	ac.overlays.copyMu.Lock()
@@ -342,14 +349,14 @@ func TestCopyWordSelectionYanksExactOSC52(t *testing.T) {
 		defer release()
 		d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 		stopOverlayTimersAtCleanup(t, ac)
-		clock := &manualMouseClock{t: t, now: time.Unix(1, 0)}
-		d.clock = clock
+		clock := &mouseClock{now: time.Unix(1, 0)}
+		d.clock = newMouseClockMock(t, clock)
 		writeTestRow(testAttachmentTab(sess).focusedPane().screen, 0, "alpha beta")
 		d.enterCopyMode(sess, ac)
 		mustOutputData(t, sends)
 
 		copyMouseInput(d, sess, ac, "\x1b[<0;1;2M\x1b[<0;1;2m")
-		clock.Advance(time.Millisecond)
+		clock.advance(time.Millisecond)
 		copyMouseInput(d, sess, ac, "\x1b[<0;1;2M")
 		mustOutputData(t, sends)
 		copyMouseInput(d, sess, ac, "y")
