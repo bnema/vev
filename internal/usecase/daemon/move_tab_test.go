@@ -17,10 +17,10 @@ import (
 func TestMoveTabPreservesWholeTabAndActivatesLogicalNeighbor(t *testing.T) {
 	for _, destinationEphemeral := range []bool{false, true} {
 		t.Run(map[bool]string{false: "named", true: "ephemeral"}[destinationEphemeral], func(t *testing.T) {
-			movedPTY := newQuietPTY()
-			remainingPTY := newQuietPTY()
-			destinationPTY := newQuietPTY()
-			floatingPTY := newQuietPTY()
+			movedPTY := newQuietPTY(t)
+			remainingPTY := newQuietPTY(t)
+			destinationPTY := newQuietPTY(t)
+			floatingPTY := newQuietPTY(t)
 			d, source, _, _ := newManualSessionWithPTYs(t, movedPTY, remainingPTY)
 			moved := source.tabs[0]
 			moved.stableID = "moved-tab"
@@ -115,10 +115,10 @@ func TestMoveTabRejectsSameSessionStaleMembershipAndWarming(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d, source, _, _ := newManualSessionWithPTYs(t, newQuietPTY(), newQuietPTY())
+			d, source, _, _ := newManualSessionWithPTYs(t, newQuietPTY(t), newQuietPTY(t))
 			moved := source.tabs[0]
 			moved.stableID = "moved-tab"
-			destination := addMoveTabTestSession(d, "destination", "destination-tab")
+			destination := addMoveTabTestSession(t, d, "destination", "destination-tab")
 			req := moveTabRequest{
 				Source: moveSessionLocator{ID: source.id, Incarnation: source.incarnation}, SourceTabID: domain.TabStableID(moved.stableID),
 				Destination: moveSessionLocator{ID: destination.id, Incarnation: destination.incarnation},
@@ -149,12 +149,12 @@ func TestMoveTabFinalSourceVisibleFloatingRejectsStaleSlotTransitions(t *testing
 		{name: "warming", mutate: func(moved *tab) { moved.floating.state = floatingWarming }},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			d, source, client, _ := newManualSessionWithPTYs(t, newQuietPTY())
+			d, source, client, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
 			moved := source.tabs[0]
 			moved.stableID = "moved-tab"
 			require.NotNil(t, d.attachCoordinator(source, nil, client, true))
-			destination := addMoveTabTestSession(d, "destination", "destination-tab")
-			floating := newPaneWithStableID("floating", "floating-stable", newQuietPTY(), domain.Size{Cols: 20, Rows: 8})
+			destination := addMoveTabTestSession(t, d, "destination", "destination-tab")
+			floating := newPaneWithStableID("floating", "floating-stable", newQuietPTY(t), domain.Size{Cols: 20, Rows: 8})
 			moved.mu.Lock()
 			moved.floating = floatingSlot{state: floatingVisible, pane: floating, desiredVisible: true, generation: 7}
 			moved.mu.Unlock()
@@ -190,10 +190,10 @@ func TestMoveTabFinalSourceVisibleFloatingRejectsStaleSlotTransitions(t *testing
 
 func TestMoveTabWaitsForSourceResizeAndAppliesDestinationGeometryLast(t *testing.T) {
 	pty := &transactionalResizePTY{}
-	d, source, _, _ := newManualSessionWithPTYs(t, pty, newQuietPTY())
+	d, source, _, _ := newManualSessionWithPTYs(t, pty, newQuietPTY(t))
 	moved := source.tabs[0]
 	moved.stableID = "moved-tab"
-	destination := addMoveTabTestSession(d, "destination", "destination-tab")
+	destination := addMoveTabTestSession(t, d, "destination", "destination-tab")
 	destination.tabs[0].mu.Lock()
 	destination.tabs[0].size = domain.Size{Cols: 100, Rows: 30}
 	destination.tabs[0].mu.Unlock()
@@ -242,10 +242,10 @@ func TestMoveTabWaitsForSourceResizeAndAppliesDestinationGeometryLast(t *testing
 }
 
 func TestMoveTabMigratesSyncAndInvalidatesSourceRetryOwner(t *testing.T) {
-	d, source, _, _ := newManualSessionWithPTYs(t, newQuietPTY(), newQuietPTY())
+	d, source, _, _ := newManualSessionWithPTYs(t, newQuietPTY(t), newQuietPTY(t))
 	moved := source.tabs[0]
 	moved.stableID = "moved-tab"
-	destination := addMoveTabTestSession(d, "destination", "destination-tab")
+	destination := addMoveTabTestSession(t, d, "destination", "destination-tab")
 	p := moved.focusedPane()
 	sourceCoordinator := d.ensureRenderCoordinator(source)
 	destinationCoordinator := d.ensureRenderCoordinator(destination)
@@ -281,11 +281,11 @@ func TestMoveTabMigratesSyncAndInvalidatesSourceRetryOwner(t *testing.T) {
 }
 
 func TestMoveTabExitReapsOnlyDestination(t *testing.T) {
-	d, source, _, _ := newManualSessionWithPTYs(t, newQuietPTY(), newQuietPTY())
+	d, source, _, _ := newManualSessionWithPTYs(t, newQuietPTY(t), newQuietPTY(t))
 	moved := source.tabs[0]
 	moved.stableID = "moved-tab"
 	remaining := source.tabs[1]
-	destination := addMoveTabTestSession(d, "destination", "destination-tab")
+	destination := addMoveTabTestSession(t, d, "destination", "destination-tab")
 	p := moved.focusedPane()
 
 	require.NoError(t, d.moveTab(moveTabRequest{
@@ -300,10 +300,10 @@ func TestMoveTabExitReapsOnlyDestination(t *testing.T) {
 }
 
 func TestMoveTabOppositeDirectionsDoNotDeadlock(t *testing.T) {
-	d, left, _, _ := newManualSessionWithPTYs(t, newQuietPTY(), newQuietPTY())
+	d, left, _, _ := newManualSessionWithPTYs(t, newQuietPTY(t), newQuietPTY(t))
 	left.tabs[0].stableID = "left-moved"
-	right := addMoveTabTestSession(d, "right", "right-stays")
-	rightMoved := newTabWithStableID("right-moved", "right-pane", newQuietPTY(), domain.Size{Cols: 80, Rows: 23})
+	right := addMoveTabTestSession(t, d, "right", "right-stays")
+	rightMoved := newTabWithStableID("right-moved", "right-pane", newQuietPTY(t), domain.Size{Cols: 80, Rows: 23})
 	rightMoved.ctx, rightMoved.cancel = context.WithCancel(right.ctx)
 	publishTiledPaneOwners(right, rightMoved)
 	right.tabs = append(right.tabs, rightMoved)
@@ -452,12 +452,12 @@ func (r *moveTabPurgeRepository) DeleteIncarnation(_ context.Context, id domain.
 }
 
 func TestMoveTabFinalNamedSourcePurgesAfterDestinationAdmissionAndFailureDoesNotRollback(t *testing.T) {
-	d, source, client, _ := newManualSessionWithPTYs(t, newQuietPTY())
+	d, source, client, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
 	require.NotNil(t, d.attachCoordinator(source, nil, client, true))
 	source.incarnation = domain.IncarnationID{4}
 	moved := source.tabs[0]
 	moved.stableID = "moved-tab"
-	destination := addMoveTabTestSession(d, "destination", "destination-tab")
+	destination := addMoveTabTestSession(t, d, "destination", "destination-tab")
 	destination.ephemeral = false
 	destination.snapEligible.Store(true)
 
@@ -489,9 +489,9 @@ func TestMoveTabFinalNamedSourcePurgesAfterDestinationAdmissionAndFailureDoesNot
 	require.Same(t, destination, moved.focusedPane().ownerSnapshot().session)
 }
 
-func addMoveTabTestSession(d *Daemon, id domain.SessionID, tabID string) *session {
+func addMoveTabTestSession(t *testing.T, d *Daemon, id domain.SessionID, tabID string) *session {
 	ctx, cancel := context.WithCancel(d.serveCtx)
-	tb := newTabWithStableID(tabID, tabID+"-pane", newQuietPTY(), domain.Size{Cols: 80, Rows: 23})
+	tb := newTabWithStableID(tabID, tabID+"-pane", newQuietPTY(t), domain.Size{Cols: 80, Rows: 23})
 	tb.ctx, tb.cancel = context.WithCancel(ctx)
 	sess := &session{sessionCore: sessionCore{id: id, name: string(id), incarnation: domain.IncarnationID{5}, ephemeral: true}, ctx: ctx, cancel: cancel, tabs: []*tab{tb}}
 	publishTiledPaneOwners(sess, tb)

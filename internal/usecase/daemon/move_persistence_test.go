@@ -173,7 +173,7 @@ func TestMoveTabPersistenceMatrix(t *testing.T) {
 			}
 			ptys := make([]ports.PTY, ptyCount)
 			for i := range ptys {
-				ptys[i] = newQuietPTY()
+				ptys[i] = newQuietPTY(t)
 			}
 			d, source, client, _ := newManualSessionWithPTYs(t, ptys...)
 			if tt.finalSource {
@@ -187,7 +187,7 @@ func TestMoveTabPersistenceMatrix(t *testing.T) {
 			moved := source.tabs[0]
 			moved.stableID = "moved-tab"
 
-			destination := addMoveTabTestSession(d, "destination", "destination-tab")
+			destination := addMoveTabTestSession(t, d, "destination", "destination-tab")
 			destination.ephemeral = !tt.destinationNamed
 			destination.snapEligible.Store(tt.destinationNamed)
 			destination.snapshotWake = d.snapshots.wake
@@ -244,11 +244,11 @@ func TestMoveTabPersistenceMatrix(t *testing.T) {
 }
 
 func TestMoveSnapshotPublicationFailureReportsWithoutRollback(t *testing.T) {
-	d, source, _, _ := newManualSessionWithPTYs(t, newQuietPTY(), newQuietPTY())
+	d, source, _, _ := newManualSessionWithPTYs(t, newQuietPTY(t), newQuietPTY(t))
 	source.ephemeral = true
 	moved := source.tabs[0]
 	moved.stableID = "moved-tab"
-	destination := addMoveTabTestSession(d, "destination", "destination-tab")
+	destination := addMoveTabTestSession(t, d, "destination", "destination-tab")
 	destination.ephemeral = false
 	destination.snapEligible.Store(true)
 	destination.snapshotWake = d.snapshots.wake

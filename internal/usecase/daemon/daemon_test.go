@@ -154,25 +154,20 @@ func newBlockingPTYWithFailingWrite(t *testing.T, writeErr error) (*portsmocks.M
 	return p, unblock
 }
 
-// quietPTY is an independently closable PTY for background floating prewarms.
-// It intentionally has no testify expectations: tests using the factories below
-// are asserting their regular panes, not incidental asynchronous prewarms.
-type quietPTY struct{ done chan struct{} }
-
-func newQuietPTY() *quietPTY                  { return &quietPTY{done: make(chan struct{})} }
-func (p *quietPTY) Read([]byte) (int, error)  { <-p.done; return 0, io.EOF }
-func (*quietPTY) Write(b []byte) (int, error) { return len(b), nil }
-func (p *quietPTY) Close() error {
-	select {
-	case <-p.done:
-	default:
-		close(p.done)
-	}
-	return nil
+// newQuietPTY provides an independently closable PTY for background prewarms.
+func newQuietPTY(t testing.TB) *portsmocks.MockPTY {
+	t.Helper()
+	p := portsmocks.NewMockPTY(t)
+	done := make(chan struct{})
+	var once sync.Once
+	p.EXPECT().Read(mock.Anything).RunAndReturn(func([]byte) (int, error) { <-done; return 0, io.EOF }).Maybe()
+	p.EXPECT().Write(mock.Anything).RunAndReturn(func(b []byte) (int, error) { return len(b), nil }).Maybe()
+	p.EXPECT().Close().RunAndReturn(func() error { once.Do(func() { close(done) }); return nil }).Maybe()
+	p.EXPECT().Resize(mock.Anything).Return(nil).Maybe()
+	p.EXPECT().Pid().Return(0).Maybe()
+	p.EXPECT().ForegroundPgid().Return(0, nil).Maybe()
+	return p
 }
-func (*quietPTY) Resize(domain.Geometry) error { return nil }
-func (*quietPTY) Pid() int                     { return 0 }
-func (*quietPTY) ForegroundPgid() (int, error) { return 0, nil }
 
 // blockingOpenFactory keeps activation tests deterministically in Warming
 // without starting pane reader/scheduler goroutines.
@@ -211,7 +206,7 @@ func newFactory(t *testing.T, p ports.PTY) *portsmocks.MockPTYFactory {
 			if geometry.Size == normal {
 				return p, nil
 			}
-			return newQuietPTY(), nil
+			return newQuietPTY(t), nil
 		},
 	).Maybe()
 	return f
@@ -231,10 +226,10 @@ func newFactorySeq(t *testing.T, ptys ...ports.PTY) *portsmocks.MockPTYFactory {
 				normal = geometry.Size
 			}
 			if geometry.Size != normal {
-				return newQuietPTY(), nil
+				return newQuietPTY(t), nil
 			}
 			if next >= len(ptys) {
-				return newQuietPTY(), nil
+				return newQuietPTY(t), nil
 			}
 			p := ptys[next]
 			next++

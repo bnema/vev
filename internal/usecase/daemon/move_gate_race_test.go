@@ -183,7 +183,7 @@ func TestFinalCloseDoesNotDeadlockWithMoveDispatchAdmission(t *testing.T) {
 }
 
 func TestPaletteFinalCloseEndsCurrentEffectBeforeDrainingPeers(t *testing.T) {
-	d, sess, current, _ := newManualSessionWithPTYs(t, newQuietPTY())
+	d, sess, current, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
 	d.attachCoordinator(sess, nil, current, true)
 	otherTransport := &closeTrackingTransport{}
 	other := &attachedClient{tr: otherTransport, output: newOutputStateStream(), geometry: domain.Geometry{Size: current.geometry.Size}}

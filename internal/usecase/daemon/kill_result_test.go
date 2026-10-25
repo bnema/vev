@@ -47,7 +47,7 @@ func requireNoFurtherSends(t *testing.T, sends chan wire.Envelope) {
 // and removes the session.
 func TestHandleKillSessionSendsExactlyOneSucceededResult(t *testing.T) {
 	d := newTestDaemon(t, nil, newStubClock(t))
-	addControlSession(d, "work", "t_work", "p_work")
+	addControlSession(t, d, "work", "t_work", "p_work")
 
 	tr, sends := newCapturingTransport(t)
 	d.handleKill(tr, protocol.Kill{RequestID: 7, Scope: protocol.KillSession, Name: "work"})

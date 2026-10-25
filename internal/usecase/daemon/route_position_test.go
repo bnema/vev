@@ -21,9 +21,9 @@ func TestRouteAppliesPreferredTabPerAttachment(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			d := newTestDaemon(t, nil, newStubClock(t))
-			sess := addControlSession(d, "work", "tab-1", "pane-1")
+			sess := addControlSession(t, d, "work", "tab-1", "pane-1")
 			sess.incarnation = domain.SessionLifecycleID{1}
-			second := newTabWithStableID("tab-2", "pane-2", newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
+			second := newTabWithStableID("tab-2", "pane-2", newQuietPTY(t), domain.Size{Cols: 80, Rows: 22})
 			sess.mu.Lock()
 			sess.tabs = append(sess.tabs, second)
 			sess.mu.Unlock()
@@ -51,7 +51,7 @@ func TestResumeAppliesPreferredTabToParkedAttachment(t *testing.T) {
 	oldTransport := &closeTrackingTransport{}
 	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTransport)
 	require.NoError(t, err)
-	second := newTabWithStableID("tab-2", "pane-2", newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
+	second := newTabWithStableID("tab-2", "pane-2", newQuietPTY(t), domain.Size{Cols: 80, Rows: 22})
 	sess.mu.Lock()
 	sess.tabs = append(sess.tabs, second)
 	sess.mu.Unlock()
@@ -71,9 +71,9 @@ func TestResumeAppliesPreferredTabToParkedAttachment(t *testing.T) {
 
 func TestPaintPublishesChangedAttachmentRoutePosition(t *testing.T) {
 	d := newTestDaemon(t, nil, newStubClock(t))
-	sess := addControlSession(d, "work", "tab-1", "pane-1")
+	sess := addControlSession(t, d, "work", "tab-1", "pane-1")
 	sess.incarnation = domain.SessionLifecycleID{1}
-	second := newTabWithStableID("tab-2", "pane-2", newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
+	second := newTabWithStableID("tab-2", "pane-2", newQuietPTY(t), domain.Size{Cols: 80, Rows: 22})
 	sess.mu.Lock()
 	sess.tabs = append(sess.tabs, second)
 	sess.mu.Unlock()
@@ -116,9 +116,9 @@ func TestWarmAndColdAttachmentPreferredTab(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			d := newTestDaemon(t, nil, newStubClock(t))
-			sess := addControlSession(d, "work", "tab-1", "pane-1")
+			sess := addControlSession(t, d, "work", "tab-1", "pane-1")
 			sess.incarnation = domain.SessionLifecycleID{1}
-			second := newTabWithStableID("tab-2", "pane-2", newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
+			second := newTabWithStableID("tab-2", "pane-2", newQuietPTY(t), domain.Size{Cols: 80, Rows: 22})
 			sess.mu.Lock()
 			sess.tabs = append(sess.tabs, second)
 			sess.mu.Unlock()

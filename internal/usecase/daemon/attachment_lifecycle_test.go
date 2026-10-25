@@ -78,7 +78,7 @@ func TestAttachmentCapabilityRejectsIndependentIdentityChanges(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
+			d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
 			transport := &closeTrackingTransport{}
 			ac.replaceTransport(transport)
 			rc := d.attachCoordinator(sess, nil, ac, true)
@@ -97,7 +97,7 @@ func TestAttachmentCapabilityRejectsIndependentIdentityChanges(t *testing.T) {
 }
 
 func TestAttachmentCapabilityInvalidationRejectsNewEffects(t *testing.T) {
-	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
+	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
 	transport := &closeTrackingTransport{}
 	ac.replaceTransport(transport)
 	rc := d.attachCoordinator(sess, nil, ac, true)

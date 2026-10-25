@@ -84,7 +84,7 @@ func TestMultiplexClaimantRemovalDoesNotTouchUnrelatedSession(t *testing.T) {
 	claimant := addMultiplexTestAttachment(t, affected, domain.Geometry{Size: domain.Size{Cols: 120, Rows: 40}})
 	require.True(t, affected.geometry.reconcile(d, affected, nil))
 
-	other := &session{sessionCore: sessionCore{id: "other", name: "other"}, tabs: []*tab{newTab(newQuietPTY(), domain.Size{Cols: 95, Rows: 34})}}
+	other := &session{sessionCore: sessionCore{id: "other", name: "other"}, tabs: []*tab{newTab(newQuietPTY(t), domain.Size{Cols: 95, Rows: 34})}}
 	otherAttachment := addMultiplexTestAttachment(t, other, domain.Geometry{Size: domain.Size{Cols: 95, Rows: 35}})
 	require.True(t, other.geometry.reconcile(d, other, nil))
 	otherBefore := other.geometry.appliedSnapshot()
@@ -102,7 +102,7 @@ func TestMultiplexClaimantRemovalDoesNotTouchUnrelatedSession(t *testing.T) {
 // overlay runtime, and command-result carriage are attachment-owned. Aliasing
 // any of those fields, or routing a result to the peer, breaks the snapshots.
 func TestMultiplexAttachmentLocalStateAndFrames(t *testing.T) {
-	d, sess, first, firstFrames := newManualSessionWithPTYs(t, newQuietPTY())
+	d, sess, first, firstFrames := newManualSessionWithPTYs(t, newQuietPTY(t))
 	peerTransport, peerFrames := newCapturingTransport(t)
 	peer, err := d.attachClient(sess, peerTransport, domain.Size{Cols: 90, Rows: 30}, attachClientOptions{})
 	require.NoError(t, err)

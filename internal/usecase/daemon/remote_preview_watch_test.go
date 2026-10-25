@@ -167,7 +167,7 @@ func newPreviewSession(t *testing.T, d *Daemon, tabIDs ...string) *session {
 	tabs := make([]*tab, 0, len(tabIDs))
 	for i, id := range tabIDs {
 		wctx, wcancel := context.WithCancel(sctx)
-		tb := newTabWithStableID(id, fmt.Sprintf("pane-%d", i), newQuietPTY(), domain.Size{Cols: 80, Rows: 24})
+		tb := newTabWithStableID(id, fmt.Sprintf("pane-%d", i), newQuietPTY(t), domain.Size{Cols: 80, Rows: 24})
 		tb.ctx, tb.cancel = wctx, wcancel
 		for _, p := range tb.panes {
 			p.ctx, p.cancel = wctx, wcancel

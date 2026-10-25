@@ -309,7 +309,7 @@ func TestResumeStoppedSessionRejectsReplacementDuringCatalogueRead(t *testing.T)
 }
 
 func TestSessionAttachTargetRejectsInactiveLifecycleReplacementDuringCatalogueRead(t *testing.T) {
-	d := newTestDaemon(t, newFactory(t, newQuietPTY()), newStubClock(t))
+	d := newTestDaemon(t, newFactory(t, newQuietPTY(t)), newStubClock(t))
 	record := durableRecoveryRecord(1)
 	record.Name = "stopped"
 	record.Committed = nil

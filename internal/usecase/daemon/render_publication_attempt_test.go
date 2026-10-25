@@ -31,7 +31,7 @@ func TestPaintPublicationAttempt(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d, sess, ac, sends := newManualSessionWithPTYs(t, newQuietPTY())
+			d, sess, ac, sends := newManualSessionWithPTYs(t, newQuietPTY(t))
 			healthy := ac.transport()
 			d.paint(sess, ac, true, nil)
 			<-sends

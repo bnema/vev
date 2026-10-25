@@ -87,7 +87,7 @@ func TestPaneOpenErrorsReleaseReturnedPTYWithoutPublication(t *testing.T) {
 			wantCode: domain.NoticeTabSpawn,
 			run: func(t *testing.T, d *Daemon) ([]*tab, func(), error) {
 				sessCtx, cancelSession := context.WithCancel(t.Context())
-				base := newTab(newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
+				base := newTab(newQuietPTY(t), domain.Size{Cols: 80, Rows: 22})
 				base.ctx, base.cancel = context.WithCancel(sessCtx)
 				sess := &session{sessionCore: sessionCore{id: "work", name: "work"}, ctx: sessCtx, cancel: cancelSession, tabs: []*tab{base}}
 				d.mu.Lock()
@@ -105,7 +105,7 @@ func TestPaneOpenErrorsReleaseReturnedPTYWithoutPublication(t *testing.T) {
 			wantCode: domain.NoticePaneSpawn,
 			run: func(t *testing.T, d *Daemon) ([]*tab, func(), error) {
 				sessCtx, cancelSession := context.WithCancel(t.Context())
-				tb := newTab(newQuietPTY(), domain.Size{Cols: 41, Rows: 10})
+				tb := newTab(newQuietPTY(t), domain.Size{Cols: 41, Rows: 10})
 				tb.ctx, tb.cancel = context.WithCancel(sessCtx)
 				sess := &session{sessionCore: sessionCore{id: "work", name: "work"}, cwd: "/tmp", ctx: sessCtx, cancel: cancelSession, tabs: []*tab{tb}}
 				_, err := d.splitPaneAt(sess, tb, tb.focusedPane(), layout.Right)

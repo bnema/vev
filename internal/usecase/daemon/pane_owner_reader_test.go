@@ -63,8 +63,8 @@ func TestPTYReaderExitReapsExactlyCurrentOwnerAfterPublication(t *testing.T) {
 	sourceTab := testAttachmentTab(source)
 	moved := sourceTab.focusedPane()
 
-	destinationTab := newTab(newQuietPTY(), domain.Size{Cols: 80, Rows: 23})
-	other := newPane(layout.PaneID("pane-2"), newQuietPTY(), domain.Size{Cols: 40, Rows: 23})
+	destinationTab := newTab(newQuietPTY(t), domain.Size{Cols: 80, Rows: 23})
+	other := newPane(layout.PaneID("pane-2"), newQuietPTY(t), domain.Size{Cols: 40, Rows: 23})
 	destinationTab.mu.Lock()
 	require.NoError(t, destinationTab.tree.Split(layout.PaneID("pane-1"), layout.Right, true, other.id, domain.Rect{Width: 80, Height: 23}))
 	destinationTab.panes[other.id] = other
@@ -75,7 +75,7 @@ func TestPTYReaderExitReapsExactlyCurrentOwnerAfterPublication(t *testing.T) {
 	// Model a completed owner commit while the one reader remains blocked in
 	// Read. The source immediately reuses the old local ID, which makes stale
 	// ID-only exit routing observably close the wrong pane.
-	replacement := newPane(layout.PaneID("pane-1"), newQuietPTY(), domain.Size{Cols: 80, Rows: 23})
+	replacement := newPane(layout.PaneID("pane-1"), newQuietPTY(t), domain.Size{Cols: 80, Rows: 23})
 	sourceTab.mu.Lock()
 	sourceTab.panes[replacement.id] = replacement
 	publishPaneOwner(replacement, source, sourceTab, 0)

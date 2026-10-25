@@ -54,10 +54,10 @@ func TestControlEqualizeMapsResizeErrors(t *testing.T) {
 }
 
 func TestResizeControlHeadlessAndErrors(t *testing.T) {
-	factory := &controlPTYFactory{}
+	factory := &controlPTYFactory{t: t}
 	d := newTestDaemon(t, factory, newStubClock(t))
 	t.Cleanup(func() { factory.close(); d.sessWg.Wait() })
-	sess := addControlSession(d, "work", "t_work", "p_work")
+	sess := addControlSession(t, d, "work", "t_work", "p_work")
 
 	tooEarly := sendCommand(t, d, protocol.CommandRequest{Slug: "grow-pane-width", TargetSession: "work"})
 	require.False(t, tooEarly.Outcome == protocol.CommandSucceeded)

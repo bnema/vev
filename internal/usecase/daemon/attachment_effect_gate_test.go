@@ -145,7 +145,7 @@ func requireAttachmentEffectGateRetired(t *testing.T, ac *attachedClient) {
 }
 
 func TestBeginCurrentAttachmentEffectFailsClosedOnStableCapabilityMismatch(t *testing.T) {
-	_, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
+	_, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
 	current := sess.captureAttachmentCapability(ac, ac.transport())
 	stale := current
 	stale.generation++
@@ -168,7 +168,7 @@ func TestBeginCurrentAttachmentEffectFailsClosedOnStableCapabilityMismatch(t *te
 }
 
 func TestBeginCurrentAttachmentEffectContextRejectsNilContext(t *testing.T) {
-	_, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
+	_, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
 
 	token, effect, admitted := ac.beginCurrentAttachmentEffectContext(nil, sess, ac.transport())
 
@@ -178,7 +178,7 @@ func TestBeginCurrentAttachmentEffectContextRejectsNilContext(t *testing.T) {
 }
 
 func TestBeginAttachmentLeaseEffectRejectsForeignLease(t *testing.T) {
-	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
+	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
 	rc := d.attachCoordinator(sess, nil, ac, true)
 	foreign := &attachmentLease{attachment: &attachedClient{}}
 	_, admitted := beginAttachmentLeaseEffect(sess, ac, foreign)

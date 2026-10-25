@@ -503,10 +503,10 @@ func TestPaletteJRSUsesEffectiveOverrideOnly(t *testing.T) {
 
 func TestPaletteQualifiesDaemonSessionForRemoteAttachment(t *testing.T) {
 	d := newTestDaemon(t, nil, newStubClock(t))
-	current := addControlSession(d, "current", "tab-current", "pane-current")
+	current := addControlSession(t, d, "current", "tab-current", "pane-current")
 	current.ephemeral = false
 	current.incarnation = domain.SessionLifecycleID{41}
-	target := addControlSession(d, "target", "tab-target", "pane-target")
+	target := addControlSession(t, d, "target", "tab-target", "pane-target")
 	target.ephemeral = false
 	target.incarnation = domain.SessionLifecycleID{42}
 
@@ -539,10 +539,10 @@ func TestPaletteQualifiesDaemonSessionForRemoteAttachment(t *testing.T) {
 
 func TestPaletteResultsDeduplicateByLifecycleAndKeepEqualLabels(t *testing.T) {
 	d := newTestDaemon(t, nil, newStubClock(t))
-	current := addControlSession(d, "hi", "tab-1", "pane-1")
+	current := addControlSession(t, d, "hi", "tab-1", "pane-1")
 	current.ephemeral = false
 	current.incarnation = domain.SessionLifecycleID{1}
-	local := addControlSession(d, "vev", "tab-2", "pane-2")
+	local := addControlSession(t, d, "vev", "tab-2", "pane-2")
 	local.ephemeral = false
 	local.incarnation = domain.SessionLifecycleID{2}
 	remoteOne := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{21}, SessionName: "vev"}

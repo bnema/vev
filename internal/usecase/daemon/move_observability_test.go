@@ -24,7 +24,7 @@ type moveObservabilityFixture struct {
 func newMoveObservabilityFixture(t *testing.T) moveObservabilityFixture {
 	t.Helper()
 	logs := &bytes.Buffer{}
-	d, source, _, _ := newManualSessionWithPTYs(t, newQuietPTY())
+	d, source, _, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
 	d.log = slog.New(slog.NewJSONHandler(logs, nil))
 
 	sourceTab := source.tabs[0]
@@ -34,7 +34,7 @@ func newMoveObservabilityFixture(t *testing.T) moveObservabilityFixture {
 
 	destinationCtx, destinationCancel := context.WithCancel(d.serveCtx)
 	t.Cleanup(destinationCancel)
-	destinationTab := newTabWithStableID("destination-tab", "destination-pane", newQuietPTY(), domain.Size{Cols: 80, Rows: 23})
+	destinationTab := newTabWithStableID("destination-tab", "destination-pane", newQuietPTY(t), domain.Size{Cols: 80, Rows: 23})
 	destinationTab.ctx, destinationTab.cancel = context.WithCancel(destinationCtx)
 	destination := &session{
 		sessionCore: sessionCore{id: "destination", name: "destination", incarnation: domain.IncarnationID{9}},

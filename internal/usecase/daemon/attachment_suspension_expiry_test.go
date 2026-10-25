@@ -64,7 +64,7 @@ func (t *expiryCloseSignalTransport) Close() error {
 // whose Close call can be observed.
 func newSuspendedExpiryFixture(t *testing.T) (*Daemon, *session, *attachedClient, *signalTimer, *expiryCloseSignalTransport) {
 	t.Helper()
-	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
+	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
 	WithSuspendedSafetyExpiry(testSuspendedExpiry)(d)
 	d.attachCoordinator(sess, nil, ac, true)
 	tr := newExpiryCloseSignalTransport()
@@ -302,7 +302,7 @@ func TestSuspendedAttachmentExpiryRequiresExactRecord(t *testing.T) {
 }
 
 func TestSuspendedAttachmentExpiryArmsOnlyAfterAck(t *testing.T) {
-	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
+	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
 	WithSuspendedSafetyExpiry(testSuspendedExpiry)(d)
 	d.attachCoordinator(sess, nil, ac, true)
 	tr := &expiryAckGateTransport{entered: make(chan struct{}), release: make(chan struct{})}
@@ -329,7 +329,7 @@ func TestSuspendedAttachmentExpiryArmsOnlyAfterAck(t *testing.T) {
 }
 
 func TestSuspendedAttachmentExpiryAckFailureArmsNothing(t *testing.T) {
-	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
+	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
 	WithSuspendedSafetyExpiry(testSuspendedExpiry)(d)
 	d.attachCoordinator(sess, nil, ac, true)
 	tr := &expiryAckFailureTransport{}
@@ -431,7 +431,7 @@ func TestSessionViewAttachedRequiresInteractivePresence(t *testing.T) {
 }
 
 func TestHandleListAttachedExcludesSuspendedOnly(t *testing.T) {
-	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
+	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
 	d.attachCoordinator(sess, nil, ac, true)
 	require.True(t, listedAttached(t, d, sess.name), "an active attachment is observably attached")
 

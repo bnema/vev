@@ -11,7 +11,7 @@ import (
 )
 
 func TestAcceptancePaletteNewTabUsesSessionGeometryAfterAttachmentResize(t *testing.T) {
-	d, sess, first, _ := newManualSessionWithPTYs(t, newQuietPTY())
+	d, sess, first, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
 	first.clientID[0] = 1
 	firstTab := sess.tabs[0]
 	firstTab.stableID = "tab-first"
@@ -26,7 +26,7 @@ func TestAcceptancePaletteNewTabUsesSessionGeometryAfterAttachmentResize(t *test
 	second.initOverlays()
 	second.clientID[0] = 2
 	second.setSession(sess)
-	secondTab := newTabWithStableID("tab-second", "pane-second", newQuietPTY(), domain.Size{Cols: 80, Rows: 23})
+	secondTab := newTabWithStableID("tab-second", "pane-second", newQuietPTY(t), domain.Size{Cols: 80, Rows: 23})
 	secondTab.ctx, secondTab.cancel = sess.ctx, func() {}
 	publishTiledPaneOwners(sess, secondTab)
 	require.NoError(t, sess.runMutation(func() error {
@@ -39,7 +39,7 @@ func TestAcceptancePaletteNewTabUsesSessionGeometryAfterAttachmentResize(t *test
 	require.True(t, sess.selectAttachmentTab(first, domain.TabStableID(firstTab.stableID)))
 	require.True(t, sess.selectAttachmentTab(second, domain.TabStableID(secondTab.stableID)))
 
-	d.ptys = newFactory(t, newQuietPTY())
+	d.ptys = newFactory(t, newQuietPTY(t))
 	rc := d.attachCoordinator(sess, nil, first, true)
 	d.attachCoordinator(sess, nil, second, true)
 	firstToken := sess.captureAttachmentCapability(first, first.transport())
@@ -91,7 +91,7 @@ func TestAcceptancePaletteNewTabUsesSessionGeometryAfterAttachmentResize(t *test
 }
 
 func TestAcceptanceAttachmentStateIsolationAcrossResetResizeAndDetach(t *testing.T) {
-	d, sess, first, _ := newManualSessionWithPTYs(t, newQuietPTY())
+	d, sess, first, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
 	first.clientID[0] = 1
 	firstTab := sess.tabs[0]
 	firstTab.stableID = "tab-first"
@@ -107,7 +107,7 @@ func TestAcceptanceAttachmentStateIsolationAcrossResetResizeAndDetach(t *testing
 	second.clientID[0] = 2
 	second.setSession(sess)
 
-	secondTab := newTabWithStableID("tab-second", "pane-second", newQuietPTY(), domain.Size{Cols: 80, Rows: 23})
+	secondTab := newTabWithStableID("tab-second", "pane-second", newQuietPTY(t), domain.Size{Cols: 80, Rows: 23})
 	secondTab.ctx, secondTab.cancel = sess.ctx, func() {}
 	publishTiledPaneOwners(sess, secondTab)
 	require.NoError(t, sess.runMutation(func() error {
@@ -183,8 +183,8 @@ func TestAcceptanceAttachmentStateIsolationAcrossResetResizeAndDetach(t *testing
 }
 
 func TestAcceptanceDirectAttachmentSupportsVerticalSplit(t *testing.T) {
-	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
-	d.ptys = newFactory(t, newQuietPTY())
+	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
+	d.ptys = newFactory(t, newQuietPTY(t))
 	rc := d.attachCoordinator(sess, nil, ac, true)
 	token := sess.captureAttachmentCapability(ac, ac.transport())
 	token.lease = rc.attachmentLease(ac)

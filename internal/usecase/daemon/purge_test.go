@@ -213,8 +213,8 @@ func TestPurgeAdmissionGatesAndReopens(t *testing.T) {
 	routePTY, releaseRoute := newBlockingPTY(t)
 	defer releaseRoute()
 	d := newTestDaemon(t, newFactorySeq(t, routePTY), newStubClock(t))
-	addControlSession(d, "work", "t_work", "p_work")
-	addNamedMoveDestination(d, "dest", "t_dest", "p_dest")
+	addControlSession(t, d, "work", "t_work", "p_work")
+	addNamedMoveDestination(t, d, "dest", "t_dest", "p_dest")
 	require.Equal(t, 2, sessionCount(d))
 
 	beginTestPurgeAdmission(t, d)
@@ -657,7 +657,7 @@ func TestCommandPathPurgeAdmissionMapsToRetryableError(t *testing.T) {
 	routePTY, releaseRoute := newBlockingPTY(t)
 	defer releaseRoute()
 	d := newTestDaemon(t, newFactorySeq(t, routePTY), newStubClock(t))
-	addControlSession(d, "work", "t_work", "p_work")
+	addControlSession(t, d, "work", "t_work", "p_work")
 
 	beginTestPurgeAdmission(t, d)
 	result := sendCommand(t, d, protocol.CommandRequest{
@@ -1514,7 +1514,7 @@ func TestPurgeAllParticipantChangeRetriesOnceAndPurgesExactly(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
+			d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
 			catalogue := newDurableRecoveryCatalogue(nil)
 			WithCatalogue(catalogue, nil)(d)
 			WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, noOpSnapshotRepository{}, nil))(d)
@@ -1558,7 +1558,7 @@ func TestPurgeAllParticipantChangeRetriesOnceAndPurgesExactly(t *testing.T) {
 // authority, and is removed only when the churn stops. The churn alternates a
 // detach with a resumed membership, so every attempt's snapshot is stale.
 func TestPurgeAllParticipantChurnIsTypedNotFalseSuccess(t *testing.T) {
-	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
+	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
 	catalogue := newDurableRecoveryCatalogue(nil)
 	WithCatalogue(catalogue, nil)(d)
 	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, noOpSnapshotRepository{}, nil))(d)
@@ -1626,7 +1626,7 @@ func TestPurgeAllParticipantChurnIsTypedNotFalseSuccess(t *testing.T) {
 // removed while the purge's participant snapshot went stale owns nothing, so
 // the purge reports success rather than a phantom live failure.
 func TestPurgeAllAlreadyRemovedParticipantChangeIsSuccess(t *testing.T) {
-	d, sess, _, _ := newManualSessionWithPTYs(t, newQuietPTY())
+	d, sess, _, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
 	catalogue := newDurableRecoveryCatalogue(nil)
 	WithCatalogue(catalogue, nil)(d)
 	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, noOpSnapshotRepository{}, nil))(d)
@@ -1830,7 +1830,7 @@ func TestPurgeAllStoppedSweepDeadlineDefersToExplicitShutdown(t *testing.T) {
 // shutdown begins as the kill aborts, the purge neither retries against the
 // stop nor reports a live failure, so the stop preserves the session.
 func TestPurgeAllParticipantChangeDefersToConcurrentExplicitShutdown(t *testing.T) {
-	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
+	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
 	catalogue := newDurableRecoveryCatalogue(nil)
 	WithCatalogue(catalogue, nil)(d)
 	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, noOpSnapshotRepository{}, nil))(d)
@@ -2010,7 +2010,7 @@ func TestPurgeAllLiveQuarantineJoinBoundedByDeadlineReleasesAdmission(t *testing
 // teardown completes, and its attached client is never left frozen.
 func TestPurgeAllLiveQuarantineAbortRestoresSurvivingSession(t *testing.T) {
 	clock := &signalClock{timers: make(chan *signalTimer, 64)}
-	d, live, ac, _ := newManualSessionWithPTYsClock(t, clock, newQuietPTY())
+	d, live, ac, _ := newManualSessionWithPTYsClock(t, clock, newQuietPTY(t))
 	live.createdAt = 42
 	live.snapEligible.Store(true)
 
@@ -2113,7 +2113,7 @@ func TestSessionKillPostQuarantineParticipantMismatchRestoresSurvivingSession(t 
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
+			d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
 			sess.snapEligible.Store(true)
 			catalogue := newDurableRecoveryCatalogue(nil)
 			repository := noOpSnapshotRepository{}

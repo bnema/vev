@@ -11,7 +11,7 @@ import (
 
 func TestRouteExactSessionTargetSelectsLifecycle(t *testing.T) {
 	d := newTestDaemon(t, nil, newStubClock(t))
-	sess := addControlSession(d, "work", "tab-1", "pane-1")
+	sess := addControlSession(t, d, "work", "tab-1", "pane-1")
 	sess.ephemeral = false
 	sess.incarnation = newTestLifecycle(t)
 	tr, _ := newCapturingTransport(t)
@@ -33,7 +33,7 @@ func TestRouteExactSessionTargetSelectsLifecycle(t *testing.T) {
 
 func TestStoppedSessionAttachTargetAcceptsSameLifecycleNowLive(t *testing.T) {
 	d := newTestDaemon(t, nil, newStubClock(t))
-	sess := addControlSession(d, "work", "tab-1", "pane-1")
+	sess := addControlSession(t, d, "work", "tab-1", "pane-1")
 	sess.ephemeral = false
 	sess.incarnation = newTestLifecycle(t)
 	tr, _ := newCapturingTransport(t)
@@ -51,7 +51,7 @@ func TestStoppedSessionAttachTargetAcceptsSameLifecycleNowLive(t *testing.T) {
 
 func TestSessionAttachTargetRejectsLifecycleReplacement(t *testing.T) {
 	d := newTestDaemon(t, nil, newStubClock(t))
-	sess := addControlSession(d, "work", "tab-1", "pane-1")
+	sess := addControlSession(t, d, "work", "tab-1", "pane-1")
 	sess.incarnation = newTestLifecycle(t)
 	stale := sess.incarnation
 	sess.incarnation[0]++
@@ -67,7 +67,7 @@ func TestSessionAttachTargetRejectsLifecycleReplacement(t *testing.T) {
 
 func TestRouteExactSessionTargetRejectsNameMismatch(t *testing.T) {
 	d := newTestDaemon(t, nil, newStubClock(t))
-	sess := addControlSession(d, "work", "tab-1", "pane-1")
+	sess := addControlSession(t, d, "work", "tab-1", "pane-1")
 	sess.ephemeral = false
 	sess.incarnation = newTestLifecycle(t)
 	tr, _ := newCapturingTransport(t)
@@ -87,7 +87,7 @@ func TestRouteExactSessionTargetRejectsNameMismatch(t *testing.T) {
 
 func TestLockedExactSessionTargetRejectsReplacement(t *testing.T) {
 	d := newTestDaemon(t, nil, newStubClock(t))
-	sess := addControlSession(d, "work", "tab-1", "pane-1")
+	sess := addControlSession(t, d, "work", "tab-1", "pane-1")
 	sess.ephemeral = false
 	sess.incarnation = newTestLifecycle(t)
 	target := protocol.ExactSessionTarget{LifecycleID: sess.incarnation, SessionName: sess.name}
@@ -106,7 +106,7 @@ func TestLockedExactSessionTargetRejectsReplacement(t *testing.T) {
 
 func TestRouteExactSessionTargetRejectsLifecycleReplacement(t *testing.T) {
 	d := newTestDaemon(t, nil, newStubClock(t))
-	sess := addControlSession(d, "work", "tab-1", "pane-1")
+	sess := addControlSession(t, d, "work", "tab-1", "pane-1")
 	sess.ephemeral = false
 	sess.incarnation = newTestLifecycle(t)
 	tr, _ := newCapturingTransport(t)

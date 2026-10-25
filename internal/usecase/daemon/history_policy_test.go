@@ -14,7 +14,7 @@ import (
 
 func TestHistoryPolicyReloadIncludesHiddenFloatingPanes(t *testing.T) {
 	d := newTestDaemon(t, nil, newStubClock(t))
-	sess := addControlSession(d, "history", "tab", "pane")
+	sess := addControlSession(t, d, "history", "tab", "pane")
 	tb := sess.tabs[0]
 	primary := tb.focusedPane()
 	floating := newPane("floating", nil, domain.Size{Cols: 80, Rows: 24})
@@ -51,7 +51,7 @@ func TestHistoryPolicyReloadIncludesHiddenFloatingPanes(t *testing.T) {
 
 func TestHistoryCompressionSkipsBusyPanesAndRemainsBounded(t *testing.T) {
 	d := newTestDaemon(t, nil, newStubClock(t))
-	sess := addControlSession(d, "history", "tab", "pane")
+	sess := addControlSession(t, d, "history", "tab", "pane")
 	p := sess.tabs[0].focusedPane()
 	installTestHistory(p, vt.HistoryConfig{MaxRows: 64, MaxBytes: 1 << 20, ChunkRows: 16})
 	for range 48 {

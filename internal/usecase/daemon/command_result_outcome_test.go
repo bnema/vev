@@ -208,7 +208,7 @@ func TestHandleCommandTimeoutSendsOneCorrelatedUnknownAndDropsLateCompletion(t *
 	factory := newGatedControlFactory()
 	clock := &signalClock{timers: make(chan *signalTimer, 16)}
 	d := newTestDaemon(t, factory, clock)
-	addControlSession(d, "work", "t_work", "p_work")
+	addControlSession(t, d, "work", "t_work", "p_work")
 	t.Cleanup(func() {
 		factory.close()
 		d.sessWg.Wait()
@@ -251,7 +251,7 @@ func TestHandleCommandTimeoutRetiresConnectionAfterOneResult(t *testing.T) {
 	factory := newGatedControlFactory()
 	clock := &signalClock{timers: make(chan *signalTimer, 16)}
 	d := newTestDaemon(t, factory, clock)
-	addControlSession(d, "work", "t_work", "p_work")
+	addControlSession(t, d, "work", "t_work", "p_work")
 	t.Cleanup(func() {
 		factory.close()
 		d.sessWg.Wait()

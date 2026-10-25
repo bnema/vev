@@ -439,7 +439,7 @@ func TestFloatingOpensFromUnrelatedSessionsAreConcurrent(t *testing.T) {
 		func(_ context.Context, _ string, _ []string, _ []string, _ string, _ domain.Geometry) (ports.PTY, error) {
 			entered <- struct{}{}
 			<-release
-			return newQuietPTY(), nil
+			return newQuietPTY(t), nil
 		}).Twice()
 	d := newTestDaemon(t, factory, newStubClock(t))
 	tabs := make([]*tab, 0, 2)

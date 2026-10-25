@@ -320,7 +320,7 @@ func TestAttachmentResizeUsesLatestClaimedSessionGeometry(t *testing.T) {
 }
 
 func TestStaleAttachmentGeometryClaimCannotCommit(t *testing.T) {
-	d, sess, first, _ := newManualSessionWithPTYs(t, newQuietPTY())
+	d, sess, first, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
 	second := &attachedClient{output: newOutputStateStream()}
 	second.setSize(domain.Size{Cols: 90, Rows: 30})
 	second.setSession(sess)
@@ -350,7 +350,7 @@ func TestStaleAttachmentGeometryClaimCannotCommit(t *testing.T) {
 }
 
 func TestAttachmentMoveReconcilesSourceGeometryAfterOwnerRemoval(t *testing.T) {
-	d, source, moved, _ := newManualSessionWithPTYs(t, newQuietPTY())
+	d, source, moved, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
 	peer := &attachedClient{output: newOutputStateStream()}
 	peer.setSize(domain.Size{Cols: 80, Rows: 24})
 	peer.setSession(source)

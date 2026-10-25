@@ -330,7 +330,7 @@ func TestNewRestoredSessionEnvironmentIsProvisional(t *testing.T) {
 // environment and its provisional state stay untouched.
 func TestFailedAttachTransitionLeavesSessionEnvironment(t *testing.T) {
 	d := newTestDaemon(t, nil, newStubClock(t))
-	sess := addControlSession(d, "work", "tab-1", "pane-1")
+	sess := addControlSession(t, d, "work", "tab-1", "pane-1")
 	sess.ephemeral = false
 	sess.incarnation = newTestLifecycle(t)
 	sess.mu.Lock()
@@ -374,10 +374,10 @@ func TestEnvironmentSeedCarriesProvisionalState(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			factory := &controlPTYFactory{}
+			factory := &controlPTYFactory{t: t}
 			d := newTestDaemon(t, factory, newStubClock(t))
 			t.Cleanup(func() { factory.close(); d.sessWg.Wait() })
-			source := addControlSession(d, "work", "t_work", "p_work")
+			source := addControlSession(t, d, "work", "t_work", "p_work")
 			source.mu.Lock()
 			source.env = []string{"PATH=/source"}
 			source.envProvisional = tt.provisional

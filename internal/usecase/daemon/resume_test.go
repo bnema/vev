@@ -1573,7 +1573,7 @@ func TestResumeParkedRefreshesSessionBoundFuturePTYEnvironment(t *testing.T) {
 	factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
 		func(_ context.Context, command string, _ []string, env []string, _ string, geometry domain.Geometry) (ports.PTY, error) {
 			if geometry.Size != (domain.Size{Cols: 80, Rows: 22}) {
-				return newQuietPTY(), nil
+				return newQuietPTY(t), nil
 			}
 			commands = append(commands, command)
 			envs = append(envs, append([]string(nil), env...))

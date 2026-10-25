@@ -272,7 +272,7 @@ func TestCreateTabClosesPTYIfSessionKilledDuringOpen(t *testing.T) {
 	f := portsmocks.NewMockPTYFactory(t)
 	normalSize := domain.Size{Cols: 80, Rows: 22}
 	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Geometry) bool { return got.Size == normalSize })).Return(p1, nil).Once()
-	floating := newQuietPTY()
+	floating := newQuietPTY(t)
 	expectFloatingPrewarmOpen(f, normalSize, floating)
 	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Geometry) bool { return got.Size == normalSize })).RunAndReturn(
 		func(ctx context.Context, _ string, _ []string, _ []string, _ string, _ domain.Geometry) (ports.PTY, error) {
@@ -675,7 +675,7 @@ func TestServeGracefulShutdownOnContextCancel(t *testing.T) {
 // snapshot missed. Final session removal alone no longer triggers this.
 func TestHelloAfterExplicitShutdownIsRejected(t *testing.T) {
 	p, releasePTY := newBlockingPTY(t)
-	floating := newQuietPTY()
+	floating := newQuietPTY(t)
 	f := portsmocks.NewMockPTYFactory(t)
 	normalSize := domain.Size{Cols: 80, Rows: 22}
 	var d *Daemon
@@ -1611,7 +1611,7 @@ func TestAttachUpdatesFutureChildEnvTrueColor(t *testing.T) {
 			return p2, nil
 		},
 	).Twice()
-	floating := newQuietPTY()
+	floating := newQuietPTY(t)
 	expectFloatingPrewarmOpen(f, normalSize, floating)
 
 	d := newTestDaemon(t, f, newStubClock(t))
@@ -1654,7 +1654,7 @@ func TestLiveAttachUpdatesFutureChildEnvTrueColor(t *testing.T) {
 			return p2, nil
 		},
 	).Twice()
-	floating := newQuietPTY()
+	floating := newQuietPTY(t)
 	expectFloatingPrewarmOpen(f, normalSize, floating)
 
 	d := newTestDaemon(t, f, newStubClock(t))
@@ -1699,7 +1699,7 @@ func TestCreateSessionAndSwitchInheritsTerminalEnv(t *testing.T) {
 			return p2, nil
 		},
 	).Twice()
-	floating := newQuietPTY()
+	floating := newQuietPTY(t)
 	expectFloatingPrewarmOpen(f, normalSize, floating)
 	d := newTestDaemon(t, f, newStubClock(t))
 	tr := newMockServerConnection(t)
@@ -1768,7 +1768,7 @@ func TestAttachEnvironmentRefreshesOnlySessionBoundFuturePTYInputs(t *testing.T)
 			return p2, nil
 		},
 	).Twice()
-	floating := newQuietPTY()
+	floating := newQuietPTY(t)
 	expectFloatingPrewarmOpen(f, normalSize, floating)
 	d := newTestDaemon(t, f, newStubClock(t))
 	tr1 := newMockServerConnection(t)
