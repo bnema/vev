@@ -158,7 +158,7 @@ func TestMoveLogsNormalizedRejection(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var logs bytes.Buffer
-			d := New(nil, stubClock{}, slog.New(slog.NewJSONHandler(&logs, nil)))
+			d := New(nil, newStubClock(t), slog.New(slog.NewJSONHandler(&logs, nil)))
 
 			require.ErrorIs(t, tt.move(d), errMovePaneInvalid)
 			output := logs.String()

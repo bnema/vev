@@ -203,7 +203,7 @@ func TestDelayedRetryUsesFreshLayoutAfterPaneResize(t *testing.T) {
 	clock := newCoordinatorMockClock(t, 8)
 	// The failed apply also posts its preserved degradation warning; its toast
 	// lifetime is unrelated to the coordinator deadlines driven below.
-	clock.clock.EXPECT().NewTimer(6 * time.Second).Return(stubTimer{}).Once()
+	clock.clock.EXPECT().NewTimer(6 * time.Second).Return(newStubTimer(t)).Once()
 	failed := &transactionalResizePTY{errs: []error{errors.New("first resize fails")}}
 	d, sess, ac, _ := newManualSessionWithPTYs(t, failed)
 	d.clock = clock.clock

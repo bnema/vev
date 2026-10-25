@@ -22,7 +22,7 @@ func TestStartupRecoveryCounts(t *testing.T) {
 		{Name: "new", IncarnationID: domain.IncarnationID{3}},
 		{Name: "broken", IncarnationID: domain.IncarnationID{4}, Committed: ref, DegradedReason: "terminal contents must not appear"},
 	}
-	d := New(nil, stubClock{}, log, WithCatalogue(newDurableRecoveryCatalogue(records), records))
+	d := New(nil, newStubClock(t), log, WithCatalogue(newDurableRecoveryCatalogue(records), records))
 	d.logSessionRestoreComplete(records[0], 7, false)
 	d.logSessionDegraded(records[3], "checkpoint-invalid")
 	d.logStartupRecoveryCounts(0)
@@ -54,7 +54,7 @@ func (c failingRecordsCatalogue) Records() ([]domain.CatalogueRecord, error) {
 func TestStartupRecoveryCountsFallsBackWhenCatalogueReadFails(t *testing.T) {
 	var buffer bytes.Buffer
 	record := domain.CatalogueRecord{Name: "broken", IncarnationID: domain.IncarnationID{4}, Committed: &domain.CheckpointRef{Generation: 1, ManifestDigest: [32]byte{1}}, DegradedReason: "invalid"}
-	d := New(nil, stubClock{}, slog.New(slog.NewJSONHandler(&buffer, nil)))
+	d := New(nil, newStubClock(t), slog.New(slog.NewJSONHandler(&buffer, nil)))
 	d.persistEnabled = true
 	d.catalogue = failingRecordsCatalogue{durableRecoveryCatalogue: newDurableRecoveryCatalogue(nil), err: errors.New("read failed")}
 	d.inactive[record.Name] = inactiveSession{record: record}

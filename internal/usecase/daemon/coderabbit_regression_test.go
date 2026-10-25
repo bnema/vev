@@ -195,7 +195,7 @@ func TestStaleIncompatibleRestoreCannotOverwriteNewerAuthority(t *testing.T) {
 }
 
 func TestFinishRecordRestoreAlwaysClosesProvidedBarrier(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	done := make(chan struct{})
 
 	d.finishRecordRestore(domain.CatalogueRecord{Name: "removed"}, nil, done)
@@ -223,7 +223,7 @@ func (c *blockingRecordCatalogue) Record(string) (domain.CatalogueRecord, bool, 
 func TestCreateSessionRechecksShutdownAfterCatalogueRead(t *testing.T) {
 	record := durableRecoveryRecord(0)
 	catalogue := &blockingRecordCatalogue{record: record, entered: make(chan struct{}), release: make(chan struct{})}
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	d.catalogue = catalogue
 	d.persistEnabled = true
 	d.inactive[record.Name] = inactiveSessionFromRecord(record, protocol.SessionDown, make(chan struct{}))
@@ -309,7 +309,7 @@ func TestResumeStoppedSessionRejectsReplacementDuringCatalogueRead(t *testing.T)
 }
 
 func TestSessionAttachTargetRejectsInactiveLifecycleReplacementDuringCatalogueRead(t *testing.T) {
-	d := newTestDaemon(t, newFactory(t, newQuietPTY()), stubClock{})
+	d := newTestDaemon(t, newFactory(t, newQuietPTY()), newStubClock(t))
 	record := durableRecoveryRecord(1)
 	record.Name = "stopped"
 	record.Committed = nil
@@ -408,7 +408,7 @@ func TestSessionAttachTargetRejectsTabAuthorityChangeDuringCatalogueRead(t *test
 				entered:                  make(chan struct{}),
 				release:                  make(chan struct{}),
 			}
-			d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+			d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
 			d.catalogue = catalogue
 			d.persistEnabled = true
 			d.recovery = recoveryusecase.NewCoordinator(catalogue, noOpSnapshotRepository{}, nil)

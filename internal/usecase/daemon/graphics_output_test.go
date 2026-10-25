@@ -174,7 +174,7 @@ func TestFreshCapabilityDowngradePreservesForeignTerminalGraphics(t *testing.T) 
 }
 
 func TestReplacementKittyTerminalGetsFreshGraphicsState(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	sess := &session{sessionCore: sessionCore{id: "work"}}
 	ac := &attachedClient{clientID: [16]byte{1}, output: newOutputStateStream()}
 
@@ -385,7 +385,7 @@ func TestGraphicsOutputExhaustionResetsInsideItsNamespace(t *testing.T) {
 }
 
 func TestGraphicsNamespaceQuarantinesOnParkExpiryAndFailedCleanup(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	base := graphicsIDNamespaceSize + 1
 	block := (base - 1) / graphicsIDNamespaceSize
 
@@ -426,7 +426,7 @@ func TestGraphicsNamespaceQuarantinesOnParkExpiryAndFailedCleanup(t *testing.T) 
 }
 
 func TestGraphicsNamespaceStaysQuarantinedAfterSocketSendSuccessWithoutTerminalFlush(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	key := "session:unflushed:attachment"
 	d.mu.Lock()
 	oldBase, oldFence := d.reserveGraphicsNamespaceLeaseLocked(key)
@@ -459,7 +459,7 @@ func TestGraphicsNamespaceStaysQuarantinedAfterSocketSendSuccessWithoutTerminalF
 }
 
 func TestGraphicsNamespaceStaysQuarantinedAfterFinalDeleteAndParkExpiry(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	key := "session:empty-park:attachment"
 	d.mu.Lock()
 	oldBase, oldFence := d.reserveGraphicsNamespaceLeaseLocked(key)
@@ -497,7 +497,7 @@ func TestGraphicsNamespaceStaysQuarantinedAfterFinalDeleteAndParkExpiry(t *testi
 }
 
 func TestGraphicsNamespacePoolExhaustionFallsBackToText(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	d.mu.Lock()
 	for block := uint64(0); block < graphicsIDNamespaceCount; block++ {
 		d.graphics.reserved[block] = struct{}{}

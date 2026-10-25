@@ -10,7 +10,7 @@ import (
 )
 
 func TestRouteExactSessionTargetSelectsLifecycle(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	sess := addControlSession(d, "work", "tab-1", "pane-1")
 	sess.ephemeral = false
 	sess.incarnation = newTestLifecycle(t)
@@ -32,7 +32,7 @@ func TestRouteExactSessionTargetSelectsLifecycle(t *testing.T) {
 }
 
 func TestStoppedSessionAttachTargetAcceptsSameLifecycleNowLive(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	sess := addControlSession(d, "work", "tab-1", "pane-1")
 	sess.ephemeral = false
 	sess.incarnation = newTestLifecycle(t)
@@ -50,7 +50,7 @@ func TestStoppedSessionAttachTargetAcceptsSameLifecycleNowLive(t *testing.T) {
 }
 
 func TestSessionAttachTargetRejectsLifecycleReplacement(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	sess := addControlSession(d, "work", "tab-1", "pane-1")
 	sess.incarnation = newTestLifecycle(t)
 	stale := sess.incarnation
@@ -66,7 +66,7 @@ func TestSessionAttachTargetRejectsLifecycleReplacement(t *testing.T) {
 }
 
 func TestRouteExactSessionTargetRejectsNameMismatch(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	sess := addControlSession(d, "work", "tab-1", "pane-1")
 	sess.ephemeral = false
 	sess.incarnation = newTestLifecycle(t)
@@ -86,7 +86,7 @@ func TestRouteExactSessionTargetRejectsNameMismatch(t *testing.T) {
 }
 
 func TestLockedExactSessionTargetRejectsReplacement(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	sess := addControlSession(d, "work", "tab-1", "pane-1")
 	sess.ephemeral = false
 	sess.incarnation = newTestLifecycle(t)
@@ -105,7 +105,7 @@ func TestLockedExactSessionTargetRejectsReplacement(t *testing.T) {
 }
 
 func TestRouteExactSessionTargetRejectsLifecycleReplacement(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	sess := addControlSession(d, "work", "tab-1", "pane-1")
 	sess.ephemeral = false
 	sess.incarnation = newTestLifecycle(t)

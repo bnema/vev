@@ -16,7 +16,7 @@ import (
 func TestParkedResumeRejectsDispatchedWakeFromPriorAttachment(t *testing.T) {
 	pty, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
-	d := newTestDaemon(t, newFactorySeq(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactorySeq(t, pty), newStubClock(t))
 
 	oldTransport := &closeTrackingTransport{}
 	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTransport)

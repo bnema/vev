@@ -29,7 +29,7 @@ func TestEphemeralCloseOnExit(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			pty, release := newBlockingPTY(t)
 			defer release()
-			d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+			d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 			updateRuntimeConfig(d, func(rc *runtimeConfig) { rc.ephemeral = domain.EphemeralConfig{CloseOnExit: tt.closeOnExit} })
 
 			tr := &closeTrackingTransport{}
@@ -121,7 +121,7 @@ func TestDetachFrameEphemeralCloseOnExit(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			pty, release := newBlockingPTY(t)
 			defer release()
-			d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+			d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 			updateRuntimeConfig(d, func(rc *runtimeConfig) { rc.ephemeral = domain.EphemeralConfig{CloseOnExit: tt.closeOnExit} })
 			tr, sends, _ := newConn(t,
 				mustHello(tt.intent, tt.sessionName, domain.Size{Cols: 80, Rows: 24}),

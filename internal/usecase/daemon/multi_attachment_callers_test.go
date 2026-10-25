@@ -45,7 +45,7 @@ func TestAttachmentsKeepDifferentPaneFocusForActionsRenderingAndMetadata(t *test
 	require.Equal(t, firstPane.id, firstState.layout.focus)
 	require.Equal(t, secondPane.id, secondState.layout.focus)
 
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	var rows []struct {
 		Pane    string `json:"pane"`
 		Focused bool   `json:"focused"`
@@ -64,7 +64,7 @@ func TestAttachmentFocusActionUpdatesOnlyInitiatingPaneView(t *testing.T) {
 	require.True(t, sess.registerAttachment(first))
 	require.True(t, sess.registerAttachment(second))
 
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	require.NoError(t, d.focusDir(sess, second, layout.Right, nil))
 	require.Equal(t, domain.PaneStableID(firstPane.stableID), first.viewSnapshot().paneID)
 	require.Equal(t, domain.PaneStableID(secondPane.stableID), second.viewSnapshot().paneID)
@@ -80,7 +80,7 @@ func TestAttachmentFocusActionCommitsWhenLayoutAlreadyFocusesDestination(t *test
 	tb.tree.Focus = secondPane.id
 	tb.mu.Unlock()
 
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	require.NoError(t, d.focusDir(sess, ac, layout.Right, nil))
 	require.Equal(t, domain.PaneStableID(secondPane.stableID), ac.viewSnapshot().paneID)
 }

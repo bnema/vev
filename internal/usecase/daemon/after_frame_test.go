@@ -66,7 +66,7 @@ func TestAfterNextFrameRunsOrDropsByCapability(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d, source, ac, _, _, releases, _ := setupMovePickerSessionsCore(t, stubClock{}, 0)
+			d, source, ac, _, _, releases, _ := setupMovePickerSessionsCore(t, newStubClock(t), 0)
 			defer releaseAll(releases)
 			effect, admitted := ac.beginAttachmentEffect(captureAttachmentCapability(source, ac, ac.transport()))
 			require.True(t, admitted)

@@ -417,7 +417,7 @@ func TestRouteRejectsSessionAdmissionContradictionsBeforeMutation(t *testing.T) 
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d := newTestDaemon(t, newFactory(t, newQuietPTY()), stubClock{})
+			d := newTestDaemon(t, newFactory(t, newQuietPTY()), newStubClock(t))
 			tr := &admittedTransport{ServerConnection: &closeTrackingTransport{}, admission: tt.admission, present: true}
 			_, _, err := d.route(tt.hello, tr)
 			var protocolErr *protoErr
@@ -443,7 +443,7 @@ func TestRouteRemoteEphemeralCreateRequiresAdmissionProof(t *testing.T) {
 		Purpose: ports.BrokerStreamAttachment, Admission: ports.BrokerAdmissionCreateEphemeral,
 	}
 
-	proven := newTestDaemon(t, newFactory(t, newQuietPTY()), stubClock{})
+	proven := newTestDaemon(t, newFactory(t, newQuietPTY()), newStubClock(t))
 	proven.baseEnv = remotePoison
 	proven.dirOrHome = func(cwd string) string {
 		require.Empty(t, cwd, "a remote creation must not resolve a client working directory")
@@ -460,7 +460,7 @@ func TestRouteRemoteEphemeralCreateRequiresAdmissionProof(t *testing.T) {
 
 	// The same Hello without a provisioned admission is the legacy shape and
 	// must stay refused rather than inherit the remote create exception.
-	unproven := newTestDaemon(t, newFactory(t, newQuietPTY()), stubClock{})
+	unproven := newTestDaemon(t, newFactory(t, newQuietPTY()), newStubClock(t))
 	legacyTr := &admittedTransport{ServerConnection: &closeTrackingTransport{}, present: false}
 	_, _, err = unproven.route(hello, legacyTr)
 	var protocolErr *protoErr
@@ -483,7 +483,7 @@ func TestRouteRemoteNamedCreateUsesDaemonEnvironment(t *testing.T) {
 		Purpose: ports.BrokerStreamAttachment, Admission: ports.BrokerAdmissionCreateNamed, Name: "work",
 	}
 
-	d := newTestDaemon(t, newFactory(t, newQuietPTY()), stubClock{})
+	d := newTestDaemon(t, newFactory(t, newQuietPTY()), newStubClock(t))
 	d.baseEnv = remotePoison
 	d.dirOrHome = func(cwd string) string {
 		require.Empty(t, cwd, "a remote creation must not resolve a client working directory")
@@ -538,7 +538,7 @@ func TestRouteLocalCreateUsesAdmittedClientEnvironment(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			d := newTestDaemon(t, newFactory(t, newQuietPTY()), stubClock{})
+			d := newTestDaemon(t, newFactory(t, newQuietPTY()), newStubClock(t))
 			d.baseEnv = daemonPoison
 			tr := &admittedTransport{ServerConnection: &closeTrackingTransport{}, admission: tt.admission, present: true}
 			sess, ac, err := d.route(tt.hello, tr)
@@ -560,7 +560,7 @@ func TestRouteLocalAttachUpdatesOnlyFutureChildEnvironment(t *testing.T) {
 	firstEnv := []string{"MARK=first", "WAYLAND_DISPLAY=wayland-old"}
 	pty, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactorySeq(t, pty, newQuietPTY()), stubClock{})
+	d := newTestDaemon(t, newFactorySeq(t, pty, newQuietPTY()), newStubClock(t))
 
 	create := protocol.Hello{
 		Version: protocol.Version, Intent: protocol.IntentNew, Name: "work", Size: defaultSize,
@@ -606,7 +606,7 @@ func TestRouteLocalAttachUpdatesOnlyFutureChildEnvironment(t *testing.T) {
 // process, takes the first local client's environment wholesale and only
 // refreshes session-bound variables afterwards.
 func TestRouteLocalAttachAdoptsClientEnvironmentForRestoredSession(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	sess := addControlSession(d, "work", "tab-1", "pane-1")
 	sess.ephemeral = false
 	sess.incarnation = newTestLifecycle(t)
@@ -649,7 +649,7 @@ func TestRouteLocalAttachAdoptsClientEnvironmentForRestoredSession(t *testing.T)
 // the daemon-owned session keeps what it was created with, and only a
 // client-owned local attach refreshes future-child state.
 func TestRouteRemoteExactAttachPreservesSessionEnvironment(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	sess := addControlSession(d, "work", "tab-1", "pane-1")
 	sess.ephemeral = false
 	sess.incarnation = newTestLifecycle(t)
@@ -702,7 +702,7 @@ func TestRouteResumeRejectsMismatchedAdmittedTargetBeforeClaim(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			pty, release := newBlockingPTY(t)
 			defer release()
-			d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+			d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 			oldTransport := &closeTrackingTransport{}
 			sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTransport)
 			require.NoError(t, err)

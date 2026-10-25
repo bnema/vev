@@ -64,7 +64,7 @@ func TestPurgeAllRemovesLiveAndInactiveAndKeepsDaemonActive(t *testing.T) {
 	writes := make(chan []byte, 8)
 	afterPTY, releaseAfter := newBlockingPTYWithWrites(t, writes)
 	tabPTY, releaseTab := newBlockingPTY(t)
-	d := newTestDaemon(t, newFactorySeq(t, seedPTY, afterPTY, tabPTY), stubClock{})
+	d := newTestDaemon(t, newFactorySeq(t, seedPTY, afterPTY, tabPTY), newStubClock(t))
 
 	seed, err := createSessionForTest(d, "0", true, "/tmp", sz, terminalEnv{}, nil)
 	require.NoError(t, err)
@@ -141,7 +141,7 @@ func TestPurgeAllReportsStructuredPartialFailures(t *testing.T) {
 		{2}: errors.New("stopped delete failed"),
 		{3}: errors.New("broken delete failed"),
 	})
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
 	WithSnapshotRepository(repository)(d)
 	store, _ := newMockStore(t)
 	WithStore(t, store)(d)
@@ -191,7 +191,7 @@ func TestPurgeAllReportsStructuredPartialFailures(t *testing.T) {
 // fails, reported as a durable-class failure.
 func TestPurgeAllReportsDurableOrphanFailure(t *testing.T) {
 	repository := newSelectivePurgeRepository(map[domain.IncarnationID]error{{9}: errors.New("orphan delete failed")})
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
 	WithSnapshotRepository(repository)(d)
 	store, _ := newMockStore(t)
 	WithStore(t, store)(d)
@@ -212,7 +212,7 @@ func TestPurgeAllReportsDurableOrphanFailure(t *testing.T) {
 func TestPurgeAdmissionGatesAndReopens(t *testing.T) {
 	routePTY, releaseRoute := newBlockingPTY(t)
 	defer releaseRoute()
-	d := newTestDaemon(t, newFactorySeq(t, routePTY), stubClock{})
+	d := newTestDaemon(t, newFactorySeq(t, routePTY), newStubClock(t))
 	addControlSession(d, "work", "t_work", "p_work")
 	addNamedMoveDestination(d, "dest", "t_dest", "p_dest")
 	require.Equal(t, 2, sessionCount(d))
@@ -256,7 +256,7 @@ func TestPurgeAllLinearizesConcurrentCreate(t *testing.T) {
 	for attempt := 0; attempt < 24; attempt++ {
 		seedPTY, releaseSeed := newBlockingPTY(t)
 		routePTY, releaseRoute := newBlockingPTY(t)
-		d := newTestDaemon(t, newFactorySeq(t, seedPTY, routePTY), stubClock{})
+		d := newTestDaemon(t, newFactorySeq(t, seedPTY, routePTY), newStubClock(t))
 
 		seed, err := createSessionForTest(d, "0", true, "/tmp", sz, terminalEnv{}, nil)
 		require.NoError(t, err)
@@ -308,7 +308,7 @@ func TestPurgeAllLinearizesConcurrentRestore(t *testing.T) {
 	for attempt := 0; attempt < 16; attempt++ {
 		seedPTY, releaseSeed := newBlockingPTY(t)
 		restorePTY, releaseRestore := newBlockingPTY(t)
-		d := newTestDaemon(t, newFactorySeq(t, seedPTY, restorePTY), stubClock{})
+		d := newTestDaemon(t, newFactorySeq(t, seedPTY, restorePTY), newStubClock(t))
 
 		seed, err := createSessionForTest(d, "work", false, "/tmp", sz, terminalEnv{}, nil)
 		require.NoError(t, err)
@@ -362,7 +362,7 @@ func TestPurgeAllLinearizesConcurrentRestore(t *testing.T) {
 func TestShutdownAllStillStopsDaemonWithSessionsClientsAndWorkers(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	pty, releasePTY := newBlockingPTY(t)
-	d := newTestDaemon(t, newFactorySeq(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactorySeq(t, pty), newStubClock(t))
 
 	tr, sends, releaseConn := newConn(t, mustHello(protocol.IntentNew, "work", sz))
 	var hg sync.WaitGroup
@@ -476,7 +476,7 @@ func TestPurgeAllWaitsForAdmittedRestoreThenPurges(t *testing.T) {
 	pty, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
 
-	d := newTestDaemon(t, newFactorySeq(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactorySeq(t, pty), newStubClock(t))
 	d.baseEnv = []string{"TERM=xterm-256color"}
 	checkpoint := domain.CheckpointRef{Generation: generation.Generation, ManifestDigest: snapcodec.ManifestDigest(generation.Manifest)}
 	record := domain.CatalogueRecord{Name: snapshot.Name, IncarnationID: generation.IncarnationID, Cwd: "/snapshot/cwd", CreatedAt: int64(snapshot.CreatedAt), Committed: &checkpoint}
@@ -538,7 +538,7 @@ func TestRestoreCatalogueAbandonsRecordsSupersededByPurge(t *testing.T) {
 	record := durableRecoveryRecord(1)
 	record.Name = "work"
 	catalogue := newDurableRecoveryCatalogue([]domain.CatalogueRecord{record})
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
 	WithCatalogue(catalogue, []domain.CatalogueRecord{record})(d)
 	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, noOpSnapshotRepository{}, nil))(d)
 
@@ -563,7 +563,7 @@ func TestRestoreCatalogueAbandonsRecordsSupersededByPurge(t *testing.T) {
 // in-progress gate and the completed-purge epoch are revalidated before a
 // restore publishes any registry entry.
 func TestEnsureCatalogueRegistryEntryRejectsSupersededRestore(t *testing.T) {
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
 	record := durableRecoveryRecord(1)
 	record.Name = "work"
 
@@ -595,7 +595,7 @@ func TestEnsureCatalogueRegistryEntryRejectsSupersededRestore(t *testing.T) {
 // cancellation, drains its job queue without touching the registry, and lets
 // the producer and the worker join.
 func TestRestoreCatalogueCancellationDrainsAdmission(t *testing.T) {
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
 	record := durableRecoveryRecord(1)
 	record.Name = "work"
 
@@ -622,7 +622,7 @@ func TestRestoreCatalogueCancellationDrainsAdmission(t *testing.T) {
 // owner at a time: a second concurrent purge cannot enter the critical section
 // until the first releases it.
 func TestPurgeAllSerializesConcurrentKillAll(t *testing.T) {
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
 	entered := make(chan struct{})
 	releaseFirst := make(chan struct{})
 	var calls atomic.Int32
@@ -656,7 +656,7 @@ func TestPurgeAllSerializesConcurrentKillAll(t *testing.T) {
 func TestCommandPathPurgeAdmissionMapsToRetryableError(t *testing.T) {
 	routePTY, releaseRoute := newBlockingPTY(t)
 	defer releaseRoute()
-	d := newTestDaemon(t, newFactorySeq(t, routePTY), stubClock{})
+	d := newTestDaemon(t, newFactorySeq(t, routePTY), newStubClock(t))
 	addControlSession(d, "work", "t_work", "p_work")
 
 	beginTestPurgeAdmission(t, d)
@@ -677,7 +677,7 @@ func TestRemoteTargetRouteWaitsForPurgeAdmission(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	pty, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
-	d := newTestDaemon(t, newFactorySeq(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactorySeq(t, pty), newStubClock(t))
 	sess, err := createSessionForTest(d, "work", false, "/tmp", sz, terminalEnv{}, nil)
 	require.NoError(t, err)
 	sess.mu.Lock()
@@ -717,7 +717,7 @@ func TestRemoteTargetRouteWaitsForPurgeAdmission(t *testing.T) {
 func TestConcurrentCreateAndExplicitShutdownInterlock(t *testing.T) {
 	for attempt := 0; attempt < 24; attempt++ {
 		pty, releasePTY := newBlockingPTY(t)
-		d := newTestDaemon(t, newFactorySeq(t, pty), stubClock{})
+		d := newTestDaemon(t, newFactorySeq(t, pty), newStubClock(t))
 
 		start := make(chan struct{})
 		var wg sync.WaitGroup
@@ -767,7 +767,7 @@ func TestPurgeAllSupersededByExplicitShutdownPreservesStopAuthority(t *testing.T
 	sz := domain.Size{Cols: 80, Rows: 24}
 	pty, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
-	d := newTestDaemon(t, newFactorySeq(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactorySeq(t, pty), newStubClock(t))
 	catalogue := newDurableRecoveryCatalogue(nil)
 	WithCatalogue(catalogue, nil)(d)
 	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, noOpSnapshotRepository{}, bytes.NewReader(bytes.Repeat([]byte{0x5a}, 32))))(d)
@@ -797,7 +797,7 @@ func TestPurgeAllSupersededByExplicitShutdownPreservesStopAuthority(t *testing.T
 // KillResult cannot silently infer success from a close.
 func TestPurgeAllLogsFailedControlSend(t *testing.T) {
 	repository := newSelectivePurgeRepository(map[domain.IncarnationID]error{{2}: errors.New("delete failed")})
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
 	var logged syncedLogBuffer
 	d.log = slog.New(slog.NewTextHandler(&logged, nil))
 	WithSnapshotRepository(repository)(d)
@@ -844,7 +844,7 @@ func TestPurgeAllPurgesSettledRestore(t *testing.T) {
 	pty, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
 
-	d := newTestDaemon(t, newFactorySeq(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactorySeq(t, pty), newStubClock(t))
 	d.baseEnv = []string{"TERM=xterm-256color"}
 	checkpoint := domain.CheckpointRef{Generation: generation.Generation, ManifestDigest: snapcodec.ManifestDigest(generation.Manifest)}
 	record := domain.CatalogueRecord{Name: snapshot.Name, IncarnationID: generation.IncarnationID, Cwd: "/snapshot/cwd", CreatedAt: int64(snapshot.CreatedAt), Committed: &checkpoint}
@@ -881,7 +881,7 @@ func TestPurgeAllConcurrentWithExplicitShutdown(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	for attempt := 0; attempt < 16; attempt++ {
 		pty, releasePTY := newBlockingPTY(t)
-		d := newTestDaemon(t, newFactorySeq(t, pty), stubClock{})
+		d := newTestDaemon(t, newFactorySeq(t, pty), newStubClock(t))
 		_, err := createSessionForTest(d, "work", false, "/tmp", sz, terminalEnv{}, nil)
 		require.NoError(t, err)
 
@@ -993,7 +993,7 @@ func TestRestoreCatalogueCaptureOrdersAfterPurgeNotResurrect(t *testing.T) {
 	record := durableRecoveryRecord(1)
 	record.Name = "work"
 	catalogue := newDurableRecoveryCatalogue([]domain.CatalogueRecord{record})
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
 	WithCatalogue(catalogue, []domain.CatalogueRecord{record})(d)
 	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, noOpSnapshotRepository{}, nil))(d)
 
@@ -1110,7 +1110,7 @@ func TestPurgeAllAdmissionDrainBoundedWithUncooperativeRepository(t *testing.T) 
 // rather than waiting out its bounded timeout. This is what keeps Serve from
 // wedging behind a purge when an admitted transition refuses to drain.
 func TestPurgeAllAdmissionDrainDefersToExplicitShutdown(t *testing.T) {
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
 	require.NoError(t, d.acquirePurgeAdmission(context.Background()))
 
 	purged := make(chan purgeResult, 1)
@@ -1145,7 +1145,7 @@ func TestPurgeAllDefersToExplicitShutdownPerUnit(t *testing.T) {
 		d.signalPurgeAdmissionChangedLocked()
 		d.mu.Unlock()
 	}
-	d = newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	d = newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
 	catalogue := newDurableRecoveryCatalogue(nil)
 	WithCatalogue(catalogue, nil)(d)
 	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, repository, nil))(d)
@@ -1873,7 +1873,7 @@ func TestPurgeAllParticipantChangeDefersToConcurrentExplicitShutdown(t *testing.
 // no-op. The purge must defer to the stop and report supersession instead of
 // counting the stop-owned unit as a successful purge.
 func TestPurgeAllStopBetweenPrecheckAndOwnershipIsSupersededNotSuccess(t *testing.T) {
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
 	catalogue := newDurableRecoveryCatalogue(nil)
 	WithCatalogue(catalogue, nil)(d)
 	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, noOpSnapshotRepository{}, nil))(d)

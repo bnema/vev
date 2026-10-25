@@ -970,7 +970,7 @@ func TestLockAttachmentSessionsRejectsNilEntriesWithoutPanic(t *testing.T) {
 }
 
 func TestBarStateForPaletteHintsNormalizesTypedNilSession(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	var sess *session
 
 	require.NotPanics(t, func() {

@@ -103,7 +103,7 @@ func TestFloatingSuccessfulOpenTransfersContextOwnershipToPane(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			pty := newContextAwareFloatingPTY()
 			factory := &contextAwareFloatingFactory{pty: pty, opened: make(chan context.Context, 1)}
-			d := newTestDaemon(t, factory, stubClock{})
+			d := newTestDaemon(t, factory, newStubClock(t))
 			tb := newFloatingTestTab(t)
 			tabCtx, cancelTab := context.WithCancel(t.Context())
 			tb.ctx, tb.cancel = tabCtx, cancelTab
@@ -223,7 +223,7 @@ func TestFloatingOpenErrorReleasesReturnedPTYBeforePublishingFailure(t *testing.
 					})
 					return pty, cause
 				}).Once()
-			d := newTestDaemon(t, factory, stubClock{})
+			d := newTestDaemon(t, factory, newStubClock(t))
 			tb := newFloatingTestTab(t)
 			tr, _ := newCapturingTransport(t)
 			ac := &attachedClient{tr: tr, output: newOutputStateStream(), geometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}}
@@ -349,7 +349,7 @@ func TestFloatingFailedAndStaleOpenCancelContext(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			pty := newContextAwareFloatingPTY()
 			factory := &contextAwareFloatingFactory{pty: pty, opened: make(chan context.Context, 1)}
-			d := newTestDaemon(t, factory, stubClock{})
+			d := newTestDaemon(t, factory, newStubClock(t))
 			tb := newFloatingTestTab(t)
 			sess := &session{sessionCore: sessionCore{name: "work"}, tabs: []*tab{tb}, ctx: t.Context()}
 			tb.mu.Lock()
@@ -398,7 +398,7 @@ func TestFloatingOpenCancellationBoundsSessionTeardownAndClosesLatePTY(t *testin
 			<-ctx.Done()
 			return latePTY, nil
 		}).Once()
-	d := newTestDaemon(t, factory, stubClock{})
+	d := newTestDaemon(t, factory, newStubClock(t))
 	tb := newFloatingTestTab(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	sess := &session{sessionCore: sessionCore{id: "blocked-open", name: "work"}, tabs: []*tab{tb}, ctx: ctx, cancel: cancel}
@@ -441,7 +441,7 @@ func TestFloatingOpensFromUnrelatedSessionsAreConcurrent(t *testing.T) {
 			<-release
 			return newQuietPTY(), nil
 		}).Twice()
-	d := newTestDaemon(t, factory, stubClock{})
+	d := newTestDaemon(t, factory, newStubClock(t))
 	tabs := make([]*tab, 0, 2)
 	cancels := make([]context.CancelFunc, 0, 2)
 	for _, id := range []domain.SessionID{"one", "two"} {

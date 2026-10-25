@@ -239,7 +239,7 @@ func TestLocalOutputAckDoesNotMoveRendererShadowBackward(t *testing.T) {
 }
 
 func TestRawTerminalSideEffectDoesNotEnterFullOutputWindow(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	tr := &closeTrackingTransport{}
 	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.output.next = maxUnackedOutputStates

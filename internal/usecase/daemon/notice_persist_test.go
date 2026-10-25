@@ -29,7 +29,7 @@ func TestStartupClaimRecordsAndToastsPendingNotices(t *testing.T) {
 
 	p, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
-	d := newTestDaemon(t, newFactory(t, p), stubClock{})
+	d := newTestDaemon(t, newFactory(t, p), newStubClock(t))
 	d.noticeStore = notices
 
 	d.restoreSnapshots(t.Context())

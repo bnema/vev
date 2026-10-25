@@ -230,7 +230,7 @@ func newDurableRecoveryDaemon(t testing.TB, records []domain.CatalogueRecord, re
 	t.Helper()
 	catalogue := newDurableRecoveryCatalogue(records)
 	coordinator := recoveryusecase.NewCoordinator(catalogue, repository, bytes.NewReader(bytes.Repeat([]byte{0xa5}, 16)))
-	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithCatalogue(catalogue, records), WithSnapshotRepository(repository), WithRecoveryCoordinator(coordinator))
+	d := New(nil, newStubClock(t), slog.New(slog.NewTextHandler(io.Discard, nil)), WithCatalogue(catalogue, records), WithSnapshotRepository(repository), WithRecoveryCoordinator(coordinator))
 	d.serveCtx, d.serveCancel = context.WithCancel(context.Background())
 	t.Cleanup(d.serveCancel)
 	return d, catalogue
@@ -248,7 +248,7 @@ func TestFinalCheckpointFailurePreservesCatalogue(t *testing.T) {
 	catalogue := newDurableRecoveryCatalogue([]domain.CatalogueRecord{prior})
 	repository := &durableRecoveryRepository{}
 	coordinator := recoveryusecase.NewCoordinator(catalogue, repository, nil)
-	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithCatalogue(catalogue, []domain.CatalogueRecord{prior}), WithSnapshotRepository(repository), WithRecoveryCoordinator(coordinator))
+	d := New(nil, newStubClock(t), slog.New(slog.NewTextHandler(io.Discard, nil)), WithCatalogue(catalogue, []domain.CatalogueRecord{prior}), WithSnapshotRepository(repository), WithRecoveryCoordinator(coordinator))
 	startSnapshotEncodeWorker(t, d)
 
 	sess := newSnapshotTestSession(t, prior.Name, false, prior.Cwd)
@@ -542,7 +542,7 @@ func TestSessionRecoveryUsesIncomingCommandContext(t *testing.T) {
 		Run(func(got context.Context, _ domain.IncarnationID) { seen = got.Value(key) == "request" }).
 		Return(wantErr).Once()
 
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
 	d.catalogue = catalogue
 	d.recovery = recoveryusecase.NewCoordinator(catalogue, repository, bytes.NewReader(bytes.Repeat([]byte{9}, 16)))
 
@@ -700,7 +700,7 @@ func TestCreateNamedSessionRegistrationFailureRollsBackDurableState(t *testing.T
 			defer release()
 			catalogue := newDurableRecoveryCatalogue(tc.records)
 			coordinator := recoveryusecase.NewCoordinator(catalogue, nil, bytes.NewReader(bytes.Repeat([]byte{0x6a}, 16)))
-			d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+			d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 			WithCatalogue(catalogue, tc.records)(d)
 			WithRecoveryCoordinator(coordinator)(d)
 
@@ -764,7 +764,7 @@ func TestSessionRecoveryCommand(t *testing.T) {
 	repository.EXPECT().DeleteIncarnation(mock.Anything, degraded.IncarnationID).Return(nil).Once()
 	catalogue.EXPECT().Record(degraded.Name).Return(fresh, true, nil).Once()
 	coordinator := recoveryusecase.NewCoordinator(catalogue, repository, bytes.NewReader(bytes.Repeat([]byte{9}, 16)))
-	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)),
+	d := New(nil, newStubClock(t), slog.New(slog.NewTextHandler(io.Discard, nil)),
 		WithCatalogue(catalogue, []domain.CatalogueRecord{degraded}),
 		WithSnapshotRepository(repository), WithRecoveryCoordinator(coordinator))
 
@@ -807,7 +807,7 @@ func TestListHidesPurgingInactiveSession(t *testing.T) {
 func TestAttachWaitsForRestore(t *testing.T) {
 	record := durableRecoveryRecord(0)
 	factory := &recoveryCountingPTYFactory{}
-	d := New(factory, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithCatalogue(newDurableRecoveryCatalogue([]domain.CatalogueRecord{record}), []domain.CatalogueRecord{record}))
+	d := New(factory, newStubClock(t), slog.New(slog.NewTextHandler(io.Discard, nil)), WithCatalogue(newDurableRecoveryCatalogue([]domain.CatalogueRecord{record}), []domain.CatalogueRecord{record}))
 	d.serveCtx, d.serveCancel = context.WithCancel(context.Background())
 	defer d.serveCancel()
 
@@ -959,7 +959,7 @@ func TestAttachRejectsDegraded(t *testing.T) {
 	record := durableRecoveryRecord(0)
 	record.DegradedReason = "checkpoint validation failed"
 	factory := &recoveryCountingPTYFactory{}
-	d := New(factory, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithCatalogue(newDurableRecoveryCatalogue([]domain.CatalogueRecord{record}), []domain.CatalogueRecord{record}))
+	d := New(factory, newStubClock(t), slog.New(slog.NewTextHandler(io.Discard, nil)), WithCatalogue(newDurableRecoveryCatalogue([]domain.CatalogueRecord{record}), []domain.CatalogueRecord{record}))
 	d.serveCtx, d.serveCancel = context.WithCancel(context.Background())
 	defer d.serveCancel()
 

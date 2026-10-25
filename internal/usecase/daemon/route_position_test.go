@@ -20,7 +20,7 @@ func TestRouteAppliesPreferredTabPerAttachment(t *testing.T) {
 		{name: "missing preferred tab falls back", preferred: "missing", want: "tab-1"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			d := newTestDaemon(t, nil, stubClock{})
+			d := newTestDaemon(t, nil, newStubClock(t))
 			sess := addControlSession(d, "work", "tab-1", "pane-1")
 			sess.incarnation = domain.SessionLifecycleID{1}
 			second := newTabWithStableID("tab-2", "pane-2", newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
@@ -47,7 +47,7 @@ func TestRouteAppliesPreferredTabPerAttachment(t *testing.T) {
 func TestResumeAppliesPreferredTabToParkedAttachment(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 	oldTransport := &closeTrackingTransport{}
 	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTransport)
 	require.NoError(t, err)
@@ -70,7 +70,7 @@ func TestResumeAppliesPreferredTabToParkedAttachment(t *testing.T) {
 }
 
 func TestPaintPublishesChangedAttachmentRoutePosition(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	sess := addControlSession(d, "work", "tab-1", "pane-1")
 	sess.incarnation = domain.SessionLifecycleID{1}
 	second := newTabWithStableID("tab-2", "pane-2", newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
@@ -115,7 +115,7 @@ func TestWarmAndColdAttachmentPreferredTab(t *testing.T) {
 			name = "retained tab disappeared"
 		}
 		t.Run(name, func(t *testing.T) {
-			d := newTestDaemon(t, nil, stubClock{})
+			d := newTestDaemon(t, nil, newStubClock(t))
 			sess := addControlSession(d, "work", "tab-1", "pane-1")
 			sess.incarnation = domain.SessionLifecycleID{1}
 			second := newTabWithStableID("tab-2", "pane-2", newQuietPTY(), domain.Size{Cols: 80, Rows: 22})

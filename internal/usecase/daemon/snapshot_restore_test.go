@@ -214,7 +214,7 @@ func TestRestoreIncrementalGenerationAcceptance(t *testing.T) {
 	generation := acceptanceGeneration(t, snapshot, 9)
 	repository := &snapshotAcceptanceRepository{names: []string{snapshot.Name}, generations: map[string]ports.SnapshotGeneration{snapshot.Name: generation}}
 	pty, release := newBlockingPTY(t)
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 	d.baseEnv = []string{"TERM=xterm-kitty", "COLORTERM=truecolor"}
 	checkpoint := domain.CheckpointRef{Generation: generation.Generation, ManifestDigest: snapcodec.ManifestDigest(generation.Manifest)}
 	record := domain.CatalogueRecord{Name: snapshot.Name, IncarnationID: generation.IncarnationID, Cwd: "/snapshot/cwd", CreatedAt: int64(snapshot.CreatedAt), Committed: &checkpoint}
@@ -297,7 +297,7 @@ func TestSnapshotCodecPreservesConsumedAndExpelledPaneLayout(t *testing.T) {
 
 func TestSnapshotRuntimeRestorePreservesConsumedAndExpelledPaneLayout(t *testing.T) {
 	fixture := captureConsumedAndExpelledPaneLayout(t)
-	restoreDaemon := newTestDaemon(t, newFactory(t, &paneRearrangePTY{}), stubClock{})
+	restoreDaemon := newTestDaemon(t, newFactory(t, &paneRearrangePTY{}), newStubClock(t))
 	restoredTabs, err := restoreDaemon.restoreSnapshotTabs(context.Background(), restoreDaemon.serveCtx, fixture.snapshot)
 	require.NoError(t, err)
 	defer closeRestoredTabs(restoredTabs)
@@ -358,7 +358,7 @@ func TestSnapshotRestoreUsesDaemonTerminalCapabilities(t *testing.T) {
 					return pty, nil
 				}).Once()
 
-			d := newTestDaemon(t, factory, stubClock{})
+			d := newTestDaemon(t, factory, newStubClock(t))
 			d.baseEnv = tt.baseEnv
 			tabs, err := d.restoreSnapshotTabs(context.Background(), d.serveCtx, snapshot)
 			require.NoError(t, err)
@@ -500,7 +500,7 @@ func TestRestoredSessionMetadataUpdatePreservesCheckpointLineage(t *testing.T) {
 	catalogue := newDurableRecoveryCatalogue([]domain.CatalogueRecord{record})
 
 	pty, release := newBlockingPTY(t)
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 	coordinator := recoveryusecase.NewCoordinator(catalogue, repository, nil)
 	WithCatalogue(catalogue, []domain.CatalogueRecord{record})(d)
 	WithSnapshotRepository(repository)(d)

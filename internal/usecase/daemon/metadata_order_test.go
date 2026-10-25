@@ -50,7 +50,7 @@ func TestMetadataWritesAreDeferred(t *testing.T) {
 	record := sess.persistRecordLocked(sess.createdAt)
 	sess.mu.Unlock()
 	cat := &syncCountingCatalogue{durableRecoveryCatalogue: newDurableRecoveryCatalogue([]domain.CatalogueRecord{record})}
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	d.catalogue = cat
 	d.persistEnabled = true
 	d.sessions[sess.id] = sess
@@ -73,7 +73,7 @@ func TestIdentityWritesAreSynchronous(t *testing.T) {
 	t.Parallel()
 	sess := newSnapshotTestSession(t, "0", true, "/work")
 	cat := &syncCountingCatalogue{durableRecoveryCatalogue: newDurableRecoveryCatalogue(nil)}
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	d.catalogue = cat
 	d.persistEnabled = true
 	d.recovery = recoveryusecase.NewCoordinator(cat, nil, bytes.NewReader(bytes.Repeat([]byte{1}, 16)))

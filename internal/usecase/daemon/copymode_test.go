@@ -29,7 +29,7 @@ import (
 // --- test doubles -----------------------------------------------------------
 
 func TestBoundedSendOutputErrTransportReturnsTransportUsedBySend(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	ac := &attachedClient{output: newOutputStateStream()}
 	ac.initOverlays()
 	replacement := &closeTrackingTransport{}
@@ -45,7 +45,7 @@ func TestBoundedSendOutputErrTransportReturnsTransportUsedBySend(t *testing.T) {
 }
 
 func TestOwnedSynchronousSendReturnsCapturedTransportAcrossReplacement(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	replacement := &closeTrackingTransport{}
 	sendErr := errors.New("owned send failed")
 	ac := &attachedClient{output: newOutputStateStream()}

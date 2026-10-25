@@ -29,7 +29,7 @@ import (
 // --- test doubles -----------------------------------------------------------
 
 func TestAttachedKeyboardMutationSharesDispatchBoundaryWithCommand(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	sess := addControlSession(d, "work", "t_work", "p_work")
 	ac := &attachedClient{}
 	ac.setSession(sess)
@@ -154,7 +154,7 @@ func TestConsumeOrExpelKeyActionPreservesRearrangementWarning(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d := newTestDaemon(t, nil, stubClock{})
+			d := newTestDaemon(t, nil, newStubClock(t))
 			sess := addControlSession(d, "work", "t_work", "p_work")
 			ac := &attachedClient{}
 			ac.setSession(sess)

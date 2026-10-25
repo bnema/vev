@@ -43,7 +43,7 @@ func TestSharedPTYGeometryCharacterization(t *testing.T) {
 			run: func(t *testing.T) {
 				pty, releasePTY := newBlockingPTY(t)
 				t.Cleanup(releasePTY)
-				d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+				d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 				firstTransport, _ := newCapturingTransport(t)
 				sess, first, err := d.route(protocol.Hello{
 					Version: protocol.Version, Intent: protocol.IntentNew, Name: "work",

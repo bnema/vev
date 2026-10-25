@@ -616,7 +616,7 @@ func TestResizePreservesLiveContentAndEvictsScrollback(t *testing.T) {
 	tr.EXPECT().Close().Return(nil).Maybe()
 	tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
 
-	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	d := New(nil, newStubClock(t), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.initOverlays()
 	// A lifecycle ID keeps the first paint valid. Without it the paint fails
@@ -872,7 +872,7 @@ func TestResizeOrdersPTYBeforeScreen(t *testing.T) {
 		return nil
 	}).Maybe()
 
-	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	d := New(nil, newStubClock(t), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.initOverlays()
 	sess := &session{sessionCore: sessionCore{id: "s", name: "s", incarnation: newTestLifecycle(t), attachments: map[*attachedClient]struct{}{ac: {}}}, tabs: []*tab{win}}
@@ -899,7 +899,7 @@ func TestSendErrorKeepsEphemeralHeadless(t *testing.T) {
 	tr.EXPECT().Send(mock.Anything).Return(io.ErrClosedPipe).Maybe()
 	tr.EXPECT().Close().Return(nil).Maybe()
 
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	win := newTab(p, domain.Size{Cols: 20, Rows: 5})
 	sctx, cancel := context.WithCancel(context.Background())
 	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
@@ -925,7 +925,7 @@ func TestSendErrorKeepsEphemeralHeadless(t *testing.T) {
 }
 
 func TestPTYKittyAnonymousGraphicsDoesNotWriteResponseToPTY(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	p := portsmocks.NewMockPTY(t)
 	chunks := [][]byte{[]byte("\x1b_Ga=T,f=32,s=1,v=1,C=1;AQIDBA\x1b\\")}
 	p.EXPECT().Read(mock.Anything).RunAndReturn(func(buf []byte) (int, error) {
@@ -948,7 +948,7 @@ func TestPTYKittyAnonymousGraphicsDoesNotWriteResponseToPTY(t *testing.T) {
 }
 
 func TestPTYKittyIcatDetectionGetsResponsesWrittenBackToPTY(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	p := portsmocks.NewMockPTY(t)
 	chunks := [][]byte{[]byte("\x1b_Ga=q,f=24,s=1,v=1,S=3,i=1;MTIz\x1b\\\x1b_Ga=q,f=24,t=t,s=1,v=1,S=47,i=2;L2Rldi9zaG0va2l0dHktdHR5LWdyYXBoaWNzLXByb3RvY29sLTMzMTU3NTkxNjc\x1b\\\x1b_Ga=q,f=24,t=s,s=1,v=1,S=18,i=3;aWNhdC1aQlJCWFdNQ0lIQ0ZD\x1b\\\x1b[c")}
 	writes := make(chan []byte, 1)
@@ -991,7 +991,7 @@ func TestPTYKittyIcatDetectionGetsResponsesWrittenBackToPTY(t *testing.T) {
 }
 
 func TestPTYKittyAnimationFallbackKeepsProtocolErrorsOutOfShell(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	p := portsmocks.NewMockPTY(t)
 	const imageNumber = "622840581"
 	chunks := [][]byte{[]byte(

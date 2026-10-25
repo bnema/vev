@@ -388,9 +388,9 @@ func TestSuspendedAttachmentShutdownJoinsWatcher(t *testing.T) {
 
 func TestWithSuspendedSafetyExpiryOption(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	configured := New(nil, stubClock{}, log, WithSuspendedSafetyExpiry(37*time.Second))
+	configured := New(nil, newStubClock(t), log, WithSuspendedSafetyExpiry(37*time.Second))
 	require.Equal(t, 37*time.Second, configured.suspendedSafetyExpiry)
-	unchanged := New(nil, stubClock{}, log, WithSuspendedSafetyExpiry(0))
+	unchanged := New(nil, newStubClock(t), log, WithSuspendedSafetyExpiry(0))
 	require.Equal(t, defaultSuspendedSafetyExpiry, unchanged.suspendedSafetyExpiry)
 }
 

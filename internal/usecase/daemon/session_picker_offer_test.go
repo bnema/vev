@@ -33,7 +33,7 @@ func awaitSentServerMessage(t *testing.T, sends <-chan wire.Envelope, what strin
 // composes its own picker for, and opens no daemon interaction that could
 // swallow input.
 func TestSessionPickerCommandOffersClientPickerOverLiveAttachment(t *testing.T) {
-	d, source, ac, _, _, releases, sends := setupMovePickerSessionsCore(t, stubClock{}, 0)
+	d, source, ac, _, _, releases, sends := setupMovePickerSessionsCore(t, newStubClock(t), 0)
 	defer releaseAll(releases)
 
 	d.handleInput(source, ac, []byte("\x1b "))
@@ -69,7 +69,7 @@ func TestPaletteClientPickerFollowsPaletteErasingFrame(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d, source, ac, _, _, releases, sends := setupMovePickerSessionsCore(t, stubClock{}, 0)
+			d, source, ac, _, _, releases, sends := setupMovePickerSessionsCore(t, newStubClock(t), 0)
 			defer releaseAll(releases)
 			// Production paints through the coordinator, which retries an
 			// ACK-blocked paint once the client acknowledges.
@@ -138,7 +138,7 @@ func assertNoSentServerMessage(t *testing.T, sends <-chan wire.Envelope, wait ti
 // A scripted CommandRequest has no palette to erase: its refusals stay
 // synchronous command results instead of a false success.
 func TestCommandRequestMovePickerReportsRefusalSynchronously(t *testing.T) {
-	d, source, ac, _, _, releases, sends := setupMovePickerSessionsCore(t, stubClock{}, 0)
+	d, source, ac, _, _, releases, sends := setupMovePickerSessionsCore(t, newStubClock(t), 0)
 	defer releaseAll(releases)
 	d.mu.Lock()
 	delete(d.sessions, "destination")

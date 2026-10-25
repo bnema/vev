@@ -55,7 +55,7 @@ func TestControlEqualizeMapsResizeErrors(t *testing.T) {
 
 func TestResizeControlHeadlessAndErrors(t *testing.T) {
 	factory := &controlPTYFactory{}
-	d := newTestDaemon(t, factory, stubClock{})
+	d := newTestDaemon(t, factory, newStubClock(t))
 	t.Cleanup(func() { factory.close(); d.sessWg.Wait() })
 	sess := addControlSession(d, "work", "t_work", "p_work")
 

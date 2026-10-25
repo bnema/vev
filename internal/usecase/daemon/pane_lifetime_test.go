@@ -147,7 +147,7 @@ func TestPaneOpenErrorsReleaseReturnedPTYWithoutPublication(t *testing.T) {
 					})
 				},
 			}
-			d := newTestDaemon(t, &openFactory, stubClock{})
+			d := newTestDaemon(t, &openFactory, newStubClock(t))
 
 			tabs, cleanup, err := tt.run(t, d)
 			require.ErrorIs(t, err, cause)

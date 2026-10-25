@@ -151,7 +151,7 @@ func TestStoppedNamedSessionResumePublishesNextCheckpointInSameDaemon(t *testing
 	firstPTY, releaseFirst := newBlockingPTY(t)
 	resumedPTY, releaseResumed := newBlockingPTY(t)
 	repository := newSnapshotLifecycleRepository(t)
-	d := newTestDaemon(t, newFactorySeq(t, keeperPTY, firstPTY, resumedPTY), stubClock{})
+	d := newTestDaemon(t, newFactorySeq(t, keeperPTY, firstPTY, resumedPTY), newStubClock(t))
 	WithSnapshotRepository(repository)(d)
 	store, _ := newMockStore(t)
 	WithStore(t, store)(d)

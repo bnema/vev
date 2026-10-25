@@ -102,7 +102,7 @@ func helloResumeCapable(intent uint8, name string, token uint64) protocol.Hello 
 }
 
 func TestTokenlessResumeIsRejectedBeforeNameRouting(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	tr, _ := newCapturingTransport(t)
 	_, _, err := d.route(helloResumeCapable(protocol.IntentResume, "work", 0), tr)
 	var protocolErr *protoErr
@@ -117,7 +117,7 @@ func TestTokenlessResumeIsRejectedBeforeNameRouting(t *testing.T) {
 func TestResumeRejectsMismatchedRemoteTargetBeforeOwnershipMutation(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 	oldTransport := &closeTrackingTransport{}
 	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTransport)
 	require.NoError(t, err)
@@ -145,7 +145,7 @@ func TestResumeRejectsMismatchedRemoteTargetBeforeOwnershipMutation(t *testing.T
 func TestParkedResumeRejectsMismatchedRemoteTargetBeforeClaim(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 	oldTransport := &closeTrackingTransport{}
 	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTransport)
 	require.NoError(t, err)
@@ -223,7 +223,7 @@ func TestFailedResumeRearmsParkExpiryAfterClaimTimerFires(t *testing.T) {
 func TestNamedLinkLossParks(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 
 	tr, _, _ := newConn(t, mustHello(protocol.IntentAttach, "unused", domain.Size{}))
 	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), tr)
@@ -243,7 +243,7 @@ func TestNamedLinkLossParks(t *testing.T) {
 func TestBoundedSendTimeoutCannotTargetResumedTransport(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 	oldTransport := &closeTrackingTransport{}
 	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "bounded-send-resume", 0), oldTransport)
 	require.NoError(t, err)
@@ -366,7 +366,7 @@ func TestHandleHelloResumeDefersFreshOutputUntilWelcome(t *testing.T) {
 func TestEphemeralLinkLossParksAndResumes(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactorySeq(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactorySeq(t, pty), newStubClock(t))
 
 	tr := &closeTrackingTransport{}
 	initial := helloResumeCapable(protocol.IntentEphemeral, "", 0)
@@ -431,7 +431,7 @@ func TestEphemeralLinkLossParksAndResumes(t *testing.T) {
 func TestResumeParkedTokenReplacedDuringWaitFailsClosed(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 
 	oldTr := &closeTrackingTransport{}
 	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTr)
@@ -503,7 +503,7 @@ func TestResumeParkedTokenReplacedDuringWaitFailsClosed(t *testing.T) {
 func TestResumeLiveAttachmentParkedResumeRaceFailsClosed(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 
 	oldTr := &closeTrackingTransport{}
 	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTr)
@@ -576,7 +576,7 @@ func TestResumeLiveAttachmentParkedResumeRaceFailsClosed(t *testing.T) {
 func TestResumeDuringTeardownBeforeParkRecoversSameAttachment(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 
 	oldTr := &closeTrackingTransport{}
 	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTr)
@@ -675,7 +675,7 @@ func TestResumeDuringTeardownBeforeParkRecoversSameAttachment(t *testing.T) {
 func TestConcurrentLiveResumesWaitParkingMarkerBeforePark(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 
 	oldTr := &closeTrackingTransport{}
 	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTr)
@@ -784,7 +784,7 @@ func TestExplicitDetachClearsOrphanedSameAttachmentParkingMarker(t *testing.T) {
 	otherPTY, releaseOther := newBlockingPTY(t)
 	defer releaseOther()
 	// Separate PTYs keep the other session alive while work detaches.
-	d := newTestDaemon(t, newFactorySeq(t, workPTY, otherPTY), stubClock{})
+	d := newTestDaemon(t, newFactorySeq(t, workPTY, otherPTY), newStubClock(t))
 
 	oldTr := &closeTrackingTransport{}
 	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTr)
@@ -897,7 +897,7 @@ func TestLiveResumeRejectsLateMarkerAfterTerminalCleanupWins(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			pty, release := newBlockingPTY(t)
 			defer release()
-			d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+			d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 
 			oldTr := &closeTrackingTransport{}
 			sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTr)
@@ -952,7 +952,7 @@ func TestLiveResumeRejectsLateMarkerAfterTerminalCleanupWins(t *testing.T) {
 	t.Run("direct_park_after_detach_without_marker", func(t *testing.T) {
 		pty, release := newBlockingPTY(t)
 		defer release()
-		d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+		d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 
 		oldTr := &closeTrackingTransport{}
 		sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTr)
@@ -986,7 +986,7 @@ func TestLiveResumeRejectsLateMarkerAfterTerminalCleanupWins(t *testing.T) {
 func TestStaleClientGoneAfterTransportCheckDoesNotDetachReboundAttachment(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 
 	oldTr := &closeTrackingTransport{}
 	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTr)
@@ -1032,7 +1032,7 @@ func TestStaleClientGoneAfterTransportCheckDoesNotDetachReboundAttachment(t *tes
 func TestResumeLiveAttachmentParkFailureRetiresOldTransport(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 
 	oldTr := &closeTrackingTransport{}
 	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTr)
@@ -1063,7 +1063,7 @@ func TestResumeLiveAttachmentParkFailureRetiresOldTransport(t *testing.T) {
 func TestResumeRebindsRotatesAndDoesNotOpenPTY(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactorySeq(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactorySeq(t, pty), newStubClock(t))
 
 	tr, _, _ := newConn(t, mustHello(protocol.IntentAttach, "unused", domain.Size{}))
 	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), tr)
@@ -1113,7 +1113,7 @@ func TestOutputAckLagAloneDoesNotForceFullStateRepaint(t *testing.T) {
 func TestResumeClientIDMismatchDoesNotConsumeParkedToken(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactorySeq(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactorySeq(t, pty), newStubClock(t))
 
 	tr, _, _ := newConn(t, mustHello(protocol.IntentAttach, "unused", domain.Size{}))
 	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), tr)
@@ -1143,7 +1143,7 @@ func TestResumeClientIDMismatchDoesNotConsumeParkedToken(t *testing.T) {
 func TestResumeCloseCapturedOldTransportDoesNotCloseReboundTransport(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactorySeq(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactorySeq(t, pty), newStubClock(t))
 
 	oldTr := &closeTrackingTransport{}
 	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTr)
@@ -1170,7 +1170,7 @@ func TestResumeCloseCapturedOldTransportDoesNotCloseReboundTransport(t *testing.
 func TestResumeRebasesFullOutputWindowBeforeFirstPaint(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactorySeq(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactorySeq(t, pty), newStubClock(t))
 	oldTr := &closeTrackingTransport{}
 	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTr)
 	require.NoError(t, err)
@@ -1203,7 +1203,7 @@ func TestResumeRebasesFullOutputWindowBeforeFirstPaint(t *testing.T) {
 func TestParkingReleasesPaneCapturesBeforeHeadlessCloseAndResume(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactorySeq(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactorySeq(t, pty), newStubClock(t))
 	oldTransport := &closeTrackingTransport{}
 	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTransport)
 	require.NoError(t, err)
@@ -1257,7 +1257,7 @@ func TestParkingReleasesPaneCapturesBeforeHeadlessCloseAndResume(t *testing.T) {
 func TestExplicitDetachDoesNotPark(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 	tr, _, _ := newConn(t, mustHello(protocol.IntentAttach, "unused", domain.Size{}))
 	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), tr)
 	require.NoError(t, err)
@@ -1317,7 +1317,7 @@ func TestParkExpiryAndShutdownCleanup(t *testing.T) {
 
 	pty2, release2 := newBlockingPTY(t)
 	defer release2()
-	d2 := newTestDaemon(t, newFactory(t, pty2), stubClock{})
+	d2 := newTestDaemon(t, newFactory(t, pty2), newStubClock(t))
 	tr2, _, _ := newConn(t, mustHello(protocol.IntentAttach, "unused", domain.Size{}))
 	sess2, ac2, err := d2.route(helloResumeCapable(protocol.IntentNew, "other", 0), tr2)
 	require.NoError(t, err)
@@ -1332,7 +1332,7 @@ func TestParkExpiryAndShutdownCleanup(t *testing.T) {
 func TestLiveParkAndResumeRetainsAttachmentWithoutDaemonHistory(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 	tr, _, _ := newConn(t, mustHello(protocol.IntentAttach, "unused", domain.Size{}))
 	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), tr)
 	require.NoError(t, err)
@@ -1374,7 +1374,7 @@ func TestDiscardingParkedAttachmentDoesNotOwnPreviousSession(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			pty, release := newBlockingPTY(t)
 			defer release()
-			d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+			d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 			tr, _, _ := newConn(t, mustHello(protocol.IntentAttach, "unused", domain.Size{}))
 			sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), tr)
 			require.NoError(t, err)
@@ -1425,7 +1425,7 @@ func TestEphemeralParkExpiryKeepsSessionWhenCloseOnExitOff(t *testing.T) {
 func TestKilledSessionPurgesParkedResumeToken(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 	tr, _, _ := newConn(t, mustHello(protocol.IntentAttach, "unused", domain.Size{}))
 	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), tr)
 	require.NoError(t, err)
@@ -1454,7 +1454,7 @@ func TestKilledSessionUnblocksParkingWaiterFailsClosed(t *testing.T) {
 	// Separate PTYs are required: a shared mock PTY makes killSession(work)
 	// close other's pane and cascade-remove the other session under -race,
 	// falsely failing the other-marker / fail-closed assertions.
-	d := newTestDaemon(t, newFactorySeq(t, workPTY, otherPTY), stubClock{})
+	d := newTestDaemon(t, newFactorySeq(t, workPTY, otherPTY), newStubClock(t))
 
 	oldTr := &closeTrackingTransport{}
 	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTr)
@@ -1515,7 +1515,7 @@ func TestKilledSessionUnblocksParkingWaiterFailsClosed(t *testing.T) {
 func TestStaleClientGoneDoesNotDetachOrCloseFreshTransport(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactory(t, p), stubClock{})
+	d := newTestDaemon(t, newFactory(t, p), newStubClock(t))
 
 	oldTr := &closeTrackingTransport{}
 	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTr)
@@ -1531,7 +1531,7 @@ func TestStaleClientGoneDoesNotDetachOrCloseFreshTransport(t *testing.T) {
 }
 
 func TestRawTerminalSideEffectsAreOutputStateNeutral(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	tr := &closeTrackingTransport{}
 	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.initOverlays()
@@ -1552,7 +1552,7 @@ func TestRawTerminalSideEffectsAreOutputStateNeutral(t *testing.T) {
 func TestSequencedInputDoesNotPrematurelyEcho(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactory(t, p), stubClock{})
+	d := newTestDaemon(t, newFactory(t, p), newStubClock(t))
 	tr := &closeTrackingTransport{}
 	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), tr)
 	require.NoError(t, err)
@@ -1583,7 +1583,7 @@ func TestResumeParkedRefreshesSessionBoundFuturePTYEnvironment(t *testing.T) {
 			return futurePTY, nil
 		},
 	).Maybe()
-	d := newTestDaemon(t, factory, stubClock{})
+	d := newTestDaemon(t, factory, newStubClock(t))
 	tr, _, _ := newConn(t, mustHello(protocol.IntentAttach, "unused", domain.Size{}))
 	hello := helloResumeCapable(protocol.IntentNew, "work", 0)
 	hello.Env = []string{"SECRET=before", "SHELL=/bin/sh", "TERM=old", "VEV=old", "SSH_AUTH_SOCK=/run/old-agent"}
@@ -1613,7 +1613,7 @@ func TestResumeParkedRefreshesSessionBoundFuturePTYEnvironment(t *testing.T) {
 func TestResumeParkedDaemonOwnedPreservesSessionEnvironment(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 	d.baseEnv = []string{"DAEMON=owned"}
 	oldTransport := &closeTrackingTransport{}
 	created := helloResumeCapable(protocol.IntentNew, "work", 0)
@@ -1648,7 +1648,7 @@ func TestResumeParkedDaemonOwnedPreservesSessionEnvironment(t *testing.T) {
 func TestResumeRenegotiatesOutputWindowOnReusedStream(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactorySeq(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactorySeq(t, pty), newStubClock(t))
 	firstHello := helloResumeCapable(protocol.IntentNew, "work", 0)
 	firstHello.MaxOutputInFlight = 8
 	sess, ac, err := d.route(firstHello, &closeTrackingTransport{})

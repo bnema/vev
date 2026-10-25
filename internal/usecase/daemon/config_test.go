@@ -25,9 +25,9 @@ func (h *captureKeyHandler) Action(action keys.Action, _ []byte) {
 }
 
 func TestApplyConfigHotReloadSwapsBindingsAndCodes(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	h := &captureKeyHandler{}
-	r := keys.NewRouter(stubClock{}, h, &d.bindings)
+	r := keys.NewRouter(newStubClock(t), h, &d.bindings)
 
 	r.Route([]byte("\x1bh"))
 	require.Equal(t, []keys.Action{keys.ActionFocusPaneLeft}, h.actions)
@@ -152,7 +152,7 @@ func TestEffectiveThemePaletteGate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d := newTestDaemon(t, nil, stubClock{})
+			d := newTestDaemon(t, nil, newStubClock(t))
 			d.ApplyConfig(tt.config)
 
 			got := d.effectiveTheme(clientTheme)
@@ -209,7 +209,7 @@ func TestApplyConfigPublishesOneSnapshot(t *testing.T) {
 		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			d := newTestDaemon(t, nil, stubClock{})
+			d := newTestDaemon(t, nil, newStubClock(t))
 			d.ApplyConfig(tt.cfg)
 			require.Equal(t, tt.want, d.config.Load())
 		})
@@ -252,7 +252,7 @@ func TestApplyConfigPublishesCopyConfig(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d := newTestDaemon(t, nil, stubClock{})
+			d := newTestDaemon(t, nil, newStubClock(t))
 			if tt.apply != nil {
 				tt.apply(d)
 			}
@@ -262,7 +262,7 @@ func TestApplyConfigPublishesCopyConfig(t *testing.T) {
 }
 
 func TestApplyConfigPublishesImmutablePaletteSnapshot(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	require.Equal(t, domain.Defaults().Palette, d.currentPaletteConfig())
 
 	firstConfig := domain.Defaults()
@@ -317,7 +317,7 @@ func TestApplyConfigRepaintsActivePaletteWithoutReplacingModel(t *testing.T) {
 }
 
 func TestApplyConfigPublishesImmutableFloatingSnapshot(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	require.Equal(t, domain.Defaults().Floating, d.currentFloatingConfig())
 
 	firstConfig := domain.Defaults()
@@ -335,7 +335,7 @@ func TestApplyConfigPublishesImmutableFloatingSnapshot(t *testing.T) {
 }
 
 func TestApplyConfigPublishesImmutableNavSnapshot(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	require.Equal(t, domain.NavConfig{}, d.currentNavConfig())
 
 	firstConfig := domain.Defaults()
@@ -353,7 +353,7 @@ func TestApplyConfigPublishesImmutableNavSnapshot(t *testing.T) {
 }
 
 func TestApplyConfigPublishesImmutableTabsSnapshot(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	require.Equal(t, domain.Defaults().Tabs, d.currentTabsConfig())
 
 	firstConfig := domain.Defaults()
@@ -408,7 +408,7 @@ func TestApplyConfigSnapshotRestoreProcesses(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d := newTestDaemon(t, nil, stubClock{})
+			d := newTestDaemon(t, nil, newStubClock(t))
 			if tt.cfg.Snapshot.RestoreProcessesSet || len(tt.cfg.Snapshot.RestoreProcesses) > 0 {
 				d.ApplyConfig(tt.cfg)
 			}
@@ -418,7 +418,7 @@ func TestApplyConfigSnapshotRestoreProcesses(t *testing.T) {
 }
 
 func TestPaletteCommandsApplyOverridesAndResolveByCode(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	d.ApplyConfig(domain.Config{
 		Theme: domain.ThemeAuto,
 		Codes: map[string]string{
@@ -438,7 +438,7 @@ func TestPaletteCommandsApplyOverridesAndResolveByCode(t *testing.T) {
 }
 
 func TestPaletteCommandsUseOverrideSnapshotForRecentAndListing(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	d.ApplyConfig(domain.Config{
 		Theme: domain.ThemeAuto,
 		Codes: map[string]string{
@@ -463,7 +463,7 @@ func TestPaletteCommandsUseOverrideSnapshotForRecentAndListing(t *testing.T) {
 }
 
 func TestCodeOverrideConflictRestoresDefaultWithoutDuplicates(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	d.ApplyConfig(domain.Config{
 		Theme: domain.ThemeAuto,
 		Codes: map[string]string{
@@ -486,7 +486,7 @@ func TestCodeOverrideConflictRestoresDefaultWithoutDuplicates(t *testing.T) {
 }
 
 func TestCodeOverrideVacatedDefaultIsReusableRegardlessOfSlugOrder(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	d.ApplyConfig(domain.Config{
 		Theme: domain.ThemeAuto,
 		Codes: map[string]string{
@@ -508,7 +508,7 @@ func TestCodeOverrideVacatedDefaultIsReusableRegardlessOfSlugOrder(t *testing.T)
 }
 
 func TestBuildCodeOverridesOrdersIndependentConflictWarnings(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 
 	_, warnings := d.buildCodeOverrides(map[string]string{
 		"new-session": "ZZ",
@@ -524,7 +524,7 @@ func TestBuildCodeOverridesOrdersIndependentConflictWarnings(t *testing.T) {
 }
 
 func TestApplyConfigInvalidDefaultsWithoutPanic(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	require.NotPanics(t, func() {
 		d.ApplyConfig(domain.Config{
 			Theme: domain.ThemeAuto,
@@ -572,7 +572,7 @@ func TestConfigReloadNoticeMessageIncludesLineOnlyWhenKnown(t *testing.T) {
 }
 
 func TestApplyConfigSurfacesOneNoticeAggregatingAllWarnings(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	d.ApplyConfig(domain.Config{
 		Theme: domain.ThemeAuto,
 		BindingEntries: []domain.ConfigEntry{

@@ -13,18 +13,21 @@ import (
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 )
 
-type manualMouseClock struct{ now time.Time }
+type manualMouseClock struct {
+	t   testing.TB
+	now time.Time
+}
 
-func (c *manualMouseClock) Now() time.Time                   { return c.now }
-func (c *manualMouseClock) Advance(d time.Duration)          { c.now = c.now.Add(d) }
-func (*manualMouseClock) NewTimer(time.Duration) ports.Timer { return stubTimer{} }
+func (c *manualMouseClock) Now() time.Time                     { return c.now }
+func (c *manualMouseClock) Advance(d time.Duration)            { c.now = c.now.Add(d) }
+func (c *manualMouseClock) NewTimer(time.Duration) ports.Timer { return newStubTimer(c.t) }
 
 func mouseCopyHarness(t *testing.T, rows ...string) (*Daemon, *session, *attachedClient, *manualMouseClock) {
 	t.Helper()
 	p, release := newBlockingPTY(t)
 	t.Cleanup(release)
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
-	clock := &manualMouseClock{now: time.Unix(1, 0)}
+	clock := &manualMouseClock{t: t, now: time.Unix(1, 0)}
 	d.clock = clock
 	pane := testAttachmentTab(sess).focusedPane()
 	for i, row := range rows {
@@ -83,7 +86,7 @@ func TestCopyDoubleClick(t *testing.T) {
 	}
 
 	t.Run("different pane is not a double click", func(t *testing.T) {
-		d := newTestDaemon(t, nil, &manualMouseClock{now: time.Unix(1, 0)})
+		d := newTestDaemon(t, nil, &manualMouseClock{t: t, now: time.Unix(1, 0)})
 		rt := newOverlayRuntime(&attachedClient{})
 		p1 := newPane("one", nil, domain.Size{Cols: 4, Rows: 1})
 		p2 := newPane("two", nil, domain.Size{Cols: 4, Rows: 1})
@@ -321,7 +324,7 @@ func TestCopyWordSelectionYanksExactOSC52(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	clock := &manualMouseClock{now: time.Unix(1, 0)}
+	clock := &manualMouseClock{t: t, now: time.Unix(1, 0)}
 	d.clock = clock
 	writeTestRow(testAttachmentTab(sess).focusedPane().screen, 0, "alpha beta")
 	d.enterCopyMode(sess, ac)

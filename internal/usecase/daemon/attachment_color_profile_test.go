@@ -91,7 +91,7 @@ func attachColorClients(t *testing.T, modes []terminalcap.ColorCapabilities) (*D
 	t.Helper()
 	pty, release := newBlockingPTY(t)
 	t.Cleanup(release)
-	d := newTestDaemon(t, newFactorySeq(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactorySeq(t, pty), newStubClock(t))
 	var (
 		sess    *session
 		clients []*colorClient
@@ -222,7 +222,7 @@ func TestResumeAdoptsColorOfLatestHello(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			pty, release := newBlockingPTY(t)
 			defer release()
-			d := newTestDaemon(t, newFactorySeq(t, pty), stubClock{})
+			d := newTestDaemon(t, newFactorySeq(t, pty), newStubClock(t))
 			oldTr := &closeTrackingTransport{}
 			sess, ac, err := d.route(colorHello(protocol.IntentNew, "work", 1, 0, tt.from), oldTr)
 			require.NoError(t, err)

@@ -318,7 +318,7 @@ func TestHandleCommandDefiniteOutcomesPreserveCorrelationAndOutcome(t *testing.T
 	}
 	for i, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d := newTestDaemon(t, nil, stubClock{})
+			d := newTestDaemon(t, nil, newStubClock(t))
 			request := tt.request
 			request.RequestID = uint64(31 + i)
 

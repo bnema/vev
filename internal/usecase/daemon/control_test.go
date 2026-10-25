@@ -40,7 +40,7 @@ func TestPaletteAndControlShareExplicitDaemonActionTarget(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d := newTestDaemon(t, nil, stubClock{})
+			d := newTestDaemon(t, nil, newStubClock(t))
 			sess := addControlSession(d, "work", "t_work", "p_work")
 			tb := testAttachmentTab(sess)
 			tb.mu.Lock()
@@ -181,7 +181,7 @@ func TestHandleCommandResponseSendTimeoutClosesTransport(t *testing.T) {
 }
 
 func TestHandleCommandAttachedRejectionReturnsSendFailure(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	var logs bytes.Buffer
 	d.log = slog.New(slog.NewTextHandler(&logs, nil))
 	sendErr := errors.New("command result send failed")
@@ -198,7 +198,7 @@ func TestHandleCommandAttachedRejectionReturnsSendFailure(t *testing.T) {
 }
 
 func TestHandleConnRoutesCommand(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	request := protocol.CommandRequest{Version: protocol.Version, Slug: "list-sessions"}
 	tr, sends, _ := newConn(t, mustClientEnvelope(request))
 
@@ -245,7 +245,7 @@ func TestHandleCommandDispatchAndTargetErrors(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d := newTestDaemon(t, nil, stubClock{})
+			d := newTestDaemon(t, nil, newStubClock(t))
 			if tt.arrange != nil {
 				tt.arrange(d)
 			}
@@ -257,7 +257,7 @@ func TestHandleCommandDispatchAndTargetErrors(t *testing.T) {
 }
 
 func TestHandleCommandResolvesStaleSessionNameByStableIDs(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	sess := addControlSession(d, "renamed", "t_work", "p_work")
 
 	result := sendCommand(t, d, protocol.CommandRequest{
@@ -270,7 +270,7 @@ func TestHandleCommandResolvesStaleSessionNameByStableIDs(t *testing.T) {
 }
 
 func TestHandleCommandStableIDsResolveSessionWithoutSelectingTab(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	sess := addControlSession(d, "work", "t_first", "p_first")
 	first := sess.tabs[0]
 	second := newTabWithStableID("t_second", "p_second", newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
@@ -299,7 +299,7 @@ func TestHandleCommandStableIDsResolveSessionWithoutSelectingTab(t *testing.T) {
 
 func TestHandleCommandStableIDsDoNotRedirectSplitFromCurrentFocus(t *testing.T) {
 	factory := &controlPTYFactory{}
-	d := newTestDaemon(t, factory, stubClock{})
+	d := newTestDaemon(t, factory, newStubClock(t))
 	t.Cleanup(func() { factory.close(); d.sessWg.Wait() })
 	sess := addControlSession(d, "work", "t_active", "p_active")
 	active := sess.tabs[0]
@@ -338,7 +338,7 @@ func TestHandleCommandStableIDsDoNotRedirectSplitFromCurrentFocus(t *testing.T) 
 
 func TestHandleCommandSelfTargetsNonActiveTabAndPane(t *testing.T) {
 	factory := &controlPTYFactory{}
-	d := newTestDaemon(t, factory, stubClock{})
+	d := newTestDaemon(t, factory, newStubClock(t))
 	t.Cleanup(func() { factory.close(); d.sessWg.Wait() })
 	sess := addControlSession(d, "work", "t_active", "p_active")
 	active := sess.tabs[0]
@@ -415,7 +415,7 @@ func TestResizeControlOneShotsTargetDetachedSessions(t *testing.T) {
 			for _, slug := range []string{"grow-pane-width", "shrink-pane-width", "grow-pane-height", "shrink-pane-height", "equalize-panes"} {
 				t.Run(slug, func(t *testing.T) {
 					factory := &controlPTYFactory{}
-					d := newTestDaemon(t, factory, stubClock{})
+					d := newTestDaemon(t, factory, newStubClock(t))
 					t.Cleanup(func() { factory.close(); d.sessWg.Wait() })
 					sess := addControlSession(d, "work", "t_work", "p_work")
 					require.True(t, sendCommand(t, d, protocol.CommandRequest{Slug: "split-right", TargetSession: "work"}).Outcome == protocol.CommandSucceeded)
@@ -450,7 +450,7 @@ func TestResizeControlOneShotsTargetDetachedSessions(t *testing.T) {
 
 func TestResizeControlNonSelfVEVLocatorUsesActiveTarget(t *testing.T) {
 	factory := &controlPTYFactory{}
-	d := newTestDaemon(t, factory, stubClock{})
+	d := newTestDaemon(t, factory, newStubClock(t))
 	t.Cleanup(func() { factory.close(); d.sessWg.Wait() })
 	sess := addControlSession(d, "work", "t_active", "p_active")
 	require.True(t, sendCommand(t, d, protocol.CommandRequest{Slug: "split-right", TargetSession: "work"}).Outcome == protocol.CommandSucceeded)
@@ -482,7 +482,7 @@ func TestResizeControlNonSelfVEVLocatorUsesActiveTarget(t *testing.T) {
 
 func TestResizeControlTooSmallUsesStableFailure(t *testing.T) {
 	factory := &controlPTYFactory{}
-	d := newTestDaemon(t, factory, stubClock{})
+	d := newTestDaemon(t, factory, newStubClock(t))
 	t.Cleanup(func() { factory.close(); d.sessWg.Wait() })
 	sess := addControlSession(d, "work", "t_work", "p_work")
 	require.True(t, sendCommand(t, d, protocol.CommandRequest{Slug: "split-right", TargetSession: "work"}).Outcome == protocol.CommandSucceeded)
@@ -499,7 +499,7 @@ func TestResizeControlTooSmallUsesStableFailure(t *testing.T) {
 }
 
 func TestHandleCommandSelfListPanesUsesInvokingTab(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	sess := addControlSession(d, "work", "t_active", "p_active")
 	invoking := newTabWithStableID("t_invoking", "p_invoking", newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
 	invoking.ctx, invoking.cancel = context.WithCancel(d.serveCtx)
@@ -518,7 +518,7 @@ func TestHandleCommandSelfListPanesUsesInvokingTab(t *testing.T) {
 }
 
 func TestHandleCommandRenameSessionRejectsInvalidNameAsCommandArgs(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	addControlSession(d, "work", "t_work", "p_work")
 
 	result := sendCommand(t, d, protocol.CommandRequest{
@@ -531,7 +531,7 @@ func TestHandleCommandRenameSessionRejectsInvalidNameAsCommandArgs(t *testing.T)
 
 func TestCloseCommandsReportMutationOutcome(t *testing.T) {
 	t.Run("stale close tab target fails", func(t *testing.T) {
-		d := newTestDaemon(t, nil, stubClock{})
+		d := newTestDaemon(t, nil, newStubClock(t))
 		sess := addControlSession(d, "work", "t_work", "p_work")
 		stale := newTabWithStableID("t_stale", "p_stale", newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
 		cmd, ok := command.BySlug("close-tab")
@@ -548,7 +548,7 @@ func TestCloseCommandsReportMutationOutcome(t *testing.T) {
 	})
 
 	t.Run("failed final pane close fails and retains session", func(t *testing.T) {
-		d := newTestDaemon(t, &controlPTYFactory{}, stubClock{})
+		d := newTestDaemon(t, &controlPTYFactory{}, newStubClock(t))
 		d.snapsEnabled = true
 		d.persistEnabled = true
 		d.snapshotRepository = portsmocks.NewMockSnapshotRepository(t)
@@ -571,7 +571,7 @@ func TestCloseCommandsReportMutationOutcome(t *testing.T) {
 	})
 
 	t.Run("successful close tab remains successful", func(t *testing.T) {
-		d := newTestDaemon(t, nil, stubClock{})
+		d := newTestDaemon(t, nil, newStubClock(t))
 		sess := addControlSession(d, "work", "t_first", "p_first")
 		second := newTabWithStableID("t_second", "p_second", newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
 		second.ctx, second.cancel = context.WithCancel(d.serveCtx)
@@ -619,7 +619,7 @@ func TestHandleCommandHeadlessMutations(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			factory := &controlPTYFactory{}
-			d := newTestDaemon(t, factory, stubClock{})
+			d := newTestDaemon(t, factory, newStubClock(t))
 			t.Cleanup(func() { factory.close(); d.sessWg.Wait() })
 			sess := addControlSession(d, "work", "t_work", "p_work")
 
@@ -633,7 +633,7 @@ func TestHandleCommandHeadlessMutations(t *testing.T) {
 
 func TestHandleCommandNewSessionInheritsHeadlessIdentityAndViewport(t *testing.T) {
 	factory := &controlPTYFactory{}
-	d := newTestDaemon(t, factory, stubClock{})
+	d := newTestDaemon(t, factory, newStubClock(t))
 	t.Cleanup(func() { factory.close(); d.sessWg.Wait() })
 	source := addControlSession(d, "work", "t_work", "p_work")
 	source.mu.Lock()
@@ -667,7 +667,7 @@ func TestHandleCommandNewSessionInheritsHeadlessIdentityAndViewport(t *testing.T
 
 func TestHandleCommandNewSessionPreservesSourceGeometry(t *testing.T) {
 	factory := &controlPTYFactory{}
-	d := newTestDaemon(t, factory, stubClock{})
+	d := newTestDaemon(t, factory, newStubClock(t))
 	t.Cleanup(func() { factory.close(); d.sessWg.Wait() })
 	source := addControlSession(d, "work", "t_work", "p_work")
 	client := &attachedClient{}
@@ -696,7 +696,7 @@ func TestHandleCommandNewSessionPreservesSourceGeometry(t *testing.T) {
 }
 
 func TestHandleCommandValidatesToastAndQueuesForDetachedSession(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	sess := addControlSession(d, "work", "t_work", "p_work")
 
 	bad := sendCommand(t, d, protocol.CommandRequest{Slug: "toast", Args: []string{"-l", "loud", "hello"}, TargetSession: "work"})
@@ -713,7 +713,7 @@ func TestHandleCommandValidatesToastAndQueuesForDetachedSession(t *testing.T) {
 }
 
 func TestHandleCommandListingsContainStableIDsMarkersAndCWD(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	sess := addControlSession(d, "work", "t_work", "p_work")
 	sess.tabs[0].name = "shell"
 
@@ -755,7 +755,7 @@ func TestHandleCommandEnvExportsTargetSessionEnvironment(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d := newTestDaemon(t, nil, stubClock{})
+			d := newTestDaemon(t, nil, newStubClock(t))
 			sess := addControlSession(d, "work", "t_work", "p_work")
 			sess.mu.Lock()
 			sess.env = []string{"SHELL=/bin/sh", "SECRET=hidden", "WAYLAND_DISPLAY=wayland-1"}
@@ -769,7 +769,7 @@ func TestHandleCommandEnvExportsTargetSessionEnvironment(t *testing.T) {
 }
 
 func TestRemoteCatalogLeavesStoppedSessionsStopped(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	d.mu.Lock()
 	d.inactive["old"] = inactiveSession{name: "old", cwd: "/tmp/old", createdAt: 1, incarnation: domain.IncarnationID{3}, state: protocol.SessionDown}
 	d.mu.Unlock()
@@ -793,7 +793,7 @@ func TestRemoteCatalogLeavesStoppedSessionsStopped(t *testing.T) {
 }
 
 func TestRemoteCatalogJSONOutput(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	work := addControlSession(d, "work", "t_work", "p_work")
 	work.incarnation[0] = 1
 	work.ephemeral = false
@@ -859,7 +859,7 @@ func TestRemoteCatalogJSONOutput(t *testing.T) {
 }
 
 func TestRemoteCatalogRefreshesFocusedTabTitle(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	sess := addControlSession(d, "work", "t_work", "p_work")
 	sess.incarnation[0] = 1
 	tb := sess.tabs[0]
@@ -894,7 +894,7 @@ func TestRemoteCatalogRefreshesFocusedTabTitle(t *testing.T) {
 }
 
 func TestRemoteCatalogRejectsTooManyTabs(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	sess := addControlSession(d, "work", "t_work", "p_work")
 	sess.mu.Lock()
 	sess.tabs = make([]*tab, catalogue.RemoteCatalogMaxTabsPerSess+1)
@@ -912,7 +912,7 @@ func TestRemoteCatalogRejectsTooManyTabs(t *testing.T) {
 
 func TestHandleCommandSerializesSelfTargetOnNonActiveTab(t *testing.T) {
 	factory := &controlPTYFactory{entered: make(chan struct{}), release: make(chan struct{})}
-	d := newTestDaemon(t, factory, stubClock{})
+	d := newTestDaemon(t, factory, newStubClock(t))
 	t.Cleanup(func() { factory.close(); d.sessWg.Wait() })
 	sess := addControlSession(d, "work", "t_active", "p_active")
 	target := newTabWithStableID("t_invoking", "p_invoking", newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
@@ -974,7 +974,7 @@ func TestHandleCommandSerializesSelfTargetOnNonActiveTab(t *testing.T) {
 }
 
 func TestControlMoveRejectsMissingAttachmentCapability(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	source := addControlSession(d, "work", "t_work", "p_work")
 	destination := addNamedMoveDestination(d, "dest", "t_dest", "p_dest")
 	tb := source.tabs[0]
@@ -995,7 +995,7 @@ func TestControlMoveRejectsMissingAttachmentCapability(t *testing.T) {
 }
 
 func TestHandleCommandMovePaneUsesActiveFocusedSourceWithSessionFlag(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	source := addControlSession(d, "work", "t_active", "p_active")
 	inactive := newTabWithStableID("t_inactive", "p_inactive", newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
 	inactive.ctx, inactive.cancel = context.WithCancel(d.serveCtx)
@@ -1034,7 +1034,7 @@ func TestHandleCommandMovePaneUsesActiveFocusedSourceWithSessionFlag(t *testing.
 // set surfaces the same retryable internal outcome as the create path, instead
 // of misreporting the destination as gone.
 func TestHandleCommandMovePanePurgeAdmissionMapsToRetryableError(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	addControlSession(d, "work", "t_work", "p_work")
 	addNamedMoveDestination(d, "dest", "t_dest", "p_dest")
 
@@ -1049,7 +1049,7 @@ func TestHandleCommandMovePanePurgeAdmissionMapsToRetryableError(t *testing.T) {
 }
 
 func TestHandleCommandMovePaneSelfUsesStableSourceIDs(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	source := addControlSession(d, "work", "t_active", "p_active")
 	inactive := newTabWithStableID("t_inactive", "p_inactive", newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
 	inactive.ctx, inactive.cancel = context.WithCancel(d.serveCtx)
@@ -1086,7 +1086,7 @@ func TestHandleCommandMovePaneSelfUsesStableSourceIDs(t *testing.T) {
 }
 
 func TestHandleCommandMoveTabUsesActiveTabWithoutSelf(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	source := addControlSession(d, "work", "t_first", "p_first")
 	publishTiledPaneOwners(source, source.tabs[0])
 	second := newTabWithStableID("t_second", "p_second", newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
@@ -1115,7 +1115,7 @@ func TestHandleCommandMoveTabUsesActiveTabWithoutSelf(t *testing.T) {
 }
 
 func TestHandleCommandMoveTabSelfUsesStableTab(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	source := addControlSession(d, "work", "t_first", "p_first")
 	second := newTabWithStableID("t_second", "p_second", newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
 	second.ctx, second.cancel = context.WithCancel(d.serveCtx)
@@ -1246,7 +1246,7 @@ func TestHandleCommandMoveCommandsRejectInvalidArgsAndTargets(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d := newTestDaemon(t, nil, stubClock{})
+			d := newTestDaemon(t, nil, newStubClock(t))
 			request := tt.arrange(d)
 			result := sendCommand(t, d, request)
 			require.False(t, result.Outcome == protocol.CommandSucceeded)
@@ -1259,7 +1259,7 @@ func TestHandleCommandMoveCommandsRejectInvalidArgsAndTargets(t *testing.T) {
 }
 
 func TestHandleCommandMovePaneRelocatedStableIDsOverrideAdvisorySessionName(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	advisory := addControlSession(d, "old-name", "t_other", "p_other")
 	source := addControlSession(d, "renamed", "t_work", "p_work")
 	destination := addNamedMoveDestination(d, "dest", "t_dest", "p_dest")
@@ -1285,7 +1285,7 @@ func TestHandleCommandMovePaneRelocatedStableIDsOverrideAdvisorySessionName(t *t
 }
 
 func TestHandleCommandMovePaneStableIDsLocateSessionWithoutSelfRedirect(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	source := addControlSession(d, "renamed", "t_active", "p_active")
 	inactive := newTabWithStableID("t_inactive", "p_inactive", newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
 	inactive.ctx, inactive.cancel = context.WithCancel(d.serveCtx)
@@ -1592,7 +1592,7 @@ func TestDispatchActionLifecycle(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d := newTestDaemon(t, nil, stubClock{})
+			d := newTestDaemon(t, nil, newStubClock(t))
 			sess := addControlSession(d, "work", "t_work", "p_work")
 			ac := &attachedClient{}
 			ac.setSession(sess)

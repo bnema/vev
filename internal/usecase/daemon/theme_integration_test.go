@@ -171,7 +171,7 @@ func TestAccentLifecycleNeutralChromeByteSnapshots(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d := newTestDaemon(t, nil, stubClock{})
+			d := newTestDaemon(t, nil, newStubClock(t))
 			d.ApplyConfig(tt.config)
 			got := chromeStyleSnapshot(t, d.resolveAppliedTheme(themeui.Theme{
 				Foreground: raw.Foreground, Background: raw.Background, Palette: raw.Palette, PaletteKnown: raw.PaletteKnown,

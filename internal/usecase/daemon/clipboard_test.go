@@ -226,7 +226,7 @@ func clipboardOwnerLease(t *testing.T, sess *session) paneEffectLease {
 }
 
 func TestPTYReaderForwardsOSC52ClipboardToAttachedClient(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	p := chunkReadPTY(t, []byte("\x1b]52;c;aGVsbG8=\x07"))
 
 	tr, sends := newCapturingTransport(t)
@@ -258,7 +258,7 @@ func TestPTYReaderForwardsOSC52ClipboardToAttachedClient(t *testing.T) {
 }
 
 func TestPTYReaderDropsOversizedClipboardPayload(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	big := strings.Repeat("a", scopy.OSC52MaxPayloadBytes+1)
 	b64 := base64.StdEncoding.EncodeToString([]byte(big))
 	p := chunkReadPTY(t, []byte("\x1b]52;c;"+b64+"\x07"))
@@ -285,7 +285,7 @@ func TestPTYReaderDropsOversizedClipboardPayload(t *testing.T) {
 }
 
 func TestPTYReaderDropsInvalidBase64Clipboard(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	p := chunkReadPTY(t, []byte("\x1b]52;c;not-valid-base64!!\x07"))
 
 	tr, sends := newCapturingTransport(t)
@@ -310,7 +310,7 @@ func TestPTYReaderDropsInvalidBase64Clipboard(t *testing.T) {
 }
 
 func TestPTYReaderClipboardNoAttachedClientDoesNotPanic(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	p := chunkReadPTY(t, []byte("\x1b]52;c;aGVsbG8=\x07"))
 
 	sctx, cancel := context.WithCancel(context.Background())

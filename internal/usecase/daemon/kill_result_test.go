@@ -46,7 +46,7 @@ func requireNoFurtherSends(t *testing.T, sends chan wire.Envelope) {
 // live session answers with one KillSucceeded result correlated to the request
 // and removes the session.
 func TestHandleKillSessionSendsExactlyOneSucceededResult(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	addControlSession(d, "work", "t_work", "p_work")
 
 	tr, sends := newCapturingTransport(t)
@@ -62,7 +62,7 @@ func TestHandleKillSessionSendsExactlyOneSucceededResult(t *testing.T) {
 // session answers with one definite KillFailed result, not a close-as-success,
 // and leaves the registry untouched.
 func TestHandleKillSessionSendsDefiniteFailureResult(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 
 	tr, sends := newCapturingTransport(t)
 	d.handleKill(tr, protocol.Kill{RequestID: 9, Scope: protocol.KillSession, Name: "ghost"})
@@ -77,7 +77,7 @@ func TestHandleKillSessionSendsDefiniteFailureResult(t *testing.T) {
 // TestHandleKillInvalidScopeSendsDefiniteFailureResult proves an invalid scope
 // still receives exactly one definite failure instead of a silent close.
 func TestHandleKillInvalidScopeSendsDefiniteFailureResult(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 
 	tr, sends := newCapturingTransport(t)
 	d.handleKill(tr, protocol.Kill{RequestID: 3, Scope: protocol.KillScope(9)})
@@ -91,7 +91,7 @@ func TestHandleKillInvalidScopeSendsDefiniteFailureResult(t *testing.T) {
 // TestHandleKillAllEmptyDaemonSendsOneSucceededResult proves a successful
 // kill-all answers with one KillSucceeded result and leaves the daemon serving.
 func TestHandleKillAllEmptyDaemonSendsOneSucceededResult(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 
 	tr, sends := newCapturingTransport(t)
 	d.handleKill(tr, protocol.Kill{RequestID: 11, Scope: protocol.KillAll})
@@ -115,7 +115,7 @@ func TestHandleKillAllReportsBoundedStructuredPartialFailures(t *testing.T) {
 
 	fail := make(map[domain.IncarnationID]error, total)
 	repository := newSelectivePurgeRepository(fail)
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	WithSnapshotRepository(repository)(d)
 	store, _ := newMockStore(t)
 	WithStore(t, store)(d)
@@ -193,7 +193,7 @@ func newKillOrderTransport(t *testing.T, teardown <-chan struct{}) (*mockServerC
 // connection closes, so a client can observe success instead of inferring it
 // from a close.
 func TestHandleKillDaemonSendsResultBeforeTeardownAndClose(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 
 	tr, recorder := newKillOrderTransport(t, d.done)
 	d.handleKill(tr, protocol.Kill{RequestID: 42, Scope: protocol.KillDaemon})
@@ -238,7 +238,7 @@ func (t *recordFailTransport) payloads() []wire.Envelope {
 // and code in the send-failure log, and sends nothing further (no success and no
 // second result).
 func TestHandleKillAllSupersededByDaemonShutdownSendsOneUnknownOutcome(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	var logged syncedLogBuffer
 	d.log = slog.New(slog.NewTextHandler(&logged, nil))
 
@@ -269,7 +269,7 @@ func TestHandleKillAllSupersededByDaemonShutdownSendsOneUnknownOutcome(t *testin
 // success) and still carries the bounded structured failures.
 func TestKillAllUndeliverableResultIsLogged(t *testing.T) {
 	repository := newSelectivePurgeRepository(map[domain.IncarnationID]error{{2}: errors.New("delete failed")})
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	var logged syncedLogBuffer
 	d.log = slog.New(slog.NewTextHandler(&logged, nil))
 	WithSnapshotRepository(repository)(d)

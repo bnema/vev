@@ -24,20 +24,24 @@ import (
 
 // --- test doubles -----------------------------------------------------------
 
-// stubClock returns timers whose channel never fires, so a scheduler under it
-// blocks in its debounce loop until the session context is cancelled. Used by
-// every test that is not specifically exercising the debounce. Now reports a
-// fixed non-zero instant so recorded timestamps are deterministic and set.
-type stubClock struct{}
+// newStubClock fixes timestamps and disables timer delivery.
+func newStubClock(t testing.TB) *portsmocks.MockClock {
+	t.Helper()
+	c := portsmocks.NewMockClock(t)
+	c.EXPECT().Now().Return(time.Unix(1_700_000_000, 0)).Maybe()
+	timer := newStubTimer(t)
+	c.EXPECT().NewTimer(mock.Anything).Return(timer).Maybe()
+	return c
+}
 
-func (stubClock) Now() time.Time                     { return time.Unix(1_700_000_000, 0) }
-func (stubClock) NewTimer(time.Duration) ports.Timer { return stubTimer{} }
-
-type stubTimer struct{}
-
-func (stubTimer) C() <-chan time.Time      { return nil }
-func (stubTimer) Reset(time.Duration) bool { return false }
-func (stubTimer) Stop() bool               { return true }
+func newStubTimer(t testing.TB) *portsmocks.MockTimer {
+	t.Helper()
+	timer := portsmocks.NewMockTimer(t)
+	timer.EXPECT().C().Return(nil).Maybe()
+	timer.EXPECT().Reset(mock.Anything).Return(false).Maybe()
+	timer.EXPECT().Stop().Return(true).Maybe()
+	return timer
+}
 
 type signalClock struct {
 	called chan struct{}
@@ -51,7 +55,11 @@ func (c *signalClock) NewTimer(d time.Duration) ports.Timer {
 		c.once.Do(func() { close(c.called) })
 	}
 	if c.timers == nil {
-		return stubTimer{}
+		timer := &portsmocks.MockTimer{}
+		timer.EXPECT().C().Return(nil).Maybe()
+		timer.EXPECT().Reset(mock.Anything).Return(false).Maybe()
+		timer.EXPECT().Stop().Return(true).Maybe()
+		return timer
 	}
 	t := &signalTimer{ch: make(chan time.Time, 1), duration: d}
 	c.timers <- t
@@ -393,7 +401,7 @@ func newCapturingTransport(t testing.TB) (*mockServerConnection, chan wire.Envel
 
 func newManualSessionWithPTYs(t testing.TB, ptys ...ports.PTY) (*Daemon, *session, *attachedClient, chan wire.Envelope) {
 	t.Helper()
-	return newManualSessionWithPTYsClock(t, stubClock{}, ptys...)
+	return newManualSessionWithPTYsClock(t, newStubClock(t), ptys...)
 }
 
 func newManualSessionWithPTYsClock(t testing.TB, clock ports.Clock, ptys ...ports.PTY) (*Daemon, *session, *attachedClient, chan wire.Envelope) {
@@ -403,7 +411,7 @@ func newManualSessionWithPTYsClock(t testing.TB, clock ports.Clock, ptys ...port
 
 func newManualSessionWithPTYsCleanup(t testing.TB, registerCleanup bool, ptys ...ports.PTY) (*Daemon, *session, *attachedClient, chan wire.Envelope) {
 	t.Helper()
-	return newManualSessionWithPTYsClockCleanup(t, stubClock{}, registerCleanup, ptys...)
+	return newManualSessionWithPTYsClockCleanup(t, newStubClock(t), registerCleanup, ptys...)
 }
 
 func newTestLifecycle(t testing.TB) domain.SessionLifecycleID {
@@ -613,7 +621,7 @@ func TestRouteRejectsInvalidTerminalSizeBeforeResumeMutation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			pty, release := newBlockingPTY(t)
 			defer release()
-			d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+			d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 
 			transport := &closeTrackingTransport{}
 			sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), transport)
@@ -673,7 +681,11 @@ func (notifyClock) Now() time.Time { return time.Now() }
 func (notifyClock) NewTimer(d time.Duration) ports.Timer {
 	switch d {
 	case debounceInterval:
-		return stubTimer{}
+		timer := &portsmocks.MockTimer{}
+		timer.EXPECT().C().Return(nil).Maybe()
+		timer.EXPECT().Reset(mock.Anything).Return(false).Maybe()
+		timer.EXPECT().Stop().Return(true).Maybe()
+		return timer
 	case detachNotifyTimeout:
 		return realTimer{t: time.NewTimer(5 * time.Millisecond)}
 	default:

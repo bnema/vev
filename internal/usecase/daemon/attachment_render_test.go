@@ -102,7 +102,7 @@ func TestStaleCapacityReadinessRequeuesWithoutAnotherInvalidation(t *testing.T) 
 func TestAttachmentResizeKeepsPeerWindowAndExpandsSharedContent(t *testing.T) {
 	pty, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 	firstTransport, _ := newCapturingTransport(t)
 	sess, first, err := d.route(protocol.Hello{
 		Version: protocol.Version, Intent: protocol.IntentNew, Name: "work",
@@ -222,7 +222,7 @@ func TestMultiAttachmentHandshakeFirstPaintNotGatedByBlockedPeer(t *testing.T) {
 func TestAttachmentPaintFanoutDoesNotWaitForBlockedPeer(t *testing.T) {
 	pty, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 	firstTransport := &blockedAttachmentTransport{entered: make(chan struct{}), release: make(chan struct{}), sends: make(chan wire.Envelope, 8)}
 	sess, _, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{1}}, firstTransport)
 	require.NoError(t, err)
@@ -258,7 +258,7 @@ func TestAttachmentPaintFanoutDoesNotWaitForBlockedPeer(t *testing.T) {
 func TestAttachmentResizeUsesLatestClaimedSessionGeometry(t *testing.T) {
 	pty, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 	firstTransport, _ := newCapturingTransport(t)
 	sess, first, err := d.route(protocol.Hello{
 		Version: protocol.Version, Intent: protocol.IntentNew, Name: "work",

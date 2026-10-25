@@ -317,7 +317,7 @@ func TestAttachedClientEnvironment(t *testing.T) {
 }
 
 func TestNewRestoredSessionEnvironmentIsProvisional(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	d.baseEnv = []string{"SHELL=/bin/sh", "PATH=/daemon"}
 	sess := d.newRestoredSession(snapcodec.Session{Name: "work"}, d.serveCtx, func() {}, nil)
 	require.Equal(t, d.baseEnv, sess.env)
@@ -329,7 +329,7 @@ func TestNewRestoredSessionEnvironmentIsProvisional(t *testing.T) {
 // after the attachment and its client environment are prepared, the session
 // environment and its provisional state stay untouched.
 func TestFailedAttachTransitionLeavesSessionEnvironment(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	sess := addControlSession(d, "work", "tab-1", "pane-1")
 	sess.ephemeral = false
 	sess.incarnation = newTestLifecycle(t)
@@ -375,7 +375,7 @@ func TestEnvironmentSeedCarriesProvisionalState(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			factory := &controlPTYFactory{}
-			d := newTestDaemon(t, factory, stubClock{})
+			d := newTestDaemon(t, factory, newStubClock(t))
 			t.Cleanup(func() { factory.close(); d.sessWg.Wait() })
 			source := addControlSession(d, "work", "t_work", "p_work")
 			source.mu.Lock()

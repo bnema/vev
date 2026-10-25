@@ -16,6 +16,8 @@ import (
 // Advance, which a mock expectation cannot express without obscuring the race
 // the mutex exists to prevent.
 type pickerGraceClock struct {
+	t testing.TB
+
 	mu  sync.Mutex
 	now time.Time
 }
@@ -32,7 +34,7 @@ func (c *pickerGraceClock) Advance(d time.Duration) {
 	c.mu.Unlock()
 }
 
-func (*pickerGraceClock) NewTimer(time.Duration) ports.Timer { return stubTimer{} }
+func (c *pickerGraceClock) NewTimer(time.Duration) ports.Timer { return newStubTimer(c.t) }
 
 // TestMovePickerInputFailSafe pins that raw input is never swallowed without a
 // live offer: bytes that arrive inside the acquisition grace were in flight
@@ -51,7 +53,7 @@ func TestMovePickerInputFailSafe(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			clock := &pickerGraceClock{now: time.Unix(100, 0)}
+			clock := &pickerGraceClock{t: t, now: time.Unix(100, 0)}
 			d, source, ac, _, _, releases, sends := setupMovePickerSessionsCore(t, clock, 0)
 			defer releaseAll(releases)
 

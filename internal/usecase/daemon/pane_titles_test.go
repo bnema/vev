@@ -98,7 +98,7 @@ func TestRefreshPaneTitleUsesProvidedOwningTab(t *testing.T) {
 	sess.mu.Lock()
 	sess.tabs = append(sess.tabs, second)
 	sess.mu.Unlock()
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	d.proc = &processInspectorFake{comm: func(pid int) (string, error) {
 		require.Equal(t, 222, pid)
 		return "vim", nil
@@ -154,7 +154,7 @@ func TestRefreshFloatingPaneTitlePreservesConfiguredCommandFallback(t *testing.T
 }
 
 func TestRefreshFloatingPaneTitleUsesShellFallbackForEmptyCommand(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	d.shell = "/usr/local/bin/zsh"
 	p := newPane("floating", nil, domain.Size{Cols: 20, Rows: 5})
 	p.title.displayFallback = floatingCommandFallback("", d.shell)

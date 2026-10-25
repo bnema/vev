@@ -167,7 +167,7 @@ func TestResponsiveFloatingZeroContentDrawerRemainsCommittedAndTargeted(t *testi
 	require.True(t, geometry.committable())
 	require.Equal(t, domain.Rect{Width: 1, Height: 1}, geometry.ptyRect())
 
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	d.ApplyConfig(domain.Config{Floating: cfg})
 	tb := newTab(nil, domain.Size{Cols: 79, Rows: 2})
 	sess := &session{sessionCore: sessionCore{name: "test"}, tabs: []*tab{tb}, ctx: t.Context()}
@@ -198,7 +198,7 @@ func TestResponsiveFloatingResizeCommitsZeroContentDrawerWithoutPhysicalResize(t
 	floating.popupGeometry = initial
 	tb := newTab(nil, domain.Size{Cols: 79, Rows: 2})
 	installTestFloating(tb, floating, true)
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	d.ApplyConfig(domain.Config{Floating: cfg})
 
 	sess := &session{tabs: []*tab{tb}}
@@ -304,7 +304,7 @@ func TestComposeCapturedFloatingFrameClipsRetainedGeometryAfterFailedShrink(t *t
 	}
 	writeTestFrame(t, floatingPane.screen, seed)
 	requested := calculateContentFloatingGeometry(rectSize(content), domain.FloatingConfig{Width: 80, Height: 80})
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	require.False(t, applyFloatingResizePlanForTest(d, floatingPane, requested))
 	require.Equal(t, retained, floatingPane.popupGeometry, "failed resize must retain the committed geometry")
 	floatingPane.mu.Lock()
@@ -553,7 +553,7 @@ func TestResizeFloatingPaneCommitsSameSizeGeometryWithoutPTYResize(t *testing.T)
 			pty := &resizePTY{}
 			p := newPane("floating", pty, rectSize(initial.Inner))
 			p.rect, p.popupGeometry = initial.Inner, initial
-			d := newTestDaemon(t, nil, stubClock{})
+			d := newTestDaemon(t, nil, newStubClock(t))
 
 			require.True(t, applyFloatingResizePlanForTest(d, p, tt.next))
 			require.Empty(t, pty.sizes(), "same-size geometry must not resize the PTY")
@@ -566,7 +566,7 @@ func TestResizeFloatingPaneCommitsSameSizeGeometryWithoutPTYResize(t *testing.T)
 }
 
 func TestComposeFloatingFrameRendersPaneOwnedCommandFallback(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	d.shell = "/usr/bin/fish"
 	p := newPane("floating", nil, domain.Size{Cols: 6, Rows: 3})
 	p.title.displayFallback = floatingCommandFallback("btop --utf", d.shell)
@@ -875,7 +875,7 @@ func BenchmarkComposeCapturedFloatingFrameCached(b *testing.B) {
 }
 
 func TestToggleFloatingResizesHiddenPaneOnShowAndRetriesFailure(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	d.ApplyConfig(domain.Config{Floating: domain.FloatingConfig{Width: 50, Height: 50}})
 	tb := newTab(nil, domain.Size{Cols: 80, Rows: 24})
 	sess := &session{tabs: []*tab{tb}}
@@ -930,7 +930,7 @@ func TestFailedFloatingResizeKeepsCommittedRenderAndInputGeometry(t *testing.T) 
 	p.popupGeometry = oldGeometry
 	tb := newTab(nil, domain.Size{Cols: newContent.Width, Rows: newContent.Height})
 	installTestFloating(tb, p, true)
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	d.ApplyConfig(domain.Config{Floating: cfg})
 
 	require.False(t, applyFloatingResizePlanForTest(d, p, newGeometry))
@@ -979,7 +979,7 @@ func TestFloatingLayoutRejectsStaleResizeBeforePublishing(t *testing.T) {
 	p.popupGeometry = previousGeometry
 	tb := newTab(nil, oldSize)
 	installTestFloating(tb, p, true)
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	d.ApplyConfig(domain.Config{Floating: cfg})
 	sess := &session{tabs: []*tab{tb}}
 
@@ -1018,7 +1018,7 @@ func TestResizeFloatingPaneFailureAndSerialization(t *testing.T) {
 		pty := &resizePTY{err: errors.New("nope")}
 		p := newPane("floating", pty, domain.Size{Cols: 5, Rows: 4})
 		p.rect = domain.Rect{X: 8, Y: 3, Width: 5, Height: 4}
-		d := newTestDaemon(t, nil, stubClock{})
+		d := newTestDaemon(t, nil, newStubClock(t))
 		requested := floatingGeometry{Bounds: domain.Rect{X: 1, Y: 1, Width: 11, Height: 9}, Inner: domain.Rect{X: 2, Y: 2, Width: 9, Height: 7}}
 		require.False(t, applyFloatingResizePlanForTest(d, p, requested))
 		require.Equal(t, domain.Rect{X: 8, Y: 3, Width: 5, Height: 4}, p.rect)
@@ -1030,7 +1030,7 @@ func TestResizeFloatingPaneFailureAndSerialization(t *testing.T) {
 	t.Run("competing resizes serialize", func(t *testing.T) {
 		pty := &resizePTY{entered: make(chan struct{}), release: make(chan struct{})}
 		p := newPane("floating", pty, domain.Size{Cols: 2, Rows: 2})
-		d := newTestDaemon(t, nil, stubClock{})
+		d := newTestDaemon(t, nil, newStubClock(t))
 		first := floatingGeometry{Bounds: domain.Rect{Width: 6, Height: 5}, Inner: domain.Rect{X: 1, Y: 1, Width: 4, Height: 3}}
 		second := floatingGeometry{Bounds: domain.Rect{Width: 10, Height: 8}, Inner: domain.Rect{X: 1, Y: 1, Width: 8, Height: 6}}
 		done1 := make(chan bool, 1)

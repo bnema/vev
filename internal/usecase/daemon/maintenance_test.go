@@ -73,7 +73,7 @@ func TestSnapshotGarbageCollectionRunsAfterRestorationThenPeriodically(t *testin
 }
 
 func TestSnapshotGarbageCollectionRequiresExplicitOption(t *testing.T) {
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
 	coordinator := recoveryusecase.NewCoordinator(portsmocks.NewMockCatalogue(t), portsmocks.NewMockSnapshotRepository(t), nil)
 	WithRecoveryCoordinator(coordinator)(d)
 	d.startDurableMaintenance()

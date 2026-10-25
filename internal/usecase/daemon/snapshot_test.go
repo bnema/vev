@@ -19,7 +19,7 @@ import (
 // TestWithSnapshotRepositoryRejectsTypedNil verifies typed nil repositories are disabled.
 func TestWithSnapshotRepositoryRejectsTypedNil(t *testing.T) {
 	var repository *snapshotAcceptanceRepository
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
 
 	WithSnapshotRepository(repository)(d)
 
@@ -28,7 +28,7 @@ func TestWithSnapshotRepositoryRejectsTypedNil(t *testing.T) {
 }
 
 func TestDurableWriterFailureNamesIncludesBufferedCapture(t *testing.T) {
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
 	capture := &snapshotCapture{name: "work", session: newSnapshotTestSession(t, "work", false, "/work")}
 	d.snapshots.mu.Lock()
 	d.snapshots.admitted[capture] = struct{}{}
@@ -39,7 +39,7 @@ func TestDurableWriterFailureNamesIncludesBufferedCapture(t *testing.T) {
 }
 
 func TestCheckpointCatalogueFailureKeepsCaptureRetryable(t *testing.T) {
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
 	catalogue := portsmocks.NewMockCatalogue(t)
 	repository := portsmocks.NewMockSnapshotRepository(t)
 	record := domain.CatalogueRecord{
@@ -62,7 +62,7 @@ func TestCheckpointCatalogueFailureKeepsCaptureRetryable(t *testing.T) {
 // TestSnapshotWorkerPublishesContentAddressedCapture verifies that all new
 // checkpoints use the repository publication contract.
 func TestSnapshotWorkerPublishesContentAddressedCapture(t *testing.T) {
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
 	repository := portsmocks.NewMockSnapshotRepository(t)
 	WithSnapshotRepository(repository)(d)
 	startSnapshotEncodeWorker(t, d)

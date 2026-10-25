@@ -120,7 +120,7 @@ func TestSizeOnlyLayoutAndFloatingRetainClaimingPixelGeometry(t *testing.T) {
 	layoutPTY := &recordingGeometryPTY{}
 	tb := newTab(layoutPTY, domain.Size{Cols: 80, Rows: 22})
 	sess.tabs = []*tab{tb}
-	d := newTestDaemon(t, nil, stubClock{})
+	d := newTestDaemon(t, nil, newStubClock(t))
 	require.True(t, sess.geometry.applyTabLayout(d, sess, tb))
 	require.Equal(t, domain.Geometry{Size: domain.Size{Cols: 80, Rows: 22}, PixelWidth: 800, PixelHeight: 440}, layoutPTY.geometry)
 
@@ -184,7 +184,7 @@ func (*blockingRecordingGeometryPTY) ForegroundPgid() (int, error) { return 1, n
 func TestInitialSessionPTYReceivesClaimingPixelGeometry(t *testing.T) {
 	pty := &recordingGeometryPTY{}
 	factory := &recordingPTYFactory{pty: pty}
-	d := newTestDaemon(t, factory, stubClock{})
+	d := newTestDaemon(t, factory, newStubClock(t))
 	geometry := domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}, PixelWidth: 800, PixelHeight: 480}
 
 	d.mu.Lock()
@@ -200,7 +200,7 @@ func TestInitialSessionPTYReceivesClaimingPixelGeometry(t *testing.T) {
 func TestResumeReappliesClaimingPixelGeometryBeforeReturn(t *testing.T) {
 	pty := &blockingRecordingGeometryPTY{done: make(chan struct{})}
 	t.Cleanup(func() { _ = pty.Close() })
-	d := newTestDaemon(t, &recordingPTYFactory{pty: pty}, stubClock{})
+	d := newTestDaemon(t, &recordingPTYFactory{pty: pty}, newStubClock(t))
 	firstHello := helloResumeCapable(protocol.IntentNew, "pixels", 0)
 	firstHello.PixelWidth, firstHello.PixelHeight = 800, 480
 	firstTransport := &closeTrackingTransport{}

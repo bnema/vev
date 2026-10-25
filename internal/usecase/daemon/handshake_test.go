@@ -112,7 +112,7 @@ func TestBoundedHandshakeCancellationDoesNotWaitForUninterruptibleOperation(t *t
 func TestHandshakeFirstPaintCancellationDoesNotRacePaintResult(t *testing.T) {
 	pty, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -150,7 +150,7 @@ func TestHandshakeFirstPaintCancellationDoesNotRacePaintResult(t *testing.T) {
 func TestHandshakeFailureAfterWelcomeDoesNotReportExplicitDetach(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 	tr := &closeTrackingTransport{}
 	sess, ac, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "welcome-failed", Size: domain.Size{Cols: 80, Rows: 24}, TermEnv: "xterm-256color"}, tr)
 	require.NoError(t, err)
@@ -194,7 +194,7 @@ func TestHandshakeTimeoutClosesBlockedReceive(t *testing.T) {
 func TestFailedResumeHandshakeRestoresParkedCredential(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 	oldTransport := newHandshakeBlockingTransport(false)
 	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "resume-timeout", 0), oldTransport)
 	require.NoError(t, err)
@@ -289,7 +289,7 @@ func TestHandshakeTimeoutCancelsRouteRestoreWait(t *testing.T) {
 func TestHandshakeTimeoutRemovesRestoredEmptySession(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 	d.mu.Lock()
 	d.inactive["restored"] = inactiveSession{name: "restored", cwd: "/tmp", state: protocol.SessionDown}
 	d.mu.Unlock()
@@ -319,7 +319,7 @@ func TestHandshakeTimeoutRemovesRestoredEmptySession(t *testing.T) {
 func TestHandshakeTimeoutPreservesUnrelatedAttachment(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 	oldTransport := &closeTrackingTransport{}
 	sess, old, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "shared", Size: domain.Size{Cols: 80, Rows: 24}}, oldTransport)
 	require.NoError(t, err)
@@ -352,7 +352,7 @@ func TestHandshakeTimeoutPreservesUnrelatedAttachment(t *testing.T) {
 func TestSuccessfulRouteOutlivesStoppedHandshakeContext(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
 	ctx, cancel := context.WithCancel(context.Background())
 	sess, ac, err := d.routeWithContext(ctx, protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "lifetime", Size: domain.Size{Cols: 80, Rows: 24}}, &closeTrackingTransport{})
 	require.NoError(t, err)
