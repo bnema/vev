@@ -233,6 +233,8 @@ func inputPayload(seq uint64) []byte {
 //   - the bounded queue never overflowed and every accepted packet is
 //     accounted for (received + duplicates == sent + drops),
 //   - cleanup and goroutine exit are bounded.
+//
+// real I/O: exchanges QUIC traffic over real UDP sockets.
 func TestRealQUICTypedConversationOverTrainProfile(t *testing.T) {
 	const total = 200
 
@@ -338,6 +340,7 @@ func TestRealQUICTypedConversationOverTrainProfile(t *testing.T) {
 // follow the client's new address (RFC 9000 section 9 passive migration) so the
 // typed conversation keeps flowing. If quic-go ever stops honouring passive
 // migration, this test fails instead of silently dropping the scenario.
+// real I/O: exchanges QUIC traffic over real UDP sockets.
 func TestRealQUICNATRebindKeepsTypedConversation(t *testing.T) {
 	before := runtime.NumGoroutine()
 	proxy, listener, fingerprint := startQUICFixture(t, quicnettest.Config{
@@ -395,18 +398,12 @@ func TestRealQUICNATRebindKeepsTypedConversation(t *testing.T) {
 // bounded queue, then returns the settled snapshot.
 func waitForAccounting(t *testing.T, proxy *quicnettest.Proxy, timeout time.Duration) quicnettest.Stats {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	stats := proxy.Stats()
-	for {
+	var stats quicnettest.Stats
+	pollUntil(t, timeout, func() bool {
 		stats = proxy.Stats()
-		if accounted(stats.ToServer) && accounted(stats.ToClient) {
-			return stats
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("proxy accounting did not settle within %s: %s", timeout, stats)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+		return accounted(stats.ToServer) && accounted(stats.ToClient)
+	})
+	return stats
 }
 
 // accounted reports that a direction has no packet in flight inside the proxy.
@@ -434,16 +431,6 @@ func assertBoundedCleanup(t *testing.T, proxy *quicnettest.Proxy, listener *quic
 		t.Fatal("cleanup did not complete within 15s")
 	}
 
-	deadline := time.Now().Add(5 * time.Second)
 	const slack = 8
-	for {
-		current := runtime.NumGoroutine()
-		if current <= baseline+slack {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("goroutines did not drain: baseline %d, still %d", baseline, current)
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
+	pollUntil(t, 5*time.Second, func() bool { return runtime.NumGoroutine() <= baseline+slack })
 }

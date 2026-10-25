@@ -434,7 +434,7 @@ func perfBlackoutRecoveryOnce(fx *perfFixture, client ports.ClientConnection, se
 		_, err := perfExchange(client, server, seq+1_000_000)
 		result <- err
 	}()
-	time.Sleep(perfBlackoutWindow)
+	<-time.After(perfBlackoutWindow)
 	start := time.Now()
 	fx.proxy.SetBlackout(false)
 	select {
@@ -469,17 +469,12 @@ func perfRebindRecoveryOnce(fx *perfFixture, client ports.ClientConnection, serv
 // either sent or dropped, then returns the settled snapshot.
 func perfWaitAccounting(tb testing.TB, fx *perfFixture, timeout time.Duration) quicnettest.Stats {
 	tb.Helper()
-	deadline := time.Now().Add(timeout)
-	for {
-		stats := fx.proxy.Stats()
-		if perfAccounted(stats.ToServer) && perfAccounted(stats.ToClient) {
-			return stats
-		}
-		if time.Now().After(deadline) {
-			tb.Fatalf("proxy accounting did not settle within %s: %s", timeout, stats)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	var stats quicnettest.Stats
+	pollUntil(tb, timeout, func() bool {
+		stats = fx.proxy.Stats()
+		return perfAccounted(stats.ToServer) && perfAccounted(stats.ToClient)
+	})
+	return stats
 }
 
 func perfAccounted(link quicnettest.LinkStats) bool {
@@ -503,17 +498,8 @@ func perfBoundedCleanup(tb testing.TB, fx *perfFixture, client ports.ClientConne
 	case <-time.After(perfExchangeTimeout):
 		tb.Fatalf("cleanup did not complete within %s", perfExchangeTimeout)
 	}
-	deadline := time.Now().Add(5 * time.Second)
 	const slack = 8
-	for {
-		if runtime.NumGoroutine() <= baseline+slack {
-			return
-		}
-		if time.Now().After(deadline) {
-			tb.Fatalf("goroutines did not drain: baseline %d, still %d", baseline, runtime.NumGoroutine())
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
+	pollUntil(tb, 5*time.Second, func() bool { return runtime.NumGoroutine() <= baseline+slack })
 }
 
 // TestRealQUICPerformanceEvidence produces one bounded, reproducible evidence
@@ -521,6 +507,8 @@ func perfBoundedCleanup(tb testing.TB, fx *perfFixture, client ports.ClientConne
 // values are emitted with t.Logf and are meant to be read with -v, e.g.
 //
 //	go test ./internal/adapters/quicnettest -run TestRealQUICPerformanceEvidence -v
+//
+// real I/O: measures QUIC traffic over real UDP sockets.
 func TestRealQUICPerformanceEvidence(t *testing.T) {
 	if testing.Short() {
 		t.Skip("real QUIC performance evidence is skipped in short mode")
