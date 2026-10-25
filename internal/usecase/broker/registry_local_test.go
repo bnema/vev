@@ -83,11 +83,12 @@ func (p *scriptedLocalProbe) noteCanceled() {
 
 func receiveLocalCall(t *testing.T, probe *scriptedLocalProbe) localProbeCall {
 	t.Helper()
+	synctest.Wait()
 	select {
 	case call := <-probe.calls:
 		return call
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for local probe")
+	default:
+		t.Fatal("no local probe was issued")
 		return localProbeCall{}
 	}
 }
