@@ -873,7 +873,8 @@ func TestSupervisorBrokerLossReconnectsWithFreshGeneration(t *testing.T) {
 		// A publication on the retired connection must never make the replacement
 		// Ready; only the replacement's own fresh epoch does.
 		first.publish(1, 2)
-		require.Never(t, func() bool { return sup.State().Connectivity == ConnectivityReady }, 50*time.Millisecond, 5*time.Millisecond)
+		synctest.Wait()
+		require.False(t, sup.State().Connectivity == ConnectivityReady)
 
 		second.publish(2, 1)
 		synctest.Wait()
@@ -972,7 +973,8 @@ func TestSupervisorIncompatibleStopsReconnecting(t *testing.T) {
 		}
 
 		require.Equal(t, State{Presentation: PresentPicker, Connectivity: ConnectivityDisconnected, Generation: 1, Err: incompatible}, sup.State())
-		require.Never(t, func() bool { return connector.callCount() > 1 }, 50*time.Millisecond, 5*time.Millisecond)
+		synctest.Wait()
+		require.False(t, connector.callCount() > 1)
 		require.Zero(t, clock.timerCount(), "a non-retryable failure schedules no retry timer")
 
 		cancel()

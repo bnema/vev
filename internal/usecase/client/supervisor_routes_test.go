@@ -99,8 +99,8 @@ func TestSupervisorPublishesRoutesWhileAttached(t *testing.T) {
 		require.Equal(t, first.Active, rung.Active, "the attachment keeps its reference")
 
 		harness.service.publishSnapshot(routeTestCatalogue(4, true))
-		require.Never(t, func() bool { return len(sentRouteSnapshots(stream)) > 2 }, 50*time.Millisecond, time.Millisecond,
-			"an unchanged catalogue publishes nothing")
+		synctest.Wait()
+		require.False(t, len(sentRouteSnapshots(stream)) > 2, "an unchanged catalogue publishes nothing")
 		require.Len(t, harness.service.openedRequests(), 1)
 	})
 }

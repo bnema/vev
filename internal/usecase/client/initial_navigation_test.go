@@ -623,7 +623,8 @@ func TestInitialNavigationWaitsForTargetObservation(t *testing.T) {
 					}
 					require.Zero(t, opened.Load())
 					service.publishSnapshot(localDaemonSnapshot(3, 2))
-					require.Never(t, func() bool { return calls.Load() > 1 }, 100*time.Millisecond, 5*time.Millisecond, "a refused intent is never re-armed")
+					synctest.Wait()
+					require.False(t, calls.Load() > 1, "a refused intent is never re-armed")
 				}
 				cancel()
 				require.ErrorIs(t, <-done, context.Canceled)
@@ -673,8 +674,8 @@ func TestInitialNavigationDropsDecisionsTakenWhileHidden(t *testing.T) {
 		stream.deliver(protocol.ErrorMsg{Code: protocol.ErrInternal, Text: "creation failed"})
 		synctest.Wait()
 		require.True(t, sup.State().Presentation == PresentPicker)
-		require.Never(t, func() bool { return len(service.openedRequests()) > 1 }, 200*time.Millisecond, 5*time.Millisecond,
-			"a decision taken while hidden must not open a second stream")
+		synctest.Wait()
+		require.False(t, len(service.openedRequests()) > 1, "a decision taken while hidden must not open a second stream")
 		require.Zero(t, picker.resolveCount(), "the hidden commit was never resolved")
 		cancel()
 		require.ErrorIs(t, <-done, context.Canceled)

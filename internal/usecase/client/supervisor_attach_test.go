@@ -1276,7 +1276,8 @@ func TestSupervisorAttachmentDeadlineNotExtendedAcrossStages(t *testing.T) {
 
 		// Crossing Welcome does not arm another deadline.
 		admitted.deliver(protocol.Welcome{SessionName: "alpha"})
-		require.Never(t, func() bool { return harness.clock.timerCount() > 2 }, 20*time.Millisecond, 2*time.Millisecond, "no stage may restart the deadline")
+		synctest.Wait()
+		require.False(t, harness.clock.timerCount() > 2, "no stage may restart the deadline")
 
 		// Firing the one adopted deadline ends the attachment as a typed timeout
 		// before publication, without claiming attachment.
@@ -1406,9 +1407,8 @@ func TestSupervisorAttachmentDeadlineDisarmedAfterPublication(t *testing.T) {
 		timer.fire()
 		// This bounded negative window gives the retired deadline goroutine an
 		// opportunity to mishandle the late fire; no sleep is used for ordering.
-		require.Never(t, func() bool {
-			return harness.sup.State().Presentation != PresentAttached || admitted.closedNow() || harness.sup.State().Err != nil
-		}, 50*time.Millisecond, time.Millisecond)
+		synctest.Wait()
+		require.False(t, harness.sup.State().Presentation != PresentAttached || admitted.closedNow() || harness.sup.State().Err != nil)
 	})
 }
 
