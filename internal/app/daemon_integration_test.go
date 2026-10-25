@@ -1003,11 +1003,19 @@ func TestMultipleClientsOneLifecycleOwner(t *testing.T) {
 	transport.EXPECT().Send(mock.Anything).Return(nil).Maybe()
 	transport.EXPECT().Recv().Return(wire.Envelope{}, io.EOF).Maybe()
 	transport.EXPECT().Close().Return(nil).Maybe()
+	// Every refused dial is an observable retry: the clients keep waiting on the
+	// held lifecycle instead of spawning, so the test waits for retries, not time.
+	const retriesBeforeRelease = 16
+	refused := make(chan struct{}, retriesBeforeRelease)
 	dial := func(context.Context, string) (wire.Transport, error) {
 		select {
 		case <-ready:
 			return transport, nil
 		default:
+			select {
+			case refused <- struct{}{}:
+			default:
+			}
 			return nil, os.ErrNotExist
 		}
 	}
@@ -1026,7 +1034,10 @@ func TestMultipleClientsOneLifecycleOwner(t *testing.T) {
 			errs <- err
 		})
 	}
-	require.Never(t, func() bool { return spawns.Load() != 0 }, 50*time.Millisecond, time.Millisecond)
+	for range retriesBeforeRelease {
+		<-refused
+		require.Zero(t, spawns.Load(), "no client spawns while the lifecycle owner is held")
+	}
 	close(ready)
 	require.NoError(t, owner.Release())
 	wg.Wait()
