@@ -11,6 +11,8 @@ import (
 )
 
 // awaitDone waits for one broker service to become terminal.
+//
+//testpolicy:realtime broker session over a real AF_UNIX socket
 func awaitDone(t *testing.T, service ports.BrokerService) {
 	t.Helper()
 	select {

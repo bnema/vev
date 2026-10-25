@@ -67,6 +67,8 @@ func serverPreviewOf(session ports.BrokerCoreService) ports.BrokerPreviewSubscri
 
 // awaitPreview waits for the core to hand out its next preview subscription,
 // under a single bounded failure guard.
+//
+//testpolicy:realtime broker session over a real AF_UNIX socket
 func awaitPreview(t *testing.T, core *coreState) *previewState {
 	t.Helper()
 	select {
@@ -79,6 +81,8 @@ func awaitPreview(t *testing.T, core *coreState) *previewState {
 }
 
 // awaitPreviewClosed waits for the server to retire one preview subscription.
+//
+//testpolicy:realtime broker session over a real AF_UNIX socket
 func awaitPreviewClosed(t *testing.T, state *previewState, why string) {
 	t.Helper()
 	select {
