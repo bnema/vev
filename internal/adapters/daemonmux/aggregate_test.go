@@ -210,9 +210,16 @@ func TestAggregateCloseDrainsQueuedConnections(t *testing.T) {
 		third := child.mustOpen(3)
 		requireSettled(t, func() bool { return aggregateQueued(a) == limit }, "the aggregate queue never filled to its bound")
 
+		// The queue is full, so an Accept that runs before Close legitimately
+		// takes one queued connection; one that runs after observes the close.
+		// Either way it must return, and a delivered connection is the caller's
+		// to close, exactly like the daemon's accept loop.
 		blocked := make(chan error, 1)
 		go func() {
-			_, err := a.Accept()
+			connection, err := a.Accept()
+			if err == nil {
+				_ = connection.Close()
+			}
 			blocked <- err
 		}()
 
@@ -221,7 +228,9 @@ func TestAggregateCloseDrainsQueuedConnections(t *testing.T) {
 
 		select {
 		case err := <-blocked:
-			require.ErrorIs(t, err, ErrAggregateClosed)
+			if err != nil {
+				require.ErrorIs(t, err, ErrAggregateClosed)
+			}
 		case <-time.After(listenerTestDeadline):
 			t.Fatal("Close did not unblock Accept")
 		}
