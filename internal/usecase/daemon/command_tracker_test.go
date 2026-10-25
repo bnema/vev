@@ -3,10 +3,8 @@ package daemon
 import (
 	"context"
 	"errors"
-	"sync"
 	"testing"
 	"testing/synctest"
-	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -14,63 +12,37 @@ import (
 	"github.com/bnema/vev/internal/protocol"
 )
 
-type commandTrackerTestTimer struct {
-	ch   chan time.Time
-	once sync.Once
-}
-
-func (t *commandTrackerTestTimer) C() <-chan time.Time      { return t.ch }
-func (t *commandTrackerTestTimer) Reset(time.Duration) bool { return false }
-func (t *commandTrackerTestTimer) Stop() bool               { return true }
-func (t *commandTrackerTestTimer) fire()                    { t.once.Do(func() { t.ch <- time.Time{} }) }
-
-type commandTrackerTestClock struct {
-	timers chan *commandTrackerTestTimer
-	delay  time.Duration
-}
-
-func newCommandTrackerTestClock() *commandTrackerTestClock {
-	return &commandTrackerTestClock{timers: make(chan *commandTrackerTestTimer, 8)}
-}
-
-func (c *commandTrackerTestClock) Now() time.Time { return time.Time{} }
-
-func (c *commandTrackerTestClock) NewTimer(delay time.Duration) ports.Timer {
-	c.delay = delay
-	timer := &commandTrackerTestTimer{ch: make(chan time.Time, 1)}
-	c.timers <- timer
-	return timer
-}
-
 func TestCommandRequestTrackerTimeoutAndGenerationIsolation(t *testing.T) {
-	tracker := NewCommandRequestTracker()
-	clock := newCommandTrackerTestClock()
-	requestID, outcome := tracker.Publish(4)
-	waitDone := make(chan error, 1)
-	go func() {
-		_, err := tracker.Wait(context.Background(), clock, requestID, 4, outcome)
-		waitDone <- err
-	}()
+	synctest.Test(t, func(t *testing.T) {
+		tracker := NewCommandRequestTracker()
+		clock, timers := newSignalClock(t, 8)
+		requestID, outcome := tracker.Publish(4)
+		waitDone := make(chan error, 1)
+		go func() {
+			_, err := tracker.Wait(context.Background(), clock, requestID, 4, outcome)
+			waitDone <- err
+		}()
 
-	timer := <-clock.timers
-	require.Equal(t, CommandRequestTimeout, clock.delay)
-	timer.fire()
-	require.ErrorIs(t, <-waitDone, ErrCommandRequestTimeout)
-	require.Zero(t, tracker.PendingCount())
+		timer := requireReceived(t, timers, "command wait did not arm its timeout")
+		require.Equal(t, CommandRequestTimeout, timer.duration)
+		timer.fire()
+		require.ErrorIs(t, <-waitDone, ErrCommandRequestTimeout)
+		require.Zero(t, tracker.PendingCount())
 
-	// Reuse the timed-out wire ID with a new generation. A late result from the
-	// old connection must not complete the new request.
-	secondOutcome, ok := tracker.Track(requestID, 8)
-	require.True(t, ok)
-	tracker.Complete(4, protocol.CommandResult{RequestID: requestID, Outcome: protocol.CommandSucceeded})
-	select {
-	case <-secondOutcome:
-		t.Fatal("late result from the old generation completed a newer request")
-	default:
-	}
-	tracker.Complete(8, protocol.CommandResult{RequestID: requestID, Outcome: protocol.CommandSucceeded})
-	result := <-secondOutcome
-	require.True(t, result.Result.Outcome == protocol.CommandSucceeded)
+		// Reuse the timed-out wire ID with a new generation. A late result from the
+		// old connection must not complete the new request.
+		secondOutcome, ok := tracker.Track(requestID, 8)
+		require.True(t, ok)
+		tracker.Complete(4, protocol.CommandResult{RequestID: requestID, Outcome: protocol.CommandSucceeded})
+		select {
+		case <-secondOutcome:
+			t.Fatal("late result from the old generation completed a newer request")
+		default:
+		}
+		tracker.Complete(8, protocol.CommandResult{RequestID: requestID, Outcome: protocol.CommandSucceeded})
+		result := <-secondOutcome
+		require.True(t, result.Result.Outcome == protocol.CommandSucceeded)
+	})
 
 	t.Run("wait outcomes", func(t *testing.T) {
 		failure := errors.New("transport failed")
@@ -85,7 +57,7 @@ func TestCommandRequestTrackerTimeoutAndGenerationIsolation(t *testing.T) {
 				setup: func(_ *testing.T, _ *CommandRequestTracker, _ uint64) (context.Context, ports.Clock, func()) {
 					ctx, cancel := context.WithCancel(context.Background())
 					cancel()
-					return ctx, newCommandTrackerTestClock(), nil
+					return ctx, newStubClock(t), nil
 				},
 				wantErr:     context.Canceled,
 				wantPending: 0,
@@ -102,18 +74,18 @@ func TestCommandRequestTrackerTimeoutAndGenerationIsolation(t *testing.T) {
 				name: "fail",
 				setup: func(_ *testing.T, tracker *CommandRequestTracker, requestID uint64) (context.Context, ports.Clock, func()) {
 					tracker.Fail(requestID, 1, failure)
-					return context.Background(), newCommandTrackerTestClock(), nil
+					return context.Background(), newStubClock(t), nil
 				},
 				wantErr:     failure,
 				wantPending: 0,
 			},
 			{
 				name: "remove",
-				setup: func(_ *testing.T, tracker *CommandRequestTracker, requestID uint64) (context.Context, ports.Clock, func()) {
+				setup: func(t *testing.T, tracker *CommandRequestTracker, requestID uint64) (context.Context, ports.Clock, func()) {
 					tracker.Remove(requestID, 1)
-					clock := newCommandTrackerTestClock()
+					clock, timers := newSignalClock(t, 8)
 					return context.Background(), clock, func() {
-						timer := <-clock.timers
+						timer := requireReceived(t, timers, "command wait did not arm its timeout")
 						timer.fire()
 					}
 				},
@@ -128,7 +100,7 @@ func TestCommandRequestTrackerTimeoutAndGenerationIsolation(t *testing.T) {
 					require.Nil(t, duplicate)
 					ctx, cancel := context.WithCancel(context.Background())
 					cancel()
-					return ctx, newCommandTrackerTestClock(), nil
+					return ctx, newStubClock(t), nil
 				},
 				wantErr:     context.Canceled,
 				wantPending: 0,
