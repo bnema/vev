@@ -564,11 +564,14 @@ func (c *coreState) recordSubscribe(passive bool) ports.BrokerSubscription {
 	c.mu.Lock()
 	c.subscribes = append(c.subscribes, passive)
 	c.mu.Unlock()
+	// Build the subscription mock before announcing it, so a test that wakes on
+	// the announcement never finishes while the mock is half configured.
+	sub := c.hub.subscribe(c.t)
 	select {
 	case c.subscribed <- passive:
 	default:
 	}
-	return c.hub.subscribe(c.t)
+	return sub
 }
 
 func (c *coreState) subscribeKinds() []bool {
