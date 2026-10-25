@@ -2,49 +2,45 @@ package daemonmux
 
 import (
 	"context"
+	"testing"
 
 	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/stretchr/testify/mock"
 )
 
-// typedStream adapts one raw mux stream to the typed session port the way the
-// client side does, while keeping the raw stream's lifecycle observable.
-type typedStream struct {
-	ports.ClientConnection
-	ports.BrokerEnvelopeStream
+// asTyped forwards through the real session codec while exposing the raw
+// stream's lifecycle through the generated logical-connection mock.
+func asTyped(t *testing.T, stream ports.BrokerEnvelopeStream) *portsmocks.MockBrokerLogicalConnection {
+	t.Helper()
+	typed := sessionwire.BrokerCodec{}.Client(stream)
+	conn := portsmocks.NewMockBrokerLogicalConnection(t)
+	conn.EXPECT().SendClient(mock.Anything).RunAndReturn(typed.SendClient).Maybe()
+	conn.EXPECT().ReceiveServer().RunAndReturn(typed.ReceiveServer).Maybe()
+	conn.EXPECT().Capabilities().RunAndReturn(typed.Capabilities).Maybe()
+	conn.EXPECT().LinkState().RunAndReturn(typed.LinkState).Maybe()
+	conn.EXPECT().LinkEvents().RunAndReturn(typed.LinkEvents).Maybe()
+	conn.EXPECT().Close().RunAndReturn(typed.Close).Maybe()
+	conn.EXPECT().Done().RunAndReturn(stream.Done).Maybe()
+	conn.EXPECT().Err().RunAndReturn(stream.Err).Maybe()
+	return conn
 }
 
-var _ ports.BrokerLogicalConnection = typedStream{}
-
-func (s typedStream) Close() error { return s.ClientConnection.Close() }
-
-// asTyped builds the one typed view of stream. The codec owns the session
-// preamble, so each raw stream must get exactly one view.
-func asTyped(stream ports.BrokerEnvelopeStream) typedStream {
-	return typedStream{ClientConnection: sessionwire.BrokerCodec{}.Client(stream), BrokerEnvelopeStream: stream}
-}
-
-// typedLogical is a typed view of one concrete logical connection.
-type typedLogical struct {
-	typedStream
-	*LogicalConnection
-}
-
-func (c typedLogical) Close() error { return c.typedStream.Close() }
-
-func newTypedLogical(connection *LogicalConnection) typedLogical {
-	return typedLogical{typedStream: asTyped(connection), LogicalConnection: connection}
+func newTypedLogical(t *testing.T, connection *LogicalConnection) *portsmocks.MockBrokerLogicalConnection {
+	t.Helper()
+	return asTyped(t, connection)
 }
 
 type envelopeOpener interface {
 	OpenStream(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerEnvelopeStream, error)
 }
 
-// openTyped opens one raw stream and returns its typed view; nil on failure.
-func openTyped(opener envelopeOpener, ctx context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+func openTyped(t *testing.T, opener envelopeOpener, ctx context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+	t.Helper()
 	stream, err := opener.OpenStream(ctx, request)
 	if err != nil {
 		return nil, err
 	}
-	return asTyped(stream), nil
+	return asTyped(t, stream), nil
 }

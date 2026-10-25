@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/ports"
@@ -225,7 +227,7 @@ func TestAggregateCloseDrainsQueuedConnections(t *testing.T) {
 
 	// Every connection the aggregate held is released, including the one its
 	// forwarder was holding while backpressured; the child itself is closed.
-	for i, broker := range []typedLogical{first, second, third} {
+	for i, broker := range []*portsmocks.MockBrokerLogicalConnection{first, second, third} {
 		require.Eventually(t, func() bool { return channelClosed(broker.Done()) }, listenerTestDeadline, time.Millisecond,
 			"queued connection %d was not cleaned by Close", i+1)
 	}

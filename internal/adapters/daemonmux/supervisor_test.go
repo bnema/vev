@@ -112,7 +112,7 @@ func TestServerSupervisorEnforcesAcceptedPolicyBeforeAdmission(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, connection)
 	server.awaitAccepted(t, 1)
-	typed := asTyped(connection)
+	typed := asTyped(t, connection)
 	require.NoError(t, typed.SendClient(protocol.Ping{}))
 	message, err := typed.ReceiveServer()
 	require.NoError(t, err)
@@ -153,7 +153,7 @@ func TestServerSupervisorDeliversFirstHelloDataFrame(t *testing.T) {
 		accepted <- connection
 	}()
 
-	logical, err := openTyped(physical, context.Background(), muxOpenRequest(1, binding.Policy()))
+	logical, err := openTyped(t, physical, context.Background(), muxOpenRequest(1, binding.Policy()))
 	require.NoError(t, err)
 	var server ports.ServerConnection
 	select {
@@ -221,7 +221,7 @@ func TestServerSupervisorStampsAcceptedOriginThroughAggregate(t *testing.T) {
 		accepted <- connection
 	}()
 
-	logical, err := openTyped(physical, context.Background(), muxOpenRequest(1, binding.Policy()))
+	logical, err := openTyped(t, physical, context.Background(), muxOpenRequest(1, binding.Policy()))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = logical.Close() })
 
@@ -293,9 +293,9 @@ func TestServerSupervisorServerLossIsolated(t *testing.T) {
 	physicalB := connectRaw(t, clientB, endpoint)
 	require.NoError(t, server.awaitAdoption(t))
 
-	logicalA, err := openTyped(physicalA, context.Background(), muxOpenRequest(1, binding.Policy()))
+	logicalA, err := openTyped(t, physicalA, context.Background(), muxOpenRequest(1, binding.Policy()))
 	require.NoError(t, err)
-	logicalB, err := openTyped(physicalB, context.Background(), muxOpenRequest(1, binding.Policy()))
+	logicalB, err := openTyped(t, physicalB, context.Background(), muxOpenRequest(1, binding.Policy()))
 	require.NoError(t, err)
 	server.awaitAccepted(t, 2)
 	require.Equal(t, 2, server.supervisor.Children())
@@ -308,14 +308,14 @@ func TestServerSupervisorServerLossIsolated(t *testing.T) {
 		"the lost child was never reaped")
 
 	// The surviving child still accepts and the aggregate never failed.
-	logicalB2, err := openTyped(physicalB, context.Background(), muxOpenRequest(2, binding.Policy()))
+	logicalB2, err := openTyped(t, physicalB, context.Background(), muxOpenRequest(2, binding.Policy()))
 	require.NoError(t, err)
 	require.NotNil(t, logicalB2)
 	server.awaitAccepted(t, 3)
 
 	// The lost physical refuses a fresh stream while its published logical
 	// stream reports the physical loss.
-	_, err = openTyped(physicalA, context.Background(), muxOpenRequest(2, binding.Policy()))
+	_, err = openTyped(t, physicalA, context.Background(), muxOpenRequest(2, binding.Policy()))
 	require.Error(t, err)
 	require.True(t, channelClosed(logicalA.Done()))
 	require.False(t, channelClosed(logicalB.Done()))

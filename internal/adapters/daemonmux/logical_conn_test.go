@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
@@ -317,13 +319,13 @@ func (a *daemonAcceptor) closePeers() {
 	}
 }
 
-func openWithDeadline(t *testing.T, connector *LogicalConnector, stream int) typedLogical {
+func openWithDeadline(t *testing.T, connector *LogicalConnector, stream int) *portsmocks.MockBrokerLogicalConnection {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	connection, err := connector.Open(ctx, controlRequest(stream))
 	require.NoError(t, err)
-	return newTypedLogical(connection)
+	return newTypedLogical(t, connection)
 }
 
 // watchRegistered reports whether the pump still holds an inbound watch entry
@@ -405,7 +407,7 @@ func TestLogicalTwoConnections(t *testing.T) {
 		acceptor.start(PhysicalStreamID(i), deadline)
 	}
 
-	connections := make([]typedLogical, 0, count)
+	connections := make([]*portsmocks.MockBrokerLogicalConnection, 0, count)
 	for i := 1; i <= count; i++ {
 		connection := openWithDeadline(t, connector, i)
 		require.NoError(t, connection.SendClient(protocol.Ping{}), "connection %d", i)
@@ -486,7 +488,7 @@ func TestLogicalHundredConnectionsConcurrentAdmission(t *testing.T) {
 		traffic.Add(1)
 		go func(index int) {
 			defer traffic.Done()
-			typed := asTyped(connections[index])
+			typed := asTyped(t, connections[index])
 			if err := typed.SendClient(protocol.Ping{}); err != nil {
 				trafficErrs[index] = err
 				return
@@ -738,7 +740,7 @@ func TestLogicalCloseIsolation(t *testing.T) {
 	require.NoError(t, first.Close())
 	require.True(t, channelClosed(first.Done()))
 	require.NoError(t, first.Err())
-	require.Equal(t, domain.RemoteFailureNone, first.FailureKind())
+	require.Equal(t, domain.RemoteFailureNone, mustStatus(t, brokerPump.Engine(), 1).FailureKind)
 	require.False(t, watchRegistered(brokerPump, 1), "closed logical connection leaked a watch entry")
 
 	// The daemon observed the orderly Close for stream 1.
@@ -821,7 +823,7 @@ func TestLogicalPhysicalLossFanout(t *testing.T) {
 	for i := 1; i <= count; i++ {
 		acceptor.start(PhysicalStreamID(i), deadline)
 	}
-	connections := make([]typedLogical, 0, count)
+	connections := make([]*portsmocks.MockBrokerLogicalConnection, 0, count)
 	for i := 1; i <= count; i++ {
 		connection := openWithDeadline(t, connector, i)
 		require.NoError(t, connection.SendClient(protocol.Ping{}))
@@ -864,7 +866,7 @@ func TestLogicalNoGoroutineLeak(t *testing.T) {
 	for i := 1; i <= count; i++ {
 		acceptor.start(PhysicalStreamID(i), deadline)
 	}
-	connections := make([]typedLogical, 0, count)
+	connections := make([]*portsmocks.MockBrokerLogicalConnection, 0, count)
 	for i := 1; i <= count; i++ {
 		connection := openWithDeadline(t, connector, i)
 		require.NoError(t, connection.SendClient(protocol.Ping{}))

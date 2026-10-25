@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/adapters/sessionwire"
@@ -201,11 +203,11 @@ func (h *listenerHarness) open(stream int) (*LogicalConnection, error) {
 	return h.connector.Open(ctx, controlRequest(stream))
 }
 
-func (h *listenerHarness) mustOpen(stream int) typedLogical {
+func (h *listenerHarness) mustOpen(stream int) *portsmocks.MockBrokerLogicalConnection {
 	h.t.Helper()
 	connection, err := h.open(stream)
 	require.NoError(h.t, err, "open stream %d", stream)
-	return newTypedLogical(connection)
+	return newTypedLogical(h.t, connection)
 }
 
 // pending reports the admitted streams waiting in the accept queue.
@@ -481,7 +483,7 @@ func TestListenerHundredTypedAdmissions(t *testing.T) {
 	}
 
 	for _, connection := range connections {
-		listenerRoundTrip(t, newTypedLogical(connection))
+		listenerRoundTrip(t, newTypedLogical(t, connection))
 	}
 
 	for i, connection := range connections {
@@ -591,7 +593,7 @@ func TestListenerQueueFullRefusesOnlyOffendingStream(t *testing.T) {
 	go func() { _ = servePongs(first) }()
 	select {
 	case connection := <-opened:
-		listenerRoundTrip(t, newTypedLogical(connection))
+		listenerRoundTrip(t, newTypedLogical(t, connection))
 	case err := <-openErrs:
 		t.Fatalf("queued stream did not open: %v", err)
 	case <-time.After(listenerTestDeadline):
@@ -708,7 +710,7 @@ func TestListenerDeadlineConsumesQueueDelay(t *testing.T) {
 	select {
 	case connection := <-opened:
 		go func() { _ = servePongs(daemonConnection) }()
-		listenerRoundTrip(t, newTypedLogical(connection))
+		listenerRoundTrip(t, newTypedLogical(t, connection))
 	case <-time.After(listenerTestDeadline):
 		t.Fatal("queued stream did not open")
 	}
@@ -766,7 +768,7 @@ func TestListenerMalformedStreamDoesNotStopAccept(t *testing.T) {
 func TestListenerPhysicalLossUnblocksAll(t *testing.T) {
 	h := newListenerHarness(t, listenerIdleBudget, MaxAcceptQueue)
 
-	connections := make([]typedLogical, 0, 2)
+	connections := make([]*portsmocks.MockBrokerLogicalConnection, 0, 2)
 	daemonConnections := make([]*ListenerConnection, 0, 2)
 	for i := 1; i <= 2; i++ {
 		probe := h.acceptAsync()
