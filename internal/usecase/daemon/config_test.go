@@ -13,6 +13,9 @@ import (
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 )
 
+// captureKeyHandler records router output.
+//
+//testpolicy:double keys.MockHandler is generated into keys' own _test.go file and cannot be imported from daemon tests
 type captureKeyHandler struct {
 	actions []keys.Action
 	forward [][]byte

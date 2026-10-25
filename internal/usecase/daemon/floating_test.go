@@ -387,8 +387,7 @@ func TestFloatingLifecycleStaleSuccessAndOldExitCannotReplaceCurrentSlot(t *test
 
 func TestFloatingExitUsesCurrentOwnerAfterTabTransfer(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		factory := &lifetimePTYFactory{}
-		d := newTestDaemon(t, factory, newStubClock(t))
+		d := newTestDaemon(t, newLifetimePTYFactory(t), newStubClock(t))
 		tb := newFloatingTestTab(t)
 		source := &session{sessionCore: sessionCore{id: "source", name: "source"}, tabs: []*tab{tb}, ctx: t.Context()}
 		destination := &session{sessionCore: sessionCore{id: "destination", name: "destination"}, tabs: []*tab{tb}, ctx: t.Context()}
