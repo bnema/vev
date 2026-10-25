@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -10,15 +11,22 @@ import (
 	"github.com/bnema/vev/internal/domain/layout"
 )
 
+// requireMutexLocked waits until another goroutine holds mu. A goroutine
+// blocked on a sync.Mutex is not durably blocked, so a synctest bubble cannot
+// observe it and no production hook announces it; the tests using this helper
+// therefore run outside a bubble and yield (no sleeping) under one bounded
+// real-time guard.
 func requireMutexLocked(t *testing.T, mu *sync.Mutex, message string) {
 	t.Helper()
-	require.Eventually(t, func() bool {
+	deadline := time.Now().Add(testWaitTimeout)
+	for time.Now().Before(deadline) {
 		if !mu.TryLock() {
-			return true
+			return
 		}
 		mu.Unlock()
-		return false
-	}, time.Second, time.Millisecond, message)
+		runtime.Gosched()
+	}
+	t.Fatal(message)
 }
 
 func TestMoveResizeFencesAcquireSessionsByStableID(t *testing.T) {
@@ -36,7 +44,7 @@ func TestMoveResizeFencesAcquireSessionsByStableID(t *testing.T) {
 	second.layoutApplyMu.Unlock()
 	first.layoutApplyMu.Unlock()
 
-	require.True(t, awaitTestValue(t, acquired, "ordered resize fences did not acquire"))
+	require.True(t, receiveBounded(t, acquired, "ordered resize fences did not acquire"))
 	fences.Release()
 	require.True(t, first.layoutApplyMu.TryLock())
 	first.layoutApplyMu.Unlock()
@@ -66,7 +74,7 @@ func TestMoveResizeFencesAcquireTabsByStableIDAfterSessions(t *testing.T) {
 	}
 	first.layoutApplyMu.Unlock()
 
-	require.True(t, awaitTestValue(t, acquired, "ordered tab resize fences did not acquire"))
+	require.True(t, receiveBounded(t, acquired, "ordered tab resize fences did not acquire"))
 	fences.Release()
 }
 
@@ -94,7 +102,7 @@ func TestMoveResizeFencesAcquirePanesByStableIDAfterTabs(t *testing.T) {
 	}
 	first.resizeMu.Unlock()
 
-	require.True(t, awaitTestValue(t, acquired, "ordered pane resize fences did not acquire"))
+	require.True(t, receiveBounded(t, acquired, "ordered pane resize fences did not acquire"))
 	fences.Release()
 }
 
@@ -162,8 +170,8 @@ func TestMoveResizeFencesRejectStaleMembershipAndCleanUp(t *testing.T) {
 	membershipCurrent = false
 	p.resizeMu.Unlock()
 
-	require.False(t, awaitTestValue(t, acquired, "stale resize fence acquisition did not return"))
-	awaitTestCompletion(t, callbackCalled, "membership was not revalidated after resize fence acquisition")
+	require.False(t, receiveBounded(t, acquired, "stale resize fence acquisition did not return"))
+	receiveBounded(t, callbackCalled, "membership was not revalidated after resize fence acquisition")
 	for _, lock := range []*sync.Mutex{&sess.layoutApplyMu, &tb.layoutApplyMu, &p.resizeMu} {
 		require.True(t, lock.TryLock(), "rejected acquisition leaked a resize fence")
 		lock.Unlock()
@@ -238,7 +246,7 @@ func TestMoveResizeFencesWaitBeforeTakingArchitectureLocks(t *testing.T) {
 	}
 	p.resizeMu.Unlock()
 
-	require.True(t, awaitTestValue(t, acquired, "resize fences did not acquire after pane resize released"))
+	require.True(t, receiveBounded(t, acquired, "resize fences did not acquire after pane resize released"))
 	fences.Release()
 }
 

@@ -2,8 +2,10 @@ package daemon
 
 import (
 	"testing"
+	"testing/synctest"
 	"time"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
@@ -23,8 +25,15 @@ func setupMovePickerSessionsWithClock(t *testing.T, clock ports.Clock, extraDest
 	// The move suites drive typed interactions, so the daemon publishes offers
 	// and snapshots to this attachment: drain them in the background so a
 	// guarded send never blocks the fixture.
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
 	go func() {
-		for range sends {
+		for {
+			select {
+			case <-sends:
+			case <-stop:
+				return
+			}
 		}
 	}()
 	return d, source, ac, destination, destinationTab, releases
@@ -63,6 +72,13 @@ func setupMovePickerSessionsCore(t *testing.T, clock ports.Clock, extraDestinati
 	d.mu.Lock()
 	d.sessions[destination.id] = destination
 	d.mu.Unlock()
+	// A toast armed by the scenario leaves its timer goroutine waiting on the
+	// stub clock; retire it so a synctest bubble can exit.
+	t.Cleanup(func() {
+		ac.overlays.noticeMu.Lock()
+		ac.overlays.noticeTimer.stop()
+		ac.overlays.noticeMu.Unlock()
+	})
 	return d, source, ac, destination, destinationTab, releases, sends
 }
 
@@ -129,243 +145,267 @@ func moveSelectionForDestination(t *testing.T, ac *attachedClient, destination d
 }
 
 func TestPaletteMovePaneCapturesSourceAndOpensPicker(t *testing.T) {
-	d, source, ac, _, _, releases := setupMovePickerSessions(t, 0)
-	defer releaseAll(releases)
+	synctest.Test(t, func(t *testing.T) {
+		d, source, ac, _, _, releases := setupMovePickerSessions(t, 0)
+		defer releaseAll(releases)
 
-	d.handleInput(source, ac, []byte("\x1b "))
-	require.True(t, ac.overlays.paletteActive())
-	d.handleInput(source, ac, []byte("MFP\r"))
-	require.False(t, ac.overlays.paletteActive())
+		d.handleInput(source, ac, []byte("\x1b "))
+		require.True(t, ac.overlays.paletteActive())
+		d.handleInput(source, ac, []byte("MFP\r"))
+		require.False(t, ac.overlays.paletteActive())
 
-	// The picker opens after the frame erasing the palette.
-	require.Eventually(t, ac.overlays.pickerClientActive, testWaitTimeout, time.Millisecond)
-	ac.overlays.pickerMu.Lock()
-	open := ac.overlays.pickerOpen
-	intent, captured := ac.overlays.pickerIntent, ac.overlays.pickerMoveSource
-	ac.overlays.pickerMu.Unlock()
-	require.True(t, open)
-	require.Equal(t, protocol.PickerIntentMovePane, intent)
-	require.Equal(t, moveSessionLocator{ID: source.id, Incarnation: source.incarnation, Name: source.name}, captured.Session)
-	require.Equal(t, domain.TabStableID("source-tab"), captured.TabID)
-	require.Equal(t, domain.PaneStableID("source-pane"), captured.PaneID)
-	require.Same(t, ac, captured.Attachment)
+		// The picker opens after the frame erasing the palette.
+		synctest.Wait()
+		require.True(t, ac.overlays.pickerClientActive())
+		ac.overlays.pickerMu.Lock()
+		open := ac.overlays.pickerOpen
+		intent, captured := ac.overlays.pickerIntent, ac.overlays.pickerMoveSource
+		ac.overlays.pickerMu.Unlock()
+		require.True(t, open)
+		require.Equal(t, protocol.PickerIntentMovePane, intent)
+		require.Equal(t, moveSessionLocator{ID: source.id, Incarnation: source.incarnation, Name: source.name}, captured.Session)
+		require.Equal(t, domain.TabStableID("source-tab"), captured.TabID)
+		require.Equal(t, domain.PaneStableID("source-pane"), captured.PaneID)
+		require.Same(t, ac, captured.Attachment)
+	})
 }
 
 func TestPaletteMoveTabCapturesActiveTabAndOpensPicker(t *testing.T) {
-	d, source, ac, _, _, releases := setupMovePickerSessions(t, 0)
-	defer releaseAll(releases)
-	sourceTab := source.tabs[0]
-	sourceTab.stableID = "active-tab"
+	synctest.Test(t, func(t *testing.T) {
+		d, source, ac, _, _, releases := setupMovePickerSessions(t, 0)
+		defer releaseAll(releases)
+		sourceTab := source.tabs[0]
+		sourceTab.stableID = "active-tab"
 
-	d.handleInput(source, ac, []byte("\x1b "))
-	d.handleInput(source, ac, []byte("MAT\r"))
+		d.handleInput(source, ac, []byte("\x1b "))
+		d.handleInput(source, ac, []byte("MAT\r"))
 
-	// The picker opens after the frame erasing the palette.
-	require.Eventually(t, ac.overlays.pickerClientActive, testWaitTimeout, time.Millisecond)
-	ac.overlays.pickerMu.Lock()
-	open := ac.overlays.pickerOpen
-	intent, captured := ac.overlays.pickerIntent, ac.overlays.pickerMoveSource
-	ac.overlays.pickerMu.Unlock()
-	require.True(t, open)
-	require.Equal(t, protocol.PickerIntentMoveTab, intent)
-	require.Equal(t, domain.TabStableID("active-tab"), captured.TabID)
-	require.Equal(t, domain.PaneStableID(""), captured.PaneID)
-	require.Same(t, ac, captured.Attachment)
+		// The picker opens after the frame erasing the palette.
+		synctest.Wait()
+		require.True(t, ac.overlays.pickerClientActive())
+		ac.overlays.pickerMu.Lock()
+		open := ac.overlays.pickerOpen
+		intent, captured := ac.overlays.pickerIntent, ac.overlays.pickerMoveSource
+		ac.overlays.pickerMu.Unlock()
+		require.True(t, open)
+		require.Equal(t, protocol.PickerIntentMoveTab, intent)
+		require.Equal(t, domain.TabStableID("active-tab"), captured.TabID)
+		require.Equal(t, domain.PaneStableID(""), captured.PaneID)
+		require.Same(t, ac, captured.Attachment)
+	})
 }
 
 func TestPaletteMoveWithoutDestinationShowsToastAndNoPicker(t *testing.T) {
-	d, source, ac, _, _, releases := setupMovePickerSessions(t, 0)
-	defer releaseAll(releases)
-	d.mu.Lock()
-	delete(d.sessions, domain.SessionID("destination"))
-	d.mu.Unlock()
+	synctest.Test(t, func(t *testing.T) {
+		d, source, ac, _, _, releases := setupMovePickerSessions(t, 0)
+		defer releaseAll(releases)
+		d.mu.Lock()
+		delete(d.sessions, domain.SessionID("destination"))
+		d.mu.Unlock()
 
-	d.handleInput(source, ac, []byte("\x1b "))
-	d.handleInput(source, ac, []byte("MFP\r"))
+		d.handleInput(source, ac, []byte("\x1b "))
+		d.handleInput(source, ac, []byte("MFP\r"))
 
-	require.False(t, ac.overlays.pickerClientActive())
-	history := d.notices.history()
-	require.NotEmpty(t, history)
-	require.Equal(t, "No destination available.", history[0].Message)
+		require.False(t, ac.overlays.pickerClientActive())
+		history := d.notices.history()
+		require.NotEmpty(t, history)
+		require.Equal(t, "No destination available.", history[0].Message)
+	})
 }
 
 func TestMovePickerMoveCommitsPane(t *testing.T) {
-	d, source, ac, destination, destinationTab, releases := setupMovePickerSessions(t, 0)
-	defer releaseAll(releases)
-	sourceTab := source.tabs[0]
-	moved := sourceTab.focusedPane()
+	synctest.Test(t, func(t *testing.T) {
+		d, source, ac, destination, destinationTab, releases := setupMovePickerSessions(t, 0)
+		defer releaseAll(releases)
+		sourceTab := source.tabs[0]
+		moved := sourceTab.focusedPane()
 
-	openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMovePane, moveSourceForSession(source, ac, "source-tab", "source-pane"))
-	effect := pickActionEffectForTest(t, source, ac)
-	selection := moveSelectionForDestination(t, ac, destination.id)
-	effect.End()
-	d.resolvePickerSelection(effect, selection)
+		openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMovePane, moveSourceForSession(source, ac, "source-tab", "source-pane"))
+		effect := pickActionEffectForTest(t, source, ac)
+		selection := moveSelectionForDestination(t, ac, destination.id)
+		effect.End()
+		d.resolvePickerSelection(effect, selection)
 
-	require.Nil(t, source.tabs)
-	require.Same(t, moved, destinationTab.panes[moved.id])
-	require.Same(t, destination, moved.ownerSnapshot().session)
+		require.Nil(t, source.tabs)
+		require.Same(t, moved, destinationTab.panes[moved.id])
+		require.Same(t, destination, moved.ownerSnapshot().session)
+	})
 }
 
 func TestMovePickerCommitMovePaneViaSharedAPI(t *testing.T) {
-	d, source, ac, destination, destinationTab, releases := setupMovePickerSessions(t, 0)
-	defer releaseAll(releases)
-	sourceTab := source.tabs[0]
-	moved := sourceTab.focusedPane()
+	synctest.Test(t, func(t *testing.T) {
+		d, source, ac, destination, destinationTab, releases := setupMovePickerSessions(t, 0)
+		defer releaseAll(releases)
+		sourceTab := source.tabs[0]
+		moved := sourceTab.focusedPane()
 
-	openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMovePane, moveSourceForSession(source, ac, "source-tab", "source-pane"))
-	selection := moveSelectionForDestination(t, ac, destination.id)
-	ac.overlays.pickerMu.Lock()
-	target, ok := ac.overlays.pickerKeys[selection.Key]
-	ac.overlays.pickerMu.Unlock()
-	require.True(t, ok)
-	require.NoError(t, d.commitMovePickerSelection(protocol.PickerIntentMovePane, moveSourceForSession(source, ac, "source-tab", "source-pane"), target, nil, nil))
+		openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMovePane, moveSourceForSession(source, ac, "source-tab", "source-pane"))
+		selection := moveSelectionForDestination(t, ac, destination.id)
+		ac.overlays.pickerMu.Lock()
+		target, ok := ac.overlays.pickerKeys[selection.Key]
+		ac.overlays.pickerMu.Unlock()
+		require.True(t, ok)
+		require.NoError(t, d.commitMovePickerSelection(protocol.PickerIntentMovePane, moveSourceForSession(source, ac, "source-tab", "source-pane"), target, nil, nil))
 
-	require.Nil(t, source.tabs)
-	require.Same(t, moved, destinationTab.panes[moved.id])
-	require.Same(t, destination, moved.ownerSnapshot().session)
+		require.Nil(t, source.tabs)
+		require.Same(t, moved, destinationTab.panes[moved.id])
+		require.Same(t, destination, moved.ownerSnapshot().session)
+	})
 }
 
 func TestMovePickerMoveCommitsTab(t *testing.T) {
-	d, source, ac, destination, _, releases := setupMovePickerSessions(t, 0)
-	defer releaseAll(releases)
-	movedTab := source.tabs[0]
-	movedTab.stableID = "moved-tab"
-	ac.setClientEnvironment([]string{"WAYLAND_DISPLAY=wayland-mover"})
-	destination.mu.Lock()
-	destination.env = []string{"SHELL=/usr/bin/fish", "WAYLAND_DISPLAY=wayland-old"}
-	destination.mu.Unlock()
+	synctest.Test(t, func(t *testing.T) {
+		d, source, ac, destination, _, releases := setupMovePickerSessions(t, 0)
+		defer releaseAll(releases)
+		movedTab := source.tabs[0]
+		movedTab.stableID = "moved-tab"
+		ac.setClientEnvironment([]string{"WAYLAND_DISPLAY=wayland-mover"})
+		destination.mu.Lock()
+		destination.env = []string{"SHELL=/usr/bin/fish", "WAYLAND_DISPLAY=wayland-old"}
+		destination.mu.Unlock()
 
-	openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMoveTab, moveSourceForSession(source, ac, "moved-tab", ""))
-	effect := pickActionEffectForTest(t, source, ac)
-	selection := moveSelectionForDestination(t, ac, destination.id)
-	completed := make(chan struct{})
-	go func() {
-		d.resolvePickerSelection(effect, selection)
-		close(completed)
-	}()
-	awaitTestCompletion(t, completed, "move-tab picker selection deadlocked on its own attachment effect")
+		openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMoveTab, moveSourceForSession(source, ac, "moved-tab", ""))
+		effect := pickActionEffectForTest(t, source, ac)
+		selection := moveSelectionForDestination(t, ac, destination.id)
+		completed := make(chan struct{})
+		go func() {
+			d.resolvePickerSelection(effect, selection)
+			close(completed)
+		}()
+		requireReceived(t, completed, "move-tab picker selection deadlocked on its own attachment effect")
 
-	require.Nil(t, source.tabs)
-	require.Len(t, destination.tabs, 2)
-	require.Same(t, movedTab, destination.tabs[1])
-	destination.mu.Lock()
-	defer destination.mu.Unlock()
-	require.Equal(t, []string{"SHELL=/usr/bin/fish", "WAYLAND_DISPLAY=wayland-mover"}, destination.env, "a followed move refreshes the destination from the moving attachment")
+		require.Nil(t, source.tabs)
+		require.Len(t, destination.tabs, 2)
+		require.Same(t, movedTab, destination.tabs[1])
+		destination.mu.Lock()
+		defer destination.mu.Unlock()
+		require.Equal(t, []string{"SHELL=/usr/bin/fish", "WAYLAND_DISPLAY=wayland-mover"}, destination.env, "a followed move refreshes the destination from the moving attachment")
+	})
 }
 
 func TestMovePickerCancelPerformsNoMutation(t *testing.T) {
-	d, source, ac, _, _, releases := setupMovePickerSessions(t, 0)
-	defer releaseAll(releases)
-	before := len(source.tabs)
+	synctest.Test(t, func(t *testing.T) {
+		d, source, ac, _, _, releases := setupMovePickerSessions(t, 0)
+		defer releaseAll(releases)
+		before := len(source.tabs)
 
-	openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMovePane, moveSourceForSession(source, ac, "source-tab", "source-pane"))
-	effect := pickActionEffectForTest(t, source, ac)
-	ac.overlays.pickerMu.Lock()
-	interaction := ac.overlays.pickerInteraction
-	ac.overlays.pickerMu.Unlock()
-	require.True(t, d.closePickerForAttachment(ac, effect, interaction))
+		openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMovePane, moveSourceForSession(source, ac, "source-tab", "source-pane"))
+		effect := pickActionEffectForTest(t, source, ac)
+		ac.overlays.pickerMu.Lock()
+		interaction := ac.overlays.pickerInteraction
+		ac.overlays.pickerMu.Unlock()
+		require.True(t, d.closePickerForAttachment(ac, effect, interaction))
 
-	require.False(t, ac.overlays.pickerClientActive())
-	require.Len(t, source.tabs, before)
+		require.False(t, ac.overlays.pickerClientActive())
+		require.Len(t, source.tabs, before)
+	})
 }
 
 func TestMovePickerStaleDestinationReportsNotice(t *testing.T) {
-	d, source, ac, destination, _, releases := setupMovePickerSessions(t, 0)
-	defer releaseAll(releases)
+	synctest.Test(t, func(t *testing.T) {
+		d, source, ac, destination, _, releases := setupMovePickerSessions(t, 0)
+		defer releaseAll(releases)
 
-	openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMovePane, moveSourceForSession(source, ac, "source-tab", "source-pane"))
-	effect := pickActionEffectForTest(t, source, ac)
-	selection := moveSelectionForDestination(t, ac, destination.id)
-	d.mu.Lock()
-	delete(d.sessions, destination.id)
-	d.mu.Unlock()
+		openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMovePane, moveSourceForSession(source, ac, "source-tab", "source-pane"))
+		effect := pickActionEffectForTest(t, source, ac)
+		selection := moveSelectionForDestination(t, ac, destination.id)
+		d.mu.Lock()
+		delete(d.sessions, destination.id)
+		d.mu.Unlock()
 
-	effect.End()
-	d.resolvePickerSelection(effect, selection)
+		effect.End()
+		d.resolvePickerSelection(effect, selection)
 
-	history := d.notices.history()
-	require.NotEmpty(t, history)
-	require.Equal(t, "Destination is no longer available.", history[0].Message)
-	require.Len(t, source.tabs, 1)
+		history := d.notices.history()
+		require.NotEmpty(t, history)
+		require.Equal(t, "Destination is no longer available.", history[0].Message)
+		require.Len(t, source.tabs, 1)
+	})
 }
 
 func TestMovePickerStaleSourcePaneReportsPreciseFeedback(t *testing.T) {
-	d, source, ac, destination, _, releases := setupMovePickerSessions(t, 0)
-	defer releaseAll(releases)
-	sourceTab := source.tabs[0]
+	synctest.Test(t, func(t *testing.T) {
+		d, source, ac, destination, _, releases := setupMovePickerSessions(t, 0)
+		defer releaseAll(releases)
+		sourceTab := source.tabs[0]
 
-	openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMovePane, moveSourceForSession(source, ac, "source-tab", "source-pane"))
-	effect := pickActionEffectForTest(t, source, ac)
-	selection := moveSelectionForDestination(t, ac, destination.id)
-	sourceTab.mu.Lock()
-	delete(sourceTab.panes, sourceTab.tree.Focus)
-	sourceTab.mu.Unlock()
+		openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMovePane, moveSourceForSession(source, ac, "source-tab", "source-pane"))
+		effect := pickActionEffectForTest(t, source, ac)
+		selection := moveSelectionForDestination(t, ac, destination.id)
+		sourceTab.mu.Lock()
+		delete(sourceTab.panes, sourceTab.tree.Focus)
+		sourceTab.mu.Unlock()
 
-	effect.End()
-	d.resolvePickerSelection(effect, selection)
+		effect.End()
+		d.resolvePickerSelection(effect, selection)
 
-	require.True(t, ac.overlays.pickerClientActive())
-	history := d.notices.history()
-	require.NotEmpty(t, history)
-	require.Equal(t, "Pane no longer exists.", history[0].Message)
+		require.True(t, ac.overlays.pickerClientActive())
+		history := d.notices.history()
+		require.NotEmpty(t, history)
+		require.Equal(t, "Pane no longer exists.", history[0].Message)
+	})
 }
 
 func TestMovePickerStaleSourceTabReportsPreciseFeedback(t *testing.T) {
-	d, source, ac, destination, _, releases := setupMovePickerSessions(t, 0)
-	defer releaseAll(releases)
+	synctest.Test(t, func(t *testing.T) {
+		d, source, ac, destination, _, releases := setupMovePickerSessions(t, 0)
+		defer releaseAll(releases)
 
-	openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMoveTab, moveSourceForSession(source, ac, "source-tab", ""))
-	effect := pickActionEffectForTest(t, source, ac)
-	selection := moveSelectionForDestination(t, ac, destination.id)
-	source.mu.Lock()
-	source.tabs = nil
-	source.mu.Unlock()
+		openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMoveTab, moveSourceForSession(source, ac, "source-tab", ""))
+		effect := pickActionEffectForTest(t, source, ac)
+		selection := moveSelectionForDestination(t, ac, destination.id)
+		source.mu.Lock()
+		source.tabs = nil
+		source.mu.Unlock()
 
-	effect.End()
-	d.resolvePickerSelection(effect, selection)
+		effect.End()
+		d.resolvePickerSelection(effect, selection)
 
-	require.True(t, ac.overlays.pickerClientActive())
-	history := d.notices.history()
-	require.NotEmpty(t, history)
-	require.Equal(t, "Tab no longer exists.", history[0].Message)
+		require.True(t, ac.overlays.pickerClientActive())
+		history := d.notices.history()
+		require.NotEmpty(t, history)
+		require.Equal(t, "Tab no longer exists.", history[0].Message)
+	})
 }
 
 // TestMovePickerSupersedingOpenRetiresTheEarlierNamespace pins that a second
 // open moves the interaction on, so rows published for the retired namespace
 // can never be committed again.
 func TestMovePickerSupersedingOpenRetiresTheEarlierNamespace(t *testing.T) {
-	d, source, ac, _, _, releases := setupMovePickerSessions(t, 0)
-	defer releaseAll(releases)
-	sourceSnapshot := moveSourceForSession(source, ac, "source-tab", "source-pane")
-	openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMovePane, sourceSnapshot)
-	effect := pickActionEffectForTest(t, source, ac)
-	ac.overlays.pickerMu.Lock()
-	firstInteraction := ac.overlays.pickerInteraction
-	firstRevision := ac.overlays.pickerRevisions[servingPickerSourceID]
-	firstKey := ""
-	for candidate := range ac.overlays.pickerKeys {
-		firstKey = candidate
-		break
-	}
-	ac.overlays.pickerMu.Unlock()
-	require.NotEmpty(t, firstKey)
+	synctest.Test(t, func(t *testing.T) {
+		d, source, ac, _, _, releases := setupMovePickerSessions(t, 0)
+		defer releaseAll(releases)
+		sourceSnapshot := moveSourceForSession(source, ac, "source-tab", "source-pane")
+		openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMovePane, sourceSnapshot)
+		effect := pickActionEffectForTest(t, source, ac)
+		ac.overlays.pickerMu.Lock()
+		firstInteraction := ac.overlays.pickerInteraction
+		firstRevision := ac.overlays.pickerRevisions[servingPickerSourceID]
+		firstKey := ""
+		for candidate := range ac.overlays.pickerKeys {
+			firstKey = candidate
+			break
+		}
+		ac.overlays.pickerMu.Unlock()
+		require.NotEmpty(t, firstKey)
 
-	openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMovePane, sourceSnapshot)
-	ac.overlays.pickerMu.Lock()
-	secondInteraction := ac.overlays.pickerInteraction
-	ac.overlays.pickerMu.Unlock()
-	require.Greater(t, secondInteraction, firstInteraction)
+		openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMovePane, sourceSnapshot)
+		ac.overlays.pickerMu.Lock()
+		secondInteraction := ac.overlays.pickerInteraction
+		ac.overlays.pickerMu.Unlock()
+		require.Greater(t, secondInteraction, firstInteraction)
 
-	// A commit from the retired namespace is rejected and leaves the open
-	// interaction untouched.
-	d.resolvePickerSelection(effect, protocol.PickerSelection{
-		InteractionID: firstInteraction, SourceID: servingPickerSourceID,
-		SourceRevision: firstRevision, Key: firstKey, Action: protocol.PickerActionMove,
+		// A commit from the retired namespace is rejected and leaves the open
+		// interaction untouched.
+		d.resolvePickerSelection(effect, protocol.PickerSelection{
+			InteractionID: firstInteraction, SourceID: servingPickerSourceID,
+			SourceRevision: firstRevision, Key: firstKey, Action: protocol.PickerActionMove,
+		})
+		ac.overlays.pickerMu.Lock()
+		require.True(t, ac.overlays.pickerOpen)
+		require.Equal(t, secondInteraction, ac.overlays.pickerInteraction)
+		ac.overlays.pickerMu.Unlock()
 	})
-	ac.overlays.pickerMu.Lock()
-	require.True(t, ac.overlays.pickerOpen)
-	require.Equal(t, secondInteraction, ac.overlays.pickerInteraction)
-	ac.overlays.pickerMu.Unlock()
 }
 
 // Exercise the real selection admission (not a pre-ended test effect), and
@@ -381,68 +421,70 @@ func TestMovePickerCompositeFollow(t *testing.T) {
 		{"final-pane", protocol.PickerIntentMovePane, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			d, source, ac, destination, destinationTab, releases := setupMovePickerSessions(t, 0)
-			defer releaseAll(releases)
-			movedTab := source.tabs[0]
-			if tt.retainSource {
-				pty, release := newBlockingPTY(t)
-				defer release()
-				source.tabs = append(source.tabs, newTabWithStableID("remaining", "remaining-pane", pty, movedTab.size))
-				publishTiledPaneOwners(source, source.tabs[1])
-			}
-			peer := &attachedClient{tr: newQuietConnection(t), output: newOutputStateStream(), geometry: domain.Geometry{Size: ac.geometry.Size}}
-			peer.setSession(source)
-			source.registerAttachment(peer)
-			destinationPeer := &attachedClient{tr: newQuietConnection(t), output: newOutputStateStream(), geometry: domain.Geometry{Size: ac.geometry.Size}}
-			destinationPeer.setSession(destination)
-			destination.registerAttachment(destinationPeer)
-			destination.selectAttachmentTabLocked(destinationPeer, domain.TabStableID(destinationTab.stableID))
-			old := captureAttachmentCapability(source, ac, ac.transport())
-			locator := moveSourceForSession(source, ac, "source-tab", "")
-			locator.AttachmentCapability = old
-			if tt.intent == protocol.PickerIntentMovePane {
-				locator.PaneID = "source-pane"
-			}
-			openMovePickerForTest(t, d, ac, source, tt.intent, locator)
-			effect := pickActionEffectForTest(t, source, ac)
-			selection := moveSelectionForDestination(t, ac, destination.id)
-			closedAtCommit := false
-			rebased := make(chan struct{}, 1)
-			ac.renderStages.handoffRebase = func() { rebased <- struct{}{} }
-			hook := func() { closedAtCommit = !ac.overlays.pickerClientActive() }
-			d.beforeMoveTabCommit = hook
-			d.beforeMovePaneCommit = hook
-			done := make(chan struct{})
-			go func() {
-				d.resolvePickerSelection(effect, selection)
-				close(done)
-			}()
-			awaitTestCompletion(t, done, "composite move waited on its own effect")
-			require.True(t, closedAtCommit)
-			select {
-			case <-rebased:
-			default:
-				t.Fatal("composite move skipped transition first-paint rebase")
-			}
-			require.True(t, destination.attachmentRegistered(destinationPeer))
-			require.Same(t, destinationTab, destination.tabForAttachment(destinationPeer))
-			require.False(t, ac.overlays.pickerClientActive())
-			require.Same(t, destination, ac.currentSession())
-			require.True(t, destination.attachmentRegistered(ac))
-			require.False(t, source.attachmentRegistered(ac))
-			require.False(t, old.current())
-			if tt.intent == protocol.PickerIntentMoveTab {
-				require.Same(t, movedTab, destination.tabForAttachment(ac))
-			} else {
-				require.Same(t, destinationTab, destination.tabForAttachment(ac))
-			}
-			if tt.retainSource {
-				require.True(t, source.attachmentRegistered(peer))
-				require.Same(t, source, d.sessionByID(source.id))
-			} else {
-				require.False(t, source.attachmentRegistered(peer))
-				require.Nil(t, d.sessionByID(source.id))
-			}
+			synctest.Test(t, func(t *testing.T) {
+				d, source, ac, destination, destinationTab, releases := setupMovePickerSessions(t, 0)
+				defer releaseAll(releases)
+				movedTab := source.tabs[0]
+				if tt.retainSource {
+					pty, release := newBlockingPTY(t)
+					defer release()
+					source.tabs = append(source.tabs, newTabWithStableID("remaining", "remaining-pane", pty, movedTab.size))
+					publishTiledPaneOwners(source, source.tabs[1])
+				}
+				peer := &attachedClient{tr: newQuietConnection(t), output: newOutputStateStream(), geometry: domain.Geometry{Size: ac.geometry.Size}}
+				peer.setSession(source)
+				source.registerAttachment(peer)
+				destinationPeer := &attachedClient{tr: newQuietConnection(t), output: newOutputStateStream(), geometry: domain.Geometry{Size: ac.geometry.Size}}
+				destinationPeer.setSession(destination)
+				destination.registerAttachment(destinationPeer)
+				destination.selectAttachmentTabLocked(destinationPeer, domain.TabStableID(destinationTab.stableID))
+				old := captureAttachmentCapability(source, ac, ac.transport())
+				locator := moveSourceForSession(source, ac, "source-tab", "")
+				locator.AttachmentCapability = old
+				if tt.intent == protocol.PickerIntentMovePane {
+					locator.PaneID = "source-pane"
+				}
+				openMovePickerForTest(t, d, ac, source, tt.intent, locator)
+				effect := pickActionEffectForTest(t, source, ac)
+				selection := moveSelectionForDestination(t, ac, destination.id)
+				closedAtCommit := false
+				rebased := make(chan struct{}, 1)
+				ac.renderStages.handoffRebase = func() { rebased <- struct{}{} }
+				hook := func() { closedAtCommit = !ac.overlays.pickerClientActive() }
+				d.beforeMoveTabCommit = hook
+				d.beforeMovePaneCommit = hook
+				done := make(chan struct{})
+				go func() {
+					d.resolvePickerSelection(effect, selection)
+					close(done)
+				}()
+				requireReceived(t, done, "composite move waited on its own effect")
+				require.True(t, closedAtCommit)
+				select {
+				case <-rebased:
+				default:
+					t.Fatal("composite move skipped transition first-paint rebase")
+				}
+				require.True(t, destination.attachmentRegistered(destinationPeer))
+				require.Same(t, destinationTab, destination.tabForAttachment(destinationPeer))
+				require.False(t, ac.overlays.pickerClientActive())
+				require.Same(t, destination, ac.currentSession())
+				require.True(t, destination.attachmentRegistered(ac))
+				require.False(t, source.attachmentRegistered(ac))
+				require.False(t, old.current())
+				if tt.intent == protocol.PickerIntentMoveTab {
+					require.Same(t, movedTab, destination.tabForAttachment(ac))
+				} else {
+					require.Same(t, destinationTab, destination.tabForAttachment(ac))
+				}
+				if tt.retainSource {
+					require.True(t, source.attachmentRegistered(peer))
+					require.Same(t, source, d.sessionByID(source.id))
+				} else {
+					require.False(t, source.attachmentRegistered(peer))
+					require.Nil(t, d.sessionByID(source.id))
+				}
+			})
 		})
 	}
 }
@@ -452,28 +494,30 @@ func TestMovePickerCompositeFollow(t *testing.T) {
 // fresh effect on the published destination capability and reports the
 // correlated PickerResult the ui-driver action waits for.
 func TestMovePickerCompositeFollowReportsCorrelatedResult(t *testing.T) {
-	d, source, ac, destination, _, releases, sends := setupMovePickerSessionsCore(t, newStubClock(t), 0)
-	defer releaseAll(releases)
-	old := captureAttachmentCapability(source, ac, ac.transport())
-	locator := moveSourceForSession(source, ac, "source-tab", "")
-	locator.AttachmentCapability = old
-	openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMoveTab, locator)
-	effect := pickActionEffectForTest(t, source, ac)
-	selection := moveSelectionForDestination(t, ac, destination.id)
-	selection.CauseActionID = 4242
-	done := make(chan struct{})
-	go func() {
-		d.resolvePickerSelection(effect, selection)
-		close(done)
-	}()
-	awaitTestCompletion(t, done, "composite follow never reported completion")
+	synctest.Test(t, func(t *testing.T) {
+		d, source, ac, destination, _, releases, sends := setupMovePickerSessionsCore(t, newStubClock(t), 0)
+		defer releaseAll(releases)
+		old := captureAttachmentCapability(source, ac, ac.transport())
+		locator := moveSourceForSession(source, ac, "source-tab", "")
+		locator.AttachmentCapability = old
+		openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMoveTab, locator)
+		effect := pickActionEffectForTest(t, source, ac)
+		selection := moveSelectionForDestination(t, ac, destination.id)
+		selection.CauseActionID = 4242
+		done := make(chan struct{})
+		go func() {
+			d.resolvePickerSelection(effect, selection)
+			close(done)
+		}()
+		requireReceived(t, done, "composite follow never reported completion")
 
-	result := awaitSentPickerResult(t, sends)
-	require.Equal(t, selection.CauseActionID, result.CauseActionID)
-	require.Equal(t, selection.InteractionID, result.InteractionID)
-	require.Equal(t, selection.Key, result.Key)
-	require.Equal(t, protocol.PickerActionMove, result.Action)
-	assertNoFurtherFrame(t, sends, "PickerResult", "composite follow reported its result more than once")
+		result := awaitSentPickerResult(t, sends)
+		require.Equal(t, selection.CauseActionID, result.CauseActionID)
+		require.Equal(t, selection.InteractionID, result.InteractionID)
+		require.Equal(t, selection.Key, result.Key)
+		require.Equal(t, protocol.PickerActionMove, result.Action)
+		assertNoFurtherFrame(t, sends, "PickerResult", "composite follow reported its result more than once")
+	})
 }
 
 // TestMovePickerCompositeFollowCompletionReadmitsSupersededCapability pins the
@@ -484,44 +528,46 @@ func TestMovePickerCompositeFollowReportsCorrelatedResult(t *testing.T) {
 // exactly once, instead of only logging while the ui-driver action runs to its
 // deadline.
 func TestMovePickerCompositeFollowCompletionReadmitsSupersededCapability(t *testing.T) {
-	d, source, ac, destination, _, releases, sends := setupMovePickerSessionsCore(t, newStubClock(t), 0)
-	defer releaseAll(releases)
-	base, ok := ac.transport().(*mockServerConnection)
-	require.True(t, ok, "fixture transport is not the capturing mock")
-	old := captureAttachmentCapability(source, ac, ac.transport())
-	locator := moveSourceForSession(source, ac, "source-tab", "")
-	locator.AttachmentCapability = old
-	openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMoveTab, locator)
-	effect := pickActionEffectForTest(t, source, ac)
-	selection := moveSelectionForDestination(t, ac, destination.id)
-	selection.CauseActionID = 5252
+	synctest.Test(t, func(t *testing.T) {
+		d, source, ac, destination, _, releases, sends := setupMovePickerSessionsCore(t, newStubClock(t), 0)
+		defer releaseAll(releases)
+		base, ok := ac.transport().(*mockServerConnection)
+		require.True(t, ok, "fixture transport is not the capturing mock")
+		old := captureAttachmentCapability(source, ac, ac.transport())
+		locator := moveSourceForSession(source, ac, "source-tab", "")
+		locator.AttachmentCapability = old
+		openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMoveTab, locator)
+		effect := pickActionEffectForTest(t, source, ac)
+		selection := moveSelectionForDestination(t, ac, destination.id)
+		selection.CauseActionID = 5252
 
-	// Supersede the exact published capability after the follow's identity send
-	// and first paint but before completion admission. The replacement keeps the
-	// attachment live on its current session while retiring the published link.
-	// A render effect may still be in flight, so this reproduces the transition's
-	// end state (a newer published capability for the replacement link) rather
-	// than requiring a drained gate.
-	replaced := make(chan attachmentCapability, 1)
-	d.beforeMoveFollowCompletion = func(published attachmentCapability) {
-		supersedeAttachmentCapabilityForTest(published, base)
-		replaced <- published
-	}
-	done := make(chan struct{})
-	go func() {
-		d.resolvePickerSelection(effect, selection)
-		close(done)
-	}()
-	awaitTestCompletion(t, done, "composite follow never reported completion")
-	published := <-replaced
-	require.False(t, published.current(), "the superseded published capability was still admissible")
+		// Supersede the exact published capability after the follow's identity send
+		// and first paint but before completion admission. The replacement keeps the
+		// attachment live on its current session while retiring the published link.
+		// A render effect may still be in flight, so this reproduces the transition's
+		// end state (a newer published capability for the replacement link) rather
+		// than requiring a drained gate.
+		replaced := make(chan attachmentCapability, 1)
+		d.beforeMoveFollowCompletion = func(published attachmentCapability) {
+			supersedeAttachmentCapabilityForTest(t, published, base)
+			replaced <- published
+		}
+		done := make(chan struct{})
+		go func() {
+			d.resolvePickerSelection(effect, selection)
+			close(done)
+		}()
+		requireReceived(t, done, "composite follow never reported completion")
+		published := <-replaced
+		require.False(t, published.current(), "the superseded published capability was still admissible")
 
-	// The completion must arrive through the current capability, exactly once.
-	result := awaitSentPickerResult(t, sends)
-	require.Equal(t, selection.CauseActionID, result.CauseActionID)
-	require.Equal(t, selection.InteractionID, result.InteractionID)
-	require.Equal(t, protocol.PickerActionMove, result.Action)
-	assertNoFurtherFrame(t, sends, "PickerResult", "composite follow reported its result more than once")
+		// The completion must arrive through the current capability, exactly once.
+		result := awaitSentPickerResult(t, sends)
+		require.Equal(t, selection.CauseActionID, result.CauseActionID)
+		require.Equal(t, selection.InteractionID, result.InteractionID)
+		require.Equal(t, protocol.PickerActionMove, result.Action)
+		assertNoFurtherFrame(t, sends, "PickerResult", "composite follow reported its result more than once")
+	})
 }
 
 // supersedeAttachmentCapabilityForTest retires an attachment's exact published
@@ -529,10 +575,11 @@ func TestMovePickerCompositeFollowCompletionReadmitsSupersededCapability(t *test
 // concurrent reconnect or transition that won the gate after publication. It
 // republishes the current capability directly so it also works while a render
 // effect may still be in flight.
-type replacementServerConnection struct{ *mockServerConnection }
-
-func supersedeAttachmentCapabilityForTest(published attachmentCapability, base *mockServerConnection) {
-	wrapper := &replacementServerConnection{mockServerConnection: base}
+func supersedeAttachmentCapabilityForTest(t *testing.T, published attachmentCapability, base *mockServerConnection) {
+	// A distinct link object whose sends reach the same observed channel.
+	wrapper := newMockServerConnection(t)
+	wrapper.EXPECT().Send(mock.Anything).RunAndReturn(base.Send).Maybe()
+	wrapper.EXPECT().Close().Return(nil).Maybe()
 	published.ac.replaceTransport(wrapper)
 	current := captureAttachmentCapability(published.ac.currentAttachmentSession(), published.ac, wrapper)
 	gate := &published.ac.lifecycle
@@ -553,62 +600,66 @@ func supersedeAttachmentCapabilityForTest(published attachmentCapability, base *
 // attachment's current capability. Aborting instead would leave the post-close
 // drain and the ui-driver action pending forever.
 func TestMovePickerCompositeFollowReadmitsSupersededCapabilityBeforeIdentity(t *testing.T) {
-	d, source, ac, destination, _, releases, sends := setupMovePickerSessionsCore(t, newStubClock(t), 0)
-	defer releaseAll(releases)
-	base, ok := ac.transport().(*mockServerConnection)
-	require.True(t, ok, "fixture transport is not the capturing mock")
-	// A published route ledger is what makes a ready transition owe its
-	// committed identity to the client.
-	ac.setRouteSnapshot(protocol.RecentRouteSnapshot{Generation: 1})
-	old := captureAttachmentCapability(source, ac, ac.transport())
-	locator := moveSourceForSession(source, ac, "source-tab", "")
-	locator.AttachmentCapability = old
-	openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMoveTab, locator)
-	effect := pickActionEffectForTest(t, source, ac)
-	selection := moveSelectionForDestination(t, ac, destination.id)
-	selection.CauseActionID = 6161
+	synctest.Test(t, func(t *testing.T) {
+		d, source, ac, destination, _, releases, sends := setupMovePickerSessionsCore(t, newStubClock(t), 0)
+		defer releaseAll(releases)
+		base, ok := ac.transport().(*mockServerConnection)
+		require.True(t, ok, "fixture transport is not the capturing mock")
+		// A published route ledger is what makes a ready transition owe its
+		// committed identity to the client.
+		ac.setRouteSnapshot(protocol.RecentRouteSnapshot{Generation: 1})
+		old := captureAttachmentCapability(source, ac, ac.transport())
+		locator := moveSourceForSession(source, ac, "source-tab", "")
+		locator.AttachmentCapability = old
+		openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMoveTab, locator)
+		effect := pickActionEffectForTest(t, source, ac)
+		selection := moveSelectionForDestination(t, ac, destination.id)
+		selection.CauseActionID = 6161
 
-	rebased := make(chan struct{}, 1)
-	ac.renderStages.handoffRebase = func() { rebased <- struct{}{} }
+		rebased := make(chan struct{}, 1)
+		ac.renderStages.handoffRebase = func() { rebased <- struct{}{} }
 
-	// Supersede the published capability before the transition admits its
-	// committed route identity, exactly in the window final review flagged.
-	superseded := make(chan attachmentCapability, 1)
-	d.beforeAttachmentTransitionIdentityAdmission = func(published attachmentCapability) {
-		supersedeAttachmentCapabilityForTest(published, base)
-		superseded <- published
-	}
-	done := make(chan struct{})
-	go func() {
-		d.resolvePickerSelection(effect, selection)
-		close(done)
-	}()
-	awaitTestCompletion(t, done, "superseded composite follow never completed")
-	published := <-superseded
-	require.False(t, published.current(), "the superseded published capability was still admissible")
+		// Supersede the published capability before the transition admits its
+		// committed route identity, exactly in the window final review flagged.
+		superseded := make(chan attachmentCapability, 1)
+		d.beforeAttachmentTransitionIdentityAdmission = func(published attachmentCapability) {
+			supersedeAttachmentCapabilityForTest(t, published, base)
+			superseded <- published
+		}
+		done := make(chan struct{})
+		go func() {
+			d.resolvePickerSelection(effect, selection)
+			close(done)
+		}()
+		requireReceived(t, done, "superseded composite follow never completed")
+		published := <-superseded
+		require.False(t, published.current(), "the superseded published capability was still admissible")
 
-	select {
-	case <-rebased:
-	default:
-		t.Fatal("superseded composite follow skipped its authoritative first paint")
-	}
+		select {
+		case <-rebased:
+		default:
+			t.Fatal("superseded composite follow skipped its authoritative first paint")
+		}
 
-	// The committed identity must reach the live replacement link for the
-	// session the attachment actually holds, exactly once, and the correlated
-	// completion must follow exactly once.
-	identity := awaitSentCommittedIdentity(t, sends)
-	require.Equal(t, destination.name, identity.Target.SessionName)
-	require.Equal(t, destination.incarnation, identity.Target.LifecycleID)
-	result := awaitSentPickerResult(t, sends)
-	require.Equal(t, selection.CauseActionID, result.CauseActionID)
-	require.Equal(t, selection.InteractionID, result.InteractionID)
-	require.Equal(t, protocol.PickerActionMove, result.Action)
-	assertNoFurtherFrame(t, sends, "CommittedRouteIdentity", "composite follow published its committed identity more than once")
-	assertNoFurtherFrame(t, sends, "PickerResult", "composite follow reported its result more than once")
+		// The committed identity must reach the live replacement link for the
+		// session the attachment actually holds, exactly once, and the correlated
+		// completion must follow exactly once.
+		identity := awaitSentCommittedIdentity(t, sends)
+		require.Equal(t, destination.name, identity.Target.SessionName)
+		require.Equal(t, destination.incarnation, identity.Target.LifecycleID)
+		result := awaitSentPickerResult(t, sends)
+		require.Equal(t, selection.CauseActionID, result.CauseActionID)
+		require.Equal(t, selection.InteractionID, result.InteractionID)
+		require.Equal(t, protocol.PickerActionMove, result.Action)
+		assertNoFurtherFrame(t, sends, "CommittedRouteIdentity", "composite follow published its committed identity more than once")
+		assertNoFurtherFrame(t, sends, "PickerResult", "composite follow reported its result more than once")
+	})
 }
 
 // awaitSentCommittedIdentity reads the next committed route identity the daemon
 // published, skipping unrelated frames.
+//
+//testpolicy:realtime shared with callers outside synctest bubbles (session_picker_offer_test.go); the bounded timer is fake time inside a bubble
 func awaitSentCommittedIdentity(t *testing.T, sends <-chan wire.Envelope) protocol.CommittedRouteIdentity {
 	t.Helper()
 	deadline := time.After(2 * time.Second)
@@ -629,6 +680,8 @@ func awaitSentCommittedIdentity(t *testing.T, sends <-chan wire.Envelope) protoc
 
 // assertNoFurtherFrame proves a frame was produced exactly once: no later frame
 // of that type may follow the one the caller already observed.
+//
+//testpolicy:realtime shared with callers outside synctest bubbles (session_picker_offer_test.go); the bounded timer is fake time inside a bubble
 func assertNoFurtherFrame(t *testing.T, sends <-chan wire.Envelope, frameName string, failure string) {
 	t.Helper()
 	deadline := time.After(200 * time.Millisecond)
@@ -646,36 +699,40 @@ func assertNoFurtherFrame(t *testing.T, sends <-chan wire.Envelope, frameName st
 // delivers bounded feedback and a repaint through the attachment's current
 // capability so the client's post-close drain can release the terminal.
 func TestMovePickerClosedRejectionUsesFreshEffect(t *testing.T) {
-	d, source, ac, destination, destinationTab, releases, sends := setupMovePickerSessionsCore(t, newStubClock(t), 0)
-	defer releaseAll(releases)
-	old := captureAttachmentCapability(source, ac, ac.transport())
-	locator := moveSourceForSession(source, ac, "source-tab", "")
-	locator.AttachmentCapability = old
-	openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMoveTab, locator)
-	effect := pickActionEffectForTest(t, source, ac)
-	// Publication must reject after the picker closed: changing the destination
-	// tab geometry re-admits the already-validated topology as stale.
-	d.afterMoveTabSourceSnapshot = func() {
-		destinationTab.mu.Lock()
-		destinationTab.size = domain.Size{Cols: 79, Rows: 22}
-		destinationTab.mu.Unlock()
-	}
-	selection := moveSelectionForDestination(t, ac, destination.id)
-	selection.CauseActionID = 99
-	done := make(chan struct{})
-	go func() {
-		d.resolvePickerSelection(effect, selection)
-		close(done)
-	}()
-	awaitTestCompletion(t, done, "closed rejection never returned")
+	synctest.Test(t, func(t *testing.T) {
+		d, source, ac, destination, destinationTab, releases, sends := setupMovePickerSessionsCore(t, newStubClock(t), 0)
+		defer releaseAll(releases)
+		old := captureAttachmentCapability(source, ac, ac.transport())
+		locator := moveSourceForSession(source, ac, "source-tab", "")
+		locator.AttachmentCapability = old
+		openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMoveTab, locator)
+		effect := pickActionEffectForTest(t, source, ac)
+		// Publication must reject after the picker closed: changing the destination
+		// tab geometry re-admits the already-validated topology as stale.
+		d.afterMoveTabSourceSnapshot = func() {
+			destinationTab.mu.Lock()
+			destinationTab.size = domain.Size{Cols: 79, Rows: 22}
+			destinationTab.mu.Unlock()
+		}
+		selection := moveSelectionForDestination(t, ac, destination.id)
+		selection.CauseActionID = 99
+		done := make(chan struct{})
+		go func() {
+			d.resolvePickerSelection(effect, selection)
+			close(done)
+		}()
+		requireReceived(t, done, "closed rejection never returned")
 
-	failure, result := collectSentPickerOutcome(t, sends)
-	require.Nil(t, result, "rejected composite move reported success")
-	require.Equal(t, selection.CauseActionID, failure.CauseActionID)
-	require.Equal(t, protocol.PickerActionFailed, failure.Code)
+		failure, result := collectSentPickerOutcome(t, sends)
+		require.Nil(t, result, "rejected composite move reported success")
+		require.Equal(t, selection.CauseActionID, failure.CauseActionID)
+		require.Equal(t, protocol.PickerActionFailed, failure.Code)
+	})
 }
 
 // awaitSentPickerResult blocks until the daemon reports a completed mutation.
+//
+//testpolicy:realtime shared with callers outside synctest bubbles (session_picker_offer_test.go); the bounded timer is fake time inside a bubble
 func awaitSentPickerResult(t *testing.T, sends <-chan wire.Envelope) protocol.PickerResult {
 	t.Helper()
 	deadline := time.After(2 * time.Second)
@@ -697,6 +754,8 @@ func awaitSentPickerResult(t *testing.T, sends <-chan wire.Envelope) protocol.Pi
 // collectSentPickerOutcome drains the bounded set of frames one rejection can
 // produce and returns the PickerFailure, plus any PickerResult that must not
 // exist on the rejection path.
+//
+//testpolicy:realtime shared with callers outside synctest bubbles (session_picker_offer_test.go); the bounded timer is fake time inside a bubble
 func collectSentPickerOutcome(t *testing.T, sends <-chan wire.Envelope) (failure protocol.PickerFailure, result *protocol.PickerResult) {
 	t.Helper()
 	found := false

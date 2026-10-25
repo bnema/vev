@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/mock"
@@ -75,56 +76,56 @@ func newDurableRecoveryDaemonState(t testing.TB, records []domain.CatalogueRecor
 }
 
 func TestFinalCheckpointFailurePreservesCatalogue(t *testing.T) {
-	priorRef := domain.CheckpointRef{Generation: 7, ManifestDigest: [32]byte{7}}
-	prior := domain.CatalogueRecord{
-		Name:          "work",
-		IncarnationID: domain.IncarnationID{1},
-		Cwd:           "/work",
-		CreatedAt:     42,
-		Committed:     &priorRef,
-	}
-	catalogue, _ := newRecoveryCatalogueMock(t, []domain.CatalogueRecord{prior})
-	repositoryState := &recoveryRepositoryState{}
-	repository := newRecoveryRepositoryMock(t, repositoryState)
-	coordinator := recoveryusecase.NewCoordinator(catalogue, repository, nil)
-	d := New(nil, newStubClock(t), slog.New(slog.NewTextHandler(io.Discard, nil)), WithCatalogue(catalogue, []domain.CatalogueRecord{prior}), WithSnapshotRepository(repository), WithRecoveryCoordinator(coordinator))
-	startSnapshotEncodeWorker(t, d)
+	synctest.Test(t, func(t *testing.T) {
+		priorRef := domain.CheckpointRef{Generation: 7, ManifestDigest: [32]byte{7}}
+		prior := domain.CatalogueRecord{
+			Name:          "work",
+			IncarnationID: domain.IncarnationID{1},
+			Cwd:           "/work",
+			CreatedAt:     42,
+			Committed:     &priorRef,
+		}
+		catalogue, _ := newRecoveryCatalogueMock(t, []domain.CatalogueRecord{prior})
+		repositoryState := &recoveryRepositoryState{}
+		repository := newRecoveryRepositoryMock(t, repositoryState)
+		coordinator := recoveryusecase.NewCoordinator(catalogue, repository, nil)
+		d := New(nil, newStubClock(t), slog.New(slog.NewTextHandler(io.Discard, nil)), WithCatalogue(catalogue, []domain.CatalogueRecord{prior}), WithSnapshotRepository(repository), WithRecoveryCoordinator(coordinator))
+		startSnapshotEncodeWorker(t, d)
 
-	sess := newSnapshotTestSession(t, prior.Name, false, prior.Cwd)
-	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
-	defer cancel()
-	sess.snapshotMu.Lock()
-	sess.snapshotPublishedGeneration = priorRef.Generation
-	sess.snapshotPublishedCheckpoint = &priorRef
-	sess.snapshotGeneration = priorRef.Generation + 1
-	sess.snapshotPublicationContext = expired
-	sess.snapDirty.Store(true)
-	sess.snapshotMu.Unlock()
+		sess := newSnapshotTestSession(t, prior.Name, false, prior.Cwd)
+		expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+		defer cancel()
+		sess.snapshotMu.Lock()
+		sess.snapshotPublishedGeneration = priorRef.Generation
+		sess.snapshotPublishedCheckpoint = &priorRef
+		sess.snapshotGeneration = priorRef.Generation + 1
+		sess.snapshotPublicationContext = expired
+		sess.snapDirty.Store(true)
+		sess.snapshotMu.Unlock()
 
-	require.True(t, d.scheduleFinalSnapshot(sess))
-	awaitSnapshotIdle(t, sess)
-	got, ok, _ := catalogue.Record(prior.Name)
-	require.True(t, ok)
-	require.Equal(t, prior, got, "a timed-out final checkpoint must not change authoritative bytes")
-	sess.snapshotMu.Lock()
-	published := sess.snapshotPublishedCheckpoint
-	sess.snapshotMu.Unlock()
-	require.Equal(t, priorRef, *published)
+		require.True(t, d.scheduleFinalSnapshot(sess))
+		requireSnapshotIdle(t, sess)
+		got, ok, _ := catalogue.Record(prior.Name)
+		require.True(t, ok)
+		require.Equal(t, prior, got, "a timed-out final checkpoint must not change authoritative bytes")
+		sess.snapshotMu.Lock()
+		published := sess.snapshotPublishedCheckpoint
+		sess.snapshotMu.Unlock()
+		require.Equal(t, priorRef, *published)
+	})
 }
 
 func TestCatalogueRestoreIndependent(t *testing.T) {
 	t.Run("empty catalogue restoration", func(t *testing.T) {
 		emptyDaemon, _ := newDurableRecoveryDaemon(t, nil, newRecoveryRepositoryMock(t, nil))
-		emptyDone := make(chan struct{})
-		go func() {
-			emptyDaemon.restoreIncrementalSnapshots(context.Background())
-			close(emptyDone)
-		}()
-		select {
-		case <-emptyDone:
-		case <-time.After(time.Second):
-			t.Fatal("empty catalogue restoration blocked")
-		}
+		synctest.Test(t, func(t *testing.T) {
+			emptyDone := make(chan struct{})
+			go func() {
+				emptyDaemon.restoreIncrementalSnapshots(context.Background())
+				close(emptyDone)
+			}()
+			requireReceived(t, emptyDone, "empty catalogue restoration blocked")
+		})
 	})
 
 	t.Run("healthy and broken restoration", func(t *testing.T) {
@@ -165,108 +166,114 @@ func TestCatalogueRestoreIndependent(t *testing.T) {
 }
 
 func TestCatalogueRestoreResetsOnlyIncompatibleCheckpoint(t *testing.T) {
-	incompatible := durableRecoveryRecord(0)
-	healthy := durableRecoveryRecord(1)
-	repositoryState := &recoveryRepositoryState{
-		generations: map[string]ports.SnapshotGeneration{healthy.Name: validGeneration(t, healthy)},
-		errors:      map[string]error{incompatible.Name: fmt.Errorf("load envelope: %w", snapcodec.ErrBadVersion)},
-		loads:       make(map[string]int),
-		repairs:     make(map[string]domain.CheckpointRef),
-	}
-	repository := newRecoveryRepositoryMock(t, repositoryState)
-	d, catalogue := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{incompatible, healthy}, repository)
+	synctest.Test(t, func(t *testing.T) {
+		incompatible := durableRecoveryRecord(0)
+		healthy := durableRecoveryRecord(1)
+		repositoryState := &recoveryRepositoryState{
+			generations: map[string]ports.SnapshotGeneration{healthy.Name: validGeneration(t, healthy)},
+			errors:      map[string]error{incompatible.Name: fmt.Errorf("load envelope: %w", snapcodec.ErrBadVersion)},
+			loads:       make(map[string]int),
+			repairs:     make(map[string]domain.CheckpointRef),
+		}
+		repository := newRecoveryRepositoryMock(t, repositoryState)
+		d, catalogue := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{incompatible, healthy}, repository)
 
-	d.restoreIncrementalSnapshots(context.Background())
+		d.restoreIncrementalSnapshots(context.Background())
 
-	fresh, ok, err := catalogue.Record(incompatible.Name)
-	require.NoError(t, err)
-	require.True(t, ok)
-	require.Equal(t, domain.IncarnationID(bytes.Repeat([]byte{0xa5}, 16)), fresh.IncarnationID)
-	require.Nil(t, fresh.Committed)
-	require.Empty(t, fresh.DegradedReason)
-	require.Empty(t, fresh.TabNames)
-	require.Equal(t, []domain.IncarnationID{incompatible.IncarnationID}, repositoryState.deleted)
-	require.Equal(t, protocol.SessionDown, d.inactive[incompatible.Name].state)
-	require.Equal(t, fresh, d.inactive[incompatible.Name].record)
+		fresh, ok, err := catalogue.Record(incompatible.Name)
+		require.NoError(t, err)
+		require.True(t, ok)
+		require.Equal(t, domain.IncarnationID(bytes.Repeat([]byte{0xa5}, 16)), fresh.IncarnationID)
+		require.Nil(t, fresh.Committed)
+		require.Empty(t, fresh.DegradedReason)
+		require.Empty(t, fresh.TabNames)
+		require.Equal(t, []domain.IncarnationID{incompatible.IncarnationID}, repositoryState.deleted)
+		require.Equal(t, protocol.SessionDown, d.inactive[incompatible.Name].state)
+		require.Equal(t, fresh, d.inactive[incompatible.Name].record)
 
-	restoredSibling, ok, err := catalogue.Record(healthy.Name)
-	require.NoError(t, err)
-	require.True(t, ok)
-	require.Equal(t, healthy, restoredSibling)
-	require.Equal(t, protocol.SessionDown, d.inactive[healthy.Name].state)
-	require.Equal(t, 1, repositoryState.loads[healthy.Name])
+		restoredSibling, ok, err := catalogue.Record(healthy.Name)
+		require.NoError(t, err)
+		require.True(t, ok)
+		require.Equal(t, healthy, restoredSibling)
+		require.Equal(t, protocol.SessionDown, d.inactive[healthy.Name].state)
+		require.Equal(t, 1, repositoryState.loads[healthy.Name])
+	})
 }
 
 func TestIncompatibleCheckpointDeleteFailurePublishesFreshStoppedAuthority(t *testing.T) {
-	record := durableRecoveryRecord(0)
-	deleteErr := errors.New("delete old incarnation")
-	repositoryState := &recoveryRepositoryState{
-		errors:    map[string]error{record.Name: snapcodec.ErrBadVersion},
-		loads:     make(map[string]int),
-		repairs:   make(map[string]domain.CheckpointRef),
-		deleteErr: deleteErr,
-	}
-	repository := newRecoveryRepositoryMock(t, repositoryState)
-	d, catalogue := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, repository)
-	d.mu.Lock()
-	restoreDone := d.inactive[record.Name].restoreDone
-	d.mu.Unlock()
+	synctest.Test(t, func(t *testing.T) {
+		record := durableRecoveryRecord(0)
+		deleteErr := errors.New("delete old incarnation")
+		repositoryState := &recoveryRepositoryState{
+			errors:    map[string]error{record.Name: snapcodec.ErrBadVersion},
+			loads:     make(map[string]int),
+			repairs:   make(map[string]domain.CheckpointRef),
+			deleteErr: deleteErr,
+		}
+		repository := newRecoveryRepositoryMock(t, repositoryState)
+		d, catalogue := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, repository)
+		d.mu.Lock()
+		restoreDone := d.inactive[record.Name].restoreDone
+		d.mu.Unlock()
 
-	restoreErr := d.restoreRecord(context.Background(), record, d.purgeEpochSnapshot())
-	require.NoError(t, restoreErr, "post-commit cleanup failure must not fail the authority transition")
+		restoreErr := d.restoreRecord(context.Background(), record, d.purgeEpochSnapshot())
+		require.NoError(t, restoreErr, "post-commit cleanup failure must not fail the authority transition")
 
-	fresh, ok, err := catalogue.Record(record.Name)
-	require.NoError(t, err)
-	require.True(t, ok)
-	require.NotEqual(t, record.IncarnationID, fresh.IncarnationID)
-	require.Nil(t, fresh.Committed)
-	require.Empty(t, fresh.DegradedReason)
-	d.mu.Lock()
-	entry := d.inactive[record.Name]
-	d.mu.Unlock()
-	require.Equal(t, protocol.SessionDown, entry.state)
-	require.Equal(t, fresh, entry.record)
-	require.Equal(t, restoreDone, entry.restoreDone)
-	select {
-	case <-entry.restoreDone:
-		t.Fatal("direct restore closed its coordinator-owned completion barrier")
-	default:
-	}
+		fresh, ok, err := catalogue.Record(record.Name)
+		require.NoError(t, err)
+		require.True(t, ok)
+		require.NotEqual(t, record.IncarnationID, fresh.IncarnationID)
+		require.Nil(t, fresh.Committed)
+		require.Empty(t, fresh.DegradedReason)
+		d.mu.Lock()
+		entry := d.inactive[record.Name]
+		d.mu.Unlock()
+		require.Equal(t, protocol.SessionDown, entry.state)
+		require.Equal(t, fresh, entry.record)
+		require.Equal(t, restoreDone, entry.restoreDone)
+		select {
+		case <-entry.restoreDone:
+			t.Fatal("direct restore closed its coordinator-owned completion barrier")
+		default:
+		}
 
-	d.finishRecordRestore(record, restoreErr, restoreDone)
-	d.mu.Lock()
-	entry = d.inactive[record.Name]
-	d.mu.Unlock()
-	require.Equal(t, protocol.SessionDown, entry.state)
-	require.Equal(t, fresh, entry.record)
-	select {
-	case <-entry.restoreDone:
-	default:
-		t.Fatal("restore completion was not signaled")
-	}
-	require.Equal(t, []domain.IncarnationID{record.IncarnationID}, repositoryState.deleted)
+		d.finishRecordRestore(record, restoreErr, restoreDone)
+		d.mu.Lock()
+		entry = d.inactive[record.Name]
+		d.mu.Unlock()
+		require.Equal(t, protocol.SessionDown, entry.state)
+		require.Equal(t, fresh, entry.record)
+		select {
+		case <-entry.restoreDone:
+		default:
+			t.Fatal("restore completion was not signaled")
+		}
+		require.Equal(t, []domain.IncarnationID{record.IncarnationID}, repositoryState.deleted)
+	})
 }
 
 func TestIncompatibleCheckpointPreCommitFailureReturnsError(t *testing.T) {
-	record := durableRecoveryRecord(0)
-	cause := errors.New("catalogue replace failed")
-	repositoryState := &recoveryRepositoryState{
-		errors:  map[string]error{record.Name: snapcodec.ErrBadVersion},
-		loads:   make(map[string]int),
-		repairs: make(map[string]domain.CheckpointRef),
-	}
-	repository := newRecoveryRepositoryMock(t, repositoryState)
-	d, catalogue, catalogueState := newDurableRecoveryDaemonState(t, []domain.CatalogueRecord{record}, repository)
-	catalogueState.setReplaceErr(cause)
+	synctest.Test(t, func(t *testing.T) {
+		record := durableRecoveryRecord(0)
+		cause := errors.New("catalogue replace failed")
+		repositoryState := &recoveryRepositoryState{
+			errors:  map[string]error{record.Name: snapcodec.ErrBadVersion},
+			loads:   make(map[string]int),
+			repairs: make(map[string]domain.CheckpointRef),
+		}
+		repository := newRecoveryRepositoryMock(t, repositoryState)
+		d, catalogue, catalogueState := newDurableRecoveryDaemonState(t, []domain.CatalogueRecord{record}, repository)
+		catalogueState.setReplaceErr(cause)
 
-	err := d.restoreRecord(context.Background(), record, d.purgeEpochSnapshot())
+		err := d.restoreRecord(context.Background(), record, d.purgeEpochSnapshot())
 
-	require.ErrorIs(t, err, cause)
-	persisted, ok, recordErr := catalogue.Record(record.Name)
-	require.NoError(t, recordErr)
-	require.True(t, ok)
-	require.Equal(t, record, persisted)
-	require.Empty(t, repositoryState.deleted)
+		require.ErrorIs(t, err, cause)
+		persisted, ok, recordErr := catalogue.Record(record.Name)
+		require.NoError(t, recordErr)
+		require.True(t, ok)
+		require.Equal(t, record, persisted)
+		require.Empty(t, repositoryState.deleted)
+	})
 }
 
 func TestRestoreLoadFailuresRetainCheckpointWithoutDeletion(t *testing.T) {
@@ -280,122 +287,138 @@ func TestRestoreLoadFailuresRetainCheckpointWithoutDeletion(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			record := durableRecoveryRecord(0)
-			repositoryState := &recoveryRepositoryState{
-				errors:  map[string]error{record.Name: tt.err},
-				loads:   make(map[string]int),
-				repairs: make(map[string]domain.CheckpointRef),
-			}
-			repository := newRecoveryRepositoryMock(t, repositoryState)
-			d, catalogue := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, repository)
+			synctest.Test(t, func(t *testing.T) {
+				record := durableRecoveryRecord(0)
+				repositoryState := &recoveryRepositoryState{
+					errors:  map[string]error{record.Name: tt.err},
+					loads:   make(map[string]int),
+					repairs: make(map[string]domain.CheckpointRef),
+				}
+				repository := newRecoveryRepositoryMock(t, repositoryState)
+				d, catalogue := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, repository)
 
-			d.restoreIncrementalSnapshots(context.Background())
+				d.restoreIncrementalSnapshots(context.Background())
 
-			persisted, ok, err := catalogue.Record(record.Name)
-			require.NoError(t, err)
-			require.True(t, ok)
-			require.Equal(t, record.IncarnationID, persisted.IncarnationID)
-			require.Equal(t, record.Committed, persisted.Committed)
-			require.Equal(t, "checkpoint validation failed", persisted.DegradedReason)
-			require.Equal(t, protocol.SessionBroken, d.inactive[record.Name].state)
-			require.Empty(t, repositoryState.deleted)
+				persisted, ok, err := catalogue.Record(record.Name)
+				require.NoError(t, err)
+				require.True(t, ok)
+				require.Equal(t, record.IncarnationID, persisted.IncarnationID)
+				require.Equal(t, record.Committed, persisted.Committed)
+				require.Equal(t, "checkpoint validation failed", persisted.DegradedReason)
+				require.Equal(t, protocol.SessionBroken, d.inactive[record.Name].state)
+				require.Empty(t, repositoryState.deleted)
+			})
 		})
 	}
 }
 
 func TestCatalogueRestoreAggregateOver4096(t *testing.T) {
-	const count = 4200
-	records := make([]domain.CatalogueRecord, count)
-	repositoryState := &recoveryRepositoryState{generations: make(map[string]ports.SnapshotGeneration, count), errors: make(map[string]error), loads: make(map[string]int), repairs: make(map[string]domain.CheckpointRef)}
-	repository := newRecoveryRepositoryMock(t, repositoryState)
-	for i := range records {
-		records[i] = durableRecoveryRecord(i)
-		repositoryState.generations[records[i].Name] = validGeneration(t, records[i])
-	}
-	d, _ := newDurableRecoveryDaemon(t, records, repository)
+	synctest.Test(t, func(t *testing.T) {
+		const count = 4200
+		records := make([]domain.CatalogueRecord, count)
+		repositoryState := &recoveryRepositoryState{generations: make(map[string]ports.SnapshotGeneration, count), errors: make(map[string]error), loads: make(map[string]int), repairs: make(map[string]domain.CheckpointRef)}
+		repository := newRecoveryRepositoryMock(t, repositoryState)
+		for i := range records {
+			records[i] = durableRecoveryRecord(i)
+			repositoryState.generations[records[i].Name] = validGeneration(t, records[i])
+		}
+		d, _ := newDurableRecoveryDaemon(t, records, repository)
 
-	d.restoreIncrementalSnapshots(context.Background())
+		d.restoreIncrementalSnapshots(context.Background())
 
-	require.Len(t, d.inactive, count)
-	for _, record := range records {
-		require.Equal(t, protocol.SessionDown, d.inactive[record.Name].state)
-		require.Equal(t, 1, repositoryState.loads[record.Name])
-	}
+		require.Len(t, d.inactive, count)
+		for _, record := range records {
+			require.Equal(t, protocol.SessionDown, d.inactive[record.Name].state)
+			require.Equal(t, 1, repositoryState.loads[record.Name])
+		}
+	})
 }
 
 func TestCatalogueRestoreSingleSessionOver4096(t *testing.T) {
-	record := durableRecoveryRecord(0)
-	repositoryState := &recoveryRepositoryState{generations: map[string]ports.SnapshotGeneration{record.Name: validGeneration(t, record)}, errors: make(map[string]error), loads: make(map[string]int), repairs: make(map[string]domain.CheckpointRef)}
-	repository := newRecoveryRepositoryMock(t, repositoryState)
-	d, _ := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, repository)
+	synctest.Test(t, func(t *testing.T) {
+		record := durableRecoveryRecord(0)
+		repositoryState := &recoveryRepositoryState{generations: map[string]ports.SnapshotGeneration{record.Name: validGeneration(t, record)}, errors: make(map[string]error), loads: make(map[string]int), repairs: make(map[string]domain.CheckpointRef)}
+		repository := newRecoveryRepositoryMock(t, repositoryState)
+		d, _ := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, repository)
 
-	// The repository may contain any number of stale entries; restoration has no
-	// discovery API and therefore performs exactly one direct catalogue lookup.
-	d.restoreIncrementalSnapshots(context.Background())
+		// The repository may contain any number of stale entries; restoration has no
+		// discovery API and therefore performs exactly one direct catalogue lookup.
+		d.restoreIncrementalSnapshots(context.Background())
 
-	require.Equal(t, protocol.SessionDown, d.inactive[record.Name].state)
-	require.Equal(t, 1, repositoryState.loads[record.Name])
+		require.Equal(t, protocol.SessionDown, d.inactive[record.Name].state)
+		require.Equal(t, 1, repositoryState.loads[record.Name])
+	})
 }
 
 func TestCatalogueRestoreIncarnationMismatch(t *testing.T) {
-	record := durableRecoveryRecord(0)
-	generation := validGeneration(t, record)
-	generation.IncarnationID = domain.IncarnationID{99}
-	repositoryState := &recoveryRepositoryState{generations: map[string]ports.SnapshotGeneration{record.Name: generation}, errors: make(map[string]error), loads: make(map[string]int), repairs: make(map[string]domain.CheckpointRef)}
-	repository := newRecoveryRepositoryMock(t, repositoryState)
-	d, catalogue := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, repository)
+	synctest.Test(t, func(t *testing.T) {
+		record := durableRecoveryRecord(0)
+		generation := validGeneration(t, record)
+		generation.IncarnationID = domain.IncarnationID{99}
+		repositoryState := &recoveryRepositoryState{generations: map[string]ports.SnapshotGeneration{record.Name: generation}, errors: make(map[string]error), loads: make(map[string]int), repairs: make(map[string]domain.CheckpointRef)}
+		repository := newRecoveryRepositoryMock(t, repositoryState)
+		d, catalogue := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, repository)
 
-	d.restoreIncrementalSnapshots(context.Background())
+		d.restoreIncrementalSnapshots(context.Background())
 
-	require.Equal(t, protocol.SessionBroken, d.inactive[record.Name].state)
-	got, _, _ := catalogue.Record(record.Name)
-	require.Equal(t, "checkpoint validation failed", got.DegradedReason)
+		require.Equal(t, protocol.SessionBroken, d.inactive[record.Name].state)
+		got, _, _ := catalogue.Record(record.Name)
+		require.Equal(t, "checkpoint validation failed", got.DegradedReason)
+	})
 }
 
-type cancellationRecoveryRepository struct {
-	ports.SnapshotRepository
-	started chan struct{}
-	once    sync.Once
+// newCancellationRecoveryRepository blocks LoadCheckpoint until its context is
+// cancelled and closes started on the first call.
+func newCancellationRecoveryRepository(t testing.TB) (*portsmocks.MockSnapshotRepository, <-chan struct{}) {
+	started := make(chan struct{})
+	var once sync.Once
+	return newSnapshotRepositoryMock(t, func(m *portsmocks.MockSnapshotRepository) {
+		m.EXPECT().LoadCheckpoint(mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+			RunAndReturn(func(ctx context.Context, _ domain.IncarnationID, _ string, _ ports.CheckpointRef) (ports.SnapshotGeneration, error) {
+				once.Do(func() { close(started) })
+				<-ctx.Done()
+				return ports.SnapshotGeneration{}, ctx.Err()
+			}).Maybe()
+	}), started
 }
 
-func (r *cancellationRecoveryRepository) LoadCheckpoint(ctx context.Context, _ domain.IncarnationID, _ string, _ ports.CheckpointRef) (ports.SnapshotGeneration, error) {
-	r.once.Do(func() { close(r.started) })
-	<-ctx.Done()
-	return ports.SnapshotGeneration{}, ctx.Err()
-}
-
-type recoveryCountingPTYFactory struct {
-	calls atomic.Int32
-}
-
-func (f *recoveryCountingPTYFactory) Open(context.Context, string, []string, []string, string, domain.Geometry) (ports.PTY, error) {
-	f.calls.Add(1)
-	return nil, errors.New("unexpected PTY open")
+// newCountingPTYFactory fails every Open and counts the attempts.
+func newCountingPTYFactory(t testing.TB) (*portsmocks.MockPTYFactory, *atomic.Int32) {
+	calls := &atomic.Int32{}
+	factory := portsmocks.NewMockPTYFactory(t)
+	factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		RunAndReturn(func(context.Context, string, []string, []string, string, domain.Geometry) (ports.PTY, error) {
+			calls.Add(1)
+			return nil, errors.New("unexpected PTY open")
+		}).Maybe()
+	return factory, calls
 }
 
 func TestSessionRecoveryUsesIncomingCommandContext(t *testing.T) {
-	type contextKey struct{}
-	key := contextKey{}
-	ctx := context.WithValue(t.Context(), key, "request")
-	wantErr := errors.New("stop after context capture")
-	record := durableRecoveryRecord(0)
-	record.DegradedReason = "checkpoint validation failed"
-	catalogue := portsmocks.NewMockCatalogue(t)
-	repository := portsmocks.NewMockSnapshotRepository(t)
-	catalogue.EXPECT().Record(record.Name).Return(record, true, nil).Once()
-	catalogue.EXPECT().Replace(record.Name, mock.Anything).Return(nil).Once()
-	seen := false
-	repository.EXPECT().DeleteIncarnation(mock.Anything, record.IncarnationID).
-		Run(func(got context.Context, _ domain.IncarnationID) { seen = got.Value(key) == "request" }).
-		Return(wantErr).Once()
+	synctest.Test(t, func(t *testing.T) {
+		type contextKey struct{}
+		key := contextKey{}
+		ctx := context.WithValue(t.Context(), key, "request")
+		wantErr := errors.New("stop after context capture")
+		record := durableRecoveryRecord(0)
+		record.DegradedReason = "checkpoint validation failed"
+		catalogue := portsmocks.NewMockCatalogue(t)
+		repository := portsmocks.NewMockSnapshotRepository(t)
+		catalogue.EXPECT().Record(record.Name).Return(record, true, nil).Once()
+		catalogue.EXPECT().Replace(record.Name, mock.Anything).Return(nil).Once()
+		seen := false
+		repository.EXPECT().DeleteIncarnation(mock.Anything, record.IncarnationID).
+			Run(func(got context.Context, _ domain.IncarnationID) { seen = got.Value(key) == "request" }).
+			Return(wantErr).Once()
 
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
-	d.catalogue = catalogue
-	d.recovery = recoveryusecase.NewCoordinator(catalogue, repository, bytes.NewReader(bytes.Repeat([]byte{9}, 16)))
+		d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), newStubClock(t))
+		d.catalogue = catalogue
+		d.recovery = recoveryusecase.NewCoordinator(catalogue, repository, bytes.NewReader(bytes.Repeat([]byte{9}, 16)))
 
-	_, err := (controlExec{ctx: ctx, d: d, recoveryName: record.Name}).SessionRecovery("discard")
-	require.ErrorIs(t, err, wantErr)
-	require.True(t, seen)
+		_, err := (controlExec{ctx: ctx, d: d, recoveryName: record.Name}).SessionRecovery("discard")
+		require.ErrorIs(t, err, wantErr)
+		require.True(t, seen)
+	})
 }
 
 type temporaryRestoreError struct{}
@@ -433,7 +456,9 @@ func TestUnambiguousBadVersionErrorClassification(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.incompatible, isUnambiguousBadVersionError(tt.err))
+			synctest.Test(t, func(t *testing.T) {
+				require.Equal(t, tt.incompatible, isUnambiguousBadVersionError(tt.err))
+			})
 		})
 	}
 }
@@ -456,7 +481,9 @@ func TestRetryableRestoreLoadErrorClassification(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.retryable, isRetryableRestoreLoadError(tt.err))
+			synctest.Test(t, func(t *testing.T) {
+				require.Equal(t, tt.retryable, isRetryableRestoreLoadError(tt.err))
+			})
 		})
 	}
 }
@@ -490,44 +517,48 @@ func TestFinishRecordRestoreDoesNotDegradeStaleCatalogueAuthority(t *testing.T) 
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			record := durableRecoveryRecord(0)
-			d, _, catalogueState := newDurableRecoveryDaemonState(t, []domain.CatalogueRecord{record}, newRecoveryRepositoryMock(t, nil))
-			tt.setup(d, catalogueState, record)
-			d.mu.Lock()
-			before := d.inactive[record.Name]
-			d.mu.Unlock()
+			synctest.Test(t, func(t *testing.T) {
+				record := durableRecoveryRecord(0)
+				d, _, catalogueState := newDurableRecoveryDaemonState(t, []domain.CatalogueRecord{record}, newRecoveryRepositoryMock(t, nil))
+				tt.setup(d, catalogueState, record)
+				d.mu.Lock()
+				before := d.inactive[record.Name]
+				d.mu.Unlock()
 
-			d.finishRecordRestore(record, errors.New("invalid checkpoint"), before.restoreDone)
+				d.finishRecordRestore(record, errors.New("invalid checkpoint"), before.restoreDone)
 
-			d.mu.Lock()
-			after := d.inactive[record.Name]
-			d.mu.Unlock()
-			require.Equal(t, before.record, after.record)
-			require.Equal(t, before.state, after.state)
+				d.mu.Lock()
+				after := d.inactive[record.Name]
+				d.mu.Unlock()
+				require.Equal(t, before.record, after.record)
+				require.Equal(t, before.state, after.state)
+			})
 		})
 	}
 }
 
 func TestPersistAndRegisterRestoredSessionRegistrationFailurePreservesStoppedEntry(t *testing.T) {
-	record := durableRecoveryRecord(0)
-	d, _ := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, newRecoveryRepositoryMock(t, nil))
-	d.mu.Lock()
-	before := d.inactive[record.Name]
-	collisionID := domain.SessionID(fmt.Sprintf("sess-%d", d.nextID))
-	d.sessions[collisionID] = &session{sessionCore: sessionCore{id: collisionID, name: "collision"}}
-	d.mu.Unlock()
-	sess := newSnapshotTestSession(t, record.Name, false, record.Cwd)
-	sess.incarnation = record.IncarnationID
+	synctest.Test(t, func(t *testing.T) {
+		record := durableRecoveryRecord(0)
+		d, _ := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, newRecoveryRepositoryMock(t, nil))
+		d.mu.Lock()
+		before := d.inactive[record.Name]
+		collisionID := domain.SessionID(fmt.Sprintf("sess-%d", d.nextID))
+		d.sessions[collisionID] = &session{sessionCore: sessionCore{id: collisionID, name: "collision"}}
+		d.mu.Unlock()
+		sess := newSnapshotTestSession(t, record.Name, false, record.Cwd)
+		sess.incarnation = record.IncarnationID
 
-	registered, err := d.persistAndRegisterRestoredSession(t.Context(), sess, d.purgeEpochSnapshot())
+		registered, err := d.persistAndRegisterRestoredSession(t.Context(), sess, d.purgeEpochSnapshot())
 
-	require.ErrorContains(t, err, "registry rejected")
-	require.False(t, registered)
-	d.mu.Lock()
-	after := d.inactive[record.Name]
-	d.mu.Unlock()
-	require.Equal(t, before, after, "failed runtime publication must preserve the exact stopped authority and barrier")
-	require.Equal(t, before.restoreDone, after.restoreDone)
+		require.ErrorContains(t, err, "registry rejected")
+		require.False(t, registered)
+		d.mu.Lock()
+		after := d.inactive[record.Name]
+		d.mu.Unlock()
+		require.Equal(t, before, after, "failed runtime publication must preserve the exact stopped authority and barrier")
+		require.Equal(t, before.restoreDone, after.restoreDone)
+	})
 }
 
 func TestCreateNamedSessionRegistrationFailureRollsBackDurableState(t *testing.T) {
@@ -541,235 +572,253 @@ func TestCreateNamedSessionRegistrationFailureRollsBackDurableState(t *testing.T
 		{name: "stopped metadata update", records: []domain.CatalogueRecord{durableRecoveryRecord(0)}, sessName: durableRecoveryRecord(0).Name, cwd: "/resumed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			pty, release := newBlockingPTY(t)
-			defer release()
-			catalogue, _ := newRecoveryCatalogueMock(t, tc.records)
-			coordinator := recoveryusecase.NewCoordinator(catalogue, nil, bytes.NewReader(bytes.Repeat([]byte{0x6a}, 16)))
-			d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
-			WithCatalogue(catalogue, tc.records)(d)
-			WithRecoveryCoordinator(coordinator)(d)
+			synctest.Test(t, func(t *testing.T) {
+				pty, release := newBlockingPTY(t)
+				defer release()
+				catalogue, _ := newRecoveryCatalogueMock(t, tc.records)
+				coordinator := recoveryusecase.NewCoordinator(catalogue, nil, bytes.NewReader(bytes.Repeat([]byte{0x6a}, 16)))
+				d := newTestDaemon(t, newFactory(t, pty), newStubClock(t))
+				WithCatalogue(catalogue, tc.records)(d)
+				WithRecoveryCoordinator(coordinator)(d)
 
-			d.mu.Lock()
-			for _, record := range tc.records {
-				d.inactive[record.Name] = inactiveSession{
-					name: record.Name, cwd: record.Cwd, createdAt: record.CreatedAt,
-					incarnation: record.IncarnationID, lastUsedSeq: record.LastUsedSeq,
-					tabNames: append([]string(nil), record.TabNames...), record: record,
-					state: protocol.SessionDown, restoreDone: make(chan struct{}),
+				d.mu.Lock()
+				for _, record := range tc.records {
+					d.inactive[record.Name] = inactiveSession{
+						name: record.Name, cwd: record.Cwd, createdAt: record.CreatedAt,
+						incarnation: record.IncarnationID, lastUsedSeq: record.LastUsedSeq,
+						tabNames: append([]string(nil), record.TabNames...), record: record,
+						state: protocol.SessionDown, restoreDone: make(chan struct{}),
+					}
 				}
-			}
-			beforeStopped, hadStopped := d.inactive[tc.sessName]
-			collisionID := domain.SessionID(fmt.Sprintf("sess-%d", d.nextID))
-			d.sessions[collisionID] = &session{sessionCore: sessionCore{id: collisionID, name: "collision"}}
-			d.mu.Unlock()
-			beforeRecords := mustDurableRecords(t, catalogue)
+				beforeStopped, hadStopped := d.inactive[tc.sessName]
+				collisionID := domain.SessionID(fmt.Sprintf("sess-%d", d.nextID))
+				d.sessions[collisionID] = &session{sessionCore: sessionCore{id: collisionID, name: "collision"}}
+				d.mu.Unlock()
+				beforeRecords := mustDurableRecords(t, catalogue)
 
-			_, err := createSessionForTest(d, tc.sessName, false, tc.cwd, defaultSize, terminalEnv{}, d.baseEnv)
+				_, err := createSessionForTest(d, tc.sessName, false, tc.cwd, defaultSize, terminalEnv{}, d.baseEnv)
 
-			require.ErrorContains(t, err, "registry rejected")
-			require.ElementsMatch(t, beforeRecords, mustDurableRecords(t, catalogue), "failed runtime publication must leave no created record or metadata mutation")
-			d.mu.Lock()
-			afterStopped, stillStopped := d.inactive[tc.sessName]
-			d.mu.Unlock()
-			require.Equal(t, hadStopped, stillStopped)
-			if hadStopped {
-				require.Equal(t, beforeStopped, afterStopped, "resume publication failure must restore the exact stopped state")
-				require.Equal(t, beforeStopped.restoreDone, afterStopped.restoreDone)
-			}
+				require.ErrorContains(t, err, "registry rejected")
+				require.ElementsMatch(t, beforeRecords, mustDurableRecords(t, catalogue), "failed runtime publication must leave no created record or metadata mutation")
+				d.mu.Lock()
+				afterStopped, stillStopped := d.inactive[tc.sessName]
+				d.mu.Unlock()
+				require.Equal(t, hadStopped, stillStopped)
+				if hadStopped {
+					require.Equal(t, beforeStopped, afterStopped, "resume publication failure must restore the exact stopped state")
+					require.Equal(t, beforeStopped.restoreDone, afterStopped.restoreDone)
+				}
+			})
 		})
 	}
 }
 
 func TestPersistAndRegisterRestoredSessionRejectsReplacementIncarnation(t *testing.T) {
-	record := durableRecoveryRecord(0)
-	d, catalogue := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, newRecoveryRepositoryMock(t, nil))
-	replacement := record
-	replacement.IncarnationID = domain.IncarnationID{99}
-	require.NoError(t, catalogue.Replace(record.Name, replacement))
-	sess := newSnapshotTestSession(t, record.Name, false, record.Cwd)
-	sess.incarnation = record.IncarnationID
+	synctest.Test(t, func(t *testing.T) {
+		record := durableRecoveryRecord(0)
+		d, catalogue := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, newRecoveryRepositoryMock(t, nil))
+		replacement := record
+		replacement.IncarnationID = domain.IncarnationID{99}
+		require.NoError(t, catalogue.Replace(record.Name, replacement))
+		sess := newSnapshotTestSession(t, record.Name, false, record.Cwd)
+		sess.incarnation = record.IncarnationID
 
-	registered, err := d.persistAndRegisterRestoredSession(t.Context(), sess, d.purgeEpochSnapshot())
-	require.ErrorContains(t, err, "incarnation")
-	require.False(t, registered)
-	require.Empty(t, d.sessions)
+		registered, err := d.persistAndRegisterRestoredSession(t.Context(), sess, d.purgeEpochSnapshot())
+		require.ErrorContains(t, err, "incarnation")
+		require.False(t, registered)
+		require.Empty(t, d.sessions)
+	})
 }
 
 func TestSessionRecoveryCommand(t *testing.T) {
-	degraded := durableRecoveryRecord(2)
-	degraded.DegradedReason = "checkpoint validation failed"
-	fresh := degraded
-	fresh.IncarnationID = domain.IncarnationID{9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9}
-	fresh.Committed = nil
-	fresh.DegradedReason = ""
-	catalogue := portsmocks.NewMockCatalogue(t)
-	repository := portsmocks.NewMockSnapshotRepository(t)
-	catalogue.EXPECT().Record(degraded.Name).Return(degraded, true, nil).Once()
-	catalogue.EXPECT().Replace(degraded.Name, fresh).Return(nil).Once()
-	repository.EXPECT().DeleteIncarnation(mock.Anything, degraded.IncarnationID).Return(nil).Once()
-	catalogue.EXPECT().Record(degraded.Name).Return(fresh, true, nil).Once()
-	coordinator := recoveryusecase.NewCoordinator(catalogue, repository, bytes.NewReader(bytes.Repeat([]byte{9}, 16)))
-	d := New(nil, newStubClock(t), slog.New(slog.NewTextHandler(io.Discard, nil)),
-		WithCatalogue(catalogue, []domain.CatalogueRecord{degraded}),
-		WithSnapshotRepository(repository), WithRecoveryCoordinator(coordinator))
+	synctest.Test(t, func(t *testing.T) {
+		degraded := durableRecoveryRecord(2)
+		degraded.DegradedReason = "checkpoint validation failed"
+		fresh := degraded
+		fresh.IncarnationID = domain.IncarnationID{9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9}
+		fresh.Committed = nil
+		fresh.DegradedReason = ""
+		catalogue := portsmocks.NewMockCatalogue(t)
+		repository := portsmocks.NewMockSnapshotRepository(t)
+		catalogue.EXPECT().Record(degraded.Name).Return(degraded, true, nil).Once()
+		catalogue.EXPECT().Replace(degraded.Name, fresh).Return(nil).Once()
+		repository.EXPECT().DeleteIncarnation(mock.Anything, degraded.IncarnationID).Return(nil).Once()
+		catalogue.EXPECT().Record(degraded.Name).Return(fresh, true, nil).Once()
+		coordinator := recoveryusecase.NewCoordinator(catalogue, repository, bytes.NewReader(bytes.Repeat([]byte{9}, 16)))
+		d := New(nil, newStubClock(t), slog.New(slog.NewTextHandler(io.Discard, nil)),
+			WithCatalogue(catalogue, []domain.CatalogueRecord{degraded}),
+			WithSnapshotRepository(repository), WithRecoveryCoordinator(coordinator))
 
-	_, err := (controlExec{d: d, recoveryName: degraded.Name}).SessionRecovery("discard")
-	require.NoError(t, err)
-	require.Equal(t, protocol.SessionDown, d.inactive[degraded.Name].state)
-	require.Equal(t, fresh, d.inactive[degraded.Name].record)
+		_, err := (controlExec{d: d, recoveryName: degraded.Name}).SessionRecovery("discard")
+		require.NoError(t, err)
+		require.Equal(t, protocol.SessionDown, d.inactive[degraded.Name].state)
+		require.Equal(t, fresh, d.inactive[degraded.Name].record)
+	})
 }
 
 func TestListShowsDegraded(t *testing.T) {
-	fresh := durableRecoveryRecord(0)
-	fresh.Committed = nil
-	restoring := durableRecoveryRecord(1)
-	degraded := durableRecoveryRecord(2)
-	degraded.DegradedReason = "checkpoint validation failed"
-	d, _ := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{fresh, restoring, degraded}, newRecoveryRepositoryMock(t, nil))
+	synctest.Test(t, func(t *testing.T) {
+		fresh := durableRecoveryRecord(0)
+		fresh.Committed = nil
+		restoring := durableRecoveryRecord(1)
+		degraded := durableRecoveryRecord(2)
+		degraded.DegradedReason = "checkpoint validation failed"
+		d, _ := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{fresh, restoring, degraded}, newRecoveryRepositoryMock(t, nil))
 
-	listed := listSessions(t, d)
-	require.Equal(t, []protocol.SessionInfo{
-		{Name: fresh.Name, State: protocol.SessionDown},
-		{Name: restoring.Name, State: protocol.SessionDown},
-		{Name: degraded.Name, State: protocol.SessionBroken},
-	}, listed.Sessions)
+		listed := listSessions(t, d)
+		require.Equal(t, []protocol.SessionInfo{
+			{Name: fresh.Name, State: protocol.SessionDown},
+			{Name: restoring.Name, State: protocol.SessionDown},
+			{Name: degraded.Name, State: protocol.SessionBroken},
+		}, listed.Sessions)
+	})
 }
 
 func TestListHidesPurgingInactiveSession(t *testing.T) {
-	record := durableRecoveryRecord(0)
-	d, _ := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, newRecoveryRepositoryMock(t, nil))
-	d.mu.Lock()
-	entry := d.inactive[record.Name]
-	entry.purging = true
-	entry.state = protocol.SessionDown
-	d.inactive[record.Name] = entry
-	d.mu.Unlock()
+	synctest.Test(t, func(t *testing.T) {
+		record := durableRecoveryRecord(0)
+		d, _ := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, newRecoveryRepositoryMock(t, nil))
+		d.mu.Lock()
+		entry := d.inactive[record.Name]
+		entry.purging = true
+		entry.state = protocol.SessionDown
+		d.inactive[record.Name] = entry
+		d.mu.Unlock()
 
-	listed := listSessions(t, d)
-	require.Empty(t, listed.Sessions)
+		listed := listSessions(t, d)
+		require.Empty(t, listed.Sessions)
+	})
 }
 
 func TestAttachWaitsForRestore(t *testing.T) {
-	record := durableRecoveryRecord(0)
-	factory := &recoveryCountingPTYFactory{}
-	d := New(factory, newStubClock(t), slog.New(slog.NewTextHandler(io.Discard, nil)), WithCatalogue(newRecoveryCatalogueOnly(t, []domain.CatalogueRecord{record}), []domain.CatalogueRecord{record}))
-	d.serveCtx, d.serveCancel = context.WithCancel(context.Background())
-	defer d.serveCancel()
+	synctest.Test(t, func(t *testing.T) {
+		record := durableRecoveryRecord(0)
+		factory, calls := newCountingPTYFactory(t)
+		d := New(factory, newStubClock(t), slog.New(slog.NewTextHandler(io.Discard, nil)), WithCatalogue(newRecoveryCatalogueOnly(t, []domain.CatalogueRecord{record}), []domain.CatalogueRecord{record}))
+		d.serveCtx, d.serveCancel = context.WithCancel(context.Background())
+		defer d.serveCancel()
 
-	result := make(chan error, 1)
-	go func() {
-		_, _, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: record.Name, Size: domain.Size{Cols: 80, Rows: 24}}, nil)
-		result <- err
-	}()
+		result := make(chan error, 1)
+		go func() {
+			_, _, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: record.Name, Size: domain.Size{Cols: 80, Rows: 24}}, nil)
+			result <- err
+		}()
 
-	select {
-	case err := <-result:
-		t.Fatalf("attach returned before target restoration completed: %v", err)
-	case <-time.After(25 * time.Millisecond):
-	}
-	require.Zero(t, factory.calls.Load())
+		synctest.Wait()
+		select {
+		case err := <-result:
+			t.Fatalf("attach returned before target restoration completed: %v", err)
+		default:
+		}
+		require.Zero(t, calls.Load())
 
-	d.setStoppedRecovery(record, protocol.SessionBroken)
-	d.mu.Lock()
-	closeRuntimeRestoreDoneLocked(d.inactive[record.Name].restoreDone)
-	d.mu.Unlock()
-	var protocolError *protoErr
-	require.ErrorAs(t, <-result, &protocolError)
-	require.Equal(t, protocol.ErrInternal, protocolError.code)
-	require.Zero(t, factory.calls.Load())
+		d.setStoppedRecovery(record, protocol.SessionBroken)
+		d.mu.Lock()
+		closeRuntimeRestoreDoneLocked(d.inactive[record.Name].restoreDone)
+		d.mu.Unlock()
+		var protocolError *protoErr
+		require.ErrorAs(t, <-result, &protocolError)
+		require.Equal(t, protocol.ErrInternal, protocolError.code)
+		require.Zero(t, calls.Load())
+	})
 }
 
 func TestAttachBarrierSurvivesLiveRegistryPublication(t *testing.T) {
-	record := durableRecoveryRecord(0)
-	d, _ := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, newRecoveryRepositoryMock(t, nil))
-	d.mu.Lock()
-	done := d.inactive[record.Name].restoreDone
-	d.mu.Unlock()
-	sess := &session{sessionCore: sessionCore{name: record.Name, incarnation: record.IncarnationID}}
+	synctest.Test(t, func(t *testing.T) {
+		record := durableRecoveryRecord(0)
+		d, _ := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, newRecoveryRepositoryMock(t, nil))
+		d.mu.Lock()
+		done := d.inactive[record.Name].restoreDone
+		d.mu.Unlock()
+		sess := &session{sessionCore: sessionCore{name: record.Name, incarnation: record.IncarnationID}}
 
-	registered, err := d.persistAndRegisterRestoredSession(t.Context(), sess, d.purgeEpochSnapshot())
-	require.NoError(t, err)
-	require.True(t, registered)
+		registered, err := d.persistAndRegisterRestoredSession(t.Context(), sess, d.purgeEpochSnapshot())
+		require.NoError(t, err)
+		require.True(t, registered)
 
-	cancelled, cancel := context.WithCancel(context.Background())
-	cancel()
-	require.ErrorIs(t, d.waitForTargetRestore(cancelled, record.Name), context.Canceled,
-		"an attach racing after live publication must still observe the restore barrier")
+		cancelled, cancel := context.WithCancel(context.Background())
+		cancel()
+		require.ErrorIs(t, d.waitForTargetRestore(cancelled, record.Name), context.Canceled,
+			"an attach racing after live publication must still observe the restore barrier")
 
-	d.finishRecordRestore(record, nil, done)
-	require.NoError(t, d.waitForTargetRestore(context.Background(), record.Name),
-		"attach must proceed after successful restoration completes")
+		d.finishRecordRestore(record, nil, done)
+		require.NoError(t, d.waitForTargetRestore(context.Background(), record.Name),
+			"attach must proceed after successful restoration completes")
+	})
 }
 
 func TestAttachRestoreWaitHonorsContextCancellation(t *testing.T) {
-	record := durableRecoveryRecord(0)
-	d, _ := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, newRecoveryRepositoryMock(t, nil))
-	ctx, cancel := context.WithCancel(context.Background())
-	result := make(chan error, 1)
-	go func() { result <- d.waitForTargetRestore(ctx, record.Name) }()
+	synctest.Test(t, func(t *testing.T) {
+		record := durableRecoveryRecord(0)
+		d, _ := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, newRecoveryRepositoryMock(t, nil))
+		ctx, cancel := context.WithCancel(context.Background())
+		result := make(chan error, 1)
+		go func() { result <- d.waitForTargetRestore(ctx, record.Name) }()
 
-	select {
-	case err := <-result:
-		t.Fatalf("restore wait returned before cancellation: %v", err)
-	case <-time.After(25 * time.Millisecond):
-	}
-	cancel()
-	require.ErrorIs(t, <-result, context.Canceled)
+		synctest.Wait()
+		select {
+		case err := <-result:
+			t.Fatalf("restore wait returned before cancellation: %v", err)
+		default:
+		}
+		cancel()
+		require.ErrorIs(t, <-result, context.Canceled)
+	})
 }
 
 func TestRestoreCancellationTransitionsBeforeAttachCompletion(t *testing.T) {
-	record := durableRecoveryRecord(0)
-	repository := &cancellationRecoveryRepository{started: make(chan struct{})}
-	d, catalogue := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, repository)
-	restoreCtx, cancelRestore := context.WithCancel(context.Background())
-	restored := make(chan struct{})
-	go func() {
-		d.restoreIncrementalSnapshots(restoreCtx)
-		close(restored)
-	}()
-	<-repository.started
+	synctest.Test(t, func(t *testing.T) {
+		record := durableRecoveryRecord(0)
+		repository, started := newCancellationRecoveryRepository(t)
+		d, catalogue := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, repository)
+		restoreCtx, cancelRestore := context.WithCancel(context.Background())
+		restored := make(chan struct{})
+		go func() {
+			d.restoreIncrementalSnapshots(restoreCtx)
+			close(restored)
+		}()
+		<-started
 
-	attached := make(chan error, 1)
-	go func() {
-		_, _, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: record.Name, Size: domain.Size{Cols: 80, Rows: 24}}, nil)
-		attached <- err
-	}()
-	cancelRestore()
+		attached := make(chan error, 1)
+		go func() {
+			_, _, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: record.Name, Size: domain.Size{Cols: 80, Rows: 24}}, nil)
+			attached <- err
+		}()
+		cancelRestore()
 
-	var protocolError *protoErr
-	require.ErrorAs(t, <-attached, &protocolError)
-	require.Equal(t, protocol.ErrInternal, protocolError.code)
-	<-restored
-	entry := d.inactive[record.Name]
-	require.Equal(t, protocol.SessionBroken, entry.state)
-	require.Equal(t, "restore interrupted", entry.record.DegradedReason)
-	select {
-	case <-entry.restoreDone:
-	default:
-		t.Fatal("restore completion was not signaled")
-	}
-	committed, _, _ := catalogue.Record(record.Name)
-	require.Equal(t, entry.record, committed)
+		var protocolError *protoErr
+		require.ErrorAs(t, <-attached, &protocolError)
+		require.Equal(t, protocol.ErrInternal, protocolError.code)
+		<-restored
+		entry := d.inactive[record.Name]
+		require.Equal(t, protocol.SessionBroken, entry.state)
+		require.Equal(t, "restore interrupted", entry.record.DegradedReason)
+		select {
+		case <-entry.restoreDone:
+		default:
+			t.Fatal("restore completion was not signaled")
+		}
+		committed, _, _ := catalogue.Record(record.Name)
+		require.Equal(t, entry.record, committed)
+	})
 }
 
 func TestWaitForTargetRestoreRejectsClosedRestoringChannel(t *testing.T) {
-	record := durableRecoveryRecord(0)
-	d, _ := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, newRecoveryRepositoryMock(t, nil))
-	d.mu.Lock()
-	closeRuntimeRestoreDoneLocked(d.inactive[record.Name].restoreDone)
-	d.mu.Unlock()
+	synctest.Test(t, func(t *testing.T) {
+		record := durableRecoveryRecord(0)
+		d, _ := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, newRecoveryRepositoryMock(t, nil))
+		d.mu.Lock()
+		closeRuntimeRestoreDoneLocked(d.inactive[record.Name].restoreDone)
+		d.mu.Unlock()
 
-	result := make(chan error, 1)
-	go func() { result <- d.waitForTargetRestore(context.Background(), record.Name) }()
+		result := make(chan error, 1)
+		go func() { result <- d.waitForTargetRestore(context.Background(), record.Name) }()
 
-	select {
-	case err := <-result:
+		err := requireReceived(t, result, "waiter spun on a closed restore channel")
 		var protocolError *protoErr
 		require.ErrorAs(t, err, &protocolError)
 		require.Equal(t, protocol.ErrInternal, protocolError.code)
-	case <-time.After(time.Second):
-		t.Fatal("waiter spun on a closed restore channel")
-	}
+	})
 }
 
 // A healthy catalogue record whose runtime registration was skipped is not
@@ -786,60 +835,68 @@ func TestWaitForTargetRestoreDistinguishesHealthyRuntime(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d, _ := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, newRecoveryRepositoryMock(t, nil))
-			d.setStoppedRecovery(record, tt.state)
-			d.mu.Lock()
-			closeRuntimeRestoreDoneLocked(d.inactive[record.Name].restoreDone)
-			d.mu.Unlock()
+			synctest.Test(t, func(t *testing.T) {
+				d, _ := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, newRecoveryRepositoryMock(t, nil))
+				d.setStoppedRecovery(record, tt.state)
+				d.mu.Lock()
+				closeRuntimeRestoreDoneLocked(d.inactive[record.Name].restoreDone)
+				d.mu.Unlock()
 
-			var protocolError *protoErr
-			require.ErrorAs(t, d.waitForTargetRestore(context.Background(), record.Name), &protocolError)
-			require.Equal(t, protocol.ErrInternal, protocolError.code)
-			require.Equal(t, tt.message, protocolError.Error())
+				var protocolError *protoErr
+				require.ErrorAs(t, d.waitForTargetRestore(context.Background(), record.Name), &protocolError)
+				require.Equal(t, protocol.ErrInternal, protocolError.code)
+				require.Equal(t, tt.message, protocolError.Error())
+			})
 		})
 	}
 }
 
 func TestAttachRejectsDegraded(t *testing.T) {
-	record := durableRecoveryRecord(0)
-	record.DegradedReason = "checkpoint validation failed"
-	factory := &recoveryCountingPTYFactory{}
-	d := New(factory, newStubClock(t), slog.New(slog.NewTextHandler(io.Discard, nil)), WithCatalogue(newRecoveryCatalogueOnly(t, []domain.CatalogueRecord{record}), []domain.CatalogueRecord{record}))
-	d.serveCtx, d.serveCancel = context.WithCancel(context.Background())
-	defer d.serveCancel()
+	synctest.Test(t, func(t *testing.T) {
+		record := durableRecoveryRecord(0)
+		record.DegradedReason = "checkpoint validation failed"
+		factory, calls := newCountingPTYFactory(t)
+		d := New(factory, newStubClock(t), slog.New(slog.NewTextHandler(io.Discard, nil)), WithCatalogue(newRecoveryCatalogueOnly(t, []domain.CatalogueRecord{record}), []domain.CatalogueRecord{record}))
+		d.serveCtx, d.serveCancel = context.WithCancel(context.Background())
+		defer d.serveCancel()
 
-	_, _, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: record.Name, Size: domain.Size{Cols: 80, Rows: 24}}, nil)
-	var protocolError *protoErr
-	require.ErrorAs(t, err, &protocolError)
-	require.Equal(t, protocol.ErrInternal, protocolError.code)
-	require.Zero(t, factory.calls.Load())
+		_, _, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: record.Name, Size: domain.Size{Cols: 80, Rows: 24}}, nil)
+		var protocolError *protoErr
+		require.ErrorAs(t, err, &protocolError)
+		require.Equal(t, protocol.ErrInternal, protocolError.code)
+		require.Zero(t, calls.Load())
+	})
 }
 
 func TestRestoreUnavailableReleasesPerRecordWaiters(t *testing.T) {
-	record := durableRecoveryRecord(0)
-	d, _ := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, nil)
-	d.closeRestoreDone()
+	synctest.Test(t, func(t *testing.T) {
+		record := durableRecoveryRecord(0)
+		d, _ := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, nil)
+		d.closeRestoreDone()
 
-	d.mu.Lock()
-	entry := d.inactive[record.Name]
-	d.mu.Unlock()
-	require.Equal(t, protocol.SessionBroken, entry.state)
-	select {
-	case <-entry.restoreDone:
-	default:
-		t.Fatal("per-record restore waiter remained blocked when repository was unavailable")
-	}
+		d.mu.Lock()
+		entry := d.inactive[record.Name]
+		d.mu.Unlock()
+		require.Equal(t, protocol.SessionBroken, entry.state)
+		select {
+		case <-entry.restoreDone:
+		default:
+			t.Fatal("per-record restore waiter remained blocked when repository was unavailable")
+		}
+	})
 }
 
 func TestCatalogueRestoreDegradedVisible(t *testing.T) {
-	record := durableRecoveryRecord(0)
-	record.DegradedReason = "checkpoint validation failed"
-	repositoryState := &recoveryRepositoryState{generations: make(map[string]ports.SnapshotGeneration), errors: make(map[string]error), loads: make(map[string]int), repairs: make(map[string]domain.CheckpointRef)}
-	repository := newRecoveryRepositoryMock(t, repositoryState)
-	d, _ := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, repository)
+	synctest.Test(t, func(t *testing.T) {
+		record := durableRecoveryRecord(0)
+		record.DegradedReason = "checkpoint validation failed"
+		repositoryState := &recoveryRepositoryState{generations: make(map[string]ports.SnapshotGeneration), errors: make(map[string]error), loads: make(map[string]int), repairs: make(map[string]domain.CheckpointRef)}
+		repository := newRecoveryRepositoryMock(t, repositoryState)
+		d, _ := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, repository)
 
-	d.restoreIncrementalSnapshots(context.Background())
+		d.restoreIncrementalSnapshots(context.Background())
 
-	require.Equal(t, protocol.SessionBroken, d.inactive[record.Name].state)
-	require.Zero(t, repositoryState.loads[record.Name])
+		require.Equal(t, protocol.SessionBroken, d.inactive[record.Name].state)
+		require.Zero(t, repositoryState.loads[record.Name])
+	})
 }

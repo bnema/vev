@@ -2,10 +2,12 @@ package daemon
 
 import (
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/stretchr/testify/require"
 )
 
@@ -44,6 +46,7 @@ func TestSessionCorePreservesLocalIdentityAndPromotedMutex(t *testing.T) {
 	sess.mu.Unlock()
 }
 
+//testpolicy:realtime a goroutine blocked on sync.Mutex is not durably blocked, so no bubble can settle the negative check below
 func TestSessionSnapshotViewUsesPromotedMutexForLocalTabAndRoleState(t *testing.T) {
 	sess := &session{
 		sessionCore: sessionCore{id: domain.SessionID("local"), name: "work"},
@@ -69,7 +72,11 @@ func TestSessionSnapshotViewUsesPromotedMutexForLocalTabAndRoleState(t *testing.
 		<-allowCall
 		snapshotted <- sess.snapshotView(viewOptions{})
 	}()
-	awaitTestCompletion(t, preCall, "snapshot goroutine did not reach the pre-call barrier")
+	select {
+	case <-preCall:
+	case <-time.After(testWaitTimeout):
+		t.Fatal("snapshot goroutine did not reach the pre-call barrier")
+	}
 	close(allowCall)
 
 	// Give the released call a bounded opportunity to acquire the mutex; it
@@ -84,7 +91,12 @@ func TestSessionSnapshotViewUsesPromotedMutexForLocalTabAndRoleState(t *testing.
 	require.Equal(t, true, sess.attachmentRegisteredLocked(ac))
 	sess.core().mu.Unlock()
 
-	view := awaitTestValue(t, snapshotted, "snapshotView did not complete after sessionCore.mu was released")
+	var view sessionView
+	select {
+	case view = <-snapshotted:
+	case <-time.After(testWaitTimeout):
+		t.Fatal("snapshotView did not complete after sessionCore.mu was released")
+	}
 	require.True(t, view.attached)
 	require.Equal(t, 2, view.tabCount)
 	require.Equal(t, 0, view.defaultTab)
@@ -149,4 +161,39 @@ func mustLocalSession(t *testing.T, entry *session) *session {
 	t.Helper()
 	require.NotNil(t, entry)
 	return entry
+}
+
+// requireQueuedFrame is the bubble form of awaitFrame: after quiescence it
+// consumes queued envelopes until one decodes to want, failing if none does.
+func requireQueuedFrame(t *testing.T, ch <-chan wire.Envelope, want string) wire.Envelope {
+	t.Helper()
+	synctest.Wait()
+	for {
+		select {
+		case f := <-ch:
+			if envelopeMessageName(t, f.Payload) == want {
+				return f
+			}
+		default:
+			t.Fatalf("envelope %s was not sent", want)
+			return wire.Envelope{}
+		}
+	}
+}
+
+// receiveBounded is for tests that cannot run in a synctest bubble (goroutines
+// blocked on sync.Mutex never become durably blocked): one bounded failure
+// guard, no polling.
+//
+//testpolicy:realtime mutex-blocked goroutines are invisible to synctest
+func receiveBounded[T any](t *testing.T, ch <-chan T, failure string) T {
+	t.Helper()
+	select {
+	case value := <-ch:
+		return value
+	case <-time.After(testWaitTimeout):
+		t.Fatal(failure)
+		var zero T
+		return zero
+	}
 }

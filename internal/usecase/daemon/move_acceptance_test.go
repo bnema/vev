@@ -4,10 +4,12 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/domain/layout"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 )
 
 func catalogueUpdateNames(updates []domain.CatalogueMetadataUpdate) []string {
@@ -27,17 +29,15 @@ type moveCatalogueRecorder struct {
 	lockViolation bool
 }
 
-func (c *moveCatalogueRecorder) Records() ([]domain.CatalogueRecord, error) { return nil, nil }
-func (c *moveCatalogueRecorder) Record(string) (domain.CatalogueRecord, bool, error) {
-	return domain.CatalogueRecord{}, false, nil
+// mock serves the recorder through a generated catalogue mock.
+func (c *moveCatalogueRecorder) mock(t testing.TB) *portsmocks.MockCatalogue {
+	catalogue, _ := newRecoveryCatalogueMock(t, nil, func(m *portsmocks.MockCatalogue, _ *recoveryCatalogueState) {
+		m.EXPECT().UpdateMetadata(mock.Anything).RunAndReturn(c.updateMetadata).Maybe()
+	})
+	return catalogue
 }
-func (c *moveCatalogueRecorder) Create(domain.CatalogueRecord) error          { return nil }
-func (c *moveCatalogueRecorder) Replace(string, domain.CatalogueRecord) error { return nil }
-func (c *moveCatalogueRecorder) Rename(string, domain.CatalogueRecord) error  { return nil }
-func (c *moveCatalogueRecorder) Delete(string) error                          { return nil }
-func (c *moveCatalogueRecorder) Sync() error                                  { return nil }
-func (c *moveCatalogueRecorder) Close() error                                 { return nil }
-func (c *moveCatalogueRecorder) UpdateMetadata(update domain.CatalogueMetadataUpdate) error {
+
+func (c *moveCatalogueRecorder) updateMetadata(update domain.CatalogueMetadataUpdate) error {
 	violated := false
 	if c.daemon.mu.TryLock() {
 		c.daemon.mu.Unlock()
@@ -100,7 +100,7 @@ func TestMovePaneAcceptanceRetainsSourceFocusAndDestinationActivity(t *testing.T
 	source.snapEligible.Store(true)
 	destination.snapEligible.Store(true)
 	catalogue := &moveCatalogueRecorder{daemon: d, source: source, destination: destination}
-	d.catalogue = catalogue
+	d.catalogue = catalogue.mock(t)
 	d.persistEnabled = true
 	source.snapshotMu.Lock()
 	beforeSourceSnapshot := source.snapshotGeneration

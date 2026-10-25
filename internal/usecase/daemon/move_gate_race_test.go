@@ -3,7 +3,7 @@ package daemon
 import (
 	"sync"
 	"testing"
-	"time"
+	"testing/synctest"
 
 	"github.com/stretchr/testify/require"
 
@@ -45,72 +45,63 @@ func moveGateRaceRequest(source *session, sourceTab *tab, moved *pane, destinati
 
 func waitMoveRace[T any](t *testing.T, ch <-chan T, name string) T {
 	t.Helper()
-	select {
-	case value := <-ch:
-		return value
-	case <-timeAfterMoveRace():
-		t.Fatalf("%s did not finish", name)
-		var zero T
-		return zero
-	}
-}
-
-// timeAfterMoveRace is kept in one helper so these barrier tests use a
-// deterministic bounded wait rather than sleeps.
-func timeAfterMoveRace() <-chan time.Time {
-	return time.After(testWaitTimeout)
+	return requireReceived(t, ch, name+" did not finish")
 }
 
 func TestMovePaneGateReservationRaceKillWinsWithoutDeadlock(t *testing.T) {
-	d, source, sourceTab, moved, destination, destinationTab, releasePTYs := newMoveGateRaceFixture(t)
-	defer releasePTYs()
+	synctest.Test(t, func(t *testing.T) {
+		d, source, sourceTab, moved, destination, destinationTab, releasePTYs := newMoveGateRaceFixture(t)
+		defer releasePTYs()
 
-	moveReserved := make(chan struct{})
-	releaseMoveAdmission := make(chan struct{})
-	d.afterMoveLifecycleReserved = func() {
-		close(moveReserved)
-		<-releaseMoveAdmission
-	}
-	killFrozen := make(chan struct{})
-	releaseKill := make(chan struct{})
-	var killFrozenOnce sync.Once
-	d.afterAttachmentEffectGateFrozen = func(action string, _ *attachedClient) {
-		if action != "" {
-			return
+		moveReserved := make(chan struct{})
+		releaseMoveAdmission := make(chan struct{})
+		d.afterMoveLifecycleReserved = func() {
+			close(moveReserved)
+			<-releaseMoveAdmission
 		}
-		killFrozenOnce.Do(func() { close(killFrozen) })
-		<-releaseKill
-	}
-	defer func() {
-		d.afterMoveLifecycleReserved = nil
-		d.afterAttachmentEffectGateFrozen = nil
-	}()
+		killFrozen := make(chan struct{})
+		releaseKill := make(chan struct{})
+		var killFrozenOnce sync.Once
+		d.afterAttachmentEffectGateFrozen = func(action string, _ *attachedClient) {
+			if action != "" {
+				return
+			}
+			killFrozenOnce.Do(func() { close(killFrozen) })
+			<-releaseKill
+		}
+		defer func() {
+			d.afterMoveLifecycleReserved = nil
+			d.afterAttachmentEffectGateFrozen = nil
+		}()
 
-	moveDone := make(chan error, 1)
-	go func() {
-		moveDone <- d.movePane(moveGateRaceRequest(source, sourceTab, moved, destination, destinationTab))
-	}()
-	waitMoveRace(t, moveReserved, "move reservation")
+		moveDone := make(chan error, 1)
+		go func() {
+			moveDone <- d.movePane(moveGateRaceRequest(source, sourceTab, moved, destination, destinationTab))
+		}()
+		waitMoveRace(t, moveReserved, "move reservation")
 
-	killDone := make(chan error, 1)
-	go func() { killDone <- d.killSession(source, protocol.ReasonSessionKilled, false) }()
-	waitMoveRace(t, killFrozen, "kill gate freeze")
-	close(releaseMoveAdmission)
-	moveErr := waitMoveRace(t, moveDone, "move abort after kill gate acquisition")
-	close(releaseKill)
-	killErr := waitMoveRace(t, killDone, "kill teardown")
+		killDone := make(chan error, 1)
+		go func() { killDone <- d.killSession(source, protocol.ReasonSessionKilled, false) }()
+		waitMoveRace(t, killFrozen, "kill gate freeze")
+		close(releaseMoveAdmission)
+		moveErr := waitMoveRace(t, moveDone, "move abort after kill gate acquisition")
+		close(releaseKill)
+		killErr := waitMoveRace(t, killDone, "kill teardown")
 
-	require.ErrorIs(t, moveErr, errMovePaneInvalid)
-	require.NoError(t, killErr)
-	d.mu.Lock()
-	_, sourceLive := d.sessions[source.id]
-	_, destinationLive := d.sessions[destination.id]
-	d.mu.Unlock()
-	require.False(t, sourceLive, "kill winner must retire the source")
-	require.True(t, destinationLive)
-	require.NotSame(t, moved, destination.tabs[0].panes[moved.id], "kill winner must not publish a partial destination move")
+		require.ErrorIs(t, moveErr, errMovePaneInvalid)
+		require.NoError(t, killErr)
+		d.mu.Lock()
+		_, sourceLive := d.sessions[source.id]
+		_, destinationLive := d.sessions[destination.id]
+		d.mu.Unlock()
+		require.False(t, sourceLive, "kill winner must retire the source")
+		require.True(t, destinationLive)
+		require.NotSame(t, moved, destination.tabs[0].panes[moved.id], "kill winner must not publish a partial destination move")
+	})
 }
 
+// Not a synctest bubble: the move goroutine blocks on the dispatch mutex before
+// its hook runs, and mutex waits are not durably blocked.
 func TestFinalCloseDoesNotDeadlockWithMoveDispatchAdmission(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -160,15 +151,15 @@ func TestFinalCloseDoesNotDeadlockWithMoveDispatchAdmission(t *testing.T) {
 
 			closeDone := make(chan error, 1)
 			go func() { closeDone <- test.close(d, source, sourceTab, moved) }()
-			waitMoveRace(t, closeReady, "final close participant snapshot")
+			receiveBounded(t, closeReady, "final close participant snapshot did not finish")
 
 			moveDone := make(chan error, 1)
 			go func() { moveDone <- test.move(d, source, sourceTab, moved, destination, destinationTab) }()
-			waitMoveRace(t, moveDispatchReady, "move dispatch admission")
+			receiveBounded(t, moveDispatchReady, "move dispatch admission did not finish")
 			close(releaseClose)
 
-			require.NoError(t, waitMoveRace(t, closeDone, "final close"))
-			require.ErrorIs(t, waitMoveRace(t, moveDone, "move after final close"), errMoveStaleTarget)
+			require.NoError(t, receiveBounded(t, closeDone, "final close did not finish"))
+			require.ErrorIs(t, receiveBounded(t, moveDone, "move after final close did not finish"), errMoveStaleTarget)
 			d.mu.Lock()
 			_, sourceLive := d.sessions[source.id]
 			_, destinationLive := d.sessions[destination.id]
@@ -183,111 +174,115 @@ func TestFinalCloseDoesNotDeadlockWithMoveDispatchAdmission(t *testing.T) {
 }
 
 func TestPaletteFinalCloseEndsCurrentEffectBeforeDrainingPeers(t *testing.T) {
-	d, sess, current, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
-	d.attachCoordinator(sess, nil, current, true)
-	otherTransport := newQuietConnection(t)
-	other := &attachedClient{tr: otherTransport, output: newOutputStateStream(), geometry: domain.Geometry{Size: current.geometry.Size}}
-	other.initOverlays()
-	other.setSession(sess)
-	sess.mu.Lock()
-	require.True(t, sess.registerAttachmentLocked(other))
-	sess.mu.Unlock()
-	d.attachCoordinator(sess, nil, other, true)
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, current, _ := newManualSessionWithPTYs(t, newQuietPTY(t))
+		d.attachCoordinator(sess, nil, current, true)
+		otherTransport := newQuietConnection(t)
+		other := &attachedClient{tr: otherTransport, output: newOutputStateStream(), geometry: domain.Geometry{Size: current.geometry.Size}}
+		other.initOverlays()
+		other.setSession(sess)
+		sess.mu.Lock()
+		require.True(t, sess.registerAttachmentLocked(other))
+		sess.mu.Unlock()
+		d.attachCoordinator(sess, nil, other, true)
 
-	currentToken := sess.captureAttachmentCapability(current, current.transport())
-	currentEffect, admitted := current.beginAttachmentEffect(currentToken)
-	require.True(t, admitted)
-	t.Cleanup(currentEffect.End)
-	otherToken := sess.captureAttachmentCapability(other, otherTransport)
-	otherEffect, admitted := other.beginAttachmentEffect(otherToken)
-	require.True(t, admitted)
-	t.Cleanup(otherEffect.End)
+		currentToken := sess.captureAttachmentCapability(current, current.transport())
+		currentEffect, admitted := current.beginAttachmentEffect(currentToken)
+		require.True(t, admitted)
+		t.Cleanup(currentEffect.End)
+		otherToken := sess.captureAttachmentCapability(other, otherTransport)
+		otherEffect, admitted := other.beginAttachmentEffect(otherToken)
+		require.True(t, admitted)
+		t.Cleanup(otherEffect.End)
 
-	currentEnded := make(chan struct{})
-	currentReleasedBeforePeerFreeze := make(chan struct{})
-	otherFrozen := make(chan struct{})
-	d.afterActionAttachmentEffectEnded = func(action string) {
-		if action == "close-tab" {
-			close(currentEnded)
-		}
-	}
-	d.afterAttachmentEffectGateFrozen = func(action string, ac *attachedClient) {
-		if action == "close-tab" && ac == other {
-			if currentEffect.ended.Load() {
-				close(currentReleasedBeforePeerFreeze)
+		currentEnded := make(chan struct{})
+		currentReleasedBeforePeerFreeze := make(chan struct{})
+		otherFrozen := make(chan struct{})
+		d.afterActionAttachmentEffectEnded = func(action string) {
+			if action == "close-tab" {
+				close(currentEnded)
 			}
-			close(otherFrozen)
 		}
-	}
-	defer func() {
-		d.afterActionAttachmentEffectEnded = nil
-		d.afterAttachmentEffectGateFrozen = nil
-	}()
+		d.afterAttachmentEffectGateFrozen = func(action string, ac *attachedClient) {
+			if action == "close-tab" && ac == other {
+				if currentEffect.ended.Load() {
+					close(currentReleasedBeforePeerFreeze)
+				}
+				close(otherFrozen)
+			}
+		}
+		defer func() {
+			d.afterActionAttachmentEffectEnded = nil
+			d.afterAttachmentEffectGateFrozen = nil
+		}()
 
-	closeDone := make(chan error, 1)
-	go func() {
-		sess.dispatchMu.Lock()
-		defer sess.dispatchMu.Unlock()
-		closeDone <- (paletteExec{d: d, sess: sess, ac: current, effect: currentEffect}).CloseTab()
-	}()
-	waitMoveRace(t, otherFrozen, "peer effect gate freeze")
-	waitMoveRace(t, currentReleasedBeforePeerFreeze, "current effect release before peer drain")
-	waitMoveRace(t, currentEnded, "current palette effect completion")
-	select {
-	case err := <-closeDone:
-		t.Fatalf("final close drained its own peer before release: %v", err)
-	default:
-	}
-	otherEffect.End()
-	require.NoError(t, waitMoveRace(t, closeDone, "palette final close"))
-	requireAttachmentEffectGateRetired(t, current)
-	requireAttachmentEffectGateRetired(t, other)
+		closeDone := make(chan error, 1)
+		go func() {
+			sess.dispatchMu.Lock()
+			defer sess.dispatchMu.Unlock()
+			closeDone <- (paletteExec{d: d, sess: sess, ac: current, effect: currentEffect}).CloseTab()
+		}()
+		waitMoveRace(t, otherFrozen, "peer effect gate freeze")
+		waitMoveRace(t, currentReleasedBeforePeerFreeze, "current effect release before peer drain")
+		waitMoveRace(t, currentEnded, "current palette effect completion")
+		select {
+		case err := <-closeDone:
+			t.Fatalf("final close drained its own peer before release: %v", err)
+		default:
+		}
+		otherEffect.End()
+		require.NoError(t, waitMoveRace(t, closeDone, "palette final close"))
+		requireAttachmentEffectGateRetired(t, current)
+		requireAttachmentEffectGateRetired(t, other)
+	})
 }
 
 func TestMovePaneGateReservationRaceMoveWinsWithoutDeadlock(t *testing.T) {
-	d, source, sourceTab, moved, destination, destinationTab, releasePTYs := newMoveGateRaceFixture(t)
-	defer releasePTYs()
+	synctest.Test(t, func(t *testing.T) {
+		d, source, sourceTab, moved, destination, destinationTab, releasePTYs := newMoveGateRaceFixture(t)
+		defer releasePTYs()
 
-	moveGateFrozen := make(chan struct{})
-	releaseMove := make(chan struct{})
-	var moveGateFrozenOnce sync.Once
-	d.afterAttachmentEffectGateFrozen = func(action string, _ *attachedClient) {
-		if action != "move-pane" {
-			return
+		moveGateFrozen := make(chan struct{})
+		releaseMove := make(chan struct{})
+		var moveGateFrozenOnce sync.Once
+		d.afterAttachmentEffectGateFrozen = func(action string, _ *attachedClient) {
+			if action != "move-pane" {
+				return
+			}
+			moveGateFrozenOnce.Do(func() { close(moveGateFrozen) })
+			<-releaseMove
 		}
-		moveGateFrozenOnce.Do(func() { close(moveGateFrozen) })
-		<-releaseMove
-	}
-	killSnapshotted := make(chan struct{})
-	var killSnapshottedOnce sync.Once
-	d.afterAttachmentEffectParticipantsSnapshotted = func(action string, _ []*attachedClient) {
-		if action == "" {
-			killSnapshottedOnce.Do(func() { close(killSnapshotted) })
+		killSnapshotted := make(chan struct{})
+		var killSnapshottedOnce sync.Once
+		d.afterAttachmentEffectParticipantsSnapshotted = func(action string, _ []*attachedClient) {
+			if action == "" {
+				killSnapshottedOnce.Do(func() { close(killSnapshotted) })
+			}
 		}
-	}
-	defer func() {
-		d.afterAttachmentEffectGateFrozen = nil
-		d.afterAttachmentEffectParticipantsSnapshotted = nil
-	}()
+		defer func() {
+			d.afterAttachmentEffectGateFrozen = nil
+			d.afterAttachmentEffectParticipantsSnapshotted = nil
+		}()
 
-	moveDone := make(chan error, 1)
-	go func() {
-		moveDone <- d.movePane(moveGateRaceRequest(source, sourceTab, moved, destination, destinationTab))
-	}()
-	waitMoveRace(t, moveGateFrozen, "move gate freeze")
+		moveDone := make(chan error, 1)
+		go func() {
+			moveDone <- d.movePane(moveGateRaceRequest(source, sourceTab, moved, destination, destinationTab))
+		}()
+		waitMoveRace(t, moveGateFrozen, "move gate freeze")
 
-	killDone := make(chan error, 1)
-	go func() { killDone <- d.killSession(source, protocol.ReasonSessionKilled, false) }()
-	waitMoveRace(t, killSnapshotted, "kill participant snapshot")
-	close(releaseMove)
+		killDone := make(chan error, 1)
+		go func() { killDone <- d.killSession(source, protocol.ReasonSessionKilled, false) }()
+		waitMoveRace(t, killSnapshotted, "kill participant snapshot")
+		close(releaseMove)
 
-	require.NoError(t, waitMoveRace(t, moveDone, "move commit"))
-	require.NoError(t, waitMoveRace(t, killDone, "kill loser"))
-	d.mu.Lock()
-	_, sourceLive := d.sessions[source.id]
-	_, destinationLive := d.sessions[destination.id]
-	d.mu.Unlock()
-	require.False(t, sourceLive)
-	require.True(t, destinationLive)
-	require.Same(t, moved, destinationTab.panes[moved.id])
+		require.NoError(t, waitMoveRace(t, moveDone, "move commit"))
+		require.NoError(t, waitMoveRace(t, killDone, "kill loser"))
+		d.mu.Lock()
+		_, sourceLive := d.sessions[source.id]
+		_, destinationLive := d.sessions[destination.id]
+		d.mu.Unlock()
+		require.False(t, sourceLive)
+		require.True(t, destinationLive)
+		require.Same(t, moved, destinationTab.panes[moved.id])
+	})
 }
