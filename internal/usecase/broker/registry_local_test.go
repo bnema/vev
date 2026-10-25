@@ -13,12 +13,13 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/stretchr/testify/mock"
 )
 
 // scriptedLocalProbe scripts one local observation per received call: the test
 // owns the completion, so the local probe never depends on wall time.
-// Missing mock: broker.LocalProbe has no generated mock; retain this local seam.
 type scriptedLocalProbe struct {
+	mock     *MockLocalProbe
 	calls    chan localProbeCall
 	canceled chan struct{}
 }
@@ -32,11 +33,31 @@ type localProbeAnswer struct {
 	err      error
 }
 
-func newScriptedLocalProbe(capacity int) *scriptedLocalProbe {
-	return &scriptedLocalProbe{calls: make(chan localProbeCall, capacity), canceled: make(chan struct{}, 1)}
+func newScriptedLocalProbe(t testing.TB, capacity int) *scriptedLocalProbe {
+	t.Helper()
+	state := &scriptedLocalProbe{calls: make(chan localProbeCall, capacity), canceled: make(chan struct{}, 1)}
+	state.mock = buildLocalProbeMock(t, state)
+	return state
 }
 
-func (p *scriptedLocalProbe) ProbeLocal(ctx context.Context) (ports.BrokerDaemonObservation, error) {
+// newLocalProbeMock builds a MockLocalProbe: options register overrides first,
+// then the optional scripted default is registered.
+func newLocalProbeMock(t testing.TB, opts ...func(*MockLocalProbe, *scriptedLocalProbe)) *MockLocalProbe {
+	t.Helper()
+	return buildLocalProbeMock(t, &scriptedLocalProbe{calls: make(chan localProbeCall, 1), canceled: make(chan struct{}, 1)}, opts...)
+}
+
+func buildLocalProbeMock(t testing.TB, state *scriptedLocalProbe, opts ...func(*MockLocalProbe, *scriptedLocalProbe)) *MockLocalProbe {
+	t.Helper()
+	m := NewMockLocalProbe(t)
+	for _, opt := range opts {
+		opt(m, state)
+	}
+	m.EXPECT().ProbeLocal(mock.Anything).RunAndReturn(state.probeLocal).Maybe()
+	return m
+}
+
+func (p *scriptedLocalProbe) probeLocal(ctx context.Context) (ports.BrokerDaemonObservation, error) {
 	call := localProbeCall{result: make(chan localProbeAnswer, 1)}
 	select {
 	case p.calls <- call:
@@ -117,8 +138,8 @@ func TestRegistryPublishesObservedLocalDaemonFirst(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		clock := newManualClock(t, time.Unix(100, 0))
 		store := newTestStore()
-		local := newScriptedLocalProbe(1)
-		registry := newLocalTestRegistry(t, store, newTestProbe(1), local, clock)
+		local := newScriptedLocalProbe(t, 1)
+		registry := newLocalTestRegistry(t, store, newTestProbe(1), local.mock, clock)
 		reg := registration(t, "user@host:22", 1)
 		require.NoError(t, registry.setHosts(hostRecords(reg)))
 		startRegistry(t, registry)
@@ -166,8 +187,8 @@ func TestRegistryLocalObservationNeverInventsState(t *testing.T) {
 	t.Run("failure keeps zero identity and typed availability", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			clock := newManualClock(t, time.Unix(100, 0))
-			local := newScriptedLocalProbe(1)
-			registry := newLocalTestRegistry(t, newTestStore(), newTestProbe(1), local, clock)
+			local := newScriptedLocalProbe(t, 1)
+			registry := newLocalTestRegistry(t, newTestStore(), newTestProbe(1), local.mock, clock)
 			startRegistry(t, registry)
 
 			call := receiveLocalCall(t, local)
@@ -190,8 +211,8 @@ func TestRegistryLocalObservationNeverInventsState(t *testing.T) {
 	t.Run("hostile probe cannot supply local authority", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			clock := newManualClock(t, time.Unix(100, 0))
-			local := newScriptedLocalProbe(1)
-			registry := newLocalTestRegistry(t, newTestStore(), newTestProbe(1), local, clock)
+			local := newScriptedLocalProbe(t, 1)
+			registry := newLocalTestRegistry(t, newTestStore(), newTestProbe(1), local.mock, clock)
 			startRegistry(t, registry)
 
 			hostilePolicy := poolPolicy()
@@ -278,8 +299,8 @@ func TestRegistryLocalPendingReprobeHonorsExplicitReconcileOnly(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				clock := newManualClock(t, time.Unix(100, 0))
-				local := newScriptedLocalProbe(2)
-				registry := newLocalTestRegistry(t, newTestStore(), nil, local, clock)
+				local := newScriptedLocalProbe(t, 2)
+				registry := newLocalTestRegistry(t, newTestStore(), nil, local.mock, clock)
 				startRegistry(t, registry)
 
 				call := receiveLocalCall(t, local)
@@ -311,8 +332,8 @@ func TestRegistryLocalPendingReprobeHonorsExplicitReconcileOnly(t *testing.T) {
 func TestRegistryLocalObservationValidatesProbeResults(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		clock := newManualClock(t, time.Unix(100, 0))
-		local := newScriptedLocalProbe(1)
-		registry := newLocalTestRegistry(t, newTestStore(), newTestProbe(1), local, clock)
+		local := newScriptedLocalProbe(t, 1)
+		registry := newLocalTestRegistry(t, newTestStore(), newTestProbe(1), local.mock, clock)
 		startRegistry(t, registry)
 
 		call := receiveLocalCall(t, local)
@@ -336,7 +357,7 @@ func TestRegistryLocalObservationValidatesProbeResults(t *testing.T) {
 // and its policy and display origin are validated before anything is published.
 func TestRegistryLocalObservationConstruction(t *testing.T) {
 	clock := newManualClock(t, time.Unix(100, 0))
-	valid := &LocalObservation{DisplayOrigin: "local", Policy: poolPolicy(), Probe: newScriptedLocalProbe(1)}
+	valid := &LocalObservation{DisplayOrigin: "local", Policy: poolPolicy(), Probe: newScriptedLocalProbe(t, 1).mock}
 
 	invalidPolicy := poolPolicy()
 	invalidPolicy.ProtocolVersion = 0
@@ -358,17 +379,17 @@ func TestRegistryLocalObservationConstruction(t *testing.T) {
 		},
 		{
 			name:        "local authority policy is validated",
-			cfg:         RegistryConfig{Local: &LocalObservation{DisplayOrigin: "local", Policy: invalidPolicy, Probe: newScriptedLocalProbe(1)}},
+			cfg:         RegistryConfig{Local: &LocalObservation{DisplayOrigin: "local", Policy: invalidPolicy, Probe: newScriptedLocalProbe(t, 1).mock}},
 			remoteProbe: newTestProbe(1),
 		},
 		{
 			name:        "local display origin is required",
-			cfg:         RegistryConfig{Local: &LocalObservation{DisplayOrigin: "", Policy: poolPolicy(), Probe: newScriptedLocalProbe(1)}},
+			cfg:         RegistryConfig{Local: &LocalObservation{DisplayOrigin: "", Policy: poolPolicy(), Probe: newScriptedLocalProbe(t, 1).mock}},
 			remoteProbe: newTestProbe(1),
 		},
 		{
 			name:        "local display origin must be normalized",
-			cfg:         RegistryConfig{Local: &LocalObservation{DisplayOrigin: "ev\u202eil", Policy: poolPolicy(), Probe: newScriptedLocalProbe(1)}},
+			cfg:         RegistryConfig{Local: &LocalObservation{DisplayOrigin: "ev\u202eil", Policy: poolPolicy(), Probe: newScriptedLocalProbe(t, 1).mock}},
 			remoteProbe: newTestProbe(1),
 		},
 		{
@@ -394,9 +415,9 @@ func TestRegistryLocalObservationConstruction(t *testing.T) {
 func TestRegistryLocalOnlyRequiresNoRemoteProbe(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		clock := newManualClock(t, time.Unix(100, 0))
-		local := newScriptedLocalProbe(1)
+		local := newScriptedLocalProbe(t, 1)
 		registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, newTestStore()), mockProbe(t, nil), clock.mock, nil, RegistryConfig{
-			Local: &LocalObservation{DisplayOrigin: "local", Policy: poolPolicy(), Probe: local},
+			Local: &LocalObservation{DisplayOrigin: "local", Policy: poolPolicy(), Probe: local.mock},
 		})
 		require.NoError(t, err)
 		registry.jitter = identityJitter
@@ -498,7 +519,7 @@ func TestRegistryLocalEntryStaysFirstAcrossMembershipChanges(t *testing.T) {
 		},
 	}
 	synctest.Test(t, func(t *testing.T) {
-		registry := newLocalTestRegistry(t, newTestStore(), newTestProbe(1), newScriptedLocalProbe(1), newManualClock(t, time.Unix(100, 0)))
+		registry := newLocalTestRegistry(t, newTestStore(), newTestProbe(1), newScriptedLocalProbe(t, 1).mock, newManualClock(t, time.Unix(100, 0)))
 		for _, tt := range steps {
 			func() {
 				t.Log(tt.name)
@@ -522,7 +543,7 @@ func TestRegistryLocalEntryStaysFirstAcrossMembershipChanges(t *testing.T) {
 func TestRegistryLocalOnlyRefusesRestoredRemoteMembership(t *testing.T) {
 	clock := newManualClock(t, time.Unix(100, 0))
 	local := func() *LocalObservation {
-		return &LocalObservation{DisplayOrigin: "local", Policy: poolPolicy(), Probe: newScriptedLocalProbe(1)}
+		return &LocalObservation{DisplayOrigin: "local", Policy: poolPolicy(), Probe: newScriptedLocalProbe(t, 1).mock}
 	}
 	reg := registration(t, "user@host:22", 1)
 
@@ -583,7 +604,7 @@ func TestPoolLocalStreamsShareOnePhysicalEntry(t *testing.T) {
 		default:
 		}
 		require.NoError(t, second.Close())
-		require.NoError(t, physical.Close())
+		require.NoError(t, physical.markClosed())
 
 	})
 }
@@ -600,11 +621,11 @@ func TestRegistryMutableAddHostLocalOnlyNoRemoteProbe(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		clock := newManualClock(t, time.Unix(100, 0))
 		store := newMembershipStore()
-		local := newScriptedLocalProbe(1)
+		local := newScriptedLocalProbe(t, 1)
 		registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, store), mockProbe(t, nil), clock.mock, nil, RegistryConfig{
 			MembershipMode:       MembershipMutable,
 			IncarnationGenerator: (&incarnationSequencer{}).generate,
-			Local:                &LocalObservation{DisplayOrigin: "local", Policy: poolPolicy(), Probe: local},
+			Local:                &LocalObservation{DisplayOrigin: "local", Policy: poolPolicy(), Probe: local.mock},
 		})
 		require.NoError(t, err)
 		registry.jitter = identityJitter

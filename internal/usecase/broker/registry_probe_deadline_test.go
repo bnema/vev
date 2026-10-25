@@ -16,14 +16,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// localProbeFunc adapts a function to LocalProbe. LocalProbe is a use-case-local
-// seam outside internal/ports, so no generated portsmocks mock exists for it.
-type localProbeFunc func(context.Context) (ports.BrokerDaemonObservation, error)
-
-func (f localProbeFunc) ProbeLocal(ctx context.Context) (ports.BrokerDaemonObservation, error) {
-	return f(ctx)
-}
-
 // TestRegistryProbeDeadlineReleasesAttempt proves every observation attempt,
 // local and remote, is bounded by the registry's ports.Clock deadline: a probe
 // that never answers (whether or not it honors cancellation) is recorded as a
@@ -80,7 +72,9 @@ func TestRegistryProbeDeadlineReleasesAttempt(t *testing.T) {
 				remote := portsmocks.NewMockBrokerHostProbe(t)
 				var localProbe *LocalObservation
 				if tt.local {
-					localProbe = &LocalObservation{DisplayOrigin: "local", Policy: poolPolicy(), Probe: localProbeFunc(observe)}
+					localProbe = &LocalObservation{DisplayOrigin: "local", Policy: poolPolicy(), Probe: newLocalProbeMock(t, func(m *MockLocalProbe, _ *scriptedLocalProbe) {
+						m.EXPECT().ProbeLocal(mock.Anything).RunAndReturn(observe).Maybe()
+					})}
 				} else {
 					remote.EXPECT().Probe(mock.Anything, reg).RunAndReturn(func(ctx context.Context, _ domain.RemoteRegistration) (ports.BrokerDaemonObservation, error) {
 						return observe(ctx)

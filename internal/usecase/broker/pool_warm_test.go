@@ -215,7 +215,7 @@ func TestPoolAdoptProbePhysical(t *testing.T) {
 				physical := &fakePhysical{endpoint: ports.BrokerDialTarget{Policy: poolPolicy(), ExpectedIdentity: ports.BrokerExpectedIdentity{Identity: "alpha", Bound: true}}, done: make(chan struct{})}
 				require.Equal(t, tt.want, h.pool.AdoptPhysical(mockPhysical(t, physical), poolPolicy()))
 				if !tt.want {
-					require.NoError(t, physical.Close())
+					require.NoError(t, physical.markClosed())
 					return
 				}
 				shared, ok := h.pool.SharedPhysical("alpha", poolPolicy())

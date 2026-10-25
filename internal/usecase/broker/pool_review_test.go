@@ -139,7 +139,7 @@ func TestPoolPostOpenPhysicalLoss(t *testing.T) {
 		p, _ := setupPool(t, func(_ context.Context, e ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
 			f := &fakePhysical{endpoint: e, done: make(chan struct{})}
 			f.open = func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerEnvelopeStream, error) {
-				_ = f.Close()
+				_ = f.markClosed()
 				return raw, nil
 			}
 			return mockPhysical(t, f), nil
@@ -165,7 +165,7 @@ func TestPoolTerminalPrecedence(t *testing.T) {
 				ctx, cancel := context.WithCancel(context.Background())
 				defer cancel()
 				f := &fakePhysical{done: make(chan struct{})}
-				_ = f.Close()
+				_ = f.markClosed()
 				e := &poolEntry{ctx: context.Background(), physical: mockPhysical(t, f)}
 				if name == "request over physical" {
 					cancel()

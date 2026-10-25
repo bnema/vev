@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/ports"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -67,27 +68,64 @@ func requireBrokerInvalid(t *testing.T, err error) {
 	require.Equal(t, ports.BrokerAdmissionInvalid, admission)
 }
 
-// Missing mock: broker.Closeable has no generated mock.
-type closeFunc func() error
+// closeableState records how often a Closeable mock was closed.
+type closeableState struct {
+	mu    sync.Mutex
+	calls int
+}
 
-func (f closeFunc) Close() error { return f() }
+func (s *closeableState) closed() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls
+}
 
-// blockingRunner stands in for a broker-owned background component such as the
+// newCloseableMock builds a MockCloseable: options register overrides first,
+// then the optional default (Close succeeds) is registered.
+func newCloseableMock(t testing.TB, opts ...func(*MockCloseable, *closeableState)) *MockCloseable {
+	t.Helper()
+	m := NewMockCloseable(t)
+	state := &closeableState{}
+	for _, opt := range opts {
+		opt(m, state)
+	}
+	m.EXPECT().Close().RunAndReturn(func() error {
+		state.mu.Lock()
+		state.calls++
+		state.mu.Unlock()
+		return nil
+	}).Maybe()
+	return m
+}
+
+// closeReturns makes the mock's Close run fn.
+func closeReturns(fn func() error) func(*MockCloseable, *closeableState) {
+	return func(m *MockCloseable, _ *closeableState) {
+		m.EXPECT().Close().RunAndReturn(fn).Maybe()
+	}
+}
+
+// runnerState stands in for a broker-owned background component such as the
 // observation Registry: it runs until cancellation and reports what it saw.
-// Missing mock: broker.Runner has no generated mock.
-type blockingRunner struct {
+type runnerState struct {
+	mock     *MockRunner
 	started  chan struct{}
 	observed chan error
 }
 
-func newBlockingRunner() *blockingRunner {
-	return &blockingRunner{started: make(chan struct{}), observed: make(chan error, 1)}
-}
-
-func (r *blockingRunner) Run(ctx context.Context) {
-	close(r.started)
-	<-ctx.Done()
-	r.observed <- ctx.Err()
+// newRunnerMock builds a MockRunner whose Run blocks until cancellation.
+func newRunnerMock(t testing.TB, opts ...func(*MockRunner, *runnerState)) *runnerState {
+	t.Helper()
+	state := &runnerState{mock: NewMockRunner(t), started: make(chan struct{}), observed: make(chan error, 1)}
+	for _, opt := range opts {
+		opt(state.mock, state)
+	}
+	state.mock.EXPECT().Run(mock.Anything).RunAndReturn(func(ctx context.Context) {
+		close(state.started)
+		<-ctx.Done()
+		state.observed <- ctx.Err()
+	}).Maybe()
+	return state
 }
 
 func TestSupervisorInitialIdleExpires(t *testing.T) {
@@ -111,8 +149,8 @@ func TestSupervisorInitialIdleExpires(t *testing.T) {
 		_, err = s.AdmitOperation()
 		requireBrokerClosed(t, err)
 		requireBrokerClosed(t, s.Register("late", func(context.Context) error { return nil }))
-		requireBrokerClosed(t, s.RegisterRunner("late-runner", newBlockingRunner()))
-		requireBrokerClosed(t, s.RegisterCloseable("late-close", closeFunc(func() error { return nil })))
+		requireBrokerClosed(t, s.RegisterRunner("late-runner", newRunnerMock(t).mock))
+		requireBrokerClosed(t, s.RegisterCloseable("late-close", newCloseableMock(t)))
 
 	})
 }
@@ -336,8 +374,8 @@ func TestSupervisorConcurrentExpiryAndAdmission(t *testing.T) {
 func TestSupervisorBlockedRunnerObservesCancellation(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s, clock := newTestSupervisor(t, time.Minute)
-		runner := newBlockingRunner()
-		require.NoError(t, s.RegisterRunner("registry", runner))
+		runner := newRunnerMock(t)
+		require.NoError(t, s.RegisterRunner("registry", runner.mock))
 		<-runner.started
 
 		clock.Advance(time.Minute)
@@ -378,13 +416,13 @@ func TestSupervisorBlockedHookObservesCancellation(t *testing.T) {
 func TestSupervisorBackgroundComponentsDoNotPinIdle(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s, clock := newTestSupervisor(t, time.Minute)
-		runner := newBlockingRunner()
+		runner := newRunnerMock(t)
 		poolDrained := make(chan struct{})
-		require.NoError(t, s.RegisterRunner("registry", runner))
-		require.NoError(t, s.RegisterCloseable("pool", closeFunc(func() error {
+		require.NoError(t, s.RegisterRunner("registry", runner.mock))
+		require.NoError(t, s.RegisterCloseable("pool", newCloseableMock(t, closeReturns(func() error {
 			close(poolDrained)
 			return nil
-		})))
+		}))))
 		<-runner.started
 
 		// Registering background components takes no lease: the timer stays armed
@@ -465,7 +503,7 @@ func TestSupervisorCloseReportsHookErrorsOnly(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s, _ := newTestSupervisor(t, time.Hour)
 		boom := errors.New("pool close failed")
-		require.NoError(t, s.RegisterCloseable("pool", closeFunc(func() error { return boom })))
+		require.NoError(t, s.RegisterCloseable("pool", newCloseableMock(t, closeReturns(func() error { return boom }))))
 		require.NoError(t, s.Register("ok", func(context.Context) error { return nil }))
 
 		err := s.Close()
@@ -530,12 +568,12 @@ func TestSupervisorCloseRacingIdleExpiryDrainsOnce(t *testing.T) {
 
 			var mu sync.Mutex
 			drains := 0
-			require.NoError(t, s.RegisterCloseable("pool", closeFunc(func() error {
+			require.NoError(t, s.RegisterCloseable("pool", newCloseableMock(t, closeReturns(func() error {
 				mu.Lock()
 				drains++
 				mu.Unlock()
 				return boom
-			})))
+			}))))
 
 			start := make(chan struct{})
 			closed := make(chan error, 1)

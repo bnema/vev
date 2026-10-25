@@ -54,7 +54,7 @@ func TestPoolRetiringKeyUntilCloseCompletes(t *testing.T) {
 			if calls.Add(1) == 1 {
 				first = &retiringPhysical{fakePhysical: f, closing: make(chan struct{}), allowClose: allow}
 				return mockPhysical(t, f, func(m *portsmocks.MockBrokerPhysicalConnection) {
-					m.EXPECT().Close().RunAndReturn(func() error { close(first.closing); <-allow; return f.Close() }).Maybe()
+					m.EXPECT().Close().RunAndReturn(func() error { close(first.closing); <-allow; return f.markClosed() }).Maybe()
 				}), nil
 			}
 			return mockPhysical(t, f), nil
@@ -69,7 +69,7 @@ func TestPoolRetiringKeyUntilCloseCompletes(t *testing.T) {
 		id, _ := p.RegisterClient()
 		s, err := p.OpenStream(context.Background(), poolRequest(id, 1))
 		require.NoError(t, err)
-		require.NoError(t, first.fakePhysical.Close())
+		require.NoError(t, first.fakePhysical.markClosed())
 		await(t, first.closing)
 		await(t, s.Done())
 		_, err = p.OpenStream(context.Background(), poolRequest(id, 2))

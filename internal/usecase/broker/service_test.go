@@ -233,7 +233,7 @@ func TestAuthorityValidation(t *testing.T) {
 		localOnly, err := NewRegistryWithConfig(1, hostStoreFixture(t, newTestStore()), mockProbe(t, nil), clock.mock, nil, RegistryConfig{Local: &LocalObservation{
 			DisplayOrigin: "local",
 			Policy:        poolPolicy(),
-			Probe:         newScriptedLocalProbe(1),
+			Probe:         newScriptedLocalProbe(t, 1).mock,
 		}})
 		require.NoError(t, err)
 		t.Cleanup(localOnly.settle)
@@ -345,9 +345,9 @@ func TestServiceOpenStreamRequestsLocalReprobeOnOpenAndClose(t *testing.T) {
 
 		clock := newManualClock(t, time.Unix(100, 0))
 		store := newTestStore()
-		local := newScriptedLocalProbe(3)
+		local := newScriptedLocalProbe(t, 3)
 		registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, store), mockProbe(t, nil), clock.mock, nil, RegistryConfig{
-			Local: &LocalObservation{DisplayOrigin: "local", Policy: poolPolicy(), Probe: local},
+			Local: &LocalObservation{DisplayOrigin: "local", Policy: poolPolicy(), Probe: local.mock},
 		})
 		require.NoError(t, err)
 		registry.jitter = identityJitter

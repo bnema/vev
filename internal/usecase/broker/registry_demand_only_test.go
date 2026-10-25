@@ -17,8 +17,8 @@ func TestRegistryObservesOnlyUnderSubscriptionOrExplicitRequest(t *testing.T) {
 		start := time.Unix(100, 0)
 		clock := newManualClock(t, start)
 		probe := newTestProbe(4)
-		local := newScriptedLocalProbe(4)
-		registry := newLocalTestRegistry(t, newTestStore(), probe, local, clock)
+		local := newScriptedLocalProbe(t, 4)
+		registry := newLocalTestRegistry(t, newTestStore(), probe, local.mock, clock)
 		reg := registration(t, "example.test", 1)
 		require.NoError(t, registry.setHosts(hostRecords(reg)))
 		// Start Run directly: the test helper's synthetic subscription must not

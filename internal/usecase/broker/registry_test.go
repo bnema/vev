@@ -1152,9 +1152,9 @@ func TestRegistryAppliesSubscriptionDemandFreshness(t *testing.T) {
 				start := time.Unix(100, 0)
 				clock := newManualClock(t, start)
 				remoteProbe := newTestProbe(1)
-				localProbe := newScriptedLocalProbe(1)
+				localProbe := newScriptedLocalProbe(t, 1)
 				registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, newTestStore()), mockProbe(t, remoteProbe), clock.mock, nil, RegistryConfig{
-					Local:                &LocalObservation{DisplayOrigin: "local", Policy: poolPolicy(), Probe: localProbe},
+					Local:                &LocalObservation{DisplayOrigin: "local", Policy: poolPolicy(), Probe: localProbe.mock},
 					DemandFreshForLocal:  demandLocal,
 					DemandFreshForRemote: demandRemote,
 				})

@@ -85,7 +85,7 @@ func mockPhysical(t testing.TB, f *fakePhysical, options ...physicalOption) *por
 	m.EXPECT().FailureKind().Return(domain.RemoteFailureTransport).Maybe()
 	m.EXPECT().Done().Return((<-chan struct{})(f.done)).Maybe()
 	m.EXPECT().Err().Return(errors.New("physical loss")).Maybe()
-	m.EXPECT().Close().RunAndReturn(f.Close).Maybe()
+	m.EXPECT().Close().RunAndReturn(f.markClosed).Maybe()
 	m.EXPECT().OpenStream(mock.Anything, mock.Anything).RunAndReturn(func(c context.Context, r ports.BrokerOpenStreamRequest) (ports.BrokerEnvelopeStream, error) {
 		if f.open != nil {
 			return f.open(c, r)
@@ -94,7 +94,7 @@ func mockPhysical(t testing.TB, f *fakePhysical, options ...physicalOption) *por
 	}).Maybe()
 	return m
 }
-func (f *fakePhysical) Close() error { f.once.Do(func() { close(f.done) }); return nil }
+func (f *fakePhysical) markClosed() error { f.once.Do(func() { close(f.done) }); return nil }
 
 func poolPolicy() ports.BrokerPolicy {
 	return ports.BrokerPolicy{ProtocolVersion: 1, CatalogSchemaVersion: 1, Transport: "quic", Trust: "trusted", Launch: "explicit", Isolation: "user", EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned}
@@ -218,7 +218,7 @@ func TestPoolHundredStreamsLossAndIsolation(t *testing.T) {
 			t.Fatal("sibling closed")
 		default:
 		}
-		require.NoError(t, physical.Close())
+		require.NoError(t, physical.markClosed())
 		for _, s := range streams[1:] {
 			await(t, s.Done())
 			var loss ports.BrokerError
