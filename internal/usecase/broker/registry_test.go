@@ -637,11 +637,12 @@ const registryTestWait = 5 * time.Second
 
 func receiveCall(t *testing.T, probe *testProbe) probeCall {
 	t.Helper()
+	synctest.Wait()
 	select {
 	case call := <-probe.calls:
 		return call
-	case <-time.After(registryTestWait):
-		t.Fatal("timed out waiting for probe")
+	default:
+		t.Fatal("no probe was issued")
 		return probeCall{}
 	}
 }

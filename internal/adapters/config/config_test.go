@@ -859,6 +859,8 @@ type watchChange struct {
 
 // startWatch runs watch on path and returns the onChange stream once the
 // watches are installed. The returned stop cancels it and checks its result.
+//
+//testpolicy:realtime config watcher on real files (fsnotify/inotify)
 func startWatch(t *testing.T, path string) (<-chan watchChange, func()) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -901,6 +903,9 @@ func writeAtomic(t *testing.T, path string, data []byte) {
 	require.NoError(t, os.Rename(tmp, path))
 }
 
+// nextChange uses real I/O; its waits are wall-clock bounded.
+//
+//testpolicy:realtime config watcher on real files (fsnotify/inotify)
 func nextChange(t *testing.T, changes <-chan watchChange) watchChange {
 	t.Helper()
 	select {

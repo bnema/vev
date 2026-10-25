@@ -18,6 +18,9 @@ func sendAcceptanceInput(t *testing.T, tr ports.ClientConnection, data string) {
 	require.NoError(t, tr.SendClient(protocol.Input{Data: []byte(data)}))
 }
 
+// awaitAcceptanceFrame uses real I/O; its waits are wall-clock bounded.
+//
+//testpolicy:realtime real unix-socket broker/daemon stack and subprocesses
 func awaitAcceptanceFrame(t *testing.T, p *typedPump, predicate func(protocol.ServerMessage) bool) protocol.ServerMessage {
 	t.Helper()
 	deadline := time.NewTimer(5 * time.Second)

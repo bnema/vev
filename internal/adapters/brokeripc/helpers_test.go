@@ -115,6 +115,8 @@ func connectionDelegates(ctx context.Context, service ports.BrokerSession) error
 // recvWithin reads one server message under an explicit bound, so a session that
 // never answers settles as a bounded test failure instead of hanging the package
 // on a read that can never complete.
+//
+//testpolicy:realtime broker session over a real AF_UNIX socket
 func (r *rawCarriage) recvWithin(t *testing.T, timeout time.Duration) brokerwire.ServerMessage {
 	t.Helper()
 	type result struct {
@@ -143,6 +145,8 @@ func (r *rawCarriage) recvWithin(t *testing.T, timeout time.Duration) brokerwire
 
 // awaitReadError proves one raw read fails under an explicit bound, so a session
 // that never settles is a bounded test failure rather than a hang.
+//
+//testpolicy:realtime broker session over a real AF_UNIX socket
 func (r *rawCarriage) awaitReadError(t *testing.T, timeout time.Duration) error {
 	t.Helper()
 	done := make(chan error, 1)
@@ -868,6 +872,8 @@ func startEndpoint(t *testing.T, cfg Config) *endpoint {
 }
 
 // accept returns the next admitted session.
+//
+//testpolicy:realtime broker session over a real AF_UNIX socket
 func (e *endpoint) accept() ports.BrokerCoreService {
 	e.t.Helper()
 	type result struct {
@@ -988,6 +994,8 @@ func (s *recordingState) transferCount(generation brokerwire.SubscriptionGenerat
 }
 
 // awaitSignal waits for one event on ch under a single bounded failure guard.
+//
+//testpolicy:realtime broker session over a real AF_UNIX socket
 func awaitSignal[T any](t *testing.T, ch <-chan T, why string) T {
 	t.Helper()
 	select {
@@ -1002,6 +1010,8 @@ func awaitSignal[T any](t *testing.T, ch <-chan T, why string) T {
 
 // awaitClosed waits for one channel to close under a single bounded failure
 // guard.
+//
+//testpolicy:realtime broker session over a real AF_UNIX socket
 func awaitClosed(t *testing.T, ch <-chan struct{}, why string) {
 	t.Helper()
 	select {

@@ -17,6 +17,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// readAllDarwin uses real I/O; its waits are wall-clock bounded.
+//
+//testpolicy:realtime real PTY and child process
 func readAllDarwin(t *testing.T, p ports.PTY, deadline time.Duration) []byte {
 	t.Helper()
 	type result struct {
@@ -62,6 +65,9 @@ func TestOpen_DarwinEchoAndOutputEOF(t *testing.T) {
 	require.Contains(t, output, "roundtrip")
 }
 
+// readUntilDarwin uses real I/O; its waits are wall-clock bounded.
+//
+//testpolicy:realtime real PTY and child process
 func readUntilDarwin(t *testing.T, p ports.PTY, marker string, deadline time.Duration) string {
 	t.Helper()
 	type result struct {

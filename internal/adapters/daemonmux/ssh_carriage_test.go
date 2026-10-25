@@ -485,6 +485,7 @@ func TestSSHCarriageConnectErrorBoundedAndSanitized(t *testing.T) {
 // a transparent relay to an in-process Unix socket, and returns its two raw
 // ends: the ssh client end (the subprocess stdio DialMuxContext owns) and the
 // in-process relay end. Every byte crosses the real subprocess pipes.
+// real I/O: real ssh stdio subprocess relayed over a unix socket.
 func sshRawCarriagePair(t *testing.T) (RawFramedTransport, RawFramedTransport) {
 	t.Helper()
 	sockPath := filepath.Join(filepath.Dir(muxCarriagePath(t)), "relay.sock")

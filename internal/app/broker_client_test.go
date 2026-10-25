@@ -284,6 +284,8 @@ type terminalCompositionRun struct {
 // wait returns the run's terminal error. It is idempotent: every caller waits on
 // the same closed channel, so a failure observed by one helper never consumes the
 // result another helper needs.
+//
+//testpolicy:realtime real unix-socket broker/daemon stack and subprocesses
 func (r *terminalCompositionRun) wait(t *testing.T) error {
 	t.Helper()
 	select {
@@ -303,6 +305,8 @@ func startTerminalComposition(t *testing.T, intent uint8, name, remoteTarget str
 
 // startTerminalCompositionWithDaemon is startTerminalComposition whose local
 // daemon owns daemonSessions even when the catalogue has not observed them.
+//
+//testpolicy:realtime real unix-socket broker/daemon stack and subprocesses
 func startTerminalCompositionWithDaemon(t *testing.T, intent uint8, name, remoteTarget string, snapshot ports.BrokerSnapshot, daemonSessions []string) *terminalCompositionRun {
 	t.Helper()
 	// The ordinary terminal path reads the nested-session environment; a test
@@ -376,6 +380,8 @@ func startTerminalCompositionWithDaemon(t *testing.T, intent uint8, name, remote
 
 // awaitTerminalCompositionAttachment waits for the supervisor to present an
 // attached state and returns it.
+//
+//testpolicy:realtime real unix-socket broker/daemon stack and subprocesses
 func awaitTerminalCompositionAttachment(t *testing.T, run *terminalCompositionRun) client.State {
 	t.Helper()
 	deadline := time.NewTimer(brokerTestWait)
@@ -395,6 +401,8 @@ func awaitTerminalCompositionAttachment(t *testing.T, run *terminalCompositionRu
 }
 
 // awaitTerminalCompositionNotice waits for one bounded lifecycle notice.
+//
+//testpolicy:realtime real unix-socket broker/daemon stack and subprocesses
 func awaitTerminalCompositionNotice(t *testing.T, run *terminalCompositionRun) client.LifecycleNotice {
 	t.Helper()
 	select {
@@ -922,6 +930,8 @@ func TestTerminalCompositionExactAttachReportsMissingLocalInventory(t *testing.T
 
 // awaitTerminalCompositionEpoch waits for one connection's first committed
 // publication and returns its epoch.
+//
+//testpolicy:realtime real unix-socket broker/daemon stack and subprocesses
 func awaitTerminalCompositionEpoch(t *testing.T, service ports.BrokerService) ports.BrokerEpoch {
 	t.Helper()
 	sub, err := service.Subscribe()

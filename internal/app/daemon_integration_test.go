@@ -114,6 +114,9 @@ func attach(t *testing.T, dir string, intent uint8, name string, sz domain.Size)
 	return attachWithEnvironment(t, dir, intent, name, sz, nil)
 }
 
+// attachWithEnvironment uses real I/O; its waits are wall-clock bounded.
+//
+//testpolicy:realtime real unix-socket broker/daemon stack and subprocesses
 func attachWithEnvironment(t *testing.T, dir string, intent uint8, name string, sz domain.Size, env []string) (ports.ClientConnection, *typedPump) {
 	t.Helper()
 	raw, err := ipc.DialContext(context.Background(), dir)
@@ -200,6 +203,8 @@ func controlKill(dir string, scope protocol.KillScope, name string) error {
 // awaitKillResult reads one correlated KillResult with a bounded timeout. A
 // close, a wrong type, or a mismatched RequestID is a definite error rather
 // than an inferred success, so a lost result is never reported as a kill.
+//
+//testpolicy:realtime real unix-socket broker/daemon stack and subprocesses
 func awaitKillResult(conn ports.ClientConnection, requestID uint64, timeout time.Duration) (protocol.KillResult, error) {
 	type result struct {
 		message protocol.ServerMessage
@@ -431,6 +436,8 @@ func requireListedAfterRestart(t *testing.T, sessions []protocol.SessionInfo, na
 
 // awaitDetached consumes typed messages until the daemon signals the session's
 // end with the expected Detached reason, ignoring interleaved Output frames.
+//
+//testpolicy:realtime real unix-socket broker/daemon stack and subprocesses
 func awaitDetached(t *testing.T, p *typedPump, reason uint8) {
 	t.Helper()
 	timeout := time.After(5 * time.Second)
@@ -452,6 +459,8 @@ func awaitDetached(t *testing.T, p *typedPump, reason uint8) {
 
 // awaitScreenText is like awaitText, but returns the reconstructed screen text
 // at the point the wanted text appears so callers can make additional checks.
+//
+//testpolicy:realtime real unix-socket broker/daemon stack and subprocesses
 func awaitScreenText(t *testing.T, p *typedPump, sz domain.Size, want string) string {
 	t.Helper()
 	screen := vt.NewScreen(sz.Cols, sz.Rows)
@@ -475,6 +484,9 @@ func awaitScreenText(t *testing.T, p *typedPump, sz domain.Size, want string) st
 	}
 }
 
+// assertNoTextAfterInput uses real I/O; its waits are wall-clock bounded.
+//
+//testpolicy:realtime real unix-socket broker/daemon stack and subprocesses
 func assertNoTextAfterInput(t *testing.T, p *typedPump, sz domain.Size, absent string) {
 	t.Helper()
 	screen := vt.NewScreen(sz.Cols, sz.Rows)
@@ -1315,6 +1327,9 @@ type blockedSnapshotWriterShutdown struct {
 	releaseWriter    func()
 }
 
+// runBlockedSnapshotWriterShutdown uses real I/O; its waits are wall-clock bounded.
+//
+//testpolicy:realtime real unix-socket broker/daemon stack and subprocesses
 func runBlockedSnapshotWriterShutdown(t *testing.T) blockedSnapshotWriterShutdown {
 	t.Helper()
 	runtimeDir := filepath.Join(t.TempDir(), "runtime")
@@ -1549,6 +1564,9 @@ func TestLifecycleSocketCloseCatalogueRace(t *testing.T) {
 	})
 }
 
+// awaitLifecycleStage uses real I/O; its waits are wall-clock bounded.
+//
+//testpolicy:realtime real unix-socket broker/daemon stack and subprocesses
 func awaitLifecycleStage(t *testing.T, stage <-chan struct{}, name string) {
 	t.Helper()
 	select {
@@ -1558,6 +1576,9 @@ func awaitLifecycleStage(t *testing.T, stage <-chan struct{}, name string) {
 	}
 }
 
+// awaitLifecycleResult uses real I/O; its waits are wall-clock bounded.
+//
+//testpolicy:realtime real unix-socket broker/daemon stack and subprocesses
 func awaitLifecycleResult(t *testing.T, result <-chan error, name string) error {
 	t.Helper()
 	select {

@@ -127,21 +127,14 @@ func (c *carrierFixture) deliver(t *testing.T, frame fakeFrame) {
 	t.Helper()
 	select {
 	case c.inbound <- frame:
-	case <-time.After(5 * time.Second):
-		t.Fatal("carrierFixture: inbound delivery timed out")
 	}
 }
 
 // nextSent returns the next outbound frame the writer recorded, in order.
 func (c *carrierFixture) nextSent(t *testing.T) []byte {
 	t.Helper()
-	select {
-	case payload := <-c.sent:
-		return payload
-	case <-time.After(5 * time.Second):
-		t.Fatal("carrierFixture: expected an outbound frame")
-		return nil
-	}
+	payload := <-c.sent
+	return payload
 }
 
 // requireNoSentSettled fails when the writer recorded an outbound frame once
@@ -678,18 +671,9 @@ func TestPumpCarrierLossFanoutOrdering(t *testing.T) {
 		for i := 1; i <= count; i++ {
 			done := mustStatus(t, pump.Engine(), PhysicalStreamID(i)).Done
 			go func(streamDone <-chan struct{}) {
-				select {
-				case <-streamDone:
-				case <-time.After(5 * time.Second):
-					ordered <- false
-					return
-				}
-				select {
-				case <-pump.Done():
-					ordered <- true
-				case <-time.After(5 * time.Second):
-					ordered <- false
-				}
+				<-streamDone
+				<-pump.Done()
+				ordered <- true
 			}(done)
 		}
 
@@ -782,11 +766,7 @@ func TestPumpConcurrentClose(t *testing.T) {
 			wg.Wait()
 			close(joined)
 		}()
-		select {
-		case <-joined:
-		case <-time.After(5 * time.Second):
-			t.Fatal("concurrent Close did not unblock the carrier and join both goroutines")
-		}
+		<-joined
 
 		for i, err := range errs {
 			require.NoError(t, err, "closer %d", i)
@@ -881,19 +861,16 @@ func TestPumpFlushWaitsForInflightSend(t *testing.T) {
 
 		flushed := make(chan error, 1)
 		go func() { flushed <- pump.Flush(context.Background()) }()
+		synctest.Wait()
 		select {
 		case <-flushed:
 			t.Fatal("Flush returned while a send was still in flight")
-		case <-time.After(50 * time.Millisecond):
+		default:
 		}
 
 		carrier.release(hold)
-		select {
-		case err := <-flushed:
-			require.NoError(t, err)
-		case <-time.After(5 * time.Second):
-			t.Fatal("Flush did not return after the write drained")
-		}
+		err := <-flushed
+		require.NoError(t, err)
 		message, err := DecodeServer(carrier.nextSent(t), testEnvelopeCeiling, testChunkCeiling)
 		require.NoError(t, err)
 		closed, ok := message.(Close)
@@ -996,10 +973,11 @@ func TestPumpSendDataBackpressure(t *testing.T) {
 
 		sent := make(chan error, 1)
 		go func() { sent <- pump.SendData(1, chunk, nil) }()
+		synctest.Wait()
 		select {
 		case err := <-sent:
 			t.Fatalf("SendData returned %v without credit", err)
-		case <-time.After(50 * time.Millisecond):
+		default:
 		}
 		require.Equal(t, StreamOpen, mustStatus(t, pump.Engine(), 1).State, "a slow peer never resets the stream")
 
@@ -1056,12 +1034,8 @@ func TestPumpSendDataCancel(t *testing.T) {
 				sent := make(chan error, 1)
 				go func() { sent <- pump.SendData(1, chunk, cancel) }()
 				tc.settle(t, pump, carrier, cancel)
-				select {
-				case err := <-sent:
-					require.ErrorIs(t, err, tc.want)
-				case <-time.After(5 * time.Second):
-					t.Fatal("blocked SendData never returned")
-				}
+				err := <-sent
+				require.ErrorIs(t, err, tc.want)
 			})
 		})
 	}

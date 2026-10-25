@@ -177,17 +177,19 @@ func newPreviewFixture(t *testing.T, target domain.RemoteSessionTarget) *preview
 func (f *previewFixture) awaitOpen() (*previewWatchConn, protocol.RemotePreviewWatch) {
 	f.t.Helper()
 	var conn *previewWatchConn
+	synctest.Wait()
 	select {
 	case conn = <-f.connector.opened:
-	case <-time.After(5 * time.Second):
+	default:
 		f.t.Fatal("the preview did not open a watch stream")
 	}
+	synctest.Wait()
 	select {
 	case message := <-conn.sent:
 		watch, ok := message.(protocol.RemotePreviewWatch)
 		require.True(f.t, ok, "the first message must be a watch, got %T", message)
 		return conn, watch
-	case <-time.After(5 * time.Second):
+	default:
 		f.t.Fatal("the preview did not send its watch")
 		return nil, protocol.RemotePreviewWatch{}
 	}
@@ -195,11 +197,12 @@ func (f *previewFixture) awaitOpen() (*previewWatchConn, protocol.RemotePreviewW
 
 func (f *previewFixture) awaitPublication() ports.BrokerPreviewPublication {
 	f.t.Helper()
+	synctest.Wait()
 	select {
 	case <-f.sub.Changed():
 		return f.sub.Latest()
-	case <-time.After(5 * time.Second):
-		f.t.Fatal("the preview subscription did not publish within the bound")
+	default:
+		f.t.Fatal("the preview subscription did not publish")
 		return ports.BrokerPreviewPublication{}
 	}
 }
@@ -214,9 +217,10 @@ func (f *previewFixture) advanceUntilOpen(delay time.Duration) {
 
 func awaitClosed(t *testing.T, conn *previewWatchConn) {
 	t.Helper()
+	synctest.Wait()
 	select {
 	case <-conn.done:
-	case <-time.After(5 * time.Second):
+	default:
 		t.Fatal("the watch stream was not closed")
 	}
 }
@@ -363,10 +367,9 @@ func TestServicePreviewNoSuchTargetStopsRecovery(t *testing.T) {
 		require.NoError(t, publication.Err)
 		require.Equal(t, protocol.RemotePreviewNoSuchTarget, publication.Preview.Status)
 		awaitClosed(t, conn)
-		require.Never(t, func() bool {
-			f.clock.Advance(previewReopenMax)
-			return len(f.connector.opened) > 0
-		}, 100*time.Millisecond, 5*time.Millisecond, "a dead target is never reopened")
+		f.clock.Advance(previewReopenMax)
+		synctest.Wait()
+		require.Empty(t, f.connector.opened, "a dead target is never reopened")
 
 	})
 }

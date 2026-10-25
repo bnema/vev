@@ -3,6 +3,7 @@ package client
 import (
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
@@ -63,10 +64,11 @@ func (t *attachPaletteTimer) fire() { t.ch <- time.Time{} }
 
 func requireTimer(t *testing.T, timers <-chan *attachPaletteTimer, message string) *attachPaletteTimer {
 	t.Helper()
+	synctest.Wait()
 	select {
 	case timer := <-timers:
 		return timer
-	case <-time.After(time.Second):
+	default:
 		t.Fatal(message)
 		return nil
 	}
@@ -74,9 +76,10 @@ func requireTimer(t *testing.T, timers <-chan *attachPaletteTimer, message strin
 
 func requireSignal(t *testing.T, signal <-chan struct{}, message string) {
 	t.Helper()
+	synctest.Wait()
 	select {
 	case <-signal:
-	case <-time.After(time.Second):
+	default:
 		t.Fatal(message)
 	}
 }

@@ -81,13 +81,8 @@ func encodedRequest(t *testing.T, ceilings MuxCeilings, policy ports.BrokerPolic
 
 func awaitSentFrame(t *testing.T, carrier *carrierFixture) []byte {
 	t.Helper()
-	select {
-	case payload := <-carrier.sent:
-		return payload
-	case <-time.After(time.Second):
-		t.Fatal("handshake sent no frame")
-		return nil
-	}
+	payload := <-carrier.sent
+	return payload
 }
 
 // TestClientHandshakeAcceptsVerifiedResponse proves a matching acceptance is

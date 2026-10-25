@@ -118,6 +118,7 @@ func (s *superviseServer) awaitQUICAccepted(t *testing.T, count int) {
 // quicDaemonPump builds a daemon-side pump over the daemon end of a real QUIC
 // mux carriage and returns the raw broker end for direct frame injection, so a
 // test can drive deterministic inbound traffic over the actual QUIC stream.
+// real I/O: real QUIC mux carriage over UDP.
 func quicDaemonPump(t *testing.T) (*Pump, RawFramedTransport, admissions) {
 	t.Helper()
 	server, readiness, addr := quicCarriageEndpoint(t)

@@ -414,11 +414,12 @@ func TestAttachmentWorkerStalledLink(t *testing.T) {
 				h.send("a")
 				<-s.entered
 				close(s.release)
+				synctest.Wait()
 				select {
 				case event := <-h.events:
 					require.Equal(t, AttachmentEventFailed, event.Kind)
 					require.ErrorIs(t, event.Err, linkErr)
-				case <-time.After(5 * time.Second):
+				default:
 					t.Fatal("the failed write never settled the run")
 				}
 				h.pump.mu.Lock()
@@ -432,10 +433,11 @@ func TestAttachmentWorkerStalledLink(t *testing.T) {
 				h.send("a")
 				<-s.entered
 				h.stream.deliver(protocol.Detached{Reason: protocol.ReasonDetach})
+				synctest.Wait()
 				select {
 				case event := <-h.events:
 					require.Equal(t, AttachmentEventEnded, event.Kind)
-				case <-time.After(5 * time.Second):
+				default:
 					t.Fatal("the daemon-confirmed detach never settled")
 				}
 				h.pump.mu.Lock()

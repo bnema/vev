@@ -3,7 +3,6 @@ package daemonmux
 import (
 	"sync"
 	"testing"
-	"time"
 
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 
@@ -226,15 +225,11 @@ func TestAggregateCloseDrainsQueuedConnections(t *testing.T) {
 		require.NoError(t, a.Close())
 		require.NoError(t, a.Close(), "Close is idempotent")
 
-		select {
-		case err := <-blocked:
-			if err != nil {
-				require.ErrorIs(t, err, ErrAggregateClosed)
-			}
-		case <-time.After(listenerTestDeadline):
-			t.Fatal("Close did not unblock Accept")
+		err := <-blocked
+		if err != nil {
+			require.ErrorIs(t, err, ErrAggregateClosed)
 		}
-		_, err := a.Accept()
+		_, err = a.Accept()
 		require.ErrorIs(t, err, ErrAggregateClosed)
 		require.Zero(t, aggregateQueued(a), "Close must clear the aggregate queue")
 		require.Zero(t, aggregateChildCount(a), "Close must drop every owned child")

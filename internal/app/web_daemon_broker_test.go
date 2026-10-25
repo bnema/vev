@@ -213,6 +213,8 @@ func (tab *webBrowserTab) submit(t *testing.T, line string) {
 }
 
 // awaitText waits until the accumulated frames contain marker.
+//
+//testpolicy:realtime real unix-socket broker/daemon stack and subprocesses
 func (tab *webBrowserTab) awaitText(t *testing.T, marker string) {
 	t.Helper()
 	deadline := time.NewTimer(brokerTestWait)
@@ -234,6 +236,8 @@ func (tab *webBrowserTab) awaitText(t *testing.T, marker string) {
 // requireTextAbsent asserts marker is not rendered within the observation
 // window. It is the independence assertion: one tab's session content must
 // never appear in another tab's terminal.
+//
+//testpolicy:realtime real unix-socket broker/daemon stack and subprocesses
 func (tab *webBrowserTab) requireTextAbsent(t *testing.T, marker string, window time.Duration) {
 	t.Helper()
 	deadline := time.NewTimer(window)
@@ -252,6 +256,8 @@ func (tab *webBrowserTab) requireTextAbsent(t *testing.T, marker string, window 
 
 // awaitMoreFrames waits until at least count frames were rendered, proving the
 // run is still serving after a failure.
+//
+//testpolicy:realtime real unix-socket broker/daemon stack and subprocesses
 func (tab *webBrowserTab) awaitMoreFrames(t *testing.T, count int) {
 	t.Helper()
 	deadline := time.NewTimer(brokerTestWait)
@@ -422,6 +428,8 @@ func (f *webGatewayFixture) closeTabs() {
 }
 
 // awaitNotice waits for one bounded lifecycle notice.
+//
+//testpolicy:realtime real unix-socket broker/daemon stack and subprocesses
 func (f *webGatewayFixture) awaitNotice(t *testing.T) client.LifecycleNotice {
 	t.Helper()
 	select {
@@ -434,6 +442,8 @@ func (f *webGatewayFixture) awaitNotice(t *testing.T) client.LifecycleNotice {
 }
 
 // awaitFailure waits for one typed failure surfaced without ending the run.
+//
+//testpolicy:realtime real unix-socket broker/daemon stack and subprocesses
 func (f *webGatewayFixture) awaitFailure(t *testing.T) error {
 	t.Helper()
 	select {
@@ -447,6 +457,8 @@ func (f *webGatewayFixture) awaitFailure(t *testing.T) error {
 }
 
 // awaitPresentation waits for one supervisor presentation.
+//
+//testpolicy:realtime real unix-socket broker/daemon stack and subprocesses
 func (f *webGatewayFixture) awaitPresentation(t *testing.T, want client.Presentation) client.State {
 	t.Helper()
 	deadline := time.NewTimer(brokerTestWait)
@@ -466,6 +478,8 @@ func (f *webGatewayFixture) awaitPresentation(t *testing.T, want client.Presenta
 
 // awaitObserved waits on the presentation signal until the durable counts
 // satisfy ready.
+//
+//testpolicy:realtime real unix-socket broker/daemon stack and subprocesses
 func (f *webGatewayFixture) awaitObserved(t *testing.T, ready func(map[client.Presentation]int) bool, what string) {
 	t.Helper()
 	deadline := time.After(brokerTestWait)

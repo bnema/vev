@@ -77,6 +77,8 @@ func startOfflineClientFixtureWithShell(t *testing.T, shell string, shellArgs []
 // state directory. It exists so a test can prove which lifecycle state the
 // daemon actually persists: a named session appears in the durable catalogue,
 // while an ephemeral one is never written.
+//
+//testpolicy:realtime real unix-socket broker/daemon stack and subprocesses
 func startPersistentOfflineClientFixture(t *testing.T, shell string, shellArgs []string, persistEnabled bool) offlineClientFixture {
 	t.Helper()
 	layout := emptyProductionBrokerLayout(t, "")
@@ -215,6 +217,9 @@ func newCountingServerListener(t *testing.T, inner ports.ServerListener, seen ch
 	return listener
 }
 
+// awaitLogicalStream uses real I/O; its waits are wall-clock bounded.
+//
+//testpolicy:realtime real unix-socket broker/daemon stack and subprocesses
 func awaitLogicalStream(t *testing.T, streams <-chan struct{}) {
 	t.Helper()
 	select {
@@ -234,6 +239,9 @@ func offlineSnapshotText(snapshot ports.UISnapshot) string {
 	return text.String()
 }
 
+// awaitUITerminalMarker uses real I/O; its waits are wall-clock bounded.
+//
+//testpolicy:realtime real unix-socket broker/daemon stack and subprocesses
 func awaitUITerminalMarker(t *testing.T, terminal *uiterm.Terminal, marker string) {
 	t.Helper()
 	deadline := time.NewTimer(brokerTestWait)
@@ -491,6 +499,9 @@ func receiveOfflineCommandResult(t *testing.T, connection ports.BrokerLogicalCon
 	return message.(protocol.CommandResult)
 }
 
+// receiveOfflineEOF uses real I/O; its waits are wall-clock bounded.
+//
+//testpolicy:realtime real unix-socket broker/daemon stack and subprocesses
 func receiveOfflineEOF(t *testing.T, connection ports.BrokerLogicalConnection) error {
 	t.Helper()
 	result := make(chan error, 1)
@@ -514,6 +525,9 @@ func receiveOfflineEOF(t *testing.T, connection ports.BrokerLogicalConnection) e
 	}
 }
 
+// receiveOfflineMessage uses real I/O; its waits are wall-clock bounded.
+//
+//testpolicy:realtime real unix-socket broker/daemon stack and subprocesses
 func receiveOfflineMessage(t *testing.T, connection ports.BrokerLogicalConnection, want string, match func(protocol.ServerMessage) bool) protocol.ServerMessage {
 	t.Helper()
 	type result struct {

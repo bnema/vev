@@ -6,7 +6,6 @@ import (
 	"strings"
 	"testing"
 	"testing/synctest"
-	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -99,10 +98,11 @@ func (h *inputHarness) send(data string) { h.reader.chunks <- []byte(data) }
 func (h *inputHarness) end(t *testing.T) {
 	t.Helper()
 	h.stream.deliver(protocol.Detached{Reason: protocol.ReasonDetach})
+	synctest.Wait()
 	select {
 	case event := <-h.events:
 		require.Equal(t, AttachmentEventEnded, event.Kind)
-	case <-time.After(5 * time.Second):
+	default:
 		t.Fatal("the worker never settled")
 	}
 }

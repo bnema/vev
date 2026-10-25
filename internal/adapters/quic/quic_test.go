@@ -363,6 +363,8 @@ func TestQUICCloseUnblocksRecv(t *testing.T) {
 // dialTestPairWithConfig returns the server and client ends of one live
 // transport whose listener uses the supplied Config, both enforcing the
 // one-stream contract.
+//
+//testpolicy:realtime real QUIC over UDP
 func dialTestPairWithConfig(t *testing.T, config Config) (*Transport, *Transport) {
 	t.Helper()
 	cert, fingerprint, err := GenerateEphemeralCert()
@@ -509,6 +511,8 @@ func TestQUICDialHasNoStartupGraceLatency(t *testing.T) {
 }
 
 // readLinkEvent reads one link event or fails the test.
+//
+//testpolicy:realtime real QUIC over UDP
 func readLinkEvent(t *testing.T, events <-chan ports.LinkEvent) (ports.LinkEvent, bool) {
 	t.Helper()
 	select {
@@ -576,6 +580,8 @@ func assertBalancedQUICMarks(t *testing.T, marks []ports.RuntimeMark) {
 
 // dialObservedTestPair dials a listener configured with observer, so the
 // accepted (accept-side) transport carries runtime marks.
+//
+//testpolicy:realtime real QUIC over UDP
 func dialObservedTestPair(t *testing.T, observer ports.SerializedRuntimeObserver) (wire.Transport, wire.Transport) {
 	t.Helper()
 	cert, fingerprint, err := GenerateEphemeralCert()

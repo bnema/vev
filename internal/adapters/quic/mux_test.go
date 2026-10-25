@@ -90,6 +90,8 @@ func acceptMuxAsync(server *Server, ctx context.Context) <-chan muxAcceptResult 
 }
 
 // awaitMuxAccept waits for one successful authenticated carriage.
+//
+//testpolicy:realtime real QUIC over UDP
 func awaitMuxAccept(t *testing.T, out <-chan muxAcceptResult) wire.BoundedTransport {
 	t.Helper()
 	select {
@@ -120,6 +122,8 @@ func muxTestPair(t *testing.T) (wire.BoundedTransport, wire.BoundedTransport) {
 
 // awaitBoundedReadError proves a carriage closed its bounded read: the refused
 // or lost carriage must return an error instead of yielding data.
+//
+//testpolicy:realtime real QUIC over UDP
 func awaitBoundedReadError(t *testing.T, carriage wire.BoundedTransport) error {
 	t.Helper()
 	result := make(chan error, 1)

@@ -5,7 +5,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -499,13 +498,8 @@ func dequeueOrTimeout(t *testing.T, scheduler *Scheduler) (OutboundEnvelope, boo
 		envelope, ok := scheduler.Dequeue()
 		done <- result{envelope: envelope, ok: ok}
 	}()
-	select {
-	case r := <-done:
-		return r.envelope, r.ok
-	case <-time.After(5 * time.Second):
-		t.Fatal("Dequeue made no progress: the DRR ring stalled")
-		return OutboundEnvelope{}, false
-	}
+	r := <-done
+	return r.envelope, r.ok
 }
 
 // maxEnvOpen builds one Open whose environment fills the per-request bound, so

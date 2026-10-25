@@ -402,6 +402,9 @@ func TestTransportCloseInterruptsSendWaitingForEgressCapacity(t *testing.T) {
 	}
 }
 
+// closeTransport uses real I/O; its waits are wall-clock bounded.
+//
+//testpolicy:realtime real AF_UNIX socket transport
 func closeTransport(t *testing.T, transport wire.Transport) {
 	t.Helper()
 

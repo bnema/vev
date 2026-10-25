@@ -155,6 +155,9 @@ func TestRuntimeMarkHasNoRenderingPayloadOrPolicyFields(t *testing.T) {
 	}
 }
 
+// runtimeObserverFunc adapts a function to RuntimeObserver.
+//
+//testpolicy:double in-package test of ports itself: ports/mocks imports ports, so the generated mock would be an import cycle
 type runtimeObserverFunc func(RuntimeMark)
 
 func (f runtimeObserverFunc) ObserveRuntime(mark RuntimeMark) { f(mark) }

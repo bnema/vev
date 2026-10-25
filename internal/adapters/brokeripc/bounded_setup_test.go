@@ -77,6 +77,8 @@ func (p *silentBrokerPeer) stop() {
 }
 
 // awaitPreamble fails unless the peer observed the client's preamble.
+//
+//testpolicy:realtime broker session over a real AF_UNIX socket
 func (p *silentBrokerPeer) awaitPreamble(t *testing.T) {
 	t.Helper()
 	select {

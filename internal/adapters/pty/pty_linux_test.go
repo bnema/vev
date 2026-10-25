@@ -21,6 +21,8 @@ import (
 )
 
 // readAll drains p until EOF or the deadline, returning what was read.
+//
+//testpolicy:realtime real PTY and child process
 func readAll(t *testing.T, p ports.PTY, deadline time.Duration) []byte {
 	t.Helper()
 	type res struct {

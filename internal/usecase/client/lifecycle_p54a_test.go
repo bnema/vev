@@ -374,10 +374,11 @@ func TestP54AttachmentFinalizeDropsPreservedResidualBeforePicker(t *testing.T) {
 
 func assertNoPickerRead(t *testing.T, reads <-chan []byte) {
 	t.Helper()
+	synctest.Wait()
 	select {
 	case got := <-reads:
 		t.Fatalf("attachment bytes crossed into picker: %q", got)
-	case <-time.After(100 * time.Millisecond):
+	default:
 	}
 }
 

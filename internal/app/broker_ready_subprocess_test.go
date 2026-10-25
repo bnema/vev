@@ -87,6 +87,8 @@ func (s *readySubprocessSandbox) waitForBrokerSocket(timeout time.Duration) bool
 
 // cleanup terminates the background broker and every recorded serve process so
 // no test leaks an orphan.
+//
+//testpolicy:realtime real unix-socket broker/daemon stack and subprocesses
 func (s *readySubprocessSandbox) cleanup() {
 	if s.broker != nil && s.broker.Process != nil {
 		_ = s.broker.Process.Signal(syscall.SIGTERM)

@@ -10,6 +10,8 @@ import (
 
 // pollUntil is the real-I/O exception for state without a notification source.
 // A single failure guard bounds the wait; the ticker only schedules observations.
+//
+//testpolicy:realtime real AF_UNIX socket transport
 func pollUntil(t testing.TB, timeout time.Duration, cond func() bool) {
 	t.Helper()
 	guard := time.After(timeout)

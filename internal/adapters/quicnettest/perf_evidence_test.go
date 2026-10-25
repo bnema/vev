@@ -155,6 +155,8 @@ type perfServerReceive struct {
 
 // startPerfConversation dials the real QUIC carriage through the proxy and
 // completes the typed sessionwire preamble (Hello/Welcome).
+//
+//testpolicy:realtime real QUIC over UDP through the lossy UDP proxy
 func startPerfConversation(tb testing.TB, fx *perfFixture) (ports.ClientConnection, ports.ServerConnection) {
 	tb.Helper()
 	accepted := make(chan struct {
@@ -222,6 +224,8 @@ func startPerfConversation(tb testing.TB, fx *perfFixture) (ports.ClientConnecti
 
 // perfSendClientMessage sends one typed client message while the server accepts
 // it, and returns the message the server observed.
+//
+//testpolicy:realtime real QUIC over UDP through the lossy UDP proxy
 func perfSendClientMessage(client ports.ClientConnection, server ports.ServerConnection, message protocol.ClientMessage) (protocol.ClientMessage, error) {
 	received := make(chan perfServerReceive, 1)
 	go func() {
@@ -424,6 +428,8 @@ func readPerfMem() perfMemSample {
 // flight, the proxy drops every packet for perfBlackoutWindow, and the returned
 // duration is measured from the moment the blackout clears until that exchange
 // completes.
+//
+//testpolicy:realtime real QUIC over UDP through the lossy UDP proxy
 func perfBlackoutRecoveryOnce(fx *perfFixture, client ports.ClientConnection, server ports.ServerConnection, seq uint64) (time.Duration, error) {
 	if _, err := perfExchange(client, server, seq); err != nil {
 		return 0, fmt.Errorf("pre-blackout baseline: %w", err)
@@ -484,6 +490,8 @@ func perfAccounted(link quicnettest.LinkStats) bool {
 
 // perfBoundedCleanup closes every resource with a deadline and requires the
 // goroutine count to return near its baseline.
+//
+//testpolicy:realtime real QUIC over UDP through the lossy UDP proxy
 func perfBoundedCleanup(tb testing.TB, fx *perfFixture, client ports.ClientConnection, server ports.ServerConnection, baseline int) {
 	tb.Helper()
 	closed := make(chan error, 1)

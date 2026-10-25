@@ -179,17 +179,17 @@ func (r *resizeRenderRecorder) samples() []resizeRenderSample {
 	return append([]resizeRenderSample(nil), r.all...)
 }
 
-// awaitResizeRender waits for the next render matching match, bounded.
+// awaitResizeRender returns the next render matching match once the bubble is quiescent.
 func awaitResizeRender(t *testing.T, recorder *resizeRenderRecorder, match func(resizeRenderSample) bool) resizeRenderSample {
 	t.Helper()
-	timeout := time.After(5 * time.Second)
 	for {
+		synctest.Wait()
 		select {
 		case sample := <-recorder.renders:
 			if match(sample) {
 				return sample
 			}
-		case <-timeout:
+		default:
 			t.Fatal("the supervisor never repainted the presentation for the resize")
 			return resizeRenderSample{}
 		}
@@ -293,9 +293,10 @@ func startResizeHarness(t *testing.T, options resizeHarnessOptions) *resizeSuper
 	}()
 	t.Cleanup(func() {
 		cancel()
+		synctest.Wait()
 		select {
 		case <-harness.runDone:
-		case <-time.After(5 * time.Second):
+		default:
 			t.Error("the supervisor did not stop")
 		}
 		// Release the single input lifetime's reader so the pump goroutine that
@@ -307,9 +308,10 @@ func startResizeHarness(t *testing.T, options resizeHarnessOptions) *resizeSuper
 
 func (h *resizeSupervisorHarness) waitRun(t *testing.T) error {
 	t.Helper()
+	synctest.Wait()
 	select {
 	case <-h.runDone:
-	case <-time.After(5 * time.Second):
+	default:
 		t.Fatal("the supervisor did not stop")
 	}
 	h.runMu.Lock()

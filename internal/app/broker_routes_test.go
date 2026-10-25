@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"github.com/bnema/vev/internal/adapters/brokerconfig"
@@ -15,18 +16,23 @@ import (
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/usecase/broker"
 	"github.com/bnema/vev/pkg/safedir"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
-type routeTestHosts struct {
-	record ports.BrokerHostRecord
-	found  bool
-}
-
-func (h *routeTestHosts) LookupHost(ctx context.Context, endpoint string) (ports.BrokerHostRecord, bool, error) {
-	return h.record, h.found && endpoint == h.record.Registration.Endpoint, ctx.Err()
+// newRouteTestHosts returns a host authority reader that knows exactly record
+// while found is set.
+func newRouteTestHosts(t *testing.T, found *atomic.Bool, record ports.BrokerHostRecord) *portsmocks.MockBrokerHostAuthorityReader {
+	t.Helper()
+	hosts := portsmocks.NewMockBrokerHostAuthorityReader(t)
+	hosts.EXPECT().LookupHost(mock.Anything, mock.Anything).RunAndReturn(
+		func(ctx context.Context, endpoint string) (ports.BrokerHostRecord, bool, error) {
+			return record, found.Load() && endpoint == record.Registration.Endpoint, ctx.Err()
+		}).Maybe()
+	return hosts
 }
 
 func TestBrokerRoutesDurableFirstAddAndRestart(t *testing.T) {
@@ -128,9 +134,11 @@ func TestBrokerDynamicConnectorDialsDurableRouteWithoutConfigEntry(t *testing.T)
 	policy := brokerTestPolicy()
 	fixture := newBrokerMuxFixture(t, policy)
 	reg := brokerTestRegistration()
-	hosts := &routeTestHosts{found: true, record: ports.BrokerHostRecord{
+	var found atomic.Bool
+	found.Store(true)
+	hosts := newRouteTestHosts(t, &found, ports.BrokerHostRecord{
 		Registration: reg, Policy: policy, Route: ports.BrokerRouteSpec{Kind: ports.BrokerRouteUnix, Path: fixture.route},
-	}}
+	})
 	routes := newBrokerRoutes(nil)
 	routes.Hosts = hosts
 	target, err := routes.ResolveDialTarget(context.Background(), ports.BrokerOpenStreamRequest{
@@ -143,7 +151,7 @@ func TestBrokerDynamicConnectorDialsDurableRouteWithoutConfigEntry(t *testing.T)
 	require.NoError(t, err)
 	require.Equal(t, ports.BrokerDaemonIdentity(brokerTestIdentity), physical.Identity())
 	require.NoError(t, physical.Close())
-	hosts.found = false
+	found.Store(false)
 	_, err = connector.Connect(context.Background(), target)
 	require.Error(t, err)
 }

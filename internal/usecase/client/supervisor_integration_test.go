@@ -185,6 +185,8 @@ func integrationSupervisor(t *testing.T, path string) (*Supervisor, *supervisorT
 // awaitIntegrationState blocks on the supervisor's published states until one
 // satisfies match. The guard is a single bounded failure deadline: the broker
 // endpoint is a real socket, so progress arrives on a channel, never by polling.
+//
+//testpolicy:realtime waits on a real broker socket outside any bubble
 func awaitIntegrationState(t *testing.T, sup *Supervisor, states <-chan State, match func(State) bool) {
 	t.Helper()
 	deadline := time.After(5 * time.Second)

@@ -44,6 +44,8 @@ func awaitSessionDone(t *testing.T, session *serverSession) {
 
 // awaitSessionDoneReal waits for one session driven over a real socket to reach
 // its terminal state, under a single bounded failure guard.
+//
+//testpolicy:realtime broker session over a real AF_UNIX socket
 func awaitSessionDoneReal(t *testing.T, session *serverSession) {
 	t.Helper()
 	select {
