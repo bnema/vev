@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/mock"
@@ -28,36 +29,38 @@ import (
 )
 
 func TestPaletteBackdropDimsSimultaneousCopyMode(t *testing.T) {
-	p, release := newBlockingPTY(t)
-	defer release()
-	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	theme := backdropTheme()
-	ac.setThemeForTest(theme)
-	client := vt.NewScreen(80, 25)
-	pane := sess.tabs[0].focusedPane()
-	pane.screen.Write([]byte("\x1b[38;2;180;90;30mX"))
+	synctest.Test(t, func(t *testing.T) {
+		p, release := newBlockingPTY(t)
+		defer release()
+		d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+		theme := backdropTheme()
+		ac.setThemeForTest(theme)
+		client := vt.NewScreen(80, 25)
+		pane := sess.tabs[0].focusedPane()
+		pane.screen.Write([]byte("\x1b[38;2;180;90;30mX"))
 
-	d.enterCopyMode(sess, ac)
-	mustApplyOutput(t, client, awaitFrame(t, sends, "Output"))
-	undimmed := client.Cell(0, 1)
-	require.Equal(t, 'X', undimmed.Rune, "fixture must address copy-mode pane content")
-	copyBar := client.RowCells(client.Rows() - 1)
-	require.Contains(t, rowText(copyBar), "[SCROLL]", "fixture must capture the copy status bar")
+		d.enterCopyMode(sess, ac)
+		mustApplyOutput(t, client, requireFrame(t, sends, "Output"))
+		undimmed := client.Cell(0, 1)
+		require.Equal(t, 'X', undimmed.Rune, "fixture must address copy-mode pane content")
+		copyBar := client.RowCells(client.Rows() - 1)
+		require.Contains(t, rowText(copyBar), "[SCROLL]", "fixture must capture the copy status bar")
 
-	d.enterPalette(sess, ac)
-	mustApplyOutput(t, client, awaitFrame(t, sends, "Output"))
-	dimmed := client.Cell(0, 1)
-	require.Equal(t, undimmed.Rune, dimmed.Rune, "palette backdrop must preserve copy content")
-	require.Equal(t, themeui.NewDimmer(theme).Dim(undimmed.Style).Canonical(), dimmed.Style.Canonical(), "palette backdrop must dim the composed copy frame")
-	for x, cell := range copyBar {
-		cell.Style = themeui.NewDimmer(theme).Dim(cell.Style).Canonical()
-		require.Equal(t, cell, client.Cell(x, client.Rows()-1), "copy status bar must be part of the complete backdrop")
-	}
-	paletteVisible := false
-	for y := range client.Rows() {
-		paletteVisible = paletteVisible || strings.Contains(rowText(client.RowCells(y)), "Commands")
-	}
-	require.True(t, paletteVisible, "palette must remain composed above copy mode")
+		d.enterPalette(sess, ac)
+		mustApplyOutput(t, client, requireFrame(t, sends, "Output"))
+		dimmed := client.Cell(0, 1)
+		require.Equal(t, undimmed.Rune, dimmed.Rune, "palette backdrop must preserve copy content")
+		require.Equal(t, themeui.NewDimmer(theme).Dim(undimmed.Style).Canonical(), dimmed.Style.Canonical(), "palette backdrop must dim the composed copy frame")
+		for x, cell := range copyBar {
+			cell.Style = themeui.NewDimmer(theme).Dim(cell.Style).Canonical()
+			require.Equal(t, cell, client.Cell(x, client.Rows()-1), "copy status bar must be part of the complete backdrop")
+		}
+		paletteVisible := false
+		for y := range client.Rows() {
+			paletteVisible = paletteVisible || strings.Contains(rowText(client.RowCells(y)), "Commands")
+		}
+		require.True(t, paletteVisible, "palette must remain composed above copy mode")
+	})
 }
 
 func TestFirstPaintRetainedFloatingPaneEmitsOneReset(t *testing.T) {
@@ -69,64 +72,68 @@ func TestFirstPaintRetainedFloatingPaneEmitsOneReset(t *testing.T) {
 		{name: "different outer size", clientSize: domain.Size{Cols: 100, Rows: 40}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			pty, releasePTY := newBlockingPTY(t)
-			defer releasePTY()
-			d, sess, ac, sends := newManualSessionWithPTYs(t, pty)
-			ac.sendMu.Lock()
-			ac.geometry.Size = tc.clientSize
-			ac.sendMu.Unlock()
+			synctest.Test(t, func(t *testing.T) {
+				pty, releasePTY := newBlockingPTY(t)
+				defer releasePTY()
+				d, sess, ac, sends := newManualSessionWithPTYs(t, pty)
+				ac.sendMu.Lock()
+				ac.geometry.Size = tc.clientSize
+				ac.sendMu.Unlock()
 
-			// A retained visible popup still needs activation warmup. When the
-			// outer terminal also changes, its completed transaction must cover
-			// that popup rather than emitting a second reset-producing frame.
-			floating := newPane(layout.PaneID("floating"), nil, domain.Size{Cols: 20, Rows: 8})
-			installTestFloating(testAttachmentTab(sess), floating, true)
+				// A retained visible popup still needs activation warmup. When the
+				// outer terminal also changes, its completed transaction must cover
+				// that popup rather than emitting a second reset-producing frame.
+				floating := newPane(layout.PaneID("floating"), nil, domain.Size{Cols: 20, Rows: 8})
+				installTestFloating(testAttachmentTab(sess), floating, true)
 
-			d.firstPaint(sess, ac)
+				d.firstPaint(sess, ac)
 
-			frame := awaitFrame(t, sends, "Output")
-			output := unmarshalTestOutput(t, frame.Payload)
-			require.Zero(t, output.Base, "first paint must be a mandatory reset")
-			select {
-			case extra := <-sends:
-				t.Fatalf("first paint emitted duplicate frame after floating activation resize: %#v", extra)
-			default:
-			}
+				frame := requireFrame(t, sends, "Output")
+				output := unmarshalTestOutput(t, frame.Payload)
+				require.Zero(t, output.Base, "first paint must be a mandatory reset")
+				select {
+				case extra := <-sends:
+					t.Fatalf("first paint emitted duplicate frame after floating activation resize: %#v", extra)
+				default:
+				}
+			})
 		})
 	}
 }
 
 func TestPaletteBackdropProductionRenderAndDismissal(t *testing.T) {
-	p, release := newBlockingPTY(t)
-	defer release()
-	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	ac.setThemeForTest(backdropTheme())
-	client := vt.NewScreen(80, 25)
-	pane := sess.tabs[0].focusedPane()
-	pane.screen.Write([]byte("X"))
-	d.paint(sess, ac, true, nil)
-	mustApplyOutput(t, client, awaitFrame(t, sends, "Output"))
-	undimmed := client.Cell(0, 1)
-	topBar := client.Cell(0, 0)
-	bottomBar := client.Cell(0, 24)
+	synctest.Test(t, func(t *testing.T) {
+		p, release := newBlockingPTY(t)
+		defer release()
+		d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+		ac.setThemeForTest(backdropTheme())
+		client := vt.NewScreen(80, 25)
+		pane := sess.tabs[0].focusedPane()
+		pane.screen.Write([]byte("X"))
+		d.paint(sess, ac, true, nil)
+		mustApplyOutput(t, client, requireFrame(t, sends, "Output"))
+		undimmed := client.Cell(0, 1)
+		topBar := client.Cell(0, 0)
+		bottomBar := client.Cell(0, 24)
 
-	d.handleInput(sess, ac, []byte("\x1b "))
-	mustApplyOutput(t, client, awaitFrame(t, sends, "Output"))
-	dimmed := client.Cell(0, 1)
-	require.Equal(t, 'X', dimmed.Rune)
-	require.Equal(t, themeui.NewDimmer(backdropTheme()).Dim(undimmed.Style).Canonical(), dimmed.Style.Canonical(), "open palette must use the theme dim style")
-	dimmedTopBar := topBar
-	dimmedTopBar.Style = themeui.NewDimmer(backdropTheme()).Dim(topBar.Style).Canonical()
-	dimmedBottomBar := bottomBar
-	dimmedBottomBar.Style = themeui.NewDimmer(backdropTheme()).Dim(bottomBar.Style).Canonical()
-	require.Equal(t, dimmedTopBar, client.Cell(0, 0), "top chrome is part of the complete backdrop")
-	require.Equal(t, dimmedBottomBar, client.Cell(0, 24), "bottom chrome is part of the complete backdrop")
+		d.handleInput(sess, ac, []byte("\x1b "))
+		mustApplyOutput(t, client, requireFrame(t, sends, "Output"))
+		dimmed := client.Cell(0, 1)
+		require.Equal(t, 'X', dimmed.Rune)
+		require.Equal(t, themeui.NewDimmer(backdropTheme()).Dim(undimmed.Style).Canonical(), dimmed.Style.Canonical(), "open palette must use the theme dim style")
+		dimmedTopBar := topBar
+		dimmedTopBar.Style = themeui.NewDimmer(backdropTheme()).Dim(topBar.Style).Canonical()
+		dimmedBottomBar := bottomBar
+		dimmedBottomBar.Style = themeui.NewDimmer(backdropTheme()).Dim(bottomBar.Style).Canonical()
+		require.Equal(t, dimmedTopBar, client.Cell(0, 0), "top chrome is part of the complete backdrop")
+		require.Equal(t, dimmedBottomBar, client.Cell(0, 24), "bottom chrome is part of the complete backdrop")
 
-	d.handleInput(sess, ac, []byte("\x1b"))
-	mustApplyOutput(t, client, awaitFrame(t, sends, "Output"))
-	require.Equal(t, undimmed, client.Cell(0, 1), "full redraw restores pane rune and style")
-	require.Equal(t, topBar, client.Cell(0, 0))
-	require.Equal(t, bottomBar, client.Cell(0, 24))
+		d.handleInput(sess, ac, []byte("\x1b"))
+		mustApplyOutput(t, client, requireFrame(t, sends, "Output"))
+		require.Equal(t, undimmed, client.Cell(0, 1), "full redraw restores pane rune and style")
+		require.Equal(t, topBar, client.Cell(0, 0))
+		require.Equal(t, bottomBar, client.Cell(0, 24))
+	})
 }
 
 // --- test doubles -----------------------------------------------------------
@@ -227,242 +234,256 @@ func TestPTYReaderLogsClosureWithoutNotification(t *testing.T) {
 	require.Empty(t, toasts, "PTY closure must not notify the user")
 }
 
-type concurrentExitPTY struct {
-	started chan struct{}
-	release chan struct{}
-}
-
-func newConcurrentExitPTY() *concurrentExitPTY {
-	return &concurrentExitPTY{started: make(chan struct{}), release: make(chan struct{})}
-}
-
-func (p *concurrentExitPTY) Read([]byte) (int, error) {
-	close(p.started)
-	<-p.release
-	return 0, io.EOF
-}
-func (*concurrentExitPTY) Write(b []byte) (int, error)  { return len(b), nil }
-func (*concurrentExitPTY) Close() error                 { return nil }
-func (*concurrentExitPTY) Resize(domain.Geometry) error { return nil }
-func (*concurrentExitPTY) Pid() int                     { return 0 }
-func (*concurrentExitPTY) ForegroundPgid() (int, error) {
-	return 0, nil
+// newConcurrentExitPTY returns a MockPTY whose first Read signals started and
+// then blocks until release closes, after which it reports io.EOF.
+func newConcurrentExitPTY(t testing.TB) (p *portsmocks.MockPTY, started, release chan struct{}) {
+	t.Helper()
+	started, release = make(chan struct{}), make(chan struct{})
+	p = portsmocks.NewMockPTY(t)
+	p.EXPECT().Read(mock.Anything).RunAndReturn(func([]byte) (int, error) {
+		close(started)
+		<-release
+		return 0, io.EOF
+	}).Maybe()
+	p.EXPECT().Write(mock.Anything).RunAndReturn(func(b []byte) (int, error) { return len(b), nil }).Maybe()
+	p.EXPECT().Close().Return(nil).Maybe()
+	p.EXPECT().Resize(mock.Anything).Return(nil).Maybe()
+	p.EXPECT().Pid().Return(0).Maybe()
+	p.EXPECT().ForegroundPgid().Return(0, nil).Maybe()
+	return p, started, release
 }
 
 func TestPTYReaderReadsSessionNameUnderLockDuringConcurrentRename(t *testing.T) {
-	// Repeated synchronized exits make the reader's closure log contend with a
-	// rename. Running this under -race proves the name snapshot uses sess.mu.
-	for range 100 {
-		pty := newConcurrentExitPTY()
-		d, sess, _, _ := newManualSessionWithPTYs(t, pty)
-		pane := sess.tabs[0].focusedPane()
-		pane.onExit = func() {}
+	synctest.Test(t, func(t *testing.T) {
+		// Repeated synchronized exits make the reader's closure log contend with a
+		// rename. Running this under -race proves the name snapshot uses sess.mu.
+		for range 100 {
+			pty, started, release := newConcurrentExitPTY(t)
+			d, sess, _, _ := newManualSessionWithPTYs(t, pty)
+			pane := sess.tabs[0].focusedPane()
+			pane.onExit = func() {}
 
-		d.sessWg.Add(1)
-		go d.ptyReader(sess, sess.tabs[0], pane)
-		<-pty.started
+			d.sessWg.Add(1)
+			go d.ptyReader(sess, sess.tabs[0], pane)
+			<-started
 
-		start := make(chan struct{})
-		renameErr := make(chan error, 1)
-		var wg sync.WaitGroup
-		wg.Add(2)
-		go func() {
-			defer wg.Done()
-			<-start
-			close(pty.release)
-		}()
-		go func() {
-			defer wg.Done()
-			<-start
-			renameErr <- d.renameSession(sess, "renamed")
-		}()
-		close(start)
-		wg.Wait()
-		require.NoError(t, <-renameErr)
-		d.sessWg.Wait()
-	}
+			start := make(chan struct{})
+			renameErr := make(chan error, 1)
+			var wg sync.WaitGroup
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				<-start
+				close(release)
+			}()
+			go func() {
+				defer wg.Done()
+				<-start
+				renameErr <- d.renameSession(sess, "renamed")
+			}()
+			close(start)
+			wg.Wait()
+			require.NoError(t, <-renameErr)
+			d.sessWg.Wait()
+		}
+	})
 }
 
 func TestPTYReaderSyncVisibilityTransitions(t *testing.T) {
 	t.Run("inactive synchronized pane activates only after complete urgent frame", func(t *testing.T) {
-		inactivePTY, inactiveSteps, inactiveProcessed := newChannelPTY(t)
-		activePTY, _, _ := newChannelPTY(t)
-		d, sess, ac, sends := newManualSessionWithPTYs(t, activePTY, inactivePTY)
-		clock := newCoordinatorMockClock(t, 8)
-		d.clock = clock.clock
-		rc := d.attachCoordinator(sess, nil, ac, true)
+		synctest.Test(t, func(t *testing.T) {
+			inactivePTY, inactiveSteps, inactiveProcessed := newChannelPTY(t)
+			activePTY, _, _ := newChannelPTY(t)
+			d, sess, ac, sends := newManualSessionWithPTYs(t, activePTY, inactivePTY)
+			clock := newCoordinatorMockClock(t, 8)
+			d.clock = clock.clock
+			rc := d.attachCoordinator(sess, nil, ac, true)
+			t.Cleanup(func() { rc.beginSessionTeardown().finish() }) // stop timer workers so the bubble can exit
 
-		d.sessWg.Add(1)
-		go d.ptyReader(sess, sess.tabs[1], sess.tabs[1].focusedPane())
-		inactiveSteps <- channelPTYStep{data: []byte("\x1b[?2026hpartial")}
-		awaitPTYReadProcessed(t, inactiveProcessed)
+			d.sessWg.Add(1)
+			go d.ptyReader(sess, sess.tabs[1], sess.tabs[1].focusedPane())
+			inactiveSteps <- channelPTYStep{data: []byte("\x1b[?2026hpartial")}
+			awaitPTYReadProcessed(t, inactiveProcessed)
 
-		sess.mu.Lock()
-		selectTestAttachmentTabLocked(sess, 1)
-		sess.mu.Unlock()
-		d.invalidateRender(sess, ac, true, "sync activation")
-		fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), urgentRenderDeadline)
-		requireNoCoordinatorOutputFrame(t, sends)
+			sess.mu.Lock()
+			selectTestAttachmentTabLocked(sess, 1)
+			sess.mu.Unlock()
+			d.invalidateRender(sess, ac, true, "sync activation")
+			fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), urgentRenderDeadline)
+			requireNoCoordinatorOutputFrame(t, sends)
 
-		inactiveSteps <- channelPTYStep{data: []byte(" complete\x1b[?2026l")}
-		awaitPTYReadProcessed(t, inactiveProcessed)
-		fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), urgentRenderDeadline)
-		frame := awaitOutputFrameWithoutSleep(t, sends)
-		output := unmarshalTestOutput(t, frame.Payload)
-		require.Contains(t, string(output.Data), "partial complete")
-		requireNoCoordinatorOutputFrame(t, sends)
+			inactiveSteps <- channelPTYStep{data: []byte(" complete\x1b[?2026l")}
+			awaitPTYReadProcessed(t, inactiveProcessed)
+			fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), urgentRenderDeadline)
+			frame := awaitOutputFrameWithoutSleep(t, sends)
+			output := unmarshalTestOutput(t, frame.Payload)
+			require.Contains(t, string(output.Data), "partial complete")
+			requireNoCoordinatorOutputFrame(t, sends)
 
-		inactiveSteps <- channelPTYStep{err: io.EOF}
-		d.sessWg.Wait()
+			inactiveSteps <- channelPTYStep{err: io.EOF}
+			d.sessWg.Wait()
+		})
 	})
 
 	t.Run("hidden synchronized pane cannot stall newly active output or flush late", func(t *testing.T) {
-		oldPTY, oldSteps, oldProcessed := newChannelPTY(t)
-		newPTY, newSteps, newProcessed := newChannelPTY(t)
-		parkedPTY, _, _ := newChannelPTY(t)
-		// Keep one unopened tab so reader EOF cleanup cannot tear down the
-		// session and introduce unrelated detach-notification timers.
-		d, sess, ac, sends := newManualSessionWithPTYs(t, oldPTY, newPTY, parkedPTY)
-		clock := newCoordinatorMockClock(t, 8)
-		d.clock = clock.clock
-		rc := d.attachCoordinator(sess, nil, ac, true)
+		synctest.Test(t, func(t *testing.T) {
+			oldPTY, oldSteps, oldProcessed := newChannelPTY(t)
+			newPTY, newSteps, newProcessed := newChannelPTY(t)
+			parkedPTY, _, _ := newChannelPTY(t)
+			// Keep one unopened tab so reader EOF cleanup cannot tear down the
+			// session and introduce unrelated detach-notification timers.
+			d, sess, ac, sends := newManualSessionWithPTYs(t, oldPTY, newPTY, parkedPTY)
+			clock := newCoordinatorMockClock(t, 8)
+			d.clock = clock.clock
+			rc := d.attachCoordinator(sess, nil, ac, true)
+			t.Cleanup(func() { rc.beginSessionTeardown().finish() }) // stop timer workers so the bubble can exit
 
-		d.sessWg.Add(2)
-		go d.ptyReader(sess, sess.tabs[0], sess.tabs[0].focusedPane())
-		go d.ptyReader(sess, sess.tabs[1], sess.tabs[1].focusedPane())
-		oldSteps <- channelPTYStep{data: []byte("\x1b[?2026hold partial")}
-		awaitPTYReadProcessed(t, oldProcessed)
+			d.sessWg.Add(2)
+			go d.ptyReader(sess, sess.tabs[0], sess.tabs[0].focusedPane())
+			go d.ptyReader(sess, sess.tabs[1], sess.tabs[1].focusedPane())
+			oldSteps <- channelPTYStep{data: []byte("\x1b[?2026hold partial")}
+			awaitPTYReadProcessed(t, oldProcessed)
 
-		sess.mu.Lock()
-		selectTestAttachmentTabLocked(sess, 1)
-		sess.mu.Unlock()
-		newSteps <- channelPTYStep{data: []byte("newly active")}
-		awaitPTYReadProcessed(t, newProcessed)
-		fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), minOutputRenderDeadline)
-		frame := awaitOutputFrameWithoutSleep(t, sends)
-		output := unmarshalTestOutput(t, frame.Payload)
-		require.Contains(t, string(output.Data), "newly active")
-		require.NotContains(t, string(output.Data), "old partial")
+			sess.mu.Lock()
+			selectTestAttachmentTabLocked(sess, 1)
+			sess.mu.Unlock()
+			newSteps <- channelPTYStep{data: []byte("newly active")}
+			awaitPTYReadProcessed(t, newProcessed)
+			fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), minOutputRenderDeadline)
+			frame := awaitOutputFrameWithoutSleep(t, sends)
+			output := unmarshalTestOutput(t, frame.Payload)
+			require.Contains(t, string(output.Data), "newly active")
+			require.NotContains(t, string(output.Data), "old partial")
 
-		oldSteps <- channelPTYStep{data: []byte("\x1b[?2026l")}
-		awaitPTYReadProcessed(t, oldProcessed)
-		requireNoCoordinatorOutputFrame(t, sends)
+			oldSteps <- channelPTYStep{data: []byte("\x1b[?2026l")}
+			awaitPTYReadProcessed(t, oldProcessed)
+			requireNoCoordinatorOutputFrame(t, sends)
 
-		oldSteps <- channelPTYStep{err: io.EOF}
-		newSteps <- channelPTYStep{err: io.EOF}
-		d.sessWg.Wait()
+			oldSteps <- channelPTYStep{err: io.EOF}
+			newSteps <- channelPTYStep{err: io.EOF}
+			d.sessWg.Wait()
+		})
 	})
 }
 
 func TestPTYReaderRepublishesSynchronizedCompletionAfterAttachmentLifecycle(t *testing.T) {
 	t.Run("detached target completes cross-session preview without later PTY output", func(t *testing.T) {
-		pty, steps, processed := newChannelPTY(t)
-		d, target, targetClient, _ := newManualSessionWithPTYs(t, pty)
-		clock := newCoordinatorMockClock(t, 8)
-		d.clock = clock.clock
-		rc := d.attachCoordinator(target, nil, targetClient, true)
+		synctest.Test(t, func(t *testing.T) {
+			pty, steps, processed := newChannelPTY(t)
+			d, target, targetClient, _ := newManualSessionWithPTYs(t, pty)
+			clock := newCoordinatorMockClock(t, 8)
+			d.clock = clock.clock
+			rc := d.attachCoordinator(target, nil, targetClient, true)
+			t.Cleanup(func() { rc.beginSessionTeardown().finish() }) // stop timer workers so the bubble can exit
 
-		// A viewer in a different session subscribes to the headless target.
-		viewer := &attachedClient{}
-		viewer.initOverlays()
-		d.sessions["viewer"] = &session{sessionCore: sessionCore{id: "viewer", attachments: map[*attachedClient]struct{}{viewer: {}}}}
-		previews := make(chan renderWake, 2)
-		rc.subscribePreviewFor(viewer, 1, func(w renderWake) { previews <- w })
+			// A viewer in a different session subscribes to the headless target.
+			viewer := &attachedClient{}
+			viewer.initOverlays()
+			d.sessions["viewer"] = &session{sessionCore: sessionCore{id: "viewer", attachments: map[*attachedClient]struct{}{viewer: {}}}}
+			previews := make(chan renderWake, 2)
+			rc.subscribePreviewFor(viewer, 1, func(w renderWake) { previews <- w })
 
-		d.sessWg.Add(1)
-		go d.ptyReader(target, target.tabs[0], target.tabs[0].focusedPane())
-		steps <- channelPTYStep{data: []byte("\x1b[?2026hpending")}
-		awaitPTYReadProcessed(t, processed)
-		drainCoordinatorTimers(clock) // detach must clear the pending output work.
+			d.sessWg.Add(1)
+			go d.ptyReader(target, target.tabs[0], target.tabs[0].focusedPane())
+			steps <- channelPTYStep{data: []byte("\x1b[?2026hpending")}
+			awaitPTYReadProcessed(t, processed)
+			drainCoordinatorTimers(clock) // detach must clear the pending output work.
 
-		target.mu.Lock()
-		clearAttachmentsForTestLocked(target)
-		target.mu.Unlock()
-		rc.noteDetach(targetClient)
-		steps <- channelPTYStep{data: []byte(" complete\x1b[?2026l")}
-		awaitPTYReadProcessed(t, processed)
+			target.mu.Lock()
+			clearAttachmentsForTestLocked(target)
+			target.mu.Unlock()
+			rc.noteDetach(targetClient)
+			steps <- channelPTYStep{data: []byte(" complete\x1b[?2026l")}
+			awaitPTYReadProcessed(t, processed)
 
-		fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), urgentRenderDeadline)
-		wake := <-previews
-		require.True(t, wake.urgent)
-		require.Equal(t, 1, wake.coalesced, "completion starts a fresh headless preview batch after detach")
-		select {
-		case duplicate := <-previews:
-			t.Fatalf("sync completion must publish exactly one preview wake: %#v", duplicate)
-		default:
-		}
+			fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), urgentRenderDeadline)
+			wake := <-previews
+			require.True(t, wake.urgent)
+			require.Equal(t, 1, wake.coalesced, "completion starts a fresh headless preview batch after detach")
+			select {
+			case duplicate := <-previews:
+				t.Fatalf("sync completion must publish exactly one preview wake: %#v", duplicate)
+			default:
+			}
 
-		steps <- channelPTYStep{err: io.EOF}
-		d.sessWg.Wait()
+			steps <- channelPTYStep{err: io.EOF}
+			d.sessWg.Wait()
+		})
 	})
 
 	t.Run("remaining attachment receives shared output after peer detach", func(t *testing.T) {
-		pty, steps, processed := newChannelPTY(t)
-		d, target, detached, _ := newManualSessionWithPTYs(t, pty)
-		clock := newCoordinatorMockClock(t, 8)
-		d.clock = clock.clock
-		rc := d.attachCoordinator(target, nil, detached, true)
+		synctest.Test(t, func(t *testing.T) {
+			pty, steps, processed := newChannelPTY(t)
+			d, target, detached, _ := newManualSessionWithPTYs(t, pty)
+			clock := newCoordinatorMockClock(t, 8)
+			d.clock = clock.clock
+			rc := d.attachCoordinator(target, nil, detached, true)
+			t.Cleanup(func() { rc.beginSessionTeardown().finish() }) // stop timer workers so the bubble can exit
 
-		secondTransport, secondSends := newCapturingTransport(t)
-		remaining := &attachedClient{tr: secondTransport, output: newOutputStateStream(), geometry: domain.Geometry{Size: detached.geometry.Size}}
-		remaining.initOverlays()
-		remaining.setSession(target)
-		target.mu.Lock()
-		require.True(t, target.registerAttachmentLocked(remaining))
-		target.mu.Unlock()
-		rc.attach(remaining)
+			secondTransport, secondSends := newCapturingTransport(t)
+			remaining := &attachedClient{tr: secondTransport, output: newOutputStateStream(), geometry: domain.Geometry{Size: detached.geometry.Size}}
+			remaining.initOverlays()
+			remaining.setSession(target)
+			target.mu.Lock()
+			require.True(t, target.registerAttachmentLocked(remaining))
+			target.mu.Unlock()
+			rc.attach(remaining)
 
-		d.sessWg.Add(1)
-		go d.ptyReader(target, target.tabs[0], target.tabs[0].focusedPane())
-		steps <- channelPTYStep{data: []byte("before detach")}
-		awaitPTYReadProcessed(t, processed)
-		timers := drainCoordinatorTimers(clock)
+			d.sessWg.Add(1)
+			go d.ptyReader(target, target.tabs[0], target.tabs[0].focusedPane())
+			steps <- channelPTYStep{data: []byte("before detach")}
+			awaitPTYReadProcessed(t, processed)
+			timers := drainCoordinatorTimers(clock)
 
-		// Detaching one attachment must not discard the session-shared pending
-		// invalidation or stop the coordinator from painting the remaining one.
-		target.mu.Lock()
-		require.True(t, target.unregisterAttachmentLocked(detached))
-		target.mu.Unlock()
-		rc.noteDetach(detached)
-		fireCoordinatorTimer(t, rc, timers, minOutputRenderDeadline)
-		require.NotEmpty(t, secondSends, "the remaining attachment received no shared output after its peer detached")
-		before := len(secondSends)
+			// Detaching one attachment must not discard the session-shared pending
+			// invalidation or stop the coordinator from painting the remaining one.
+			target.mu.Lock()
+			require.True(t, target.unregisterAttachmentLocked(detached))
+			target.mu.Unlock()
+			rc.noteDetach(detached)
+			fireCoordinatorTimer(t, rc, timers, minOutputRenderDeadline)
+			require.NotEmpty(t, secondSends, "the remaining attachment received no shared output after its peer detached")
+			before := len(secondSends)
 
-		steps <- channelPTYStep{data: []byte("after detach")}
-		awaitPTYReadProcessed(t, processed)
-		fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), minOutputRenderDeadline)
-		require.Greater(t, len(secondSends), before, "shared output stopped after the peer detached")
+			steps <- channelPTYStep{data: []byte("after detach")}
+			awaitPTYReadProcessed(t, processed)
+			fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), minOutputRenderDeadline)
+			require.Greater(t, len(secondSends), before, "shared output stopped after the peer detached")
 
-		steps <- channelPTYStep{err: io.EOF}
-		d.sessWg.Wait()
-		d.waitNotifies()
+			steps <- channelPTYStep{err: io.EOF}
+			d.sessWg.Wait()
+			d.waitNotifies()
+		})
 	})
 
 	t.Run("headless pane without a preview stays quiet on completion", func(t *testing.T) {
-		pty, steps, processed := newChannelPTY(t)
-		d, target, client, _ := newManualSessionWithPTYs(t, pty)
-		clock := newCoordinatorMockClock(t, 8)
-		d.clock = clock.clock
-		rc := d.attachCoordinator(target, nil, client, true)
-		wakes := make(chan renderWake, 1)
-		rc.opts.wake = func(w renderWake) { wakes <- w }
-		target.mu.Lock()
-		clearAttachmentsForTestLocked(target)
-		target.mu.Unlock()
-		rc.noteDetach(client)
+		synctest.Test(t, func(t *testing.T) {
+			pty, steps, processed := newChannelPTY(t)
+			d, target, client, _ := newManualSessionWithPTYs(t, pty)
+			clock := newCoordinatorMockClock(t, 8)
+			d.clock = clock.clock
+			rc := d.attachCoordinator(target, nil, client, true)
+			t.Cleanup(func() { rc.beginSessionTeardown().finish() }) // stop timer workers so the bubble can exit
+			wakes := make(chan renderWake, 1)
+			rc.opts.wake = func(w renderWake) { wakes <- w }
+			target.mu.Lock()
+			clearAttachmentsForTestLocked(target)
+			target.mu.Unlock()
+			rc.noteDetach(client)
 
-		d.sessWg.Add(1)
-		go d.ptyReader(target, target.tabs[0], target.tabs[0].focusedPane())
-		steps <- channelPTYStep{data: []byte("\x1b[?2026hpending")}
-		awaitPTYReadProcessed(t, processed)
-		drainCoordinatorTimers(clock)
-		steps <- channelPTYStep{data: []byte(" complete\x1b[?2026l")}
-		awaitPTYReadProcessed(t, processed)
-		require.Empty(t, drainCoordinatorTimers(clock))
-		requireNoWake(t, wakes)
+			d.sessWg.Add(1)
+			go d.ptyReader(target, target.tabs[0], target.tabs[0].focusedPane())
+			steps <- channelPTYStep{data: []byte("\x1b[?2026hpending")}
+			awaitPTYReadProcessed(t, processed)
+			drainCoordinatorTimers(clock)
+			steps <- channelPTYStep{data: []byte(" complete\x1b[?2026l")}
+			awaitPTYReadProcessed(t, processed)
+			require.Empty(t, drainCoordinatorTimers(clock))
+			requireNoWake(t, wakes)
 
-		steps <- channelPTYStep{err: io.EOF}
-		d.sessWg.Wait()
+			steps <- channelPTYStep{err: io.EOF}
+			d.sessWg.Wait()
+		})
 	})
 }
 
@@ -499,104 +520,119 @@ func TestNonRenderablePaneDamageRemainsPendingForCapture(t *testing.T) {
 			}},
 		} {
 			t.Run(tt.name, func(t *testing.T) {
-				d, sess, tb, p, sends := newFixture(t)
-				tt.setup(d, sess, tb, p)
-				p.screen.Write([]byte("damage"))
-				_ = d.paneRenderable(sess, tb, p)
-				require.NotEmpty(t, p.screen.Damage(), "only render capture may consume VT damage")
-				select {
-				case frame := <-sends:
-					t.Fatalf("non-renderable output must not compose or send: %#v", frame)
-				default:
-				}
+				synctest.Test(t, func(t *testing.T) {
+					d, sess, tb, p, sends := newFixture(t)
+					tt.setup(d, sess, tb, p)
+					p.screen.Write([]byte("damage"))
+					_ = d.paneRenderable(sess, tb, p)
+					require.NotEmpty(t, p.screen.Damage(), "only render capture may consume VT damage")
+					select {
+					case frame := <-sends:
+						t.Fatalf("non-renderable output must not compose or send: %#v", frame)
+					default:
+					}
+				})
 			})
 		}
 	})
 
 	t.Run("retains active pane damage", func(t *testing.T) {
-		d, sess, tb, p, _ := newFixture(t)
-		p.screen.Write([]byte("active"))
-		_ = d.paneRenderable(sess, tb, p)
-		require.NotEmpty(t, p.screen.Damage(), "active pane damage belongs to coordinator composition")
+		synctest.Test(t, func(t *testing.T) {
+			d, sess, tb, p, _ := newFixture(t)
+			p.screen.Write([]byte("active"))
+			_ = d.paneRenderable(sess, tb, p)
+			require.NotEmpty(t, p.screen.Damage(), "active pane damage belongs to coordinator composition")
+		})
 	})
 }
 
 func TestAltXClosesFinalTabAndDetaches(t *testing.T) {
-	d, sess, ac, sends, releases := newManualTabSession(t, 1)
-	defer releases[0]()
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, ac, sends, releases := newManualTabSession(t, 1)
+		defer releases[0]()
 
-	d.handleInput(sess, ac, []byte("\x1b "))
-	d.handleInput(sess, ac, []byte("CLT\r"))
+		d.handleInput(sess, ac, []byte("\x1b "))
+		d.handleInput(sess, ac, []byte("CLT\r"))
 
-	require.Equal(t, 0, sessionCount(d))
-	f := awaitFrame(t, sends, "Detached")
-	det := decodeServerMessage(t, f).(protocol.Detached)
-	require.Equal(t, protocol.ReasonSessionKilled, det.Reason)
+		require.Equal(t, 0, sessionCount(d))
+		f := requireFrame(t, sends, "Detached")
+		det := decodeServerMessage(t, f).(protocol.Detached)
+		require.Equal(t, protocol.ReasonSessionKilled, det.Reason)
+	})
 }
 
 func TestPTYEOFClosesActiveNonFinalTabAndRepaintsRemaining(t *testing.T) {
-	p1, releasePTY1 := newBlockingPTY(t)
-	p2, releasePTY2 := newBlockingPTY(t)
-	d, sess, _, sends := newManualSessionWithPTYs(t, p1, p2)
-	defer releasePTY2()
-	selectTestAttachmentTab(sess, 0)
-	sess.tabs[1].focusedPane().screen.Write([]byte("remaining"))
+	synctest.Test(t, func(t *testing.T) {
+		p1, releasePTY1 := newBlockingPTY(t)
+		p2, releasePTY2 := newBlockingPTY(t)
+		d, sess, _, sends := newManualSessionWithPTYs(t, p1, p2)
+		defer releasePTY2()
+		selectTestAttachmentTab(sess, 0)
+		sess.tabs[1].focusedPane().screen.Write([]byte("remaining"))
 
-	d.sessWg.Add(1)
-	go d.ptyReader(sess, sess.tabs[0], sess.tabs[0].focusedPane())
-	releasePTY1()
+		d.sessWg.Add(1)
+		go d.ptyReader(sess, sess.tabs[0], sess.tabs[0].focusedPane())
+		releasePTY1()
 
-	require.Eventually(t, func() bool { return tabCount(sess) == 1 }, 2*time.Second, 5*time.Millisecond)
-	require.Equal(t, 1, sessionCount(d))
-	require.Equal(t, 0, testAttachmentTabIndex(sess))
-	f := awaitFrame(t, sends, "Output")
-	out := unmarshalTestOutput(t, f.Payload)
-	data := string(out.Data)
-	require.Contains(t, data, "remaining")
-	require.Contains(t, data, "work")
-	require.Contains(t, data, ";7m")
+		synctest.Wait()
+		require.Equal(t, 1, tabCount(sess))
+		require.Equal(t, 1, sessionCount(d))
+		require.Equal(t, 0, testAttachmentTabIndex(sess))
+		f := requireFrame(t, sends, "Output")
+		out := unmarshalTestOutput(t, f.Payload)
+		data := string(out.Data)
+		require.Contains(t, data, "remaining")
+		require.Contains(t, data, "work")
+		require.Contains(t, data, ";7m")
 
-	d.sessWg.Wait()
+		d.sessWg.Wait()
+	})
 }
 
 func TestPTYEOFClosesInactiveNonFinalTabAndRepaintsStatus(t *testing.T) {
-	p1, releasePTY1 := newBlockingPTY(t)
-	p2, releasePTY2 := newBlockingPTY(t)
-	d, sess, _, sends := newManualSessionWithPTYs(t, p1, p2)
-	defer releasePTY1()
-	selectTestAttachmentTab(sess, 0)
-	sess.tabs[0].focusedPane().screen.Write([]byte("active"))
+	synctest.Test(t, func(t *testing.T) {
+		p1, releasePTY1 := newBlockingPTY(t)
+		p2, releasePTY2 := newBlockingPTY(t)
+		d, sess, _, sends := newManualSessionWithPTYs(t, p1, p2)
+		defer releasePTY1()
+		selectTestAttachmentTab(sess, 0)
+		sess.tabs[0].focusedPane().screen.Write([]byte("active"))
 
-	d.sessWg.Add(1)
-	go d.ptyReader(sess, sess.tabs[1], sess.tabs[1].focusedPane())
-	releasePTY2()
+		d.sessWg.Add(1)
+		go d.ptyReader(sess, sess.tabs[1], sess.tabs[1].focusedPane())
+		releasePTY2()
 
-	require.Eventually(t, func() bool { return tabCount(sess) == 1 }, 2*time.Second, 5*time.Millisecond)
-	require.Equal(t, 1, sessionCount(d))
-	require.Equal(t, 0, testAttachmentTabIndex(sess))
-	f := awaitFrame(t, sends, "Output")
-	out := unmarshalTestOutput(t, f.Payload)
-	data := string(out.Data)
-	require.Contains(t, data, "active")
-	require.Contains(t, data, "work")
-	require.NotContains(t, data, "  2 ")
+		synctest.Wait()
+		require.Equal(t, 1, tabCount(sess))
+		require.Equal(t, 1, sessionCount(d))
+		require.Equal(t, 0, testAttachmentTabIndex(sess))
+		f := requireFrame(t, sends, "Output")
+		out := unmarshalTestOutput(t, f.Payload)
+		data := string(out.Data)
+		require.Contains(t, data, "active")
+		require.Contains(t, data, "work")
+		require.NotContains(t, data, "  2 ")
 
-	d.sessWg.Wait()
+		d.sessWg.Wait()
+	})
 }
 
 func TestPTYEOFFinalTabKillsSessionAndDetaches(t *testing.T) {
-	d, sess, _, sends, releases := newManualTabSession(t, 1)
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, _, sends, releases := newManualTabSession(t, 1)
 
-	d.sessWg.Add(1)
-	go d.ptyReader(sess, sess.tabs[0], sess.tabs[0].focusedPane())
-	releases[0]()
+		d.sessWg.Add(1)
+		go d.ptyReader(sess, sess.tabs[0], sess.tabs[0].focusedPane())
+		releases[0]()
 
-	require.Eventually(t, func() bool { return sessionCount(d) == 0 }, 2*time.Second, 5*time.Millisecond)
-	f := awaitFrame(t, sends, "Detached")
-	det := decodeServerMessage(t, f).(protocol.Detached)
-	require.Equal(t, protocol.ReasonSessionKilled, det.Reason)
+		synctest.Wait()
+		require.Equal(t, 0, sessionCount(d))
+		f := requireFrame(t, sends, "Detached")
+		det := decodeServerMessage(t, f).(protocol.Detached)
+		require.Equal(t, protocol.ReasonSessionKilled, det.Reason)
 
-	d.sessWg.Wait()
+		d.sessWg.Wait()
+	})
 }
 
 // --- resize ordering --------------------------------------------------------
@@ -705,7 +741,9 @@ func TestTranslatePaneDamagePreservesFullWidthScrollFastPathOnly(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.want, translatePaneDamage(tt.in, tt.content, tt.area))
+			synctest.Test(t, func(t *testing.T) {
+				require.Equal(t, tt.want, translatePaneDamage(tt.in, tt.content, tt.area))
+			})
 		})
 	}
 }
@@ -750,25 +788,27 @@ func TestOverlayPaintInvalidationShowsAndRestoresBaseFrame(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			p, release := newBlockingPTY(t)
-			d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-			defer release()
-			if tt.prepareScreen != nil {
-				tt.prepareScreen(sess)
-			}
-			sess.tabs[0].focusedPane().screen.Write([]byte("live"))
-			if tt.wantRestored == "" {
-				tt.wantRestored = "live"
-			}
+			synctest.Test(t, func(t *testing.T) {
+				p, release := newBlockingPTY(t)
+				d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+				defer release()
+				if tt.prepareScreen != nil {
+					tt.prepareScreen(sess)
+				}
+				sess.tabs[0].focusedPane().screen.Write([]byte("live"))
+				if tt.wantRestored == "" {
+					tt.wantRestored = "live"
+				}
 
-			tt.open(d, sess, ac)
-			shown := string(mustOutputData(t, sends))
-			require.Contains(t, shown, tt.visible)
+				tt.open(d, sess, ac)
+				shown := string(mustOutputData(t, sends))
+				require.Contains(t, shown, tt.visible)
 
-			tt.close(d, sess, ac)
-			restored := string(mustOutputData(t, sends))
-			require.Contains(t, restored, tt.wantRestored)
-			require.NotContains(t, restored, tt.notVisible)
+				tt.close(d, sess, ac)
+				restored := string(mustOutputData(t, sends))
+				require.Contains(t, restored, tt.wantRestored)
+				require.NotContains(t, restored, tt.notVisible)
+			})
 		})
 	}
 }
@@ -836,199 +876,207 @@ func TestPaintEarlyReturnReleasesOverlayRenderLocks(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			p, release := newBlockingPTY(t)
-			d, sess, ac, _ := newManualSessionWithPTYs(t, p)
-			defer release()
-			sess.tabs[0].tree.Focus = layout.PaneID("missing")
+			synctest.Test(t, func(t *testing.T) {
+				p, release := newBlockingPTY(t)
+				d, sess, ac, _ := newManualSessionWithPTYs(t, p)
+				defer release()
+				sess.tabs[0].tree.Focus = layout.PaneID("missing")
 
-			tt.open(d, sess, ac)
+				tt.open(d, sess, ac)
 
-			require.True(t, tt.try(ac.overlays), "overlay render lock should be released after paint returns early")
-			tt.give(ac.overlays)
+				require.True(t, tt.try(ac.overlays), "overlay render lock should be released after paint returns early")
+				tt.give(ac.overlays)
+			})
 		})
 	}
 }
 
 func TestResizeOrdersPTYBeforeScreen(t *testing.T) {
-	newSize := domain.Size{Cols: 100, Rows: 30}
+	synctest.Test(t, func(t *testing.T) {
+		newSize := domain.Size{Cols: 100, Rows: 30}
 
-	p := portsmocks.NewMockPTY(t)
-	var screenWidthAtResize int
-	win := newTab(newScriptPTY(t, nil), domain.Size{Cols: 80, Rows: 24})
-	p.EXPECT().Resize(domain.Geometry{Size: domain.Size{Cols: 100, Rows: 28}}).RunAndReturn(func(domain.Geometry) error {
-		// The screen must not yet be resized when the PTY is: proves order.
-		screenWidthAtResize = win.focusedPane().screen.Columns()
-		return nil
-	}).Once()
-	win.focusedPane().pty = p
+		p := portsmocks.NewMockPTY(t)
+		var screenWidthAtResize int
+		win := newTab(newScriptPTY(t, nil), domain.Size{Cols: 80, Rows: 24})
+		p.EXPECT().Resize(domain.Geometry{Size: domain.Size{Cols: 100, Rows: 28}}).RunAndReturn(func(domain.Geometry) error {
+			// The screen must not yet be resized when the PTY is: proves order.
+			screenWidthAtResize = win.focusedPane().screen.Columns()
+			return nil
+		}).Once()
+		win.focusedPane().pty = p
 
-	var gotOutput atomic.Bool
-	tr := newMockServerConnection(t)
-	tr.EXPECT().Close().Return(nil).Maybe()
-	tr.EXPECT().Send(mock.Anything).RunAndReturn(func(f wire.Envelope) error {
-		if envelopeMessageName(nil, f.Payload) == "Output" {
-			gotOutput.Store(true)
-		}
-		return nil
-	}).Maybe()
+		var gotOutput atomic.Bool
+		tr := newMockServerConnection(t)
+		tr.EXPECT().Close().Return(nil).Maybe()
+		tr.EXPECT().Send(mock.Anything).RunAndReturn(func(f wire.Envelope) error {
+			if envelopeMessageName(nil, f.Payload) == "Output" {
+				gotOutput.Store(true)
+			}
+			return nil
+		}).Maybe()
 
-	d := New(nil, newStubClock(t), slog.New(slog.NewTextHandler(io.Discard, nil)))
-	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
-	ac.initOverlays()
-	sess := &session{sessionCore: sessionCore{id: "s", name: "s", incarnation: newTestLifecycle(t), attachments: map[*attachedClient]struct{}{ac: {}}}, tabs: []*tab{win}}
-	ac.setSession(sess)
+		d := New(nil, newStubClock(t), slog.New(slog.NewTextHandler(io.Discard, nil)))
+		ac := &attachedClient{tr: tr, output: newOutputStateStream()}
+		ac.initOverlays()
+		sess := &session{sessionCore: sessionCore{id: "s", name: "s", incarnation: newTestLifecycle(t), attachments: map[*attachedClient]struct{}{ac: {}}}, tabs: []*tab{win}}
+		ac.setSession(sess)
 
-	d.resize(sess, ac, newSize)
-	// This test verifies resize ordering, not the idle fallback. Consume the
-	// pending resize paint deterministically under the non-firing stub clock.
-	d.paint(sess, ac, false, nil)
+		d.resize(sess, ac, newSize)
+		// This test verifies resize ordering, not the idle fallback. Consume the
+		// pending resize paint deterministically under the non-firing stub clock.
+		d.paint(sess, ac, false, nil)
 
-	require.Equal(t, 80, screenWidthAtResize, "pty.Resize must run before screen.Resize")
-	require.Equal(t, 100, win.focusedPane().screen.Columns(), "screen resized after pty")
-	require.Equal(t, 28, win.focusedPane().screen.Rows(), "screen reserves top and bottom chrome rows")
-	require.True(t, gotOutput.Load(), "resize forces a full redraw output")
+		require.Equal(t, 80, screenWidthAtResize, "pty.Resize must run before screen.Resize")
+		require.Equal(t, 100, win.focusedPane().screen.Columns(), "screen resized after pty")
+		require.Equal(t, 28, win.focusedPane().screen.Rows(), "screen reserves top and bottom chrome rows")
+		require.True(t, gotOutput.Load(), "resize forces a full redraw output")
+	})
 }
 
 // --- failed client send teardown --------------------------------------------
 
 func TestSendErrorKeepsEphemeralHeadless(t *testing.T) {
-	p := portsmocks.NewMockPTY(t)
-	p.EXPECT().Close().Return(nil).Maybe()
+	synctest.Test(t, func(t *testing.T) {
+		p := portsmocks.NewMockPTY(t)
+		p.EXPECT().Close().Return(nil).Maybe()
 
-	tr := newMockServerConnection(t)
-	tr.EXPECT().Send(mock.Anything).Return(io.ErrClosedPipe).Maybe()
-	tr.EXPECT().Close().Return(nil).Maybe()
+		tr := newMockServerConnection(t)
+		tr.EXPECT().Send(mock.Anything).Return(io.ErrClosedPipe).Maybe()
+		tr.EXPECT().Close().Return(nil).Maybe()
 
-	d := newTestDaemon(t, nil, newStubClock(t))
-	win := newTab(p, domain.Size{Cols: 20, Rows: 5})
-	sctx, cancel := context.WithCancel(context.Background())
-	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
-	ac.initOverlays()
-	sess := &session{sessionCore: sessionCore{id: "e", name: "0", ephemeral: true, attachments: map[*attachedClient]struct{}{ac: {}}}, tabs: []*tab{win}, ctx: sctx, cancel: cancel}
-	ac.setSession(sess)
-	d.sessions[sess.id] = sess
+		d := newTestDaemon(t, nil, newStubClock(t))
+		win := newTab(p, domain.Size{Cols: 20, Rows: 5})
+		sctx, cancel := context.WithCancel(context.Background())
+		ac := &attachedClient{tr: tr, output: newOutputStateStream()}
+		ac.initOverlays()
+		sess := &session{sessionCore: sessionCore{id: "e", name: "0", ephemeral: true, attachments: map[*attachedClient]struct{}{ac: {}}}, tabs: []*tab{win}, ctx: sctx, cancel: cancel}
+		ac.setSession(sess)
+		d.sessions[sess.id] = sess
 
-	win.mu.Lock()
-	win.focusedPane().screen.Write([]byte("x"))
-	win.mu.Unlock()
+		win.mu.Lock()
+		win.focusedPane().screen.Write([]byte("x"))
+		win.mu.Unlock()
 
-	d.paint(sess, ac, true, nil)
+		d.paint(sess, ac, true, nil)
 
-	require.Equal(t, 1, sessionCount(d), "ephemeral session survives failed client send")
-	sess.mu.Lock()
-	require.Empty(t, sess.snapshotAttachmentsLocked())
-	sess.mu.Unlock()
+		require.Equal(t, 1, sessionCount(d), "ephemeral session survives failed client send")
+		sess.mu.Lock()
+		require.Empty(t, sess.snapshotAttachmentsLocked())
+		sess.mu.Unlock()
 
-	_ = d.killSession(sess, protocol.ReasonServerShutdown, false)
-	cancel()
-	d.waitNotifies()
+		_ = d.killSession(sess, protocol.ReasonServerShutdown, false)
+		cancel()
+		d.waitNotifies()
+	})
 }
 
 func TestPTYKittyAnonymousGraphicsDoesNotWriteResponseToPTY(t *testing.T) {
-	d := newTestDaemon(t, nil, newStubClock(t))
-	p := portsmocks.NewMockPTY(t)
-	chunks := [][]byte{[]byte("\x1b_Ga=T,f=32,s=1,v=1,C=1;AQIDBA\x1b\\")}
-	p.EXPECT().Read(mock.Anything).RunAndReturn(func(buf []byte) (int, error) {
-		if len(chunks) == 0 {
-			return 0, io.EOF
-		}
-		n := copy(buf, chunks[0])
-		chunks = chunks[1:]
-		return n, nil
+	synctest.Test(t, func(t *testing.T) {
+		d := newTestDaemon(t, nil, newStubClock(t))
+		p := portsmocks.NewMockPTY(t)
+		chunks := [][]byte{[]byte("\x1b_Ga=T,f=32,s=1,v=1,C=1;AQIDBA\x1b\\")}
+		p.EXPECT().Read(mock.Anything).RunAndReturn(func(buf []byte) (int, error) {
+			if len(chunks) == 0 {
+				return 0, io.EOF
+			}
+			n := copy(buf, chunks[0])
+			chunks = chunks[1:]
+			return n, nil
+		})
+		p.EXPECT().Close().Return(nil).Maybe()
+
+		sctx, cancel := context.WithCancel(context.Background())
+		win := newTestTabWithContext(p, sctx, cancel)
+		sess := &session{sessionCore: sessionCore{id: "anonymous", name: "anonymous"}, tabs: []*tab{win}, ctx: sctx, cancel: cancel}
+		d.sessions[sess.id] = sess
+		d.sessWg.Add(1)
+
+		d.ptyReader(sess, win, win.focusedPane())
 	})
-	p.EXPECT().Close().Return(nil).Maybe()
-
-	sctx, cancel := context.WithCancel(context.Background())
-	win := newTestTabWithContext(p, sctx, cancel)
-	sess := &session{sessionCore: sessionCore{id: "anonymous", name: "anonymous"}, tabs: []*tab{win}, ctx: sctx, cancel: cancel}
-	d.sessions[sess.id] = sess
-	d.sessWg.Add(1)
-
-	d.ptyReader(sess, win, win.focusedPane())
 }
 
 func TestPTYKittyIcatDetectionGetsResponsesWrittenBackToPTY(t *testing.T) {
-	d := newTestDaemon(t, nil, newStubClock(t))
-	p := portsmocks.NewMockPTY(t)
-	chunks := [][]byte{[]byte("\x1b_Ga=q,f=24,s=1,v=1,S=3,i=1;MTIz\x1b\\\x1b_Ga=q,f=24,t=t,s=1,v=1,S=47,i=2;L2Rldi9zaG0va2l0dHktdHR5LWdyYXBoaWNzLXByb3RvY29sLTMzMTU3NTkxNjc\x1b\\\x1b_Ga=q,f=24,t=s,s=1,v=1,S=18,i=3;aWNhdC1aQlJCWFdNQ0lIQ0ZD\x1b\\\x1b[c")}
-	writes := make(chan []byte, 1)
-	p.EXPECT().Read(mock.Anything).RunAndReturn(func(buf []byte) (int, error) {
-		if len(chunks) == 0 {
-			return 0, io.EOF
-		}
-		n := copy(buf, chunks[0])
-		chunks = chunks[1:]
-		return n, nil
-	})
-	p.EXPECT().Write(mock.Anything).RunAndReturn(func(b []byte) (int, error) {
-		writes <- append([]byte(nil), b...)
-		return len(b), nil
-	}).Once()
-	p.EXPECT().Close().Return(nil).Maybe()
+	synctest.Test(t, func(t *testing.T) {
+		d := newTestDaemon(t, nil, newStubClock(t))
+		p := portsmocks.NewMockPTY(t)
+		chunks := [][]byte{[]byte("\x1b_Ga=q,f=24,s=1,v=1,S=3,i=1;MTIz\x1b\\\x1b_Ga=q,f=24,t=t,s=1,v=1,S=47,i=2;L2Rldi9zaG0va2l0dHktdHR5LWdyYXBoaWNzLXByb3RvY29sLTMzMTU3NTkxNjc\x1b\\\x1b_Ga=q,f=24,t=s,s=1,v=1,S=18,i=3;aWNhdC1aQlJCWFdNQ0lIQ0ZD\x1b\\\x1b[c")}
+		writes := make(chan []byte, 1)
+		p.EXPECT().Read(mock.Anything).RunAndReturn(func(buf []byte) (int, error) {
+			if len(chunks) == 0 {
+				return 0, io.EOF
+			}
+			n := copy(buf, chunks[0])
+			chunks = chunks[1:]
+			return n, nil
+		})
+		p.EXPECT().Write(mock.Anything).RunAndReturn(func(b []byte) (int, error) {
+			writes <- append([]byte(nil), b...)
+			return len(b), nil
+		}).Once()
+		p.EXPECT().Close().Return(nil).Maybe()
 
-	tr, sends := newCapturingTransport(t)
-	sctx, cancel := context.WithCancel(context.Background())
-	win := newTestTabWithContext(p, sctx, cancel)
-	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
-	ac.initOverlays()
-	sess := &session{sessionCore: sessionCore{id: "query", name: "query", attachments: map[*attachedClient]struct{}{ac: {}}}, tabs: []*tab{win}, ctx: sctx, cancel: cancel}
-	ac.setSession(sess)
-	d.sessions[sess.id] = sess
-	d.sessWg.Add(1)
-	d.ptyReader(sess, win, win.focusedPane())
+		tr, sends := newCapturingTransport(t)
+		sctx, cancel := context.WithCancel(context.Background())
+		win := newTestTabWithContext(p, sctx, cancel)
+		ac := &attachedClient{tr: tr, output: newOutputStateStream()}
+		ac.initOverlays()
+		sess := &session{sessionCore: sessionCore{id: "query", name: "query", attachments: map[*attachedClient]struct{}{ac: {}}}, tabs: []*tab{win}, ctx: sctx, cancel: cancel}
+		ac.setSession(sess)
+		d.sessions[sess.id] = sess
+		d.sessWg.Add(1)
+		d.ptyReader(sess, win, win.focusedPane())
 
-	select {
-	case got := <-writes:
+		got := requireReceived(t, writes, "PTY response was never written")
 		require.Equal(t, []byte("\x1b_Gi=1;OK\x1b\\\x1b_Gi=2;ENOTSUP\x1b\\\x1b_Gi=3;ENOTSUP\x1b\\\x1b[?62;22c"), got)
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for PTY response write")
-	}
-	select {
-	case f := <-sends:
-		require.NotEqual(t, "Output", envelopeMessageName(t, f.Payload))
-	default:
-	}
+		select {
+		case f := <-sends:
+			require.NotEqual(t, "Output", envelopeMessageName(t, f.Payload))
+		default:
+		}
+	})
 }
 
 func TestPTYKittyAnimationFallbackKeepsProtocolErrorsOutOfShell(t *testing.T) {
-	d := newTestDaemon(t, nil, newStubClock(t))
-	p := portsmocks.NewMockPTY(t)
-	const imageNumber = "622840581"
-	chunks := [][]byte{[]byte(
-		"\x1b_Ga=T,q=1,f=24,s=1,v=1,I=" + imageNumber + ";AAAA\x1b\\" +
-			"\x1b_Ga=f,q=1,f=24,s=1,v=1,I=" + imageNumber + ";AAAA\x1b\\" +
-			"\x1b_Ga=a,q=1,s=3,I=" + imageNumber + ";\x1b\\",
-	)}
-	writes := make(chan []byte, 1)
-	p.EXPECT().Read(mock.Anything).RunAndReturn(func(buf []byte) (int, error) {
-		if len(chunks) == 0 {
-			return 0, io.EOF
+	synctest.Test(t, func(t *testing.T) {
+		d := newTestDaemon(t, nil, newStubClock(t))
+		p := portsmocks.NewMockPTY(t)
+		const imageNumber = "622840581"
+		chunks := [][]byte{[]byte(
+			"\x1b_Ga=T,q=1,f=24,s=1,v=1,I=" + imageNumber + ";AAAA\x1b\\" +
+				"\x1b_Ga=f,q=1,f=24,s=1,v=1,I=" + imageNumber + ";AAAA\x1b\\" +
+				"\x1b_Ga=a,q=1,s=3,I=" + imageNumber + ";\x1b\\",
+		)}
+		writes := make(chan []byte, 1)
+		p.EXPECT().Read(mock.Anything).RunAndReturn(func(buf []byte) (int, error) {
+			if len(chunks) == 0 {
+				return 0, io.EOF
+			}
+			n := copy(buf, chunks[0])
+			chunks = chunks[1:]
+			return n, nil
+		})
+		p.EXPECT().Write(mock.Anything).RunAndReturn(func(b []byte) (int, error) {
+			writes <- append([]byte(nil), b...)
+			return len(b), nil
+		}).Maybe()
+		p.EXPECT().Close().Return(nil).Maybe()
+
+		sctx, cancel := context.WithCancel(context.Background())
+		win := newTestTabWithContext(p, sctx, cancel)
+		sess := &session{sessionCore: sessionCore{id: "animation", name: "animation"}, tabs: []*tab{win}, ctx: sctx, cancel: cancel}
+		publishTiledPaneOwners(sess, win)
+		d.sessWg.Add(1)
+		d.ptyReader(sess, win, win.focusedPane())
+
+		select {
+		case got := <-writes:
+			t.Fatalf("unsupported animation response leaked into shell input: %q", got)
+		default:
 		}
-		n := copy(buf, chunks[0])
-		chunks = chunks[1:]
-		return n, nil
+		snapshot := win.focusedPane().screen.GraphicsSnapshot()
+		require.NotNil(t, snapshot)
+		require.Equal(t, uint64(1), snapshot.Usage().Placements, "the supported first frame remains as a static fallback")
 	})
-	p.EXPECT().Write(mock.Anything).RunAndReturn(func(b []byte) (int, error) {
-		writes <- append([]byte(nil), b...)
-		return len(b), nil
-	}).Maybe()
-	p.EXPECT().Close().Return(nil).Maybe()
-
-	sctx, cancel := context.WithCancel(context.Background())
-	win := newTestTabWithContext(p, sctx, cancel)
-	sess := &session{sessionCore: sessionCore{id: "animation", name: "animation"}, tabs: []*tab{win}, ctx: sctx, cancel: cancel}
-	publishTiledPaneOwners(sess, win)
-	d.sessWg.Add(1)
-	d.ptyReader(sess, win, win.focusedPane())
-
-	select {
-	case got := <-writes:
-		t.Fatalf("unsupported animation response leaked into shell input: %q", got)
-	default:
-	}
-	snapshot := win.focusedPane().screen.GraphicsSnapshot()
-	require.NotNil(t, snapshot)
-	require.Equal(t, uint64(1), snapshot.Usage().Placements, "the supported first frame remains as a static fallback")
 }
 
 func TestCursorTailVisibleHideAndMoveOnly(t *testing.T) {
