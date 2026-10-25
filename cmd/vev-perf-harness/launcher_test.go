@@ -14,6 +14,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/bnema/vev/pkg/safedir"
@@ -138,40 +139,42 @@ func TestCLIProcessResize(t *testing.T) {
 }
 
 func TestCLIProcessCloseDrainsQueuedTerminalOutputBeforeClientExit(t *testing.T) {
-	harnessPTY, clientPTY := net.Pipe()
-	t.Cleanup(func() { _ = clientPTY.Close() })
-	waitErr := make(chan error, 1)
-	secondRead := make(chan struct{})
-	p := &cliProcess{
-		pty:          harnessPTY,
-		output:       discardTerminalOutput{},
-		chunks:       make(chan []byte, 1),
-		done:         make(chan struct{}),
-		waitErr:      waitErr,
-		waitTimeout:  func() <-chan time.Time { return time.After(time.Second) },
-		forceCleanup: func() { waitErr <- nil },
-	}
-	go p.copyTerminal()
-	go func() {
-		_, _ = clientPTY.Write([]byte("first"))
-		_, _ = clientPTY.Write([]byte("second"))
-		close(secondRead)
-	}()
-	select {
-	case <-secondRead:
-	case <-time.After(time.Second):
-		t.Fatal("terminal reader did not queue output")
-	}
-	closed := make(chan error, 1)
-	go func() { closed <- p.Close() }()
-	select {
-	case err := <-closed:
-		if err != nil {
-			t.Fatal(err)
+	synctest.Test(t, func(t *testing.T) {
+		harnessPTY, clientPTY := net.Pipe()
+		t.Cleanup(func() { _ = clientPTY.Close() })
+		waitErr := make(chan error, 1)
+		secondRead := make(chan struct{})
+		p := &cliProcess{
+			pty:          harnessPTY,
+			output:       discardTerminalOutput{},
+			chunks:       make(chan []byte, 1),
+			done:         make(chan struct{}),
+			waitErr:      waitErr,
+			waitTimeout:  func() <-chan time.Time { return time.After(time.Second) },
+			forceCleanup: func() { waitErr <- nil },
 		}
-	case <-time.After(time.Second):
-		t.Fatal("Close did not drain queued terminal output before waiting for client exit")
-	}
+		go p.copyTerminal()
+		go func() {
+			_, _ = clientPTY.Write([]byte("first"))
+			_, _ = clientPTY.Write([]byte("second"))
+			close(secondRead)
+		}()
+		select {
+		case <-secondRead:
+		case <-time.After(time.Second):
+			t.Fatal("terminal reader did not queue output")
+		}
+		closed := make(chan error, 1)
+		go func() { closed <- p.Close() }()
+		select {
+		case err := <-closed:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("Close did not drain queued terminal output before waiting for client exit")
+		}
+	})
 }
 
 func TestCLIProcessCloseKeepsTerminalDrainActiveUntilClientExit(t *testing.T) {
@@ -223,41 +226,45 @@ func TestCLIProcessCloseKeepsTerminalDrainActiveUntilClientExit(t *testing.T) {
 }
 
 func TestCLIProcessCloseIsBoundedWhenPublicRoleDoesNotExit(t *testing.T) {
-	deadline := make(chan time.Time)
-	close(deadline)
-	var term, kill int
-	p := &cliProcess{
-		waitErr:      make(chan error),
-		waitTimeout:  func() <-chan time.Time { return deadline },
-		forceCleanup: func() { term++ },
-		forceKill:    func() { kill++ },
-	}
-	if err := p.Close(); err == nil {
-		t.Fatal("stuck public role close succeeded")
-	}
-	if term != 1 || kill != 1 {
-		t.Fatalf("TERM/KILL calls = %d/%d, want 1/1", term, kill)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		deadline := make(chan time.Time)
+		close(deadline)
+		var term, kill int
+		p := &cliProcess{
+			waitErr:      make(chan error),
+			waitTimeout:  func() <-chan time.Time { return deadline },
+			forceCleanup: func() { term++ },
+			forceKill:    func() { kill++ },
+		}
+		if err := p.Close(); err == nil {
+			t.Fatal("stuck public role close succeeded")
+		}
+		if term != 1 || kill != 1 {
+			t.Fatalf("TERM/KILL calls = %d/%d, want 1/1", term, kill)
+		}
+	})
 }
 
 func TestCLIProcessCloseEscalatesHungClientAfterGracefulDrainTimeout(t *testing.T) {
-	deadline := make(chan time.Time)
-	close(deadline)
-	var graceful, term, kill int
-	p := &cliProcess{
-		pty:              &orderedPTY{close: func() {}},
-		waitErr:          make(chan error),
-		waitTimeout:      func() <-chan time.Time { return deadline },
-		gracefulShutdown: func() { graceful++ },
-		forceCleanup:     func() { term++ },
-		forceKill:        func() { kill++ },
-	}
-	if err := p.Close(); err == nil {
-		t.Fatal("hung client close succeeded")
-	}
-	if graceful != 1 || term != 1 || kill != 1 {
-		t.Fatalf("graceful/TERM/KILL calls = %d/%d/%d, want 1/1/1", graceful, term, kill)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		deadline := make(chan time.Time)
+		close(deadline)
+		var graceful, term, kill int
+		p := &cliProcess{
+			pty:              &orderedPTY{close: func() {}},
+			waitErr:          make(chan error),
+			waitTimeout:      func() <-chan time.Time { return deadline },
+			gracefulShutdown: func() { graceful++ },
+			forceCleanup:     func() { term++ },
+			forceKill:        func() { kill++ },
+		}
+		if err := p.Close(); err == nil {
+			t.Fatal("hung client close succeeded")
+		}
+		if graceful != 1 || term != 1 || kill != 1 {
+			t.Fatalf("graceful/TERM/KILL calls = %d/%d/%d, want 1/1/1", graceful, term, kill)
+		}
+	})
 }
 
 func TestCLIProcessCloseEscalationOutcome(t *testing.T) {
@@ -303,35 +310,37 @@ func TestCLIProcessCloseEscalationOutcome(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			waitErr := make(chan error, 1)
-			var term, kill int
-			p := &cliProcess{
-				waitErr:     waitErr,
-				waitTimeout: tt.waitTimeout(),
-				forceCleanup: func() {
-					term++
-					if tt.reapsAt == "term" {
-						waitErr <- nil
-					}
-				},
-				forceKill: func() {
-					kill++
-					if tt.reapsAt == "kill" {
-						waitErr <- nil
-					}
-				},
-			}
-			err := p.Close()
-			if tt.wantErrSub == "" {
-				if err != nil {
-					t.Fatalf("Close() error = %v, want nil", err)
+			synctest.Test(t, func(t *testing.T) {
+				waitErr := make(chan error, 1)
+				var term, kill int
+				p := &cliProcess{
+					waitErr:     waitErr,
+					waitTimeout: tt.waitTimeout(),
+					forceCleanup: func() {
+						term++
+						if tt.reapsAt == "term" {
+							waitErr <- nil
+						}
+					},
+					forceKill: func() {
+						kill++
+						if tt.reapsAt == "kill" {
+							waitErr <- nil
+						}
+					},
 				}
-			} else if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
-				t.Fatalf("Close() error = %v, want an error containing %q", err, tt.wantErrSub)
-			}
-			if term != tt.wantTerm || kill != tt.wantKill {
-				t.Fatalf("TERM/KILL calls = %d/%d, want %d/%d", term, kill, tt.wantTerm, tt.wantKill)
-			}
+				err := p.Close()
+				if tt.wantErrSub == "" {
+					if err != nil {
+						t.Fatalf("Close() error = %v, want nil", err)
+					}
+				} else if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Fatalf("Close() error = %v, want an error containing %q", err, tt.wantErrSub)
+				}
+				if term != tt.wantTerm || kill != tt.wantKill {
+					t.Fatalf("TERM/KILL calls = %d/%d, want %d/%d", term, kill, tt.wantTerm, tt.wantKill)
+				}
+			})
 		})
 	}
 }
@@ -451,25 +460,27 @@ func TestPreparePeerReleasesOwnedRuntimeOnPreparationFailure(t *testing.T) {
 }
 
 func TestCLIProcessCloseUsesPublicDaemonShutdown(t *testing.T) {
-	wait := make(chan error, 1)
-	wait <- nil
-	var shutdown int
-	p := &cliProcess{waitErr: wait, shutdown: func() error { shutdown++; return nil }}
-	if err := p.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if shutdown != 0 {
-		t.Fatalf("shutdown calls = %d, want 0 for an exited daemon", shutdown)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		wait := make(chan error, 1)
+		wait <- nil
+		var shutdown int
+		p := &cliProcess{waitErr: wait, shutdown: func() error { shutdown++; return nil }}
+		if err := p.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if shutdown != 0 {
+			t.Fatalf("shutdown calls = %d, want 0 for an exited daemon", shutdown)
+		}
 
-	wait = make(chan error, 1)
-	p = &cliProcess{waitErr: wait, shutdown: func() error { shutdown++; wait <- nil; return nil }}
-	if err := p.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if shutdown != 1 {
-		t.Fatalf("shutdown calls = %d, want 1", shutdown)
-	}
+		wait = make(chan error, 1)
+		p = &cliProcess{waitErr: wait, shutdown: func() error { shutdown++; wait <- nil; return nil }}
+		if err := p.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if shutdown != 1 {
+			t.Fatalf("shutdown calls = %d, want 1", shutdown)
+		}
+	})
 }
 
 func TestHarnessCanonicalLocalSmokeRealRoles(t *testing.T) {
@@ -559,35 +570,37 @@ func TestCLIProcessCloseStopsShellBeforeProcessGroupCleanup(t *testing.T) {
 }
 
 func TestCLIProcessWarmupWaitsForDelayedTerminalReadiness(t *testing.T) {
-	allowWrite := make(chan struct{})
-	pty, output := &stagedPTY{allow: allowWrite, writes: make(chan []byte, 1)}, &fakeOutput{}
-	p := &cliProcess{pty: pty, output: output, chunks: make(chan []byte)}
-	input := workloadInput(scenario{ID: "s"}, 1, "warmup")
-	done := make(chan error, 1)
-	go func() { done <- p.Warmup(input) }()
+	synctest.Test(t, func(t *testing.T) {
+		allowWrite := make(chan struct{})
+		pty, output := &stagedPTY{allow: allowWrite, writes: make(chan []byte, 1)}, &fakeOutput{}
+		p := &cliProcess{pty: pty, output: output, chunks: make(chan []byte)}
+		input := workloadInput(scenario{ID: "s"}, 1, "warmup")
+		done := make(chan error, 1)
+		go func() { done <- p.Warmup(input) }()
 
-	// This is public client output from the initial application prompt/state,
-	// emitted only after the client has entered raw mode. A premature PTY write
-	// blocks on allowWrite and therefore cannot consume this delayed readiness.
-	go func() {
-		p.chunks <- []byte("shell prompt$ ")
-		close(allowWrite)
-	}()
-	select {
-	case got := <-pty.writes:
-		if !bytes.Equal(got, input) {
-			t.Fatalf("warmup write=%q want %q", got, input)
+		// This is public client output from the initial application prompt/state,
+		// emitted only after the client has entered raw mode. A premature PTY write
+		// blocks on allowWrite and therefore cannot consume this delayed readiness.
+		go func() {
+			p.chunks <- []byte("shell prompt$ ")
+			close(allowWrite)
+		}()
+		select {
+		case got := <-pty.writes:
+			if !bytes.Equal(got, input) {
+				t.Fatalf("warmup write=%q want %q", got, input)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("warmup did not wait for and then proceed from client readiness")
 		}
-	case <-time.After(time.Second):
-		t.Fatal("warmup did not wait for and then proceed from client readiness")
-	}
-	go func() { p.chunks <- append([]byte("application "), inputMarker(input)...); close(p.chunks) }()
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
-	if output.syncs != 0 {
-		t.Fatalf("readiness performed a filesystem sync: syncs=%d", output.syncs)
-	}
+		go func() { p.chunks <- append([]byte("application "), inputMarker(input)...); close(p.chunks) }()
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+		if output.syncs != 0 {
+			t.Fatalf("readiness performed a filesystem sync: syncs=%d", output.syncs)
+		}
+	})
 }
 
 func TestCLIProcessRejectsPTYLocalEchoAsFlushEvidence(t *testing.T) {

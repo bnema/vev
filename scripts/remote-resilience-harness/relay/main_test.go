@@ -9,36 +9,39 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
 
 func TestTCPRelayPreservesBytesAndStops(t *testing.T) {
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	r := &relay{ctx: ctx, cancel: cancel}
-	source, writer := net.Pipe()
-	reader, destination := net.Pipe()
-	defer source.Close()
-	defer writer.Close()
-	defer reader.Close()
-	defer destination.Close()
-	done := make(chan struct{})
-	go func() { defer close(done); r.copy(destination, source) }()
-	payload := []byte("fixture input in order")
-	go func() { writer.Write(payload); writer.Close() }()
-	reader.SetReadDeadline(time.Now().Add(time.Second))
-	got := make([]byte, len(payload))
-	_, err := io.ReadFull(reader, got)
-	require.NoError(t, err)
-	require.Equal(t, payload, got)
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("relay did not stop after EOF")
-	}
-	require.Equal(t, uint64(len(payload)), r.bytes.Load())
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		r := &relay{ctx: ctx, cancel: cancel}
+		source, writer := net.Pipe()
+		reader, destination := net.Pipe()
+		defer source.Close()
+		defer writer.Close()
+		defer reader.Close()
+		defer destination.Close()
+		done := make(chan struct{})
+		go func() { defer close(done); r.copy(destination, source) }()
+		payload := []byte("fixture input in order")
+		go func() { writer.Write(payload); writer.Close() }()
+		reader.SetReadDeadline(time.Now().Add(time.Second))
+		got := make([]byte, len(payload))
+		_, err := io.ReadFull(reader, got)
+		require.NoError(t, err)
+		require.Equal(t, payload, got)
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("relay did not stop after EOF")
+		}
+		require.Equal(t, uint64(len(payload)), r.bytes.Load())
+	})
 }
 
 // controlSocketPath returns a socket path in a short private directory: the
@@ -52,13 +55,14 @@ func controlSocketPath(t *testing.T) string {
 	return filepath.Join(directory, "control.sock")
 }
 
+// real I/O: exercises real TCP, UDP or Unix socket listeners.
 func TestRelayShutdownClosesListeners(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	r := &relay{ctx: ctx, cancel: cancel, connections: make(map[net.Conn]struct{})}
 	path := controlSocketPath(t)
 	done := make(chan error, 1)
 	go func() { done <- r.serve("127.0.0.1:0", path) }()
-	require.Eventually(t, func() bool { _, err := os.Stat(path); return err == nil }, time.Second, time.Millisecond)
+	pollUntil(t, func() bool { _, err := os.Stat(path); return err == nil })
 	cancel()
 	select {
 	case err := <-done:
@@ -71,43 +75,47 @@ func TestRelayShutdownClosesListeners(t *testing.T) {
 }
 
 func TestTCPRelayBlackoutHoldsBytes(t *testing.T) {
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	r := &relay{ctx: ctx, cancel: cancel}
-	_, err := r.apply(command{Op: "blackout", TCP: true, Active: true})
-	require.NoError(t, err)
-	source, writer := net.Pipe()
-	reader, destination := net.Pipe()
-	defer source.Close()
-	defer writer.Close()
-	defer reader.Close()
-	defer destination.Close()
-	done := make(chan struct{})
-	go func() { defer close(done); r.copy(destination, source) }()
-	payload := []byte("held")
-	wrote := make(chan error, 1)
-	go func() { _, err := writer.Write(payload); wrote <- err }()
-	select {
-	case err := <-wrote:
-		t.Fatalf("blackout read the source: %v", err)
-	case <-time.After(50 * time.Millisecond):
-	}
-	require.Zero(t, r.bytes.Load())
-	_, err = r.apply(command{Op: "blackout", TCP: true, Active: false})
-	require.NoError(t, err)
-	reader.SetReadDeadline(time.Now().Add(time.Second))
-	got := make([]byte, len(payload))
-	_, err = io.ReadFull(reader, got)
-	require.NoError(t, err)
-	require.Equal(t, payload, got)
-	require.NoError(t, <-wrote)
-	cancel()
-	writer.Close()
-	<-done
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		r := &relay{ctx: ctx, cancel: cancel}
+		_, err := r.apply(command{Op: "blackout", TCP: true, Active: true})
+		require.NoError(t, err)
+		source, writer := net.Pipe()
+		reader, destination := net.Pipe()
+		defer source.Close()
+		defer writer.Close()
+		defer reader.Close()
+		defer destination.Close()
+		done := make(chan struct{})
+		go func() { defer close(done); r.copy(destination, source) }()
+		payload := []byte("held")
+		wrote := make(chan error, 1)
+		go func() { _, err := writer.Write(payload); wrote <- err }()
+		synctest.Wait()
+		select {
+		case err := <-wrote:
+			t.Fatalf("blackout read the source: %v", err)
+		default:
+		}
+		require.Zero(t, r.bytes.Load())
+		_, err = r.apply(command{Op: "blackout", TCP: true, Active: false})
+		require.NoError(t, err)
+		reader.SetReadDeadline(time.Now().Add(time.Second))
+		got := make([]byte, len(payload))
+		_, err = io.ReadFull(reader, got)
+		require.NoError(t, err)
+		require.Equal(t, payload, got)
+		require.NoError(t, <-wrote)
+		cancel()
+		writer.Close()
+		<-done
+	})
 }
 
 // TestRelayUDPProxyInheritsActiveBlackout opens a UDP route while a blackout
 // is active and proves it drops datagrams until the blackout ends.
+// real I/O: exercises real TCP, UDP or Unix socket listeners.
 func TestRelayUDPProxyInheritsActiveBlackout(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -125,7 +133,7 @@ func TestRelayUDPProxyInheritsActiveBlackout(t *testing.T) {
 	defer client.Close()
 	_, err = client.Write([]byte("blocked"))
 	require.NoError(t, err)
-	require.Eventually(t, func() bool { return r.proxies[0].Stats().ToServer.BlackoutDrops == 1 }, time.Second, time.Millisecond)
+	pollUntil(t, func() bool { return r.proxies[0].Stats().ToServer.BlackoutDrops == 1 })
 	_, err = r.apply(command{Op: "blackout", UDP: true, Active: false})
 	require.NoError(t, err)
 	_, err = client.Write([]byte("open"))
@@ -138,19 +146,22 @@ func TestRelayUDPProxyInheritsActiveBlackout(t *testing.T) {
 }
 
 func TestRelayDisconnectClosesConnections(t *testing.T) {
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	r := &relay{ctx: ctx, cancel: cancel, connections: make(map[net.Conn]struct{})}
-	local, peer := net.Pipe()
-	defer peer.Close()
-	r.connections[local] = struct{}{}
-	_, err := r.apply(command{Op: "disconnect"})
-	require.NoError(t, err)
-	peer.SetReadDeadline(time.Now().Add(time.Second))
-	_, err = peer.Read(make([]byte, 1))
-	require.ErrorIs(t, err, io.EOF)
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		r := &relay{ctx: ctx, cancel: cancel, connections: make(map[net.Conn]struct{})}
+		local, peer := net.Pipe()
+		defer peer.Close()
+		r.connections[local] = struct{}{}
+		_, err := r.apply(command{Op: "disconnect"})
+		require.NoError(t, err)
+		peer.SetReadDeadline(time.Now().Add(time.Second))
+		_, err = peer.Read(make([]byte, 1))
+		require.ErrorIs(t, err, io.EOF)
+	})
 }
 
+// real I/O: exercises real TCP, UDP or Unix socket listeners.
 func TestRelayControlRoundTrip(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -158,7 +169,7 @@ func TestRelayControlRoundTrip(t *testing.T) {
 	path := controlSocketPath(t)
 	done := make(chan error, 1)
 	go func() { done <- r.serve("127.0.0.1:0", path) }()
-	require.Eventually(t, func() bool { _, err := os.Stat(path); return err == nil }, time.Second, time.Millisecond)
+	pollUntil(t, func() bool { _, err := os.Stat(path); return err == nil })
 	send := func(c command) map[string]any {
 		conn, err := net.Dial("unix", path)
 		require.NoError(t, err)
@@ -197,4 +208,21 @@ func TestRelayRejectsInvalidControl(t *testing.T) {
 	_, err := r.apply(command{Op: "stop"})
 	require.NoError(t, err)
 	require.ErrorIs(t, ctx.Err(), context.Canceled)
+}
+
+// pollUntil observes kernel socket readiness and UDP proxy counters, which have no
+// notification API. Keep the real-I/O polling exception bounded and centralized.
+func pollUntil(t *testing.T, ready func() bool) {
+	t.Helper()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	timeout := time.NewTimer(time.Second)
+	defer timeout.Stop()
+	for !ready() {
+		select {
+		case <-ticker.C:
+		case <-timeout.C:
+			t.Fatal("real I/O condition did not become ready")
+		}
+	}
 }
