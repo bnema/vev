@@ -49,9 +49,9 @@ func TestPickerClientMessagesEncodeWithTypes(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			raw := &scriptedTransport{recv: []wire.Envelope{mustPreambleResponse(t)}}
+			raw, rawState := newScriptedTransport(t, withRecv([]wire.Envelope{mustPreambleResponse(t)}...))
 			require.NoError(t, NewClientConnection(raw).SendClient(tt.message))
-			got, err := DecodeClientEnvelope(mustSingleAppPayload(t, raw))
+			got, err := DecodeClientEnvelope(mustSingleAppPayload(t, rawState))
 			require.NoError(t, err)
 			switch message := tt.message.(type) {
 			case *protocol.PickerClose:
@@ -85,10 +85,10 @@ func TestPickerServerMessagesEncodeWithTypes(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			raw := &scriptedTransport{}
+			raw, rawState := newScriptedTransport(t)
 			require.NoError(t, NewServerConnection(raw).SendServer(tt.message))
-			require.Equal(t, 1, raw.sentLen())
-			got, err := DecodeServerEnvelope(raw.sentPayload(0))
+			require.Equal(t, 1, rawState.sentLen())
+			got, err := DecodeServerEnvelope(rawState.sentPayload(0))
 			require.NoError(t, err)
 			switch message := tt.message.(type) {
 			case *protocol.PickerOffer:
@@ -118,10 +118,10 @@ func TestPickerSnapshotNoDaemonStatusRoundTrips(t *testing.T) {
 
 func TestPickerSnapshotNormalizesIntoProjections(t *testing.T) {
 	snapshot := pickerWireSnapshot()
-	raw := &scriptedTransport{}
+	raw, rawState := newScriptedTransport(t)
 	require.NoError(t, NewServerConnection(raw).SendServer(snapshot))
-	require.Equal(t, 1, raw.sentLen())
-	got, err := DecodeServerEnvelope(raw.sentPayload(0))
+	require.Equal(t, 1, rawState.sentLen())
+	got, err := DecodeServerEnvelope(rawState.sentPayload(0))
 	require.NoError(t, err)
 	decoded, ok := got.(protocol.PickerSnapshot)
 	require.True(t, ok, "got %T", got)

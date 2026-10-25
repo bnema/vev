@@ -40,7 +40,7 @@ func wireTestAdmission() ports.SessionAdmission {
 // same connection is byte-for-byte the ordinary session traffic: the admission
 // never leaks onto the session wire.
 func TestServerConnectionAdmissionProviderPreservedWithoutWireChange(t *testing.T) {
-	raw := &scriptedTransport{recv: mustServerPreambleQueue(t, mustEncodeClient(t, protocol.Ping{}))}
+	raw, rawState := newScriptedTransport(t, withRecv(mustServerPreambleQueue(t, mustEncodeClient(t, protocol.Ping{}))...))
 	deadline := time.Now().Add(protocol.HandshakeTimeout)
 	connection := NewServerConnectionWithAdmission(raw, deadline, wireTestAdmission())
 
@@ -58,8 +58,8 @@ func TestServerConnectionAdmissionProviderPreservedWithoutWireChange(t *testing.
 	require.NoError(t, err)
 	require.Equal(t, protocol.Ping{}, message)
 	require.NoError(t, connection.SendServer(protocol.Pong{}))
-	require.Equal(t, 2, raw.sentLen())
-	got, err := DecodeServerEnvelope(raw.sentPayload(1))
+	require.Equal(t, 2, rawState.sentLen())
+	got, err := DecodeServerEnvelope(rawState.sentPayload(1))
 	require.NoError(t, err)
 	require.Equal(t, protocol.Pong{}, got)
 }
@@ -68,7 +68,7 @@ func TestServerConnectionAdmissionProviderPreservedWithoutWireChange(t *testing.
 // out an independent copy on every read: a consumer that mutates what it holds
 // never alters the connection's stored admission or a sibling's view.
 func TestServerConnectionAdmissionProviderIsDefensiveCopy(t *testing.T) {
-	raw := &scriptedTransport{}
+	raw, _ := newScriptedTransport(t)
 	connection := NewServerConnectionWithAdmission(raw, time.Now().Add(protocol.HandshakeTimeout), wireTestAdmission())
 	provider := connection.(ports.SessionAdmissionProvider)
 
@@ -96,12 +96,12 @@ func TestServerConnectionAdmissionAbsentForLegacyConstructors(t *testing.T) {
 		name  string
 		build func() ports.ServerConnection
 	}{
-		{name: "NewServerConnection", build: func() ports.ServerConnection { return NewServerConnection(&scriptedTransport{}) }},
+		{name: "NewServerConnection", build: func() ports.ServerConnection { return NewServerConnection(newBareTransport(t)) }},
 		{name: "NewServerConnectionWithDeadline", build: func() ports.ServerConnection {
-			return NewServerConnectionWithDeadline(&scriptedTransport{}, time.Now().Add(protocol.HandshakeTimeout))
+			return NewServerConnectionWithDeadline(newBareTransport(t), time.Now().Add(protocol.HandshakeTimeout))
 		}},
 		{name: "NewServerConnectionWithAdmission zero", build: func() ports.ServerConnection {
-			return NewServerConnectionWithAdmission(&scriptedTransport{}, time.Now().Add(protocol.HandshakeTimeout), ports.SessionAdmission{})
+			return NewServerConnectionWithAdmission(newBareTransport(t), time.Now().Add(protocol.HandshakeTimeout), ports.SessionAdmission{})
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

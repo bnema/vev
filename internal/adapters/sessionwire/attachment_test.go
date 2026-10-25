@@ -150,21 +150,21 @@ func TestAttachmentTypedConnectionSequence(t *testing.T) {
 	activate := protocol.ActivateAttachment{RequestID: 11, Target: target, Size: domain.Size{Cols: 80, Rows: 24}, PixelWidth: 800, PixelHeight: 480}
 	full := protocol.Output{Epoch: 2, New: 1, Full: true, Size: activate.Size, Context: context, Data: []byte("full")}
 	activated := protocol.AttachmentActivated{RequestID: 11, Identity: context.Route, Epoch: full.Epoch, State: full.New, ViewPublication: context.Publication}
-	clientRaw := &scriptedTransport{recv: []wire.Envelope{mustPreambleResponse(t)}}
-	serverRaw := &scriptedTransport{recv: []wire.Envelope{mustPreambleRequest(t)}}
+	clientRaw, clientState := newScriptedTransport(t, withRecv([]wire.Envelope{mustPreambleResponse(t)}...))
+	serverRaw, serverState := newScriptedTransport(t, withRecv([]wire.Envelope{mustPreambleRequest(t)}...))
 	client := NewClientConnection(clientRaw)
 	server := NewServerConnection(serverRaw)
 	t.Cleanup(func() { require.NoError(t, client.Close()); require.NoError(t, server.Close()) })
 	sendClient := func(message protocol.ClientMessage) {
 		require.NoError(t, client.SendClient(message))
-		serverRaw.recv = append(serverRaw.recv, wire.Envelope{Payload: clientRaw.sentPayload(clientRaw.sentLen() - 1)})
+		serverState.queueRecv(wire.Envelope{Payload: clientState.sentPayload(clientState.sentLen() - 1)})
 		got, err := server.ReceiveClient()
 		require.NoError(t, err)
 		require.Equal(t, message, got)
 	}
 	sendServer := func(message protocol.ServerMessage) {
 		require.NoError(t, server.SendServer(message))
-		clientRaw.recv = append(clientRaw.recv, wire.Envelope{Payload: serverRaw.sentPayload(serverRaw.sentLen() - 1)})
+		clientState.queueRecv(wire.Envelope{Payload: serverState.sentPayload(serverState.sentLen() - 1)})
 		got, err := client.ReceiveServer()
 		require.NoError(t, err)
 		require.Equal(t, message, got)

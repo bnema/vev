@@ -85,20 +85,20 @@ func TestProtoPreambleRejectsScannedMalformation(t *testing.T) {
 	defer cancel()
 
 	t.Run("server rejects unknown request field", func(t *testing.T) {
-		raw := &scriptedTransport{recv: []wire.Envelope{{Payload: withUnknownField(t, mustMarshalPreambleRequest(t))}}}
+		raw, rawState := newScriptedTransport(t, withRecv([]wire.Envelope{{Payload: withUnknownField(t, mustMarshalPreambleRequest(t))}}...))
 		_, err := runProtoServerPreamble(ctx, raw, defaultProtoCeilings())
 		require.ErrorIs(t, err, wire.ErrScanUnknown)
-		require.Equal(t, 1, raw.sentLen())
+		require.Equal(t, 1, rawState.sentLen())
 	})
 	t.Run("server rejects concatenated request", func(t *testing.T) {
 		request := mustMarshalPreambleRequest(t)
-		raw := &scriptedTransport{recv: []wire.Envelope{{Payload: append(append([]byte(nil), request...), request...)}}}
+		raw, rawState := newScriptedTransport(t, withRecv([]wire.Envelope{{Payload: append(append([]byte(nil), request...), request...)}}...))
 		_, err := runProtoServerPreamble(ctx, raw, defaultProtoCeilings())
 		require.ErrorIs(t, err, wire.ErrScanDuplicate)
-		require.Equal(t, 1, raw.sentLen())
+		require.Equal(t, 1, rawState.sentLen())
 	})
 	t.Run("client rejects unknown response field", func(t *testing.T) {
-		raw := &scriptedTransport{recv: []wire.Envelope{{Payload: withUnknownField(t, mustMarshalPreambleResponse(t))}}}
+		raw, _ := newScriptedTransport(t, withRecv([]wire.Envelope{{Payload: withUnknownField(t, mustMarshalPreambleResponse(t))}}...))
 		_, err := runProtoClientPreamble(ctx, raw, defaultProtoCeilings())
 		require.ErrorIs(t, err, wire.ErrScanUnknown)
 	})

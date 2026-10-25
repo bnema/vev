@@ -16,7 +16,7 @@ import (
 // already fixed.
 func TestServerHandshakeCompletionSeam(t *testing.T) {
 	fixed := time.Now().Add(protocol.HandshakeTimeout)
-	raw := &scriptedTransport{recv: mustServerPreambleQueue(t, mustEncodeClient(t, protocol.Ping{}))}
+	raw, _ := newScriptedTransport(t, withRecv(mustServerPreambleQueue(t, mustEncodeClient(t, protocol.Ping{}))...))
 	conn := NewServerConnectionWithDeadline(raw, fixed).(*serverConnection)
 
 	require.Equal(t, fixed, conn.HandshakeDeadline(), "the accepted deadline is adopted verbatim")
@@ -67,7 +67,7 @@ func TestServerHandshakeCompletionSeam(t *testing.T) {
 // second 15 s budget, and that completion is still published for the failed
 // handshake.
 func TestServerHandshakeElapsedDeadlineFailsPreamble(t *testing.T) {
-	raw := &scriptedTransport{recv: mustServerPreambleQueue(t, mustEncodeClient(t, protocol.Ping{}))}
+	raw, _ := newScriptedTransport(t, withRecv(mustServerPreambleQueue(t, mustEncodeClient(t, protocol.Ping{}))...))
 	conn := NewServerConnectionWithDeadline(raw, time.Now().Add(-time.Second)).(*serverConnection)
 
 	completed := make(chan struct{}, 1)
@@ -105,11 +105,11 @@ func TestServerFinishHandshakeNilSafe(t *testing.T) {
 func TestServerHandshakeHookReentersConnection(t *testing.T) {
 	// A preamble followed by two messages: one for the re-entrant hook and one
 	// for the outer receive.
-	raw := &scriptedTransport{recv: []wire.Envelope{
+	raw, _ := newScriptedTransport(t, withRecv(
 		mustPreambleRequest(t),
-		{Payload: mustEncodeClient(t, protocol.Ping{})},
-		{Payload: mustEncodeClient(t, protocol.Ping{})},
-	}}
+		wire.Envelope{Payload: mustEncodeClient(t, protocol.Ping{})},
+		wire.Envelope{Payload: mustEncodeClient(t, protocol.Ping{})},
+	))
 	conn := NewServerConnection(raw).(*serverConnection)
 
 	hookErr := make(chan error, 1)

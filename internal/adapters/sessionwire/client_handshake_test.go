@@ -14,7 +14,7 @@ import (
 // the connection's lifetime and completion is published exactly once to early
 // and late subscribers.
 func TestClientHandshakeCompletionSeam(t *testing.T) {
-	raw := &scriptedTransport{recv: []wire.Envelope{mustPreambleResponse(t)}}
+	raw, _ := newScriptedTransport(t, withRecv([]wire.Envelope{mustPreambleResponse(t)}...))
 	conn := NewClientConnection(raw).(*clientConnection)
 
 	deadline := conn.HandshakeDeadline()
@@ -78,7 +78,7 @@ func TestClientFinishHandshakeNilSafe(t *testing.T) {
 // back into the connection does not re-enter the preamble's sync.Once and
 // deadlock: the hook runs after the Once body has returned.
 func TestClientHandshakeHookReentersConnection(t *testing.T) {
-	raw := &scriptedTransport{recv: mustClientPreambleQueue(t, mustEncodeServer(t, protocol.Pong{}))}
+	raw, _ := newScriptedTransport(t, withRecv(mustClientPreambleQueue(t, mustEncodeServer(t, protocol.Pong{}))...))
 	conn := NewClientConnection(raw).(*clientConnection)
 
 	sent := make(chan error, 1)
