@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
@@ -637,10 +638,10 @@ func TestLogicalBlockedReaderSiblingProgresses(t *testing.T) {
 		// Trigger the flood, then do not read: the daemon fills the window and
 		// its writer waits for credit.
 		require.NoError(t, blocked.SendClient(protocol.Ping{}))
-		require.Eventually(t, func() bool {
+		requireSettled(t, func() bool {
 			status, ok := daemonPump.Engine().Status(1)
 			return ok && status.SendCredit < chunkCredit(int(MaxMuxChunkBytes))
-		}, 5*time.Second, time.Millisecond, "the daemon never exhausted its credit")
+		}, "the daemon never exhausted its credit")
 		require.False(t, channelClosed(blocked.Done()), "a slow consumer must not reset its stream")
 
 		// The sibling still progresses and the physical connection is untouched.
@@ -701,10 +702,10 @@ func TestLogicalMalformedInnerFrameResetsOnlyStream(t *testing.T) {
 		require.Equal(t, domain.RemoteFailureInvalidResponse, loss.Cause)
 
 		// The daemon observed exactly a stream-local reset.
-		require.Eventually(t, func() bool {
+		requireSettled(t, func() bool {
 			status, ok := daemonPump.Engine().Status(1)
 			return ok && status.State == StreamTerminal
-		}, 5*time.Second, time.Millisecond)
+		})
 		reset := mustStatus(t, daemonPump.Engine(), 1)
 		require.Equal(t, domain.RemoteFailureInvalidResponse, reset.FailureKind)
 
@@ -733,10 +734,10 @@ func TestLogicalOpenCancellationReleasesReservation(t *testing.T) {
 		require.ErrorIs(t, err, context.DeadlineExceeded)
 		require.Nil(t, connection)
 
-		require.Eventually(t, func() bool {
+		requireSettled(t, func() bool {
 			status, ok := brokerPump.Engine().Status(1)
 			return ok && status.State == StreamTerminal
-		}, 5*time.Second, time.Millisecond)
+		})
 		require.False(t, watchRegistered(brokerPump, 1), "cancelled open leaked a watch entry")
 
 		// A sibling stream on the same physical connection still opens and works.
@@ -798,10 +799,10 @@ func TestLogicalCloseIsolation(t *testing.T) {
 		require.False(t, watchRegistered(brokerPump, 1), "closed logical connection leaked a watch entry")
 
 		// The daemon observed the orderly Close for stream 1.
-		require.Eventually(t, func() bool {
+		requireSettled(t, func() bool {
 			status, ok := daemonPump.Engine().Status(1)
 			return ok && status.State == StreamTerminal && status.Err == nil
-		}, 5*time.Second, time.Millisecond)
+		})
 
 		require.NoError(t, second.SendClient(protocol.Ping{}))
 		message, err := second.ReceiveServer()
@@ -839,7 +840,7 @@ func TestLogicalCloseDiscardsQueuedInboundReleasesAccounting(t *testing.T) {
 			// The peer pipelined one chunk that this side never reads, so the stream
 			// holds accepted inbound data when the local Close arrives.
 			deliverServerFrame(t, carrier, Data{Physical: id, Data: chunk})
-			requireEngineEventually(t, pump, func(e *StreamEngine) bool { return e.AggregateBytes() > 0 },
+			requireEngineSettled(t, pump, func(e *StreamEngine) bool { return e.AggregateBytes() > 0 },
 				"cycle %d: the accepted chunk was never queued", i)
 
 			require.NoError(t, connection.Close())
@@ -944,8 +945,7 @@ func TestLogicalNoGoroutineLeak(t *testing.T) {
 		require.NoError(t, brokerPump.Close())
 		require.NoError(t, daemonPump.Close())
 
-		require.Eventually(t, func() bool { return runtime.NumGoroutine() <= before+3 }, 5*time.Second, time.Millisecond,
-			"logical connection goroutines leaked")
+		requireSettled(t, func() bool { return runtime.NumGoroutine() <= before+3 }, "logical connection goroutines leaked")
 	})
 }
 
@@ -982,8 +982,7 @@ func TestLogicalPeerCloseReleasesGoroutines(t *testing.T) {
 		require.NoError(t, brokerPump.Close())
 		require.NoError(t, daemonPump.Close())
 
-		require.Eventually(t, func() bool { return runtime.NumGoroutine() <= before+3 }, 5*time.Second, time.Millisecond,
-			"peer-closed logical connection goroutines leaked")
+		requireSettled(t, func() bool { return runtime.NumGoroutine() <= before+3 }, "peer-closed logical connection goroutines leaked")
 	})
 }
 
@@ -1018,7 +1017,7 @@ func TestLogicalPhysicalLossBlockedReadReturnsLoss(t *testing.T) {
 			blocked <- result{message: msg, err: err}
 		}()
 		// Let the reader reach the inner stream and block there.
-		time.Sleep(50 * time.Millisecond)
+		synctest.Wait()
 		require.False(t, channelClosed(connection.Done()), "the read is blocked, not settled")
 
 		// Fail the daemon side; the broker observes a physical loss.
@@ -1158,10 +1157,10 @@ func TestLogicalFreshOpenRefusedByDaemonCeiling(t *testing.T) {
 		require.Nil(t, connection)
 
 		refusedID := PhysicalStreamID(MaxMuxStreams + 1)
-		require.Eventually(t, func() bool {
+		requireSettled(t, func() bool {
 			status, ok := brokerPump.Engine().Status(refusedID)
 			return ok && status.State == StreamTerminal
-		}, 15*time.Second, time.Millisecond)
+		})
 		status := mustStatus(t, brokerPump.Engine(), refusedID)
 		require.True(t, status.Refused, "the daemon's fresh refusal reached the broker")
 		require.Equal(t, uint32(1), status.Refusal.AdmissionCode)

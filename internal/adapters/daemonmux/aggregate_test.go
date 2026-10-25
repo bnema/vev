@@ -42,11 +42,11 @@ func startAggregateSink(a *AggregateListener) *aggregateSink {
 
 func (s *aggregateSink) await(t *testing.T, count int) []ports.ServerConnection {
 	t.Helper()
-	require.Eventually(t, func() bool {
+	requireSettled(t, func() bool {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		return len(s.conns) >= count
-	}, listenerTestDeadline, time.Millisecond, "aggregate accepted %d of %d connections", count, count)
+	}, "aggregate accepted %d of %d connections", count, count)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make([]ports.ServerConnection, len(s.conns))
@@ -172,8 +172,7 @@ func TestAggregateChildLossDoesNotStopAccept(t *testing.T) {
 
 		// The aggregate isolates the loss: the child is deregistered and the loss
 		// is never surfaced to the shared accept loop.
-		require.Eventually(t, func() bool { return aggregateChildCount(a) == 1 }, listenerTestDeadline, time.Millisecond,
-			"the lost child was not deregistered")
+		requireSettled(t, func() bool { return aggregateChildCount(a) == 1 }, "the lost child was not deregistered")
 		require.Empty(t, sink.errors(), "a child loss must not surface as an aggregate Accept error")
 
 		// The surviving physical child still admits.
@@ -209,8 +208,7 @@ func TestAggregateCloseDrainsQueuedConnections(t *testing.T) {
 		first := child.mustOpen(1)
 		second := child.mustOpen(2)
 		third := child.mustOpen(3)
-		require.Eventually(t, func() bool { return aggregateQueued(a) == limit }, listenerTestDeadline, time.Millisecond,
-			"the aggregate queue never filled to its bound")
+		requireSettled(t, func() bool { return aggregateQueued(a) == limit }, "the aggregate queue never filled to its bound")
 
 		blocked := make(chan error, 1)
 		go func() {
@@ -282,8 +280,7 @@ func TestAggregateRemoveUnblocksBackpressuredForwarder(t *testing.T) {
 
 		queuedBroker := child.mustOpen(1)
 		heldBroker := child.mustOpen(2)
-		require.Eventually(t, func() bool { return aggregateQueued(a) == 1 }, listenerTestDeadline, time.Millisecond,
-			"the aggregate queue never filled to its bound")
+		requireSettled(t, func() bool { return aggregateQueued(a) == 1 }, "the aggregate queue never filled to its bound")
 
 		require.NoError(t, a.Remove(child.listener))
 		require.Zero(t, aggregateChildCount(a))

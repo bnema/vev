@@ -316,8 +316,7 @@ func TestServerSupervisorServerLossIsolated(t *testing.T) {
 		// Lose child A's carriage entirely.
 		_ = serverA.Close()
 		awaitClosed(t, physicalA.Done(), p3cTestDeadline, "the lost physical connection never reached its terminal outcome")
-		require.Eventually(t, func() bool { return server.supervisor.Children() == 1 }, p3cTestDeadline, time.Millisecond,
-			"the lost child was never reaped")
+		requireSettled(t, func() bool { return server.supervisor.Children() == 1 }, "the lost child was never reaped")
 
 		// The surviving child still accepts and the aggregate never failed.
 		logicalB2, err := openTyped(t, physicalB, context.Background(), muxOpenRequest(2, binding.Policy()))
@@ -356,9 +355,9 @@ func TestServerSupervisorCloseTearsDownOwnedChildren(t *testing.T) {
 
 		require.NoError(t, server.supervisor.Close())
 		require.Zero(t, server.supervisor.Children())
-		require.Eventually(t, func() bool {
+		requireSettled(t, func() bool {
 			return channelClosed(physicalA.Done()) && channelClosed(physicalB.Done())
-		}, p3cTestDeadline, time.Millisecond, "Close did not tear down every owned carriage")
+		}, "Close did not tear down every owned carriage")
 
 		// A closed supervisor refuses later carriage and closes it.
 		lateClient, lateServer := rawCarriagePair(t)
@@ -381,8 +380,7 @@ func TestServerSupervisorBoundsConcurrentAdmissions(t *testing.T) {
 
 		clientA, serverA := rawCarriagePair(t)
 		server.adopt(context.Background(), serverA)
-		require.Eventually(t, func() bool { return len(server.supervisor.slots) == 1 }, p3cTestDeadline, time.Millisecond,
-			"the first admission never took the only slot")
+		requireSettled(t, func() bool { return len(server.supervisor.slots) == 1 }, "the first admission never took the only slot")
 
 		clientB, serverB := rawCarriagePair(t)
 		admittedB := make(chan error, 1)

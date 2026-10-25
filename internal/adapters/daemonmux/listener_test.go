@@ -924,8 +924,7 @@ func TestListenerCloseUnblocksAcceptAndJoinsGoroutines(t *testing.T) {
 
 		awaitClosed(t, daemonConnection.watchDone, listenerTestDeadline)
 		require.False(t, watchRegistered(h.daemonPump, 1), "listener connection leaked a pump watch entry")
-		require.Eventually(t, func() bool { return runtime.NumGoroutine() <= before+3 }, listenerTestDeadline, time.Millisecond,
-			"listener goroutines leaked")
+		requireSettled(t, func() bool { return runtime.NumGoroutine() <= before+3 }, "listener goroutines leaked")
 	})
 }
 
@@ -1118,7 +1117,7 @@ func TestListenerConnectionCloseDiscardsQueuedInboundReleasesAccounting(t *testi
 			// The broker sent one chunk the daemon never reads, so the stream holds
 			// accepted inbound data when the local Close arrives.
 			require.NoError(t, h.brokerPump.SendData(id, chunk, nil))
-			requireEngineEventually(t, h.daemonPump, func(e *StreamEngine) bool { return e.AggregateBytes() > 0 },
+			requireEngineSettled(t, h.daemonPump, func(e *StreamEngine) bool { return e.AggregateBytes() > 0 },
 				"cycle %d: the accepted chunk was never queued", i)
 
 			require.NoError(t, daemonConnection.Close())
