@@ -26,6 +26,7 @@ func TestRecoveryCorruption(t *testing.T) {
 	require.ErrorContains(t, err, "digest mismatch")
 }
 
+// real I/O: file-backed store with concurrent readers and writers.
 func TestDefensiveCopiesAndConcurrentAccess(t *testing.T) {
 	o := options(t)
 	s, err := Open(o)

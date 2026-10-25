@@ -78,6 +78,7 @@ func TestMigrationFaultRestart(t *testing.T) {
 		}
 	}
 }
+// real I/O: flock-based lock lifetime across a re-executed test subprocess.
 func TestLockLifetime(t *testing.T) {
 	if dir := os.Getenv("VEV_BROKERSTORE_LOCK_TEST"); dir != "" {
 		s, err := Open(Options{Dir: dir})
