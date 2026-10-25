@@ -1498,7 +1498,7 @@ func sendCommand(t *testing.T, d *Daemon, request protocol.CommandRequest) proto
 
 func awaitCommandResult(t *testing.T, sends chan wire.Envelope) protocol.CommandResult {
 	t.Helper()
-	reply := requireFrame(t, sends, "CommandResult")
+	reply := frameEither(t, sends, "CommandResult")
 	return decodeServerMessage(t, reply).(protocol.CommandResult)
 }
 

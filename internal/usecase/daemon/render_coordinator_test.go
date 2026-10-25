@@ -202,7 +202,7 @@ func (h *coordinatorHarness) armedTimers(t *testing.T) []*coordinatorMockTimer {
 // deterministic contract failure, not a slow behavior to poll for.
 func awaitWake(t *testing.T, ch chan renderWake) renderWake {
 	t.Helper()
-	wake := requireReceived(t, ch, "coordinator did not publish a wake after fake-clock advancement")
+	wake := receiveEither(t, ch, "coordinator did not publish a wake after fake-clock advancement")
 	wake.attachmentLeases = nil
 	wake.generation = 0
 	return wake
@@ -219,7 +219,7 @@ func requireNoWake(t *testing.T, ch chan renderWake) {
 
 func awaitInvalidation(t *testing.T, ch chan renderInvalidation) renderInvalidation {
 	t.Helper()
-	return requireReceived(t, ch, "producer did not publish a coordinator invalidation")
+	return receiveEither(t, ch, "producer did not publish a coordinator invalidation")
 }
 
 func requireNoInvalidation(t *testing.T, ch chan renderInvalidation) {
