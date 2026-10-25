@@ -198,6 +198,7 @@ func (t *supervisorTestTerminal) restoreCount() int {
 // supervisorTestConnector scripts connection attempts and records concurrency,
 // so a test can prove attempts never overlap.
 type supervisorTestConnector struct {
+	port    *portsmocks.MockBrokerConnector
 	connect func(ctx context.Context, call int) (ports.BrokerNavigator, error)
 
 	mu          sync.Mutex
@@ -207,11 +208,14 @@ type supervisorTestConnector struct {
 	started     chan int
 }
 
-func newSupervisorTestConnector(connect func(ctx context.Context, call int) (ports.BrokerNavigator, error)) *supervisorTestConnector {
-	return &supervisorTestConnector{connect: connect, started: make(chan int, 32)}
+func newSupervisorTestConnector(t *testing.T, connect func(ctx context.Context, call int) (ports.BrokerNavigator, error)) *supervisorTestConnector {
+	c := &supervisorTestConnector{connect: connect, started: make(chan int, 32)}
+	c.port = portsmocks.NewMockBrokerConnector(t)
+	c.port.EXPECT().Connect(mock.Anything).RunAndReturn(c.recordConnect).Maybe()
+	return c
 }
 
-func (c *supervisorTestConnector) Connect(ctx context.Context) (ports.BrokerNavigator, error) {
+func (c *supervisorTestConnector) recordConnect(ctx context.Context) (ports.BrokerNavigator, error) {
 	c.mu.Lock()
 	c.calls++
 	call := c.calls
@@ -697,7 +701,7 @@ func TestSupervisorPickerWithoutBroker(t *testing.T) {
 		reader := newSupervisorTestReader()
 		t.Cleanup(reader.unblock)
 		terminal := newSupervisorTestTerminal(t, reader)
-		connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) {
+		connector := newSupervisorTestConnector(t, func(context.Context, int) (ports.BrokerNavigator, error) {
 			return nil, ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: "broker down"}
 		})
 
@@ -706,7 +710,7 @@ func TestSupervisorPickerWithoutBroker(t *testing.T) {
 			renders  []State
 		)
 		sup := mustSupervisor(t, SupervisorConfig{
-			Connector: connector,
+			Connector: connector.port,
 			Terminal:  terminal.port,
 			Clock:     clock.port,
 			Jitter:    func() float64 { return 0 },
@@ -761,9 +765,9 @@ func TestSupervisorPickerPublicationRequestsRepaint(t *testing.T) {
 		renders := make(chan State, 16)
 
 		sup := mustSupervisor(t, SupervisorConfig{
-			Connector: newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) {
+			Connector: newSupervisorTestConnector(t, func(context.Context, int) (ports.BrokerNavigator, error) {
 				return service.port, nil
-			}),
+			}).port,
 			Terminal: newSupervisorTestTerminal(t, reader).port,
 			Clock:    clock.port,
 			Picker:   newPickerController(clock.port, pickerTestFreshness, terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor}),
@@ -813,7 +817,7 @@ func TestSupervisorBrokerLossReconnectsWithFreshGeneration(t *testing.T) {
 		first.publish(1, 1)
 		second := newSupervisorTestService(t, ports.BrokerConnectionID{2})
 
-		connector := newSupervisorTestConnector(func(_ context.Context, call int) (ports.BrokerNavigator, error) {
+		connector := newSupervisorTestConnector(t, func(_ context.Context, call int) (ports.BrokerNavigator, error) {
 			switch call {
 			case 1:
 				return first.port, nil
@@ -823,7 +827,7 @@ func TestSupervisorBrokerLossReconnectsWithFreshGeneration(t *testing.T) {
 		})
 
 		sup := mustSupervisor(t, SupervisorConfig{
-			Connector: connector,
+			Connector: connector.port,
 			Terminal:  terminal.port,
 			Clock:     clock.port,
 			Jitter:    func() float64 { return 0 },
@@ -898,13 +902,13 @@ func TestSupervisorCancellationClosesLateConnection(t *testing.T) {
 		release := make(chan struct{})
 		late := newSupervisorTestService(t, ports.BrokerConnectionID{9})
 		late.publish(1, 1)
-		connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) {
+		connector := newSupervisorTestConnector(t, func(context.Context, int) (ports.BrokerNavigator, error) {
 			<-release
 			return late.port, nil
 		})
 
 		sup := mustSupervisor(t, SupervisorConfig{
-			Connector: connector,
+			Connector: connector.port,
 			Terminal:  terminal.port,
 			Clock:     clock.port,
 			Jitter:    func() float64 { return 0 },
@@ -941,12 +945,12 @@ func TestSupervisorIncompatibleStopsReconnecting(t *testing.T) {
 		terminal := newSupervisorTestTerminal(t, reader)
 
 		incompatible := ports.BrokerError{Code: ports.BrokerErrorIncompatible, Text: "protocol"}
-		connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) {
+		connector := newSupervisorTestConnector(t, func(context.Context, int) (ports.BrokerNavigator, error) {
 			return nil, incompatible
 		})
 		notified := make(chan error, 4)
 		sup := mustSupervisor(t, SupervisorConfig{
-			Connector: connector,
+			Connector: connector.port,
 			Terminal:  terminal.port,
 			Clock:     clock.port,
 			Jitter:    func() float64 { return 0 },
@@ -979,12 +983,12 @@ func TestSupervisorTerminalEOFRestoresRawOnce(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		clock := newSupervisorTestClock(t)
 		terminal := newSupervisorTestTerminal(t, strings.NewReader(""))
-		connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) {
+		connector := newSupervisorTestConnector(t, func(context.Context, int) (ports.BrokerNavigator, error) {
 			return nil, ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: "down"}
 		})
 
 		sup := mustSupervisor(t, SupervisorConfig{
-			Connector: connector,
+			Connector: connector.port,
 			Terminal:  terminal.port,
 			Clock:     clock.port,
 			Jitter:    func() float64 { return 0 },
@@ -1004,13 +1008,13 @@ func TestSupervisorRawModePrecedesBroker(t *testing.T) {
 		terminal := newSupervisorTestTerminal(t, reader)
 
 		enteredAfterRaw := make(chan bool, 1)
-		connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) {
+		connector := newSupervisorTestConnector(t, func(context.Context, int) (ports.BrokerNavigator, error) {
 			enteredAfterRaw <- terminal.restoreCount() == 0
 			return nil, ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: "down"}
 		})
 
 		sup := mustSupervisor(t, SupervisorConfig{
-			Connector: connector,
+			Connector: connector.port,
 			Terminal:  terminal.port,
 			Clock:     clock.port,
 			Jitter:    func() float64 { return 0 },
@@ -1034,12 +1038,12 @@ func TestSupervisorSingleAttemptAndTimer(t *testing.T) {
 		reader := newSupervisorTestReader()
 		t.Cleanup(reader.unblock)
 		terminal := newSupervisorTestTerminal(t, reader)
-		connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) {
+		connector := newSupervisorTestConnector(t, func(context.Context, int) (ports.BrokerNavigator, error) {
 			return nil, ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: "down"}
 		})
 
 		sup := mustSupervisor(t, SupervisorConfig{
-			Connector: connector,
+			Connector: connector.port,
 			Terminal:  terminal.port,
 			Clock:     clock.port,
 			Jitter:    func() float64 { return 0 },
@@ -1216,11 +1220,11 @@ func startCancellationRace(t *testing.T, connect func(ctx context.Context, call 
 		clock:     newSupervisorTestClock(t),
 		terminal:  newSupervisorTestTerminal(t, reader),
 		recorder:  &cancellationRaceRecorder{},
-		connector: newSupervisorTestConnector(connect),
+		connector: newSupervisorTestConnector(t, connect),
 		runErr:    make(chan error, 1),
 	}
 	race.supervisor = mustSupervisor(t, SupervisorConfig{
-		Connector: race.connector,
+		Connector: race.connector.port,
 		Terminal:  race.terminal.port,
 		Clock:     race.clock.port,
 		Jitter:    func() float64 { return 0 },
@@ -1295,7 +1299,7 @@ func TestSupervisorDefensiveGenerationFenceRejectsSupersededAttempt(t *testing.T
 		clock := newSupervisorTestClock(t)
 		terminal := newSupervisorTestTerminal(t, newSupervisorTestReader())
 		sup := mustSupervisor(t, SupervisorConfig{
-			Connector: newSupervisorTestConnector(nil),
+			Connector: newSupervisorTestConnector(t, nil).port,
 			Terminal:  terminal.port,
 			Clock:     clock.port,
 			Jitter:    func() float64 { return 0 },
@@ -1356,12 +1360,12 @@ func TestSupervisorNormalizesUntypedConnectFailure(t *testing.T) {
 		terminal := newSupervisorTestTerminal(t, reader)
 
 		cause := errors.New("dial: connection refused")
-		connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) {
+		connector := newSupervisorTestConnector(t, func(context.Context, int) (ports.BrokerNavigator, error) {
 			return nil, cause
 		})
 		notified := make(chan error, 4)
 		sup := mustSupervisor(t, SupervisorConfig{
-			Connector: connector,
+			Connector: connector.port,
 			Terminal:  terminal.port,
 			Clock:     clock.port,
 			Jitter:    func() float64 { return 0 },
@@ -1407,11 +1411,11 @@ func TestSupervisorNormalizesUntypedLoss(t *testing.T) {
 
 		service := newSupervisorTestService(t, ports.BrokerConnectionID{1})
 		service.publish(1, 1)
-		connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) {
+		connector := newSupervisorTestConnector(t, func(context.Context, int) (ports.BrokerNavigator, error) {
 			return service.port, nil
 		})
 		sup := mustSupervisor(t, SupervisorConfig{
-			Connector: connector,
+			Connector: connector.port,
 			Terminal:  terminal.port,
 			Clock:     clock.port,
 			Jitter:    func() float64 { return 0 },
@@ -1462,11 +1466,11 @@ func TestSupervisorNilSubscriptionIsTypedUnavailable(t *testing.T) {
 
 				base := newSupervisorTestService(t, ports.BrokerConnectionID{7}, func(m *portsmocks.MockBrokerNavigator) { m.EXPECT().Subscribe().Return(tc.sub, nil).Maybe() })
 				svc := base.port
-				connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) {
+				connector := newSupervisorTestConnector(t, func(context.Context, int) (ports.BrokerNavigator, error) {
 					return svc, nil
 				})
 				sup := mustSupervisor(t, SupervisorConfig{
-					Connector: connector,
+					Connector: connector.port,
 					Terminal:  terminal.port,
 					Clock:     clock.port,
 					Jitter:    func() float64 { return 0 },
@@ -1547,7 +1551,7 @@ func TestSupervisorPickerCloseWhileOffline(t *testing.T) {
 				terminal := newSupervisorTestTerminal(t, reader)
 				clock := newSupervisorTestClock(t)
 				reached := make(chan struct{}, 1)
-				connector := newSupervisorTestConnector(func(ctx context.Context, _ int) (ports.BrokerNavigator, error) {
+				connector := newSupervisorTestConnector(t, func(ctx context.Context, _ int) (ports.BrokerNavigator, error) {
 					if phase == "connecting" {
 						reached <- struct{}{}
 						<-ctx.Done()
@@ -1560,7 +1564,7 @@ func TestSupervisorPickerCloseWhileOffline(t *testing.T) {
 					return nil, ports.BrokerError{Code: code, Text: "test refusal"}
 				})
 				s := mustSupervisor(t, SupervisorConfig{
-					Connector: connector, Terminal: terminal.port, Clock: clock.port,
+					Connector: connector.port, Terminal: terminal.port, Clock: clock.port,
 					Picker: NewPicker(clock.port, 0, terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor}),
 					Notify: func(State, error) { reached <- struct{}{} },
 				})

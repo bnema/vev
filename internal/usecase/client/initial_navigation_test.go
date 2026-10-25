@@ -352,7 +352,7 @@ func TestInitialNavigationResolverIsConsultedAtMostOnce(t *testing.T) {
 		first.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 			return stream.conn, nil
 		})
-		connector := newSupervisorTestConnector(func(_ context.Context, call int) (ports.BrokerNavigator, error) {
+		connector := newSupervisorTestConnector(t, func(_ context.Context, call int) (ports.BrokerNavigator, error) {
 			if call == 1 {
 				return first.port, nil
 			}
@@ -363,7 +363,7 @@ func TestInitialNavigationResolverIsConsultedAtMostOnce(t *testing.T) {
 		var resolvedEpoch atomic.Uint64
 		var mutatedOnce atomic.Bool
 		cfg := SupervisorConfig{
-			Connector: connector,
+			Connector: connector.port,
 			Terminal:  terminal.port,
 			Clock:     clock.port,
 			Jitter:    func() float64 { return 0 },
@@ -454,12 +454,12 @@ func TestNewSupervisorRefusesContradictoryInitialConfiguration(t *testing.T) {
 		reader := newSupervisorTestReader()
 		t.Cleanup(reader.unblock)
 		terminal := newSupervisorTestTerminal(t, reader)
-		connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) {
+		connector := newSupervisorTestConnector(t, func(context.Context, int) (ports.BrokerNavigator, error) {
 			return nil, ports.BrokerError{Code: ports.BrokerErrorUnavailable}
 		})
 
 		base := func() SupervisorConfig {
-			return SupervisorConfig{Connector: connector, Terminal: terminal.port, Clock: clock.port, Jitter: func() float64 { return 0 }, SessionEnvironment: SessionEnvironment{Provenance: SessionEnvironmentLocalCLI}}
+			return SupervisorConfig{Connector: connector.port, Terminal: terminal.port, Clock: clock.port, Jitter: func() float64 { return 0 }, SessionEnvironment: SessionEnvironment{Provenance: SessionEnvironmentLocalCLI}}
 		}
 
 		both := base()
@@ -502,7 +502,7 @@ func TestInitialNavigationResolverFailureIsSelectionUnavailable(t *testing.T) {
 		var calls atomic.Int64
 		resolverErr := errors.New("no such target")
 		sup := mustSupervisor(t, SupervisorConfig{
-			Connector: newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) { return service.port, nil }),
+			Connector: newSupervisorTestConnector(t, func(context.Context, int) (ports.BrokerNavigator, error) { return service.port, nil }).port,
 			Terminal:  terminal.port, Clock: clock.port, Jitter: func() float64 { return 0 }, Picker: picker,
 			NotifyLifecycle: func(notice LifecycleNotice) { notices <- notice },
 			ResolveInitialNavigation: func(ports.BrokerSnapshot) (InitialNavigation, error) {
@@ -558,7 +558,7 @@ func TestInitialNavigationWaitsForTargetObservation(t *testing.T) {
 				notices := make(chan LifecycleNotice, 4)
 				var calls atomic.Int64
 				sup := mustSupervisor(t, SupervisorConfig{
-					Connector: newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) { return service.port, nil }),
+					Connector: newSupervisorTestConnector(t, func(context.Context, int) (ports.BrokerNavigator, error) { return service.port, nil }).port,
 					Terminal:  terminal.port, Clock: clock.port, Jitter: func() float64 { return 0 }, Picker: picker,
 					NotifyLifecycle: func(notice LifecycleNotice) { notices <- notice },
 					ResolveInitialNavigation: func(snapshot ports.BrokerSnapshot) (InitialNavigation, error) {
@@ -651,13 +651,13 @@ func TestInitialNavigationDropsDecisionsTakenWhileHidden(t *testing.T) {
 		service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 			return stream.conn, nil
 		})
-		connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) { return service.port, nil })
+		connector := newSupervisorTestConnector(t, func(context.Context, int) (ports.BrokerNavigator, error) { return service.port, nil })
 		// A keystroke typed during the cold start: the hidden picker recorded a
 		// commit before the broker published anything.
 		picker.recordOp(pickerOp{commit: true}, "row", ports.BrokerOpenStreamRequest{})
 
 		sup := mustSupervisor(t, SupervisorConfig{
-			Connector: connector, Terminal: terminal.port, Clock: clock.port,
+			Connector: connector.port, Terminal: terminal.port, Clock: clock.port,
 			Jitter: func() float64 { return 0 }, Picker: picker,
 			InitialNavigation: InitialNavigation{Kind: InitialNavigationCreateEphemeral, Destination: ports.BrokerEndpointFence{Local: true}},
 		})

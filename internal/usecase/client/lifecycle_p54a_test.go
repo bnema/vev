@@ -147,7 +147,7 @@ func TestP54InitialNavigationCreatesEphemeralThroughBroker(t *testing.T) {
 		service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 			return stream.conn, nil
 		})
-		sup := mustSupervisor(t, SupervisorConfig{Connector: newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) { return service.port, nil }), Terminal: terminal.port, Clock: clock.port, Jitter: func() float64 { return 0 }, Picker: picker, InitialNavigation: navigation})
+		sup := mustSupervisor(t, SupervisorConfig{Connector: newSupervisorTestConnector(t, func(context.Context, int) (ports.BrokerNavigator, error) { return service.port, nil }).port, Terminal: terminal.port, Clock: clock.port, Jitter: func() float64 { return 0 }, Picker: picker, InitialNavigation: navigation})
 		done := make(chan error, 1)
 		go func() { done <- sup.Run(ctx) }()
 		synctest.Wait()
@@ -180,13 +180,13 @@ func TestP54InitialNavigationIsNotReplayedAfterReconnect(t *testing.T) {
 		first.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 			return stream.conn, nil
 		})
-		connector := newSupervisorTestConnector(func(_ context.Context, call int) (ports.BrokerNavigator, error) {
+		connector := newSupervisorTestConnector(t, func(_ context.Context, call int) (ports.BrokerNavigator, error) {
 			if call == 1 {
 				return first.port, nil
 			}
 			return second.port, nil
 		})
-		sup := mustSupervisor(t, SupervisorConfig{Connector: connector, Terminal: terminal.port, Clock: clock.port, Jitter: func() float64 { return 0 }, Picker: picker, InitialNavigation: navigation})
+		sup := mustSupervisor(t, SupervisorConfig{Connector: connector.port, Terminal: terminal.port, Clock: clock.port, Jitter: func() float64 { return 0 }, Picker: picker, InitialNavigation: navigation})
 		done := make(chan error, 1)
 		go func() { done <- sup.Run(ctx) }()
 		require.Equal(t, 1, connector.awaitStart(t))
@@ -254,14 +254,14 @@ func TestP54BrokerRestartDoesNotReattachOrReplayUnknownMutation(t *testing.T) {
 		first := newSupervisorTestService(t, ports.BrokerConnectionID{1})
 		first.publish(1, 1)
 		second := newSupervisorTestService(t, ports.BrokerConnectionID{2})
-		connector := newSupervisorTestConnector(func(_ context.Context, call int) (ports.BrokerNavigator, error) {
+		connector := newSupervisorTestConnector(t, func(_ context.Context, call int) (ports.BrokerNavigator, error) {
 			if call == 1 {
 				return first.port, nil
 			}
 			return second.port, nil
 		})
 		notices := make(chan LifecycleNotice, 4)
-		sup := mustSupervisor(t, SupervisorConfig{Connector: connector, Terminal: newSupervisorTestTerminal(t, reader).port, Clock: clock.port, Jitter: func() float64 { return 0 }, NotifyLifecycle: func(n LifecycleNotice) { notices <- n }})
+		sup := mustSupervisor(t, SupervisorConfig{Connector: connector.port, Terminal: newSupervisorTestTerminal(t, reader).port, Clock: clock.port, Jitter: func() float64 { return 0 }, NotifyLifecycle: func(n LifecycleNotice) { notices <- n }})
 		done := make(chan error, 1)
 		go func() { done <- sup.Run(ctx) }()
 		require.Equal(t, 1, connector.awaitStart(t))

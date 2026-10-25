@@ -262,10 +262,10 @@ func startResizeHarness(t *testing.T, options resizeHarnessOptions) *resizeSuper
 	if connect == nil {
 		connect = func(context.Context, int) (ports.BrokerNavigator, error) { return service.port, nil }
 	}
-	connector := newSupervisorTestConnector(connect)
+	connector := newSupervisorTestConnector(t, connect)
 	recorder := newResizeRenderRecorder(terminal)
 	sup := mustSupervisor(t, SupervisorConfig{
-		Connector: connector,
+		Connector: connector.port,
 		Terminal:  terminal.port,
 		Clock:     clock.port,
 		Jitter:    func() float64 { return 0 },
@@ -904,7 +904,7 @@ func TestSupervisorResizeInvalidationRendersOnlyPickerPresentations(t *testing.T
 	terminal := newResizeTestTerminal(t, newAttachTestReader(t), domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
 	recorder := newResizeRenderRecorder(terminal)
 	sup := mustSupervisor(t, SupervisorConfig{
-		Connector: newSupervisorTestConnector(nil),
+		Connector: newSupervisorTestConnector(t, nil).port,
 		Terminal:  terminal.port,
 		Clock:     newSupervisorTestClock(t).port,
 		Render:    recorder.render,
@@ -972,7 +972,7 @@ func TestSupervisorPresentationInvalidationNilHostIsSafe(t *testing.T) {
 			// gone the helper must fall back to nil rather than panic.
 			terminal := newResizeTestTerminal(t, newAttachTestReader(t), domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
 			sup := mustSupervisor(t, SupervisorConfig{
-				Connector: newSupervisorTestConnector(nil),
+				Connector: newSupervisorTestConnector(t, nil).port,
 				Terminal:  terminal.port,
 				Clock:     newSupervisorTestClock(t).port,
 			})
@@ -987,7 +987,7 @@ func TestSupervisorPresentationInvalidationNilHostIsSafe(t *testing.T) {
 			terminal := newResizeTestTerminal(t, newAttachTestReader(t), domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
 			clock := newSupervisorTestClock(t)
 			sup := mustSupervisor(t, SupervisorConfig{
-				Connector: newSupervisorTestConnector(nil),
+				Connector: newSupervisorTestConnector(t, nil).port,
 				Terminal:  terminal.port,
 				Clock:     clock.port,
 				Jitter:    func() float64 { return 0 },
@@ -1031,7 +1031,7 @@ func TestSupervisorPresentationInvalidationNilHostIsSafe(t *testing.T) {
 			terminal := newResizeTestTerminal(t, newAttachTestReader(t), domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
 			clock := newSupervisorTestClock(t)
 			sup := mustSupervisor(t, SupervisorConfig{
-				Connector: newSupervisorTestConnector(nil),
+				Connector: newSupervisorTestConnector(t, nil).port,
 				Terminal:  terminal.port,
 				Clock:     clock.port,
 				Jitter:    func() float64 { return 0 },

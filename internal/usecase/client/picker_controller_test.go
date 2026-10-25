@@ -462,13 +462,13 @@ func TestSupervisorPickerFoldsPublicationsAndInput(t *testing.T) {
 		reader := newPickerChunkReader()
 		t.Cleanup(reader.close)
 		terminal := newPickerRecordingTerminal(t, reader)
-		connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) {
+		connector := newSupervisorTestConnector(t, func(context.Context, int) (ports.BrokerNavigator, error) {
 			service := newSupervisorTestService(t, ports.BrokerConnectionID{1})
 			service.hub.publish(pickerTestSnapshot(3, 1, clock.port.Now(), "alpha", "beta"))
 			return service.port, nil
 		})
 		controller := newPickerController(clock.port, pickerTestFreshness, terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor})
-		sup := mustSupervisor(t, SupervisorConfig{Connector: connector, Terminal: terminal.port, Clock: clock.port, Picker: controller})
+		sup := mustSupervisor(t, SupervisorConfig{Connector: connector.port, Terminal: terminal.port, Clock: clock.port, Picker: controller})
 
 		runErr := make(chan error, 1)
 		go func() { runErr <- sup.Run(ctx) }()
@@ -510,12 +510,12 @@ func TestSupervisorPickerFoldsLaterPublication(t *testing.T) {
 		terminal := newPickerRecordingTerminal(t, reader)
 
 		service := newSupervisorTestService(t, ports.BrokerConnectionID{1})
-		connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) {
+		connector := newSupervisorTestConnector(t, func(context.Context, int) (ports.BrokerNavigator, error) {
 			service.hub.publish(pickerTestSnapshot(3, 1, clock.port.Now(), "alpha"))
 			return service.port, nil
 		})
 		controller := newPickerController(clock.port, pickerTestFreshness, terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor})
-		sup := mustSupervisor(t, SupervisorConfig{Connector: connector, Terminal: terminal.port, Clock: clock.port, Picker: controller})
+		sup := mustSupervisor(t, SupervisorConfig{Connector: connector.port, Terminal: terminal.port, Clock: clock.port, Picker: controller})
 
 		runErr := make(chan error, 1)
 		go func() { runErr <- sup.Run(ctx) }()
