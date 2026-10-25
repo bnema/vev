@@ -1412,6 +1412,7 @@ func awaitCommandResult(t *testing.T, sends chan wire.Envelope) protocol.Command
 type controlPTYFactory struct {
 	mu      sync.Mutex
 	ptys    []*quietPTY
+	closed  bool
 	entered chan struct{}
 	release chan struct{}
 	once    sync.Once
@@ -1426,8 +1427,14 @@ func (f *controlPTYFactory) Open(_ context.Context, _ string, _ []string, _ []st
 	})
 	pty := newQuietPTY()
 	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.closed {
+		// A background prewarm can open after cleanup closed the factory;
+		// hand it a closed PTY so its reader exits instead of hanging.
+		_ = pty.Close()
+		return pty, nil
+	}
 	f.ptys = append(f.ptys, pty)
-	f.mu.Unlock()
 	return pty, nil
 }
 
@@ -1441,6 +1448,7 @@ func (f *controlPTYFactory) close() {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.closed = true
 	for _, pty := range f.ptys {
 		_ = pty.Close()
 	}
