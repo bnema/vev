@@ -68,7 +68,7 @@ func TestPoolSharesCompatibleAliasesOverOnePhysical(t *testing.T) {
 
 	connector, err := NewEndpointConnector(server.dial(), DefaultMuxCeilings())
 	require.NoError(t, err)
-	pool, err := broker.NewPool(1, resolver, p3cBinder{}, connector, newListenerClock(time.Now()), p3cPoolLimits())
+	pool, err := broker.NewPool(1, resolver, p3cBinder{}, connector, newListenerClock(t, time.Now()).mock, p3cPoolLimits())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = pool.Close() })
 
@@ -108,7 +108,7 @@ func TestPoolRefusesConflictingPolicyWithoutDial(t *testing.T) {
 
 	connector, err := NewEndpointConnector(server.dial(), DefaultMuxCeilings())
 	require.NoError(t, err)
-	pool, err := broker.NewPool(1, resolver, p3cBinder{}, connector, newListenerClock(time.Now()), p3cPoolLimits())
+	pool, err := broker.NewPool(1, resolver, p3cBinder{}, connector, newListenerClock(t, time.Now()).mock, p3cPoolLimits())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = pool.Close() })
 
@@ -136,7 +136,7 @@ func TestPoolSurfacesPhysicalLossPerStream(t *testing.T) {
 
 	connector, err := NewEndpointConnector(server.dial(), DefaultMuxCeilings())
 	require.NoError(t, err)
-	pool, err := broker.NewPool(1, resolver, p3cBinder{}, connector, newListenerClock(time.Now()), p3cPoolLimits())
+	pool, err := broker.NewPool(1, resolver, p3cBinder{}, connector, newListenerClock(t, time.Now()).mock, p3cPoolLimits())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = pool.Close() })
 

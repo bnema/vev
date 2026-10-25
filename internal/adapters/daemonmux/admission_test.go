@@ -87,8 +87,8 @@ func TestListenerRefusesLiarLocalOrigin(t *testing.T) {
 
 	t.Run("remote carriage refuses a local Open", func(t *testing.T) {
 		brokerPump, daemonPump, start := newPairedPumpsUnstarted(t, DefaultMuxCeilings())
-		clock := newListenerClock(time.Now())
-		listener, err := newListener(daemonPump, listenerIdleBudget, MaxAcceptQueue, clock, remoteAcceptance(policy))
+		clock := newListenerClock(t, time.Now())
+		listener, err := newListener(daemonPump, listenerIdleBudget, MaxAcceptQueue, clock.mock, remoteAcceptance(policy))
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = listener.Close() })
 		start()

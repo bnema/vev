@@ -133,9 +133,10 @@ type superviseServer struct {
 	dials      atomic.Int64
 	adoptions  chan error
 
-	mu       sync.Mutex
-	accepted []ports.ServerConnection
-	serveOne sync.Once
+	mu              sync.Mutex
+	accepted        []ports.ServerConnection
+	acceptedChanged chan struct{}
+	serveOne        sync.Once
 }
 
 func newSuperviseServer(t *testing.T, binding ServerBinding, ceilings MuxCeilings, limit int, timeSource ports.Clock) *superviseServer {
@@ -154,10 +155,11 @@ func newSuperviseServer(t *testing.T, binding ServerBinding, ceilings MuxCeiling
 		_ = aggregate.Close()
 	})
 	return &superviseServer{
-		t:          t,
-		aggregate:  aggregate,
-		supervisor: supervisor,
-		adoptions:  make(chan error, 16),
+		t:               t,
+		aggregate:       aggregate,
+		supervisor:      supervisor,
+		adoptions:       make(chan error, 16),
+		acceptedChanged: make(chan struct{}),
 	}
 }
 
@@ -202,6 +204,8 @@ func (s *superviseServer) serve() {
 				}
 				s.mu.Lock()
 				s.accepted = append(s.accepted, connection)
+				close(s.acceptedChanged)
+				s.acceptedChanged = make(chan struct{})
 				s.mu.Unlock()
 				go func() { _ = servePongs(connection) }()
 			}
@@ -218,8 +222,20 @@ func (s *superviseServer) acceptedCount() int {
 
 func (s *superviseServer) awaitAccepted(t *testing.T, count int) {
 	t.Helper()
-	require.Eventually(t, func() bool { return s.acceptedCount() >= count }, p3cTestDeadline, time.Millisecond,
-		"server accepted %d of %d streams", s.acceptedCount(), count)
+	guard := time.After(p3cTestDeadline)
+	for {
+		s.mu.Lock()
+		accepted, ch := len(s.accepted), s.acceptedChanged
+		s.mu.Unlock()
+		if accepted >= count {
+			return
+		}
+		select {
+		case <-ch:
+		case <-guard:
+			t.Fatalf("server accepted %d of %d streams", accepted, count)
+		}
+	}
 }
 
 // TestNewEndpointConnectorValidation proves a connector refuses a nil dial

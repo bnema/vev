@@ -10,6 +10,7 @@ import (
 
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/adapters/sessionwire"
@@ -34,29 +35,31 @@ const listenerIdleBudget = time.Hour
 // its expiry are asserted exactly instead of racing wall time. Timers that come
 // due at the same instant fire in creation order.
 type listenerClock struct {
+	mock   *portsmocks.MockClock
+	t      *testing.T
 	mu     sync.Mutex
 	now    time.Time
 	order  uint64
 	timers map[*listenerTimer]struct{}
 }
 
-func newListenerClock(start time.Time) *listenerClock {
-	return &listenerClock{now: start, timers: make(map[*listenerTimer]struct{})}
+func newListenerClock(t *testing.T, start time.Time) *listenerClock {
+	c := &listenerClock{mock: portsmocks.NewMockClock(t), t: t, now: start, timers: make(map[*listenerTimer]struct{})}
+	c.mock.EXPECT().Now().RunAndReturn(c.Now).Maybe()
+	c.mock.EXPECT().NewTimer(mock.Anything).RunAndReturn(func(d time.Duration) ports.Timer {
+		timer := &listenerTimer{clock: c, ch: make(chan time.Time, 1)}
+		timerMock := portsmocks.NewMockTimer(t)
+		timerMock.EXPECT().C().Return(timer.ch).Maybe()
+		timerMock.EXPECT().Stop().RunAndReturn(timer.stop).Maybe()
+		timerMock.EXPECT().Reset(mock.Anything).RunAndReturn(timer.reset).Maybe()
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		timer.arm(d)
+		return timerMock
+	}).Maybe()
+	return c
 }
-
-func (c *listenerClock) Now() time.Time {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.now
-}
-
-func (c *listenerClock) NewTimer(d time.Duration) ports.Timer {
-	timer := &listenerTimer{clock: c, ch: make(chan time.Time, 1)}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	timer.arm(d)
-	return timer
-}
+func (c *listenerClock) Now() time.Time { c.mu.Lock(); defer c.mu.Unlock(); return c.now }
 
 // Advance moves time forward and fires every timer that came due.
 func (c *listenerClock) Advance(d time.Duration) {
@@ -105,9 +108,7 @@ type listenerTimer struct {
 	active bool
 }
 
-func (t *listenerTimer) C() <-chan time.Time { return t.ch }
-
-func (t *listenerTimer) Stop() bool {
+func (t *listenerTimer) stop() bool {
 	t.clock.mu.Lock()
 	defer t.clock.mu.Unlock()
 	if !t.active {
@@ -118,7 +119,7 @@ func (t *listenerTimer) Stop() bool {
 	return true
 }
 
-func (t *listenerTimer) Reset(d time.Duration) bool {
+func (t *listenerTimer) reset(d time.Duration) bool {
 	t.clock.mu.Lock()
 	defer t.clock.mu.Unlock()
 	wasActive := t.active
@@ -180,8 +181,8 @@ func newListenerHarness(t *testing.T, budget time.Duration, queueLimit int) *lis
 func newListenerHarnessWithCeilings(t *testing.T, budget time.Duration, queueLimit int, ceilings MuxCeilings) *listenerHarness {
 	t.Helper()
 	brokerPump, daemonPump, start := newPairedPumpsUnstarted(t, ceilings)
-	clock := newListenerClock(time.Now())
-	listener, err := newListener(daemonPump, budget, queueLimit, clock, localAcceptance(logicalTestPolicy()))
+	clock := newListenerClock(t, time.Now())
+	listener, err := newListener(daemonPump, budget, queueLimit, clock.mock, localAcceptance(logicalTestPolicy()))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = listener.Close() })
 	start()
@@ -219,8 +220,26 @@ func (h *listenerHarness) pending() int {
 
 func (h *listenerHarness) awaitPending(count int) {
 	h.t.Helper()
-	require.Eventually(h.t, func() bool { return h.pending() == count }, listenerTestDeadline, time.Millisecond,
-		"accept queue never held %d admitted stream(s)", count)
+	h.awaitRegistry(func() bool { return len(h.listener.queue) == count })
+}
+
+// awaitRegistry reads the condition and notification under the same lock.
+func (h *listenerHarness) awaitRegistry(condition func() bool) {
+	h.t.Helper()
+	guard := time.After(listenerTestDeadline)
+	for {
+		h.listener.mu.Lock()
+		ok, ch := condition(), h.listener.change
+		h.listener.mu.Unlock()
+		if ok {
+			return
+		}
+		select {
+		case <-ch:
+		case <-guard:
+			h.t.Fatal("listener registry did not reach expected state")
+		}
+	}
 }
 
 // activeWatchdog reports how many admitted streams the deadline watchdog still
@@ -298,16 +317,20 @@ func listenerRoundTrip(t *testing.T, conn ports.ClientConnection) {
 // requireStreamState waits until one stream of the daemon pump reached state.
 func requireStreamState(t *testing.T, pump *Pump, id PhysicalStreamID, state StreamState) StreamStatus {
 	t.Helper()
-	var status StreamStatus
-	require.Eventually(t, func() bool {
-		current, ok := pump.Engine().Status(id)
-		if !ok || current.State != state {
-			return false
+	guard := time.After(listenerTestDeadline)
+	for {
+		ch := pump.Watch(id)
+		status, ok := pump.Engine().Status(id)
+		if ok && status.State == state {
+			return status
 		}
-		status = current
-		return true
-	}, listenerTestDeadline, time.Millisecond, "daemon stream %d never reached %s", id, state)
-	return status
+		select {
+		case <-ch:
+		case <-status.Done:
+		case <-guard:
+			t.Fatalf("stream %d did not reach %s", id, state)
+		}
+	}
 }
 
 // listenerDaemon is the test's daemon accept loop: it takes connections from
@@ -315,12 +338,13 @@ func requireStreamState(t *testing.T, pump *Pump, id PhysicalStreamID, state Str
 type listenerDaemon struct {
 	listener *Listener
 
-	mu    sync.Mutex
-	conns []*ListenerConnection
+	mu      sync.Mutex
+	conns   []*ListenerConnection
+	changed chan struct{}
 }
 
 func startListenerDaemon(l *Listener) *listenerDaemon {
-	daemon := &listenerDaemon{listener: l}
+	daemon := &listenerDaemon{listener: l, changed: make(chan struct{})}
 	go func() {
 		for {
 			raw, err := l.Accept()
@@ -330,6 +354,8 @@ func startListenerDaemon(l *Listener) *listenerDaemon {
 			connection := raw.(*ListenerConnection)
 			daemon.mu.Lock()
 			daemon.conns = append(daemon.conns, connection)
+			close(daemon.changed)
+			daemon.changed = make(chan struct{})
 			daemon.mu.Unlock()
 			go func() { _ = servePongs(connection) }()
 		}
@@ -345,11 +371,20 @@ func (d *listenerDaemon) connection(index int) *ListenerConnection {
 
 func (d *listenerDaemon) await(t *testing.T, count int) {
 	t.Helper()
-	require.Eventually(t, func() bool {
+	guard := time.After(listenerTestDeadline)
+	for {
 		d.mu.Lock()
-		defer d.mu.Unlock()
-		return len(d.conns) >= count
-	}, listenerTestDeadline, time.Millisecond, "daemon accepted %d of %d streams", count, count)
+		n, ch := len(d.conns), d.changed
+		d.mu.Unlock()
+		if n >= count {
+			return
+		}
+		select {
+		case <-ch:
+		case <-guard:
+			t.Fatalf("daemon accepted %d of %d", n, count)
+		}
+	}
 }
 
 func TestNewListenerValidation(t *testing.T) {
@@ -489,7 +524,9 @@ func TestListenerHundredTypedAdmissions(t *testing.T) {
 	for i, connection := range connections {
 		require.NoError(t, connection.Close(), "stream %d", i+1)
 	}
-	require.Eventually(t, func() bool { return h.daemonPump.Engine().Live() == 0 }, listenerTestDeadline, time.Millisecond)
+	for id := PhysicalStreamID(1); id <= 3; id++ {
+		requireStreamState(t, h.daemonPump, id, StreamTerminal)
+	}
 	for i, connection := range connections {
 		require.True(t, channelClosed(connection.Done()), "stream %d", i+1)
 	}
@@ -551,7 +588,7 @@ func TestListenerBlockedAcceptAndReaderSiblingProgress(t *testing.T) {
 	case <-time.After(listenerTestDeadline):
 		t.Fatal("closing the stream did not unblock its reader")
 	}
-	require.Eventually(t, func() bool { return channelClosed(daemonSecond.Done()) }, listenerTestDeadline, time.Millisecond)
+	awaitClosed(t, daemonSecond.Done(), listenerTestDeadline)
 	listenerRoundTrip(t, first)
 }
 
@@ -628,12 +665,12 @@ func TestListenerHandshakeExpiryResetsOnlyStream(t *testing.T) {
 	var detail ports.BrokerError
 	require.ErrorAs(t, expired.Err, &detail)
 	require.Equal(t, handshakeDeadlineText, detail.Text)
-	require.Eventually(t, func() bool { return channelClosed(daemonFirst.Done()) }, listenerTestDeadline, time.Millisecond)
+	awaitClosed(t, daemonFirst.Done(), listenerTestDeadline)
 	require.Error(t, daemonFirst.Err())
 	require.Equal(t, domain.RemoteFailureTransport, daemonFirst.FailureKind())
 
 	// The broker observes the stream-local loss with its exact scope.
-	require.Eventually(t, func() bool { return channelClosed(first.Done()) }, listenerTestDeadline, time.Millisecond)
+	awaitClosed(t, first.Done(), listenerTestDeadline)
 	var loss ports.BrokerStreamLost
 	require.ErrorAs(t, first.Err(), &loss)
 	require.Equal(t, ports.BrokerStreamID(1), loss.Stream)
@@ -753,7 +790,7 @@ func TestListenerMalformedStreamDoesNotStopAccept(t *testing.T) {
 
 	malformed := requireStreamState(t, h.daemonPump, 1, StreamTerminal)
 	require.Equal(t, domain.RemoteFailureInvalidResponse, malformed.FailureKind)
-	require.Eventually(t, func() bool { return channelClosed(first.Done()) }, listenerTestDeadline, time.Millisecond)
+	awaitClosed(t, first.Done(), listenerTestDeadline)
 
 	// The accept loop survived: a fresh stream is admitted and served.
 	second := h.mustOpen(2)
@@ -792,7 +829,7 @@ func TestListenerPhysicalLossUnblocksAll(t *testing.T) {
 
 	// Failing the broker carrier is a physical loss on the daemon side.
 	require.NoError(t, h.brokerPump.Close())
-	require.Eventually(t, func() bool { return channelClosed(h.daemonPump.Done()) }, listenerTestDeadline, time.Millisecond)
+	awaitClosed(t, h.daemonPump.Done(), listenerTestDeadline)
 	require.Error(t, h.daemonPump.Err(), "the daemon pump must publish the carrier failure")
 
 	select {
@@ -809,12 +846,12 @@ func TestListenerPhysicalLossUnblocksAll(t *testing.T) {
 		case <-time.After(listenerTestDeadline):
 			t.Fatalf("physical loss did not unblock stream %d", i+1)
 		}
-		require.Eventually(t, func() bool { return channelClosed(daemonConnections[i].Done()) }, listenerTestDeadline, time.Millisecond, "stream %d", i+1)
+		awaitClosed(t, daemonConnections[i].Done(), listenerTestDeadline, "stream %d", i+1)
 		require.Error(t, daemonConnections[i].Err(), "stream %d", i+1)
 		require.Equal(t, domain.RemoteFailureTransport, daemonConnections[i].FailureKind(), "stream %d", i+1)
 	}
 	for i, connection := range connections {
-		require.Eventually(t, func() bool { return channelClosed(connection.Done()) }, listenerTestDeadline, time.Millisecond, "stream %d", i+1)
+		awaitClosed(t, connection.Done(), listenerTestDeadline, "stream %d", i+1)
 	}
 
 	// The fatal outcome is stable, so a later Accept cannot restart the loop.
@@ -854,7 +891,7 @@ func TestListenerCloseUnblocksAcceptAndJoinsGoroutines(t *testing.T) {
 	require.ErrorIs(t, err, ErrListenerClosed)
 
 	require.NoError(t, connection.Close())
-	require.Eventually(t, func() bool { return channelClosed(daemonConnection.Done()) }, listenerTestDeadline, time.Millisecond)
+	awaitClosed(t, daemonConnection.Done(), listenerTestDeadline)
 	require.NoError(t, h.brokerPump.Close())
 	require.NoError(t, h.daemonPump.Close())
 
@@ -905,15 +942,14 @@ func TestListenerConnectionAdoptsAdmissionDeadline(t *testing.T) {
 
 	malformed := requireStreamState(t, h.daemonPump, 1, StreamTerminal)
 	require.Equal(t, domain.RemoteFailureInvalidResponse, malformed.FailureKind)
-	require.Eventually(t, func() bool { return channelClosed(daemonConnection.Done()) }, listenerTestDeadline, time.Millisecond)
-	require.Eventually(t, func() bool { return channelClosed(connection.Done()) }, listenerTestDeadline, time.Millisecond)
+	awaitClosed(t, daemonConnection.Done(), listenerTestDeadline)
+	awaitClosed(t, connection.Done(), listenerTestDeadline)
 	require.False(t, channelClosed(h.brokerPump.Done()))
 	require.False(t, channelClosed(h.daemonPump.Done()))
 
 	// The failed handshake leaves no live stream and no watchdog entry behind.
 	require.Equal(t, 0, h.daemonPump.Engine().Live())
-	require.Eventually(t, func() bool { return h.activeWatchdog() == 0 }, listenerTestDeadline, time.Millisecond,
-		"the failed handshake leaked a watchdog entry")
+	h.awaitRegistry(func() bool { return len(h.listener.active) == 0 })
 }
 
 // TestListenerConnectionPreambleFailureLeavesNoResidue proves a session
@@ -936,11 +972,10 @@ func TestListenerConnectionPreambleFailureLeavesNoResidue(t *testing.T) {
 
 	failed := requireStreamState(t, h.daemonPump, 1, StreamTerminal)
 	require.Equal(t, domain.RemoteFailureInvalidResponse, failed.FailureKind)
-	require.Eventually(t, func() bool { return channelClosed(daemonConnection.Done()) }, listenerTestDeadline, time.Millisecond)
-	require.Eventually(t, func() bool { return channelClosed(connection.Done()) }, listenerTestDeadline, time.Millisecond)
+	awaitClosed(t, daemonConnection.Done(), listenerTestDeadline)
+	awaitClosed(t, connection.Done(), listenerTestDeadline)
 	require.Equal(t, 0, h.daemonPump.Engine().Live())
-	require.Eventually(t, func() bool { return h.activeWatchdog() == 0 }, listenerTestDeadline, time.Millisecond,
-		"the failed handshake leaked a watchdog entry")
+	h.awaitRegistry(func() bool { return len(h.listener.active) == 0 })
 
 	siblingProbe := h.acceptAsync()
 	sibling := h.mustOpen(2)
@@ -966,7 +1001,7 @@ func TestListenerConnectionCarriageErrorsAreStreamLocal(t *testing.T) {
 	require.NoError(t, connection.Close())
 	_, err := daemonConnection.ReceiveClient()
 	require.ErrorIs(t, err, io.EOF)
-	require.Eventually(t, func() bool { return channelClosed(daemonConnection.Done()) }, listenerTestDeadline, time.Millisecond)
+	awaitClosed(t, daemonConnection.Done(), listenerTestDeadline)
 	require.Nil(t, daemonConnection.Err())
 	require.Equal(t, domain.RemoteFailureNone, daemonConnection.FailureKind())
 
@@ -999,16 +1034,15 @@ func TestListenerConnectionInternalCarriageCloseSettlesStream(t *testing.T) {
 	var detail ports.BrokerError
 	require.ErrorAs(t, closed.Err, &detail)
 	require.Equal(t, sessionCarriageClosedText, detail.Text)
-	require.Eventually(t, func() bool { return channelClosed(daemonConnection.Done()) }, listenerTestDeadline, time.Millisecond)
+	awaitClosed(t, daemonConnection.Done(), listenerTestDeadline)
 	require.Error(t, daemonConnection.Err())
 	require.Equal(t, domain.RemoteFailureInvalidResponse, daemonConnection.FailureKind())
 	require.Equal(t, 0, h.daemonPump.Engine().Live())
-	require.Eventually(t, func() bool { return h.activeWatchdog() == 0 }, listenerTestDeadline, time.Millisecond,
-		"the closed carriage leaked a watchdog entry")
+	h.awaitRegistry(func() bool { return len(h.listener.active) == 0 })
 
 	// The peer observes the stream-local Reset and its Open fails, while the
 	// physical connection stays live.
-	require.Eventually(t, func() bool { return channelClosed(connection.Done()) }, listenerTestDeadline, time.Millisecond)
+	awaitClosed(t, connection.Done(), listenerTestDeadline)
 	require.Error(t, connection.Err())
 	require.False(t, channelClosed(h.brokerPump.Done()))
 	require.False(t, channelClosed(h.daemonPump.Done()))
@@ -1059,13 +1093,11 @@ func TestListenerConnectionCloseDiscardsQueuedInboundReleasesAccounting(t *testi
 		require.Zero(t, closed.QueuedChunks, "cycle %d", i)
 		require.Zero(t, h.daemonPump.Engine().Live(), "cycle %d: a closing stream leaked its admission slot", i)
 		require.Zero(t, h.daemonPump.Engine().AggregateBytes(), "cycle %d: a closing stream leaked its queued bytes", i)
-		require.Eventually(t, func() bool { return h.activeWatchdog() == 0 }, listenerTestDeadline, time.Millisecond,
-			"cycle %d: the closed connection leaked a watchdog entry", i)
+		h.awaitRegistry(func() bool { return len(h.listener.active) == 0 })
 
 		// The broker observes one orderly mux Close, never a stream-local Reset,
 		// and the physical connection keeps flowing into the next cycle.
-		require.Eventually(t, func() bool { return channelClosed(connection.Done()) }, listenerTestDeadline, time.Millisecond,
-			"cycle %d: the broker never observed the mux Close", i)
+		awaitClosed(t, connection.Done(), listenerTestDeadline, "cycle %d: the broker never observed the mux Close", i)
 		require.NoError(t, connection.Err(), "cycle %d: the mux Close must stay orderly", i)
 		require.False(t, channelClosed(h.brokerPump.Done()))
 		require.False(t, channelClosed(h.daemonPump.Done()))

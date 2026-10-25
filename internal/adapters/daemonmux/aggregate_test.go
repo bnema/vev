@@ -163,7 +163,7 @@ func TestAggregateChildLossDoesNotStopAccept(t *testing.T) {
 
 	// Failing the first physical carriage makes its child's Accept terminal.
 	require.NoError(t, first.brokerPump.Close())
-	require.Eventually(t, func() bool { return channelClosed(first.daemonPump.Done()) }, listenerTestDeadline, time.Millisecond)
+	awaitClosed(t, first.daemonPump.Done(), listenerTestDeadline)
 
 	// The aggregate isolates the loss: the child is deregistered and the loss
 	// is never surfaced to the shared accept loop.
@@ -228,8 +228,7 @@ func TestAggregateCloseDrainsQueuedConnections(t *testing.T) {
 	// Every connection the aggregate held is released, including the one its
 	// forwarder was holding while backpressured; the child itself is closed.
 	for i, broker := range []*portsmocks.MockBrokerLogicalConnection{first, second, third} {
-		require.Eventually(t, func() bool { return channelClosed(broker.Done()) }, listenerTestDeadline, time.Millisecond,
-			"queued connection %d was not cleaned by Close", i+1)
+		awaitClosed(t, broker.Done(), listenerTestDeadline, "queued connection %d was not cleaned by Close", i+1)
 	}
 	_, err = child.listener.Accept()
 	require.ErrorIs(t, err, ErrListenerClosed)
@@ -280,8 +279,7 @@ func TestAggregateRemoveUnblocksBackpressuredForwarder(t *testing.T) {
 
 	// The connection the forwarder was holding is released; the connection
 	// already queued from the removed child stays deliverable.
-	require.Eventually(t, func() bool { return channelClosed(heldBroker.Done()) }, listenerTestDeadline, time.Millisecond,
-		"the backpressured in-flight connection was not released")
+	awaitClosed(t, heldBroker.Done(), listenerTestDeadline, "the backpressured in-flight connection was not released")
 	queued, err := a.Accept()
 	require.NoError(t, err)
 	queuedConnection, ok := queued.(*ListenerConnection)
@@ -289,5 +287,5 @@ func TestAggregateRemoveUnblocksBackpressuredForwarder(t *testing.T) {
 	require.False(t, channelClosed(queuedConnection.Done()), "a queued connection from a removed child must stay deliverable")
 	require.NoError(t, queued.Close())
 	require.True(t, channelClosed(queuedConnection.Done()))
-	require.Eventually(t, func() bool { return channelClosed(queuedBroker.Done()) }, listenerTestDeadline, time.Millisecond)
+	awaitClosed(t, queuedBroker.Done(), listenerTestDeadline)
 }

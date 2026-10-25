@@ -302,8 +302,7 @@ func TestServerSupervisorServerLossIsolated(t *testing.T) {
 
 	// Lose child A's carriage entirely.
 	_ = serverA.Close()
-	require.Eventually(t, func() bool { return channelClosed(physicalA.Done()) }, p3cTestDeadline, time.Millisecond,
-		"the lost physical connection never reached its terminal outcome")
+	awaitClosed(t, physicalA.Done(), p3cTestDeadline, "the lost physical connection never reached its terminal outcome")
 	require.Eventually(t, func() bool { return server.supervisor.Children() == 1 }, p3cTestDeadline, time.Millisecond,
 		"the lost child was never reaped")
 

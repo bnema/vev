@@ -112,8 +112,7 @@ func (s *superviseServer) serveQUICCapturing(t *testing.T, server *quic.Server) 
 // awaitQUICAccepted waits for the aggregate to deliver count typed admissions.
 func (s *superviseServer) awaitQUICAccepted(t *testing.T, count int) {
 	t.Helper()
-	require.Eventually(t, func() bool { return s.acceptedCount() >= count }, quicCarriageDeadline, time.Millisecond,
-		"server accepted %d of %d streams", s.acceptedCount(), count)
+	s.awaitAccepted(t, count)
 }
 
 // quicDaemonPump builds a daemon-side pump over the daemon end of a real QUIC

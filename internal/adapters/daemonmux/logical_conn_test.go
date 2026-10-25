@@ -836,10 +836,10 @@ func TestLogicalPhysicalLossFanout(t *testing.T) {
 
 	// Failing the daemon-side carrier is a physical loss on the broker pump.
 	require.NoError(t, daemonPump.Close())
-	require.Eventually(t, func() bool { return channelClosed(brokerPump.Done()) }, 5*time.Second, time.Millisecond)
+	awaitClosed(t, brokerPump.Done(), 5*time.Second)
 
 	for i, connection := range connections {
-		require.Eventually(t, func() bool { return channelClosed(connection.Done()) }, 5*time.Second, time.Millisecond)
+		awaitClosed(t, connection.Done(), 5*time.Second)
 		var loss ports.BrokerStreamLost
 		require.ErrorAs(t, connection.Err(), &loss, "connection %d", i)
 		require.Equal(t, ports.BrokerStreamID(i+1), loss.Stream, "connection %d", i)
@@ -913,7 +913,7 @@ func TestLogicalPeerCloseReleasesGoroutines(t *testing.T) {
 		t.Fatalf("daemon close: %v", err)
 	}
 	require.NoError(t, daemonPump.Send(Close{Physical: 1}))
-	require.Eventually(t, func() bool { return channelClosed(connection.Done()) }, 5*time.Second, time.Millisecond)
+	awaitClosed(t, connection.Done(), 5*time.Second)
 	require.NoError(t, connection.Err())
 
 	acceptor.closePeers()
@@ -1054,7 +1054,7 @@ func TestLogicalWatcherCauseSurvivesEvictionStress(t *testing.T) {
 			_, tracked := brokerPump.Engine().Status(1)
 			require.False(t, tracked, "stream 1 record was evicted")
 
-			require.Eventually(t, func() bool { return channelClosed(connection.Done()) }, 5*time.Second, time.Millisecond)
+			awaitClosed(t, connection.Done(), 5*time.Second)
 			var loss ports.BrokerStreamLost
 			require.ErrorAs(t, connection.Err(), &loss,
 				"a late watcher must not degrade a Reset into an orderly close")
