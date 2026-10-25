@@ -16,6 +16,7 @@ import (
 	"github.com/bnema/vev/internal/protocol/wire"
 )
 
+// real I/O: net.Pipe transport whose synchronous Send borrows streamframe's pooled result channel, which cannot be used inside a synctest bubble.
 func TestTransportSendRecvBothDirections(t *testing.T) {
 	c1, c2 := net.Pipe()
 	defer func() { _ = c1.Close() }()
@@ -90,6 +91,7 @@ func TestTransportCloseClosesUnderlyingConn(t *testing.T) {
 	}
 }
 
+// real I/O: net.Pipe transport whose synchronous Send borrows streamframe's pooled result channel, which cannot be used inside a synctest bubble.
 func TestTransportLargeFrameNearCap(t *testing.T) {
 	c1, c2 := net.Pipe()
 	defer func() { _ = c1.Close() }()
@@ -129,6 +131,7 @@ func TestTransportLargeFrameNearCap(t *testing.T) {
 	}
 }
 
+// real I/O: net.Pipe transport whose synchronous Send borrows streamframe's pooled result channel, which cannot be used inside a synctest bubble.
 func TestTransportManySmallFramesBackToBack(t *testing.T) {
 	c1, c2 := net.Pipe()
 	defer func() { _ = c1.Close() }()
@@ -235,6 +238,7 @@ func TestTransportRecvTruncatedHeader(t *testing.T) {
 	})
 }
 
+// real I/O: net.Pipe transport whose synchronous Send borrows streamframe's pooled result channel, which cannot be used inside a synctest bubble.
 func TestTransportSendOversizePayloadRejected(t *testing.T) {
 	c1, c2 := net.Pipe()
 	defer func() { _ = c1.Close() }()
@@ -248,6 +252,7 @@ func TestTransportSendOversizePayloadRejected(t *testing.T) {
 	}
 }
 
+// real I/O: net.Pipe transport whose synchronous Send borrows streamframe's pooled result channel, which cannot be used inside a synctest bubble.
 func TestTransportAsyncEgressPreservesWelcomeBeforeOutput(t *testing.T) {
 	const timeout = time.Second
 
