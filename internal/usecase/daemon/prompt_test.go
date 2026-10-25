@@ -6,17 +6,12 @@ import (
 	"testing"
 	"testing/synctest"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 )
-
-type failingPTYFactory struct{ err error }
-
-func (f failingPTYFactory) Open(context.Context, string, []string, []string, string, domain.Geometry) (ports.PTY, error) {
-	return nil, f.err
-}
 
 func TestPromptModalGeometry(t *testing.T) {
 	base := domain.Size{Cols: 100, Rows: 40}
@@ -126,7 +121,9 @@ func TestPromptSubmitSessionSpawnFailureReportsOneSafeNotice(t *testing.T) {
 		d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 		stopOverlayTimersAtCleanup(t, ac)
 		cause := errors.New("fork/exec /bin/sh: permission denied")
-		d.ptys = failingPTYFactory{err: cause}
+		failing := portsmocks.NewMockPTYFactory(t)
+		failing.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil, cause).Maybe()
+		d.ptys = failing
 
 		// Submit through the actual prompt input boundary rather than calling its
 		// callback directly.

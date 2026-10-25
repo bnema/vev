@@ -8,11 +8,13 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/domain/layout"
-	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
-type ownerRoutingPTY struct {
+// ownerRoutingState is the observable state behind newOwnerRoutingPTY's mock.
+type ownerRoutingState struct {
 	steps         chan channelPTYStep
 	processed     chan struct{}
 	activeReaders atomic.Int32
@@ -21,35 +23,34 @@ type ownerRoutingPTY struct {
 	closes        atomic.Int32
 }
 
-func newOwnerRoutingPTY() *ownerRoutingPTY {
-	return &ownerRoutingPTY{
+func newOwnerRoutingPTY(t testing.TB) (*portsmocks.MockPTY, *ownerRoutingState) {
+	t.Helper()
+	st := &ownerRoutingState{
 		steps:     make(chan channelPTYStep),
 		processed: make(chan struct{}, 4),
 	}
-}
-
-func (p *ownerRoutingPTY) Read(buf []byte) (int, error) {
-	active := p.activeReaders.Add(1)
-	defer p.activeReaders.Add(-1)
-	for {
-		maximum := p.maxReaders.Load()
-		if active <= maximum || p.maxReaders.CompareAndSwap(maximum, active) {
-			break
+	p := portsmocks.NewMockPTY(t)
+	p.EXPECT().Read(mock.Anything).RunAndReturn(func(buf []byte) (int, error) {
+		active := st.activeReaders.Add(1)
+		defer st.activeReaders.Add(-1)
+		for {
+			maximum := st.maxReaders.Load()
+			if active <= maximum || st.maxReaders.CompareAndSwap(maximum, active) {
+				break
+			}
 		}
-	}
-	if p.reads.Add(1) > 1 {
-		p.processed <- struct{}{}
-	}
-	step := <-p.steps
-	return copy(buf, step.data), step.err
-}
-
-func (*ownerRoutingPTY) Write(b []byte) (int, error)  { return len(b), nil }
-func (p *ownerRoutingPTY) Close() error               { p.closes.Add(1); return nil }
-func (*ownerRoutingPTY) Resize(domain.Geometry) error { return nil }
-func (*ownerRoutingPTY) Pid() int                     { return 0 }
-func (*ownerRoutingPTY) ForegroundPgid() (int, error) {
-	return 0, nil
+		if st.reads.Add(1) > 1 {
+			st.processed <- struct{}{}
+		}
+		step := <-st.steps
+		return copy(buf, step.data), step.err
+	}).Maybe()
+	p.EXPECT().Write(mock.Anything).RunAndReturn(func(b []byte) (int, error) { return len(b), nil }).Maybe()
+	p.EXPECT().Close().RunAndReturn(func() error { st.closes.Add(1); return nil }).Maybe()
+	p.EXPECT().Resize(mock.Anything).Return(nil).Maybe()
+	p.EXPECT().Pid().Return(0).Maybe()
+	p.EXPECT().ForegroundPgid().Return(0, nil).Maybe()
+	return p, st
 }
 
 func (p *pane) clearOwnerForTest() {
@@ -60,8 +61,8 @@ func (p *pane) clearOwnerForTest() {
 
 func TestPTYReaderExitReapsExactlyCurrentOwnerAfterPublication(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		pty := newOwnerRoutingPTY()
-		d, source, _, _ := newManualSessionWithPTYs(t, pty)
+		ptyMock, pty := newOwnerRoutingPTY(t)
+		d, source, _, _ := newManualSessionWithPTYs(t, ptyMock)
 		sourceTab := testAttachmentTab(source)
 		moved := sourceTab.focusedPane()
 
@@ -121,5 +122,3 @@ func TestPTYReaderExitReapsExactlyCurrentOwnerAfterPublication(t *testing.T) {
 		require.Equal(t, int32(1), pty.closes.Load(), "exit must release the process exactly once")
 	})
 }
-
-var _ ports.PTY = (*ownerRoutingPTY)(nil)

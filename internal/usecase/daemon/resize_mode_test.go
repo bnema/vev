@@ -7,7 +7,9 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/domain/layout"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -133,27 +135,34 @@ func TestResizeModeRendersGuidanceWithoutHidingContentOrCursor(t *testing.T) {
 	})
 }
 
-type resizeLockProbePTY struct {
+// resizeLockProbe is the observable state behind newResizeLockProbePTY's mock.
+type resizeLockProbe struct {
 	once    sync.Once
 	entered chan struct{}
 	release chan struct{}
 	check   func()
 }
 
-func (p *resizeLockProbePTY) Read([]byte) (int, error)   { return 0, nil }
-func (*resizeLockProbePTY) Write(b []byte) (int, error)  { return len(b), nil }
-func (*resizeLockProbePTY) Close() error                 { return nil }
-func (*resizeLockProbePTY) Pid() int                     { return 0 }
-func (*resizeLockProbePTY) ForegroundPgid() (int, error) { return 0, nil }
-func (p *resizeLockProbePTY) Resize(domain.Geometry) error {
-	p.once.Do(func() {
-		func() {
-			defer close(p.entered)
-			p.check()
-		}()
-		<-p.release
-	})
-	return nil
+func newResizeLockProbePTY(t testing.TB) (*portsmocks.MockPTY, *resizeLockProbe) {
+	t.Helper()
+	probe := &resizeLockProbe{entered: make(chan struct{}), release: make(chan struct{})}
+	p := portsmocks.NewMockPTY(t)
+	p.EXPECT().Read(mock.Anything).Return(0, nil).Maybe()
+	p.EXPECT().Write(mock.Anything).RunAndReturn(func(b []byte) (int, error) { return len(b), nil }).Maybe()
+	p.EXPECT().Close().Return(nil).Maybe()
+	p.EXPECT().Pid().Return(0).Maybe()
+	p.EXPECT().ForegroundPgid().Return(0, nil).Maybe()
+	p.EXPECT().Resize(mock.Anything).RunAndReturn(func(domain.Geometry) error {
+		probe.once.Do(func() {
+			func() {
+				defer close(probe.entered)
+				probe.check()
+			}()
+			<-probe.release
+		})
+		return nil
+	}).Maybe()
+	return p, probe
 }
 
 func TestResizeModeReleasesTabAndOverlayLocksBeforePTY(t *testing.T) {
@@ -163,8 +172,8 @@ func TestResizeModeReleasesTabAndOverlayLocksBeforePTY(t *testing.T) {
 		d, sess, ac, _ := newManualSessionWithPTYs(t, nil)
 		stopOverlayTimersAtCleanup(t, ac)
 		tb := testAttachmentTab(sess)
-		probe := &resizeLockProbePTY{entered: make(chan struct{}), release: make(chan struct{})}
-		second := newPane("pane-2", probe, domain.Size{Cols: 39, Rows: 23})
+		probePTY, probe := newResizeLockProbePTY(t)
+		second := newPane("pane-2", probePTY, domain.Size{Cols: 39, Rows: 23})
 		tb.mu.Lock()
 		tb.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}, Focus: "pane-2"}
 		tb.panes[second.id] = second
