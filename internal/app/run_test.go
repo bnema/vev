@@ -105,6 +105,7 @@ type fakeLifecycleOwnership struct {
 
 func (o fakeLifecycleOwnership) Release() error { return o.release() }
 
+// real I/O: real flock lifecycle locks.
 func TestCatalogueFailureDoesNotListen(t *testing.T) {
 	originalOpenCatalogue, originalListenDaemon := openCatalogue, listenDaemon
 	t.Cleanup(func() {
@@ -148,6 +149,7 @@ func TestCatalogueFailureDoesNotListen(t *testing.T) {
 // regression for the relaxed lock-permission rule: a pre-existing lock written
 // with an owner-only mode other than 0600 must still let the daemon start, while
 // group/other access stays refused (covered by the lifecycle unit tests).
+// real I/O: real flock lifecycle locks.
 func TestLifecycleOwnershipAcceptsOwnerOnlyVariantLock(t *testing.T) {
 	runtimeDir := filepath.Join(t.TempDir(), "runtime")
 	stateDir := filepath.Join(t.TempDir(), "state")
@@ -168,6 +170,7 @@ func TestLifecycleOwnershipAcceptsOwnerOnlyVariantLock(t *testing.T) {
 	require.NoError(t, owner.Release())
 }
 
+// real I/O: real flock lifecycle locks.
 func TestLifecycleOwnershipPrecedesDaemonStartup(t *testing.T) {
 	t.Run("ownership prefix is exact", func(t *testing.T) {
 		var events []string
@@ -292,10 +295,11 @@ func TestLifecycleOwnershipPrecedesDaemonStartup(t *testing.T) {
 			}
 		})
 
-		require.Eventually(t, func() bool {
+		// A socket appearing on disk publishes no event, so this polls.
+		require.True(t, pollUntil(5*time.Second, func() bool {
 			_, err := os.Stat(daemonmux.SocketPath(runtimeDir))
 			return err == nil
-		}, 5*time.Second, time.Millisecond, "daemon mux socket was not published")
+		}), "daemon mux socket was not published")
 		require.FileExists(t, persist.StorePath(stateDir))
 	})
 

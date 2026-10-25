@@ -50,10 +50,11 @@ func startProductionBrokerFixture(t *testing.T) (ports.BrokerService, context.Co
 		}
 	})
 	muxPath := daemonmux.SocketPath(ipc.SocketDir())
-	require.Eventually(t, func() bool {
+	// A socket appearing on disk publishes no event, so this polls.
+	require.True(t, pollUntil(10*time.Second, func() bool {
 		info, err := os.Stat(muxPath)
 		return err == nil && info.Mode()&os.ModeSocket != 0
-	}, 10*time.Second, 10*time.Millisecond, "daemon never published its mux socket at %s", muxPath)
+	}), "daemon never published its mux socket at %s", muxPath)
 	identity, err := daemonidentity.Load(filepath.Join(os.Getenv("XDG_STATE_HOME"), "vev"))
 	require.NoError(t, err)
 	require.NotEmpty(t, identity)
@@ -73,15 +74,18 @@ func startProductionBrokerFixture(t *testing.T) (ports.BrokerService, context.Co
 		}
 	})
 	var service ports.BrokerService
-	require.Eventually(t, func() bool {
+	// Dialing a broker that is still binding fails until it listens and
+	// publishes no event, so this polls the dial.
+	require.True(t, pollUntil(10*time.Second, func() bool {
 		var dialErr error
 		service, dialErr = connectExistingBroker(ctx)
 		return dialErr == nil
-	}, 10*time.Second, 10*time.Millisecond)
+	}), "the broker never accepted a connection")
 	t.Cleanup(func() { require.NoError(t, service.Close()) })
 	return service, ctx
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestProductionBrokerCompositionLocalAndMutableRemote(t *testing.T) {
 	service, ctx := startProductionBrokerFixture(t)
 	sub, err := service.Subscribe()
@@ -105,18 +109,17 @@ func TestProductionBrokerCompositionLocalAndMutableRemote(t *testing.T) {
 	}))
 	welcome := awaitWelcome(t, stream)
 	require.NotNil(t, welcome.CommittedIdentity)
-	require.Eventually(t, func() bool {
-		snapshot := service.Snapshot()
+	awaitBrokerSnapshot(t, service, func(snapshot ports.BrokerSnapshot) bool {
 		return len(snapshot.Daemons) > 0 && snapshot.Daemons[0].Identity != ""
-	}, 10*time.Second, 10*time.Millisecond, "local observation: %+v", service.Snapshot())
+	}, "the local daemon observation")
 
 	registration, err := service.AddHost(ctx, "harness@127.0.0.1", remoteBrokerPolicy(hostTransportSSH))
 	require.NoError(t, err)
 	require.Equal(t, "harness@127.0.0.1", registration.Endpoint)
-	require.Eventually(t, func() bool {
-		_, ok := service.Snapshot().Find(registration.Endpoint)
+	awaitBrokerSnapshot(t, service, func(snapshot ports.BrokerSnapshot) bool {
+		_, ok := snapshot.Find(registration.Endpoint)
 		return ok
-	}, 10*time.Second, 10*time.Millisecond)
+	}, "the added host to be published")
 	_, err = service.RemoveHost(ctx, registration)
 	require.NoError(t, err)
 }
@@ -124,6 +127,7 @@ func TestProductionBrokerCompositionLocalAndMutableRemote(t *testing.T) {
 // Both production remote transports are reached through mutable AddHost,
 // never through a broker.json fixture route. SSH is replaced by an owned test
 // shim; the remote mux helper and daemon are real subprocesses.
+// real I/O: real unix-socket broker/daemon stack.
 func TestProductionBrokerRemoteMuxTransports(t *testing.T) {
 	for _, tc := range []struct {
 		name, helper string

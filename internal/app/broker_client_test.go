@@ -12,6 +12,7 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/mock"
@@ -124,166 +125,29 @@ func sortStrings(values []string) {
 	}
 }
 
-// terminalCompositionService is the scripted broker service one terminal client
-// adopts. It records every opened stream request, serves one committed
+// newTerminalCompositionService is the scripted broker service one terminal
+// client adopts. It records every opened stream request, serves one committed
 // publication, and answers each admitted attachment with a Welcome and one
 // initial full session frame so the supervisor reaches its attached
-// presentation.
-type terminalCompositionService struct {
-	mu       sync.Mutex
-	snapshot ports.BrokerSnapshot
-	// daemonSessions, when set, is what the local daemon owns regardless of
-	// what the broker catalogue has observed.
-	daemonSessions []string
-	closed         bool
-	next           ports.BrokerStreamID
-	opened         []ports.BrokerOpenStreamRequest
-	streams        []*terminalCompositionStream
-	done           chan struct{}
-	changed        chan struct{}
-}
-
-func newTerminalCompositionService(snapshot ports.BrokerSnapshot) *terminalCompositionService {
-	return &terminalCompositionService{
-		snapshot: snapshot,
-		done:     make(chan struct{}),
-		changed:  make(chan struct{}, 1),
-	}
-}
-
-func (s *terminalCompositionService) ConnectionID() ports.BrokerConnectionID {
-	return ports.BrokerConnectionID{4}
-}
-
-func (s *terminalCompositionService) NextStreamID() (ports.BrokerStreamID, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return 0, ports.BrokerAdmissionClosed
-	}
-	s.next++
-	return s.next, nil
-}
-
-func (s *terminalCompositionService) Done() <-chan struct{} { return s.done }
-func (s *terminalCompositionService) Err() error            { return nil }
-
-func (s *terminalCompositionService) Snapshot() ports.BrokerSnapshot { return s.snapshot.Clone() }
-
-func (s *terminalCompositionService) Subscribe() (ports.BrokerSubscription, error) {
-	return terminalCompositionSubscription{changed: s.changed}, nil
-}
-
-func (s *terminalCompositionService) SubscribePreview(ports.BrokerPreviewRequest) (ports.BrokerPreviewSubscription, error) {
-	return nil, errors.New("terminal composition service does not support preview")
-}
-
-func (s *terminalCompositionService) OpenStream(_ context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
-		return nil, ports.BrokerAdmissionClosed
-	}
-	s.opened = append(s.opened, request)
-	sessions := terminalCompositionDaemonSessions(s.snapshot, request)
-	if request.Local && s.daemonSessions != nil {
-		sessions = terminalCompositionSessions(s.daemonSessions)
-	}
-	stream := newTerminalCompositionStream(request, sessions)
-	s.streams = append(s.streams, stream)
-	s.mu.Unlock()
-	return stream, nil
-}
-
-func (s *terminalCompositionService) CloseStream(ports.BrokerConnectionID, ports.BrokerStreamID) error {
-	return nil
-}
-
-func (s *terminalCompositionService) AddHost(context.Context, string, ports.BrokerPolicy) (domain.RemoteRegistration, error) {
-	return domain.RemoteRegistration{}, nil
-}
-
-func (s *terminalCompositionService) RemoveHost(context.Context, domain.RemoteRegistration) (bool, error) {
-	return false, nil
-}
-
-func (s *terminalCompositionService) UpdateHostPolicy(context.Context, domain.RemoteRegistration, ports.BrokerPolicy) (domain.RemoteRegistration, error) {
-	return domain.RemoteRegistration{}, nil
-}
-
-func (s *terminalCompositionService) RequestReconcile(string) {}
-
-func (s *terminalCompositionService) Close() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.closed {
-		s.closed = true
-		close(s.done)
-	}
-	return nil
-}
-
-// openedRequests returns the attachment streams opened; the preflight's
-// control listings are reported by openedControls.
-func (s *terminalCompositionService) openedRequests() []ports.BrokerOpenStreamRequest {
-	return s.openedWithPurpose(ports.BrokerStreamAttachment)
-}
-
-func (s *terminalCompositionService) openedControls() []ports.BrokerOpenStreamRequest {
-	return s.openedWithPurpose(ports.BrokerStreamControl)
-}
-
-func (s *terminalCompositionService) openedWithPurpose(purpose ports.BrokerStreamPurpose) []ports.BrokerOpenStreamRequest {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var out []ports.BrokerOpenStreamRequest
-	for _, request := range s.opened {
-		if request.Purpose == purpose {
-			out = append(out, request)
-		}
-	}
-	return out
-}
-
-// streamHello returns the Hello the supervisor sent on the single admitted
-// stream, proving the composition carried the CLI intent through to the typed
-// session handshake.
-func (s *terminalCompositionService) streamHello(t *testing.T) protocol.Hello {
+// presentation. daemonSessions, when set, is what the local daemon owns
+// regardless of what the broker catalogue has observed.
+func newTerminalCompositionService(t *testing.T, snapshot ports.BrokerSnapshot, daemonSessions []string) (*portsmocks.MockBrokerService, *brokerServiceState) {
 	t.Helper()
-	s.mu.Lock()
-	var streams []*terminalCompositionStream
-	for _, stream := range s.streams {
-		if stream.request.Purpose == ports.BrokerStreamAttachment {
-			streams = append(streams, stream)
+	return newBrokerServiceMock(t, snapshot, func(_ *portsmocks.MockBrokerService, state *brokerServiceState) {
+		state.doneOnClose = true
+		state.openStream = func(request ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+			sessions := terminalCompositionDaemonSessions(snapshot, request)
+			if request.Local && daemonSessions != nil {
+				sessions = terminalCompositionSessions(daemonSessions)
+			}
+			stream, streamState := newBrokerStreamMock(t, terminalCompositionReplies(request, sessions), func(_ *portsmocks.MockBrokerLogicalConnection, s *brokerStreamState) {
+				s.request = request
+				s.blockWhenEmpty = true
+			})
+			state.addStream(streamState)
+			return stream, nil
 		}
-	}
-	s.mu.Unlock()
-	require.Len(t, streams, 1)
-	for _, message := range streams[0].sentMessages() {
-		if hello, ok := message.(protocol.Hello); ok {
-			return hello
-		}
-	}
-	t.Fatal("the composed client never sent a session Hello")
-	return protocol.Hello{}
-}
-
-type terminalCompositionSubscription struct{ changed chan struct{} }
-
-func (s terminalCompositionSubscription) Changed() <-chan struct{} { return s.changed }
-func (s terminalCompositionSubscription) Close()                   {}
-
-// terminalCompositionStream answers one admitted attachment with a Welcome and
-// one initial full session frame carrying real terminal bytes, so a test can
-// prove the committed publication reached the terminal.
-type terminalCompositionStream struct {
-	request ports.BrokerOpenStreamRequest
-
-	mu     sync.Mutex
-	sent   []protocol.ClientMessage
-	queue  []protocol.ServerMessage
-	closed bool
-	done   chan struct{}
+	})
 }
 
 // terminalCompositionDaemonSessions is the session list the scripted
@@ -297,28 +161,30 @@ func terminalCompositionDaemonSessions(snapshot ports.BrokerSnapshot, request po
 	return nil
 }
 
-func newTerminalCompositionStream(request ports.BrokerOpenStreamRequest, sessions []catalogue.RemoteCatalogSession) *terminalCompositionStream {
-	stream := &terminalCompositionStream{request: request, done: make(chan struct{})}
+// terminalCompositionReplies is the reply queue the scripted daemon serves one
+// admitted request.
+func terminalCompositionReplies(request ports.BrokerOpenStreamRequest, sessions []catalogue.RemoteCatalogSession) []protocol.ServerMessage {
+	var queue []protocol.ServerMessage
 	if request.Purpose == ports.BrokerStreamControl {
 		// The scripted daemon answers a List with its own sessions.
 		infos := make([]protocol.SessionInfo, 0, len(sessions))
 		for _, session := range sessions {
 			infos = append(infos, protocol.SessionInfo{Name: session.Name})
 		}
-		stream.queue = append(stream.queue, protocol.Sessions{Sessions: infos})
-		return stream
+		queue = append(queue, protocol.Sessions{Sessions: infos})
+		return queue
 	}
 	if request.Admission == ports.BrokerAdmissionAttachNamed && !slices.ContainsFunc(sessions, func(session catalogue.RemoteCatalogSession) bool { return session.Name == request.Name }) {
 		// Like the real daemon, an unknown name is refused, never created.
-		stream.queue = append(stream.queue, protocol.ErrorMsg{Code: protocol.ErrNoSuchSession, Text: "no such resumable session: " + request.Name})
-		return stream
+		queue = append(queue, protocol.ErrorMsg{Code: protocol.ErrNoSuchSession, Text: "no such resumable session: " + request.Name})
+		return queue
 	}
 	target := terminalCompositionCommittedTarget(request)
-	stream.queue = append(stream.queue, protocol.Welcome{
+	queue = append(queue, protocol.Welcome{
 		SessionID: "sess", SessionName: request.Name,
 		CommittedIdentity: &protocol.CommittedRouteIdentity{Target: target},
 	})
-	stream.queue = append(stream.queue, protocol.Output{
+	queue = append(queue, protocol.Output{
 		Epoch: 1, Full: true, New: 1,
 		Size: domain.Size{Cols: 80, Rows: 24},
 		Context: &protocol.ViewContext{
@@ -329,7 +195,7 @@ func newTerminalCompositionStream(request ports.BrokerOpenStreamRequest, session
 		},
 		Data: []byte("terminal-composition-ready\r\n"),
 	})
-	return stream
+	return queue
 }
 
 // terminalCompositionCommittedTarget is the exact identity the scripted daemon
@@ -348,83 +214,12 @@ func terminalCompositionCommittedTarget(request ports.BrokerOpenStreamRequest) p
 	return protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: name}
 }
 
-func (s *terminalCompositionStream) SendClient(message protocol.ClientMessage) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.sent = append(s.sent, message)
-	return nil
-}
+// blockingTerminalInput is the supervisor's single terminal reader. It yields
+// bytes only when a test pushes them and reaches EOF when it closes, so a
+// client with no pushed input stays live until the test ends the run.
+type blockingTerminalInput struct{ chunks chan []byte }
 
-func (s *terminalCompositionStream) ReceiveServer() (protocol.ServerMessage, error) {
-	s.mu.Lock()
-	if len(s.queue) != 0 {
-		message := s.queue[0]
-		s.queue = s.queue[1:]
-		s.mu.Unlock()
-		return message, nil
-	}
-	s.mu.Unlock()
-	<-s.done
-	return nil, io.EOF
-}
-
-func (s *terminalCompositionStream) Capabilities() protocol.ConnectionCapabilities {
-	return protocol.ConnectionCapabilities{}
-}
-
-func (s *terminalCompositionStream) LinkState() ports.LinkState { return ports.LinkStateConnected }
-func (s *terminalCompositionStream) LinkEvents() <-chan ports.LinkEvent {
-	return nil
-}
-
-func (s *terminalCompositionStream) Done() <-chan struct{} { return s.done }
-func (s *terminalCompositionStream) Err() error            { return nil }
-
-func (s *terminalCompositionStream) Close() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.closed {
-		s.closed = true
-		close(s.done)
-	}
-	return nil
-}
-
-func (s *terminalCompositionStream) sentMessages() []protocol.ClientMessage {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return append([]protocol.ClientMessage(nil), s.sent...)
-}
-
-// terminalCompositionTerminal is the terminal double: it records written bytes,
-// flushes, raw-mode entries/restores, and every UI publication so a test can
-// prove a committed attachment published a real frame.
-type terminalCompositionTerminal struct {
-	mu       sync.Mutex
-	out      []byte
-	flushes  int
-	restores int
-	statuses []ports.UIPresentationStatus
-	changes  chan struct{}
-	input    *terminalCompositionInput
-}
-
-func newTerminalCompositionTerminal() *terminalCompositionTerminal {
-	return &terminalCompositionTerminal{changes: make(chan struct{}), input: newTerminalCompositionInput()}
-}
-
-// terminalCompositionInput is the supervisor's single terminal reader. It
-// yields bytes only when a test pushes them and reaches EOF when it closes, so
-// a client with no pushed input stays live until the test ends the run.
-type terminalCompositionInput struct {
-	chunks chan []byte
-}
-
-func newTerminalCompositionInput() *terminalCompositionInput {
-	return &terminalCompositionInput{chunks: make(chan []byte)}
-}
-
-func (i *terminalCompositionInput) Read(buffer []byte) (int, error) {
+func (i blockingTerminalInput) Read(buffer []byte) (int, error) {
 	chunk, ok := <-i.chunks
 	if !ok {
 		return 0, io.EOF
@@ -432,64 +227,41 @@ func (i *terminalCompositionInput) Read(buffer []byte) (int, error) {
 	return copy(buffer, chunk), nil
 }
 
-func (t *terminalCompositionTerminal) EnableKittyKeyboard(int) error { return nil }
-
-func (t *terminalCompositionTerminal) EnterRaw() (func() error, error) {
-	return func() error {
-		t.mu.Lock()
-		t.restores++
-		t.mu.Unlock()
-		return nil
-	}, nil
+// terminalCompositionTerminal is the composition terminal: the generated
+// terminal mock records written bytes, flushes and raw-mode restores, and the
+// generated transaction mock records every UI publication, so a test can prove
+// a committed attachment published a real frame.
+type terminalCompositionTerminal struct {
+	// terminal is the production observedTerminal pairing of the two mocks.
+	terminal ports.Terminal
+	output   *terminalState
+	ui       *transactionState
 }
 
-func (t *terminalCompositionTerminal) Geometry() (domain.Geometry, error) {
-	return domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}, nil
-}
-
-func (t *terminalCompositionTerminal) ResizeEvents() <-chan domain.Geometry { return nil }
-
-// In blocks until the run ends: the supervisor owns exactly one terminal read
-// lifetime, and an immediately-empty reader would look like a terminal EOF and
-// end an otherwise live client.
-func (t *terminalCompositionTerminal) In() io.Reader { return t.input }
-
-func (t *terminalCompositionTerminal) Out() io.Writer { return t }
-
-func (t *terminalCompositionTerminal) Write(data []byte) (int, error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.out = append(t.out, data...)
-	return len(data), nil
-}
-
-func (t *terminalCompositionTerminal) Flush() error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.flushes++
-	return nil
-}
-
-func (t *terminalCompositionTerminal) BeginOutput(ports.UIContext) {}
-func (t *terminalCompositionTerminal) EndOutput(bool)              {}
-
-func (t *terminalCompositionTerminal) PublishContext(context ports.UIContext) error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.statuses = append(t.statuses, context.Status)
-	return nil
+func newTerminalCompositionTerminal(t *testing.T) *terminalCompositionTerminal {
+	t.Helper()
+	input := blockingTerminalInput{chunks: make(chan []byte)}
+	physical, output := newTerminalMock(t, domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}, func(terminal *portsmocks.MockTerminal, _ *terminalState) {
+		// ResizeEvents is nil and In blocks until the run ends: the supervisor
+		// owns exactly one terminal read lifetime, and an immediately-empty
+		// reader would look like a terminal EOF and end an otherwise live client.
+		terminal.EXPECT().ResizeEvents().Return(nil).Maybe()
+		terminal.EXPECT().In().Return(input).Maybe()
+	})
+	// Registered before any run's cancel cleanup, so it runs after the run was
+	// cancelled: the terminal then reaches EOF and the read lifetime ends.
+	t.Cleanup(func() { close(input.chunks) })
+	transaction, ui := newUITransactionMock(t)
+	return &terminalCompositionTerminal{terminal: observedTerminal{Terminal: physical, UIOutputTransaction: transaction}, output: output, ui: ui}
 }
 
 func (t *terminalCompositionTerminal) written() string {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return string(t.out)
+	written, _ := t.output.written()
+	return written
 }
 
 func (t *terminalCompositionTerminal) publishes() []ports.UIPresentationStatus {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return append([]ports.UIPresentationStatus(nil), t.statuses...)
+	return t.ui.publishes()
 }
 
 // startTerminalComposition drives the real runAttach entry point over one
@@ -498,7 +270,7 @@ func (t *terminalCompositionTerminal) publishes() []ports.UIPresentationStatus {
 // so every assertion holds for the production terminal path itself and not for
 // a parallel test harness.
 type terminalCompositionRun struct {
-	service  *terminalCompositionService
+	service  *brokerServiceState
 	terminal *terminalCompositionTerminal
 	states   chan client.State
 	notices  chan client.LifecycleNotice
@@ -536,19 +308,18 @@ func startTerminalCompositionWithDaemon(t *testing.T, intent uint8, name, remote
 	// The ordinary terminal path reads the nested-session environment; a test
 	// drives the broker composition with it unset.
 	t.Setenv("VEV", "")
-	service := newTerminalCompositionService(snapshot)
-	service.daemonSessions = daemonSessions
-	terminal := newTerminalCompositionTerminal()
+	service, serviceState := newTerminalCompositionService(t, snapshot, daemonSessions)
+	terminal := newTerminalCompositionTerminal(t)
 	previousConnect := connectProductionClientBroker
 	previousTerminal := terminalForAttach
 	previousCallbacks := terminalBrokerCallbacks
 	connectProductionClientBroker = func(context.Context) (ports.BrokerService, error) {
 		return service, nil
 	}
-	terminalForAttach = func() ports.Terminal { return terminal }
+	terminalForAttach = func() ports.Terminal { return terminal.terminal }
 
 	run := &terminalCompositionRun{
-		service:  service,
+		service:  serviceState,
 		terminal: terminal,
 		states:   make(chan client.State, 64),
 		notices:  make(chan client.LifecycleNotice, 16),
@@ -710,45 +481,47 @@ func TestTerminalCompositionOpensTheExactBrokerStream(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			run := startTerminalCompositionWithDaemon(t, tc.intent, tc.session, tc.remote, tc.snapshot, tc.daemonSessions)
-			awaitTerminalCompositionAttachment(t, run)
-			opened := run.service.openedRequests()
-			require.Len(t, opened, 1, "one CLI target opens exactly one broker stream")
-			request := opened[0]
-			require.NoError(t, request.Validate())
-			require.Equal(t, terminalCompositionEpoch, request.Epoch)
-			require.Equal(t, ports.BrokerStreamAttachment, request.Purpose)
-			require.Equal(t, tc.wantAdmission, request.Admission)
-			require.Equal(t, tc.wantLocal, request.Local)
-			require.Equal(t, tc.wantName, request.Name)
-			require.Equal(t, ports.BrokerConnectionID{4}, request.Connection)
-			require.NotZero(t, request.Stream)
-			require.NotEmpty(t, request.Policy.Transport)
-			require.Equal(t, ports.BrokerDaemonStartIfNeeded, request.StartMode)
-			if !tc.wantLocal {
-				require.Equal(t, "user@example.test", request.Endpoint)
-				require.Equal(t, terminalCompositionRegistration("user@example.test"), request.Registration)
-			}
-			if tc.wantAdmission == ports.BrokerAdmissionExact {
-				require.NoError(t, request.Target.Validate())
-				require.Equal(t, tc.session, request.Target.SessionName)
-			}
-			// The same intent reaches the typed session handshake, so the
-			// broker admission and the daemon Hello can never disagree.
-			hello := run.service.streamHello(t)
-			require.Equal(t, tc.wantHello, hello.Intent)
-			require.Equal(t, tc.session, hello.Name)
-			require.Equal(t, tc.remote != "", hello.Remote)
-			if tc.wantAdmission == ports.BrokerAdmissionExact {
-				require.NotNil(t, hello.ExactTarget)
-				require.Equal(t, request.Target, *hello.ExactTarget)
-			}
-			if tc.wantAdmission == ports.BrokerAdmissionAttachNamed {
-				require.Nil(t, hello.ExactTarget, "a named attach leaves identity to the daemon")
-				controls := run.service.openedControls()
-				require.Len(t, controls, 1, "the preflight asks the daemon once")
-				require.Equal(t, ports.BrokerDaemonStartIfNeeded, controls[0].StartMode, "the preflight may start a stopped daemon")
-			}
+			synctest.Test(t, func(t *testing.T) {
+				run := startTerminalCompositionWithDaemon(t, tc.intent, tc.session, tc.remote, tc.snapshot, tc.daemonSessions)
+				awaitTerminalCompositionAttachment(t, run)
+				opened := run.service.openedRequests()
+				require.Len(t, opened, 1, "one CLI target opens exactly one broker stream")
+				request := opened[0]
+				require.NoError(t, request.Validate())
+				require.Equal(t, terminalCompositionEpoch, request.Epoch)
+				require.Equal(t, ports.BrokerStreamAttachment, request.Purpose)
+				require.Equal(t, tc.wantAdmission, request.Admission)
+				require.Equal(t, tc.wantLocal, request.Local)
+				require.Equal(t, tc.wantName, request.Name)
+				require.Equal(t, ports.BrokerConnectionID{4}, request.Connection)
+				require.NotZero(t, request.Stream)
+				require.NotEmpty(t, request.Policy.Transport)
+				require.Equal(t, ports.BrokerDaemonStartIfNeeded, request.StartMode)
+				if !tc.wantLocal {
+					require.Equal(t, "user@example.test", request.Endpoint)
+					require.Equal(t, terminalCompositionRegistration("user@example.test"), request.Registration)
+				}
+				if tc.wantAdmission == ports.BrokerAdmissionExact {
+					require.NoError(t, request.Target.Validate())
+					require.Equal(t, tc.session, request.Target.SessionName)
+				}
+				// The same intent reaches the typed session handshake, so the
+				// broker admission and the daemon Hello can never disagree.
+				hello := run.service.streamHello(t)
+				require.Equal(t, tc.wantHello, hello.Intent)
+				require.Equal(t, tc.session, hello.Name)
+				require.Equal(t, tc.remote != "", hello.Remote)
+				if tc.wantAdmission == ports.BrokerAdmissionExact {
+					require.NotNil(t, hello.ExactTarget)
+					require.Equal(t, request.Target, *hello.ExactTarget)
+				}
+				if tc.wantAdmission == ports.BrokerAdmissionAttachNamed {
+					require.Nil(t, hello.ExactTarget, "a named attach leaves identity to the daemon")
+					controls := run.service.openedControls()
+					require.Len(t, controls, 1, "the preflight asks the daemon once")
+					require.Equal(t, ports.BrokerDaemonStartIfNeeded, controls[0].StartMode, "the preflight may start a stopped daemon")
+				}
+			})
 		})
 	}
 }
@@ -767,25 +540,24 @@ func terminalCompositionUnobservedLocal() ports.BrokerSnapshot {
 // the terminal through a committed UI output transaction, and the supervisor
 // presented attached only after that commit.
 func TestTerminalCompositionPublishesRealSessionOutput(t *testing.T) {
-	run := startTerminalComposition(t, protocol.IntentEphemeral, "", "", terminalCompositionSnapshot([]string{"work"}, nil))
-	awaitTerminalCompositionAttachment(t, run)
-	require.Contains(t, run.terminal.written(), "terminal-composition-ready")
-	// The initial publication is committed before the attached marker, so its
-	// recorded boundary status is the pre-attachment Connecting presentation.
-	require.Contains(t, run.terminal.publishes(), ports.UIStatusConnecting)
-	// The attached presentation is published just after the attached state, on
-	// the attachment goroutine, so wait for it instead of racing it.
-	require.Eventually(t, func() bool {
-		return slices.Contains(run.terminal.publishes(), ports.UIStatusAttached)
-	}, brokerTestWait, 5*time.Millisecond)
-	_, _, restores := run.terminalCounts()
-	require.Zero(t, restores)
+	synctest.Test(t, func(t *testing.T) {
+		run := startTerminalComposition(t, protocol.IntentEphemeral, "", "", terminalCompositionSnapshot([]string{"work"}, nil))
+		awaitTerminalCompositionAttachment(t, run)
+		require.Contains(t, run.terminal.written(), "terminal-composition-ready")
+		// The initial publication is committed before the attached marker, so its
+		// recorded boundary status is the pre-attachment Connecting presentation.
+		require.Contains(t, run.terminal.publishes(), ports.UIStatusConnecting)
+		// The attached presentation is published just after the attached state, on
+		// the attachment goroutine, so let the bubble settle instead of racing it.
+		synctest.Wait()
+		require.Contains(t, run.terminal.publishes(), ports.UIStatusAttached)
+		_, _, restores := run.terminalCounts()
+		require.Zero(t, restores)
+	})
 }
 
 func (r *terminalCompositionRun) terminalCounts() (int, int, int) {
-	r.terminal.mu.Lock()
-	defer r.terminal.mu.Unlock()
-	return len(r.terminal.out), r.terminal.flushes, r.terminal.restores
+	return r.terminal.output.counts()
 }
 
 // TestTerminalCompositionRefusedTargetOpensNothingAndKeepsThePicker pins the
@@ -806,32 +578,35 @@ func TestTerminalCompositionRefusedTargetOpensNothingAndKeepsThePicker(t *testin
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			run := startTerminalComposition(t, tc.intent, tc.session, tc.remote, tc.snapshot)
-			require.Equal(t, client.LifecycleNoticeSelectionUnavailable, awaitTerminalCompositionNotice(t, run).Kind)
-			// A local refusal is surfaced once, with the bounded text the supervisor
-			// classifies; the resolver's own sentinel is deliberately not propagated
-			// past that taxonomy, so only the presence and the classification are
-			// asserted.
-			select {
-			case failure := <-run.failures:
-				require.Error(t, failure)
-			case <-time.After(brokerTestWait):
-				t.Fatal("the refused target reported no failure")
-			}
-			require.Empty(t, run.service.openedRequests(), "a refused target never opens a stream")
-			// The pending navigation presents Connecting, never the picker
-			// first; the refusal then returns to the picker and never attaches.
-			last := client.PresentConnecting
-			for {
+			synctest.Test(t, func(t *testing.T) {
+				run := startTerminalComposition(t, tc.intent, tc.session, tc.remote, tc.snapshot)
+				require.Equal(t, client.LifecycleNoticeSelectionUnavailable, awaitTerminalCompositionNotice(t, run).Kind)
+				// A local refusal is surfaced once, with the bounded text the supervisor
+				// classifies; the resolver's own sentinel is deliberately not propagated
+				// past that taxonomy, so only the presence and the classification are
+				// asserted.
+				synctest.Wait()
 				select {
-				case state := <-run.states:
-					require.NotEqual(t, client.PresentAttached, state.Presentation, "a refusal never attaches")
-					last = state.Presentation
-				case <-time.After(100 * time.Millisecond):
-					require.Equal(t, client.PresentPicker, last, "a refusal ends on the picker")
-					return
+				case failure := <-run.failures:
+					require.Error(t, failure)
+				default:
+					t.Fatal("the refused target reported no failure")
 				}
-			}
+				require.Empty(t, run.service.openedRequests(), "a refused target never opens a stream")
+				// The pending navigation presents Connecting, never the picker
+				// first; the refusal then returns to the picker and never attaches.
+				last := client.PresentConnecting
+				for {
+					select {
+					case state := <-run.states:
+						require.NotEqual(t, client.PresentAttached, state.Presentation, "a refusal never attaches")
+						last = state.Presentation
+					default:
+						require.Equal(t, client.PresentPicker, last, "a refusal ends on the picker")
+						return
+					}
+				}
+			})
 		})
 	}
 }
@@ -851,20 +626,23 @@ func TestTerminalCompositionDaemonRefusesMissingName(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			withAttachInteractiveConsole(t, false)
-			run := startTerminalComposition(t, protocol.IntentAttach, "gone", tc.remote, tc.snapshot)
-			require.Equal(t, client.LifecycleNoticeDestinationFailed, awaitTerminalCompositionNotice(t, run).Kind)
-			select {
-			case failure := <-run.failures:
-				var protocolErr *client.ProtocolError
-				require.ErrorAs(t, failure, &protocolErr)
-				require.Equal(t, protocol.ErrNoSuchSession, protocolErr.Code)
-			case <-time.After(brokerTestWait):
-				t.Fatal("the daemon refusal was not reported")
-			}
-			opened := run.service.openedRequests()
-			require.Len(t, opened, 1)
-			require.Equal(t, ports.BrokerAdmissionAttachNamed, opened[0].Admission, "a missing name is never created implicitly")
+			synctest.Test(t, func(t *testing.T) {
+				withAttachInteractiveConsole(t, false)
+				run := startTerminalComposition(t, protocol.IntentAttach, "gone", tc.remote, tc.snapshot)
+				require.Equal(t, client.LifecycleNoticeDestinationFailed, awaitTerminalCompositionNotice(t, run).Kind)
+				synctest.Wait()
+				select {
+				case failure := <-run.failures:
+					var protocolErr *client.ProtocolError
+					require.ErrorAs(t, failure, &protocolErr)
+					require.Equal(t, protocol.ErrNoSuchSession, protocolErr.Code)
+				default:
+					t.Fatal("the daemon refusal was not reported")
+				}
+				opened := run.service.openedRequests()
+				require.Len(t, opened, 1)
+				require.Equal(t, ports.BrokerAdmissionAttachNamed, opened[0].Admission, "a missing name is never created implicitly")
+			})
 		})
 	}
 }
@@ -873,12 +651,14 @@ func TestTerminalCompositionDaemonRefusesMissingName(t *testing.T) {
 // composition restores the terminal exactly once when the run ends, however the
 // attachment settled.
 func TestTerminalCompositionClosesRawModeOnTerminalEnd(t *testing.T) {
-	run := startTerminalComposition(t, protocol.IntentEphemeral, "", "", terminalCompositionSnapshot([]string{"work"}, nil))
-	awaitTerminalCompositionAttachment(t, run)
-	run.cancel()
-	require.NoError(t, ignoreContextCancellation(run.wait(t)))
-	_, _, restores := run.terminalCounts()
-	require.Equal(t, 1, restores, "raw mode is restored exactly once")
+	synctest.Test(t, func(t *testing.T) {
+		run := startTerminalComposition(t, protocol.IntentEphemeral, "", "", terminalCompositionSnapshot([]string{"work"}, nil))
+		awaitTerminalCompositionAttachment(t, run)
+		run.cancel()
+		require.NoError(t, ignoreContextCancellation(run.wait(t)))
+		_, _, restores := run.terminalCounts()
+		require.Equal(t, 1, restores, "raw mode is restored exactly once")
+	})
 }
 
 // TestTerminalCompositionCapturesSessionEnvironmentDefensively proves the test
@@ -905,14 +685,14 @@ func TestTerminalCompositionCapturesSessionEnvironmentDefensively(t *testing.T) 
 	}
 	require.NotEqual(t, snapshot.Env, clone.Env)
 	servicesnapshot := terminalCompositionSnapshot([]string{"work"}, nil)
-	service := newTerminalCompositionService(servicesnapshot)
-	terminal := newTerminalCompositionTerminal()
+	service, _ := newTerminalCompositionService(t, servicesnapshot, nil)
+	terminal := newTerminalCompositionTerminal(t)
 	navigation := localEphemeralNavigation()
 	connector := portsmocks.NewMockBrokerConnector(t)
 	connector.EXPECT().Connect(mock.Anything).Return(service, nil).Maybe()
 	_, err := client.NewSupervisor(client.SupervisorConfig{
 		Connector: connector,
-		Terminal:  terminal,
+		Terminal:  terminal.terminal,
 		Clock:     clock.New(),
 		// The picker is omitted: creation alone proves the snapshot does not
 		// fail supervisor validation.
@@ -927,43 +707,42 @@ func TestTerminalCompositionCapturesSessionEnvironmentDefensively(t *testing.T) 
 // the run enters raw mode, stays in the picker, and reports the typed failure
 // without opening any stream. It remains live until the terminal ends.
 func TestTerminalCompositionReportsBrokerFailureInThePicker(t *testing.T) {
-	t.Setenv("VEV", "")
-	startupErr := errors.New("broker not reachable")
-	previousConnect := connectProductionClientBroker
-	terminal := newTerminalCompositionTerminal()
-	previousTerminal := terminalForAttach
-	connectProductionClientBroker = func(context.Context) (ports.BrokerService, error) { return nil, startupErr }
-	terminalForAttach = func() ports.Terminal { return terminal }
-	t.Cleanup(func() {
-		connectProductionClientBroker = previousConnect
-		terminalForAttach = previousTerminal
-	})
+	synctest.Test(t, func(t *testing.T) {
+		t.Setenv("VEV", "")
+		startupErr := errors.New("broker not reachable")
+		previousConnect := connectProductionClientBroker
+		terminal := newTerminalCompositionTerminal(t)
+		previousTerminal := terminalForAttach
+		connectProductionClientBroker = func(context.Context) (ports.BrokerService, error) { return nil, startupErr }
+		terminalForAttach = func() ports.Terminal { return terminal.terminal }
+		t.Cleanup(func() {
+			connectProductionClientBroker = previousConnect
+			terminalForAttach = previousTerminal
+		})
 
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- runAttach(ctx, protocol.IntentEphemeral, "", "") }()
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- runAttach(ctx, protocol.IntentEphemeral, "", "") }()
 
-	// A broker failure is surfaced, not fatal, and no stream is opened.
-	require.Eventually(t, func() bool {
+		// A broker failure is surfaced, not fatal, and no stream is opened.
+		synctest.Wait()
 		for _, status := range terminal.publishes() {
-			if status == ports.UIStatusConnecting || status == ports.UIStatusAttached {
-				return false
-			}
+			require.NotEqual(t, ports.UIStatusConnecting, status, "a broker failure presents no connecting state")
+			require.NotEqual(t, ports.UIStatusAttached, status, "a broker failure never attaches")
 		}
-		return true
-	}, 200*time.Millisecond, 10*time.Millisecond)
-	select {
-	case err := <-done:
-		t.Fatalf("the composition ended on a broker failure: %v", err)
-	case <-time.After(200 * time.Millisecond):
-	}
-	_, _, restores := terminalCounts(terminal)
-	require.Zero(t, restores, "the run is still live, so raw mode is not yet restored")
+		select {
+		case err := <-done:
+			t.Fatalf("the composition ended on a broker failure: %v", err)
+		default:
+		}
+		_, _, restores := terminalCounts(terminal)
+		require.Zero(t, restores, "the run is still live, so raw mode is not yet restored")
 
-	cancel()
-	require.NoError(t, ignoreContextCancellation(<-done))
-	_, _, restores = terminalCounts(terminal)
-	require.Equal(t, 1, restores, "the cancelled run restores raw mode exactly once")
+		cancel()
+		require.NoError(t, ignoreContextCancellation(<-done))
+		_, _, restores = terminalCounts(terminal)
+		require.Equal(t, 1, restores, "the cancelled run restores raw mode exactly once")
+	})
 }
 
 // TestRunAttachNestedSessionBehavior pins the nested-session product contract of
@@ -1000,9 +779,7 @@ func TestRunAttachNestedSessionBehavior(t *testing.T) {
 }
 
 func terminalCounts(terminal *terminalCompositionTerminal) (int, int, int) {
-	terminal.mu.Lock()
-	defer terminal.mu.Unlock()
-	return len(terminal.out), terminal.flushes, terminal.restores
+	return terminal.output.counts()
 }
 
 // TestTerminalCompositionUsesTheBrokerConnector pins the production terminal
@@ -1031,6 +808,7 @@ func TestTerminalCompositionUsesTheBrokerConnector(t *testing.T) {
 // Name equal to the exact target's session name, ExactTarget set) is accepted
 // and answered with a committed Welcome. It fails if the strict Hello contract
 // and the worker disagree about the name.
+// real I/O: real unix-socket broker/daemon stack.
 func TestTerminalExactAttachAcceptedByRealDaemon(t *testing.T) {
 	fixture := startOfflineClientFixture(t)
 	ctx, cancel := context.WithTimeout(context.Background(), brokerTestWait)
@@ -1077,12 +855,13 @@ func TestTerminalExactAttachAcceptedByRealDaemon(t *testing.T) {
 // notice, opens no stream, and never invents a creation or a same-name
 // fallback. It pins the honest refusal so a future broker-side local catalogue
 // is the only thing that can make this navigation succeed.
+// real I/O: real unix-socket broker/daemon stack.
 func TestTerminalCompositionExactAttachReportsMissingLocalInventory(t *testing.T) {
 	fixture := startOfflineClientFixture(t)
 	ctx, cancel := context.WithTimeout(context.Background(), brokerTestWait)
 	defer cancel()
 
-	terminal := newTerminalCompositionTerminal()
+	terminal := newTerminalCompositionTerminal(t)
 	notices := make(chan client.LifecycleNotice, 16)
 	failures := make(chan error, 16)
 	var lifecycleID domain.SessionLifecycleID
@@ -1099,7 +878,7 @@ func TestTerminalCompositionExactAttachReportsMissingLocalInventory(t *testing.T
 	go func() {
 		done <- runBrokerClient(ctx, brokerClientConfig{
 			Connector:          brokeripc.NewConnector(fixture.socket, brokeripc.Config{}).Navigator(),
-			Terminal:           terminal,
+			Terminal:           terminal.terminal,
 			InitialNavigation:  navigation,
 			SessionEnvironment: client.SessionEnvironment{Provenance: client.SessionEnvironmentLocalCLI},
 			OnFailure: func(err error) {

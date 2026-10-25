@@ -21,7 +21,7 @@ import (
 // startScriptedUIDriverRun launches one driver run over a scripted broker
 // service, waits for its discovery response, and then waits for the run's single
 // logical stream admission.
-func startScriptedUIDriverRun(t *testing.T, service *terminalCompositionService, navigation client.InitialNavigation, resolver client.InitialNavigationResolver) *uiDriverFixtureRun {
+func startScriptedUIDriverRun(t *testing.T, service ports.BrokerService, state *brokerServiceState, navigation client.InitialNavigation, resolver client.InitialNavigationResolver) *uiDriverFixtureRun {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
 	terminal, err := uiterm.New(ctx, domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}, "")
@@ -54,11 +54,17 @@ func startScriptedUIDriverRun(t *testing.T, service *terminalCompositionService,
 		}, stream)
 	}()
 	run.Ready(t)
-	require.Eventually(t, func() bool { return len(service.openedRequests()) != 0 }, brokerTestWait, 5*time.Millisecond,
-		"the run never admitted its logical stream")
+	for len(state.openedRequests()) == 0 {
+		select {
+		case <-state.openedSignal:
+		case <-time.After(brokerTestWait):
+			t.Fatal("the run never admitted its logical stream")
+		}
+	}
 	return run
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestUIDriverUsesBrokerSupervisorAndDaemon(t *testing.T) {
 	fixture := startUIDriverBrokerFixture(t)
 	run := fixture.StartDriver(t)
@@ -91,6 +97,7 @@ func TestUIDriverUsesBrokerSupervisorAndDaemon(t *testing.T) {
 // automatically numbered ephemeral local session, and `--session NAME` creates
 // exactly that named one. Each run's own committed publication is the proof,
 // so the test never races the broker's own observation cadence.
+// real I/O: real unix-socket broker/daemon stack.
 func TestUIDriverCreationRoutes(t *testing.T) {
 	fixture := startUIDriverBrokerFixture(t)
 
@@ -120,11 +127,11 @@ func TestUIDriverNamedAttachLetsTheDaemonResolve(t *testing.T) {
 	require.Nil(t, resolver, "a local name needs no catalogue resolution")
 	require.Equal(t, client.InitialNavigationAttachNamed, navigation.Kind)
 
-	service := newTerminalCompositionService(snapshot)
-	run := startScriptedUIDriverRun(t, service, navigation, resolver)
+	service, state := newTerminalCompositionService(t, snapshot, nil)
+	run := startScriptedUIDriverRun(t, service, state, navigation, resolver)
 	require.NotNil(t, run)
 
-	opened := service.openedRequests()
+	opened := state.openedRequests()
 	require.Len(t, opened, 1, "attach work opens exactly one broker stream")
 	request := opened[0]
 	require.NoError(t, request.Validate())
@@ -137,6 +144,7 @@ func TestUIDriverNamedAttachLetsTheDaemonResolve(t *testing.T) {
 // TestUIDriverRefusedTargetStaysPickerAndKeepsServing pins the local-refusal
 // contract: a target carrying a lifecycle the broker has never committed is
 // refused, the driver stays usable in the picker, and it never attaches.
+// real I/O: real unix-socket broker/daemon stack.
 func TestUIDriverRefusedTargetStaysPickerAndKeepsServing(t *testing.T) {
 	fixture := startUIDriverBrokerFixture(t)
 	run := fixture.StartRefusedTargetDriver(t)
@@ -145,9 +153,11 @@ func TestUIDriverRefusedTargetStaysPickerAndKeepsServing(t *testing.T) {
 	require.Zero(t, ready.Generation)
 	// The refused target is never attached and the driver keeps answering while
 	// it stays in the picker.
-	require.Never(t, func() bool {
+	// The driver is reached only through requests and publishes no event, so the
+	// negative window is observed with pollUntil.
+	require.False(t, pollUntil(500*time.Millisecond, func() bool {
 		return run.presentationStatus(t, ready.Attachment) == ports.UIStatusAttached
-	}, 500*time.Millisecond, 20*time.Millisecond, "a refused target never attaches")
+	}), "a refused target never attaches")
 	require.NotNil(t, run.capture(t, ready.Attachment))
 	run.EOF(t)
 }
@@ -157,6 +167,7 @@ func TestUIDriverRefusedTargetStaysPickerAndKeepsServing(t *testing.T) {
 // alive and the one-shot initial navigation is not re-armed into a second
 // attachment. A re-armed intent would return the driver to Attached on its own,
 // so staying in the picker is the observable proof.
+// real I/O: real unix-socket broker/daemon stack.
 func TestUIDriverDetachReturnsToPickerWithoutRecreating(t *testing.T) {
 	fixture := startUIDriverBrokerFixture(t)
 	run := fixture.StartDriver(t)
@@ -171,13 +182,13 @@ func TestUIDriverDetachReturnsToPickerWithoutRecreating(t *testing.T) {
 	// unknown outcome; either way the input is not replayed.
 	status := run.keys(t, ready.Attachment, generation, "Ctrl+D")
 	require.Contains(t, []ports.UIActionStatus{ports.UIActionProcessed, ports.UIActionOutcomeUnknown}, status)
-	require.Eventually(t, func() bool {
+	require.True(t, pollUntil(brokerTestWait, func() bool {
 		return run.presentationStatus(t, ready.Attachment) != ports.UIStatusAttached
-	}, brokerTestWait, 20*time.Millisecond, "an ended attachment returns the driver to the picker")
+	}), "an ended attachment returns the driver to the picker")
 
-	require.Never(t, func() bool {
+	require.False(t, pollUntil(750*time.Millisecond, func() bool {
 		return run.presentationStatus(t, ready.Attachment) == ports.UIStatusAttached
-	}, 750*time.Millisecond, 20*time.Millisecond, "a consumed intent is never re-armed")
+	}), "a consumed intent is never re-armed")
 	run.EOF(t)
 }
 

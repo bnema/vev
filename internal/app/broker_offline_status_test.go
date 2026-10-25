@@ -157,7 +157,7 @@ func TestBrokerServeRefusesConflictingIdleGrace(t *testing.T) {
 	layout := emptyProductionBrokerLayout(t, "90s")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	deps, _ := testBrokerServeDeps(newSandboxClock())
+	deps, _ := testBrokerServeDeps(idleSandboxClock(t))
 	err := runBrokerServe(ctx, brokerServeOptions{idleGrace: time.Minute}, deps)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "conflicts with the provisioned idle grace")
@@ -297,7 +297,7 @@ func TestBrokerStatusEnsureSpawnFailureIsReported(t *testing.T) {
 func TestBrokerEnsureProductionConfigFailure(t *testing.T) {
 	layout := emptyProductionBrokerLayout(t, "")
 	require.NoError(t, os.WriteFile(productionBrokerConfigPath(), []byte("not json"), 0o600))
-	deps, _ := testBrokerServeDeps(newSandboxClock())
+	deps, _ := testBrokerServeDeps(idleSandboxClock(t))
 	err := runBrokerServe(context.Background(), brokerServeOptions{}, deps)
 	require.Error(t, err)
 	require.NoFileExists(t, filepath.Join(layout.Runtime, "lifecycle.lock"))
@@ -344,6 +344,7 @@ func TestBrokerStatusEnsureHonorsCancellation(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestProbeBrokerStatusClassifiesAbsenceAndIncompatibility(t *testing.T) {
 	layout := emptyProductionBrokerLayout(t, "")
 	socketPath := brokeripc.SocketPath(layout.Runtime)
@@ -384,6 +385,7 @@ func TestProbeBrokerStatusClassifiesAbsenceAndIncompatibility(t *testing.T) {
 	})
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestProbeBrokerStatusSilentRegistrationIsBounded(t *testing.T) {
 	layout := emptyProductionBrokerLayout(t, "")
 	socketPath := brokeripc.SocketPath(layout.Runtime)

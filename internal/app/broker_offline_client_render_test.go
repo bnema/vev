@@ -1,11 +1,8 @@
 package app
 
 import (
-	"bytes"
 	"errors"
-	"io"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -37,81 +34,6 @@ func testBrokerClientRender(terminal ports.Terminal, picker *client.Picker, onSt
 // pre-attachment connecting transition would overwrite session output with
 // picker bytes. Attached and terminating presentations are refused for the same
 // reason.
-
-// offlineRenderTerminal is the composition's terminal double: a mutable
-// geometry and an output buffer, with the single resize channel the attachment
-// geometry collector would consume.
-type offlineRenderTerminal struct {
-	mu       sync.Mutex
-	geometry domain.Geometry
-	out      bytes.Buffer
-	flushes  int
-}
-
-func newOfflineRenderTerminal(geometry domain.Geometry) *offlineRenderTerminal {
-	return &offlineRenderTerminal{geometry: geometry}
-}
-
-func (t *offlineRenderTerminal) EnableKittyKeyboard(int) error { return nil }
-
-func (t *offlineRenderTerminal) EnterRaw() (func() error, error) {
-	return func() error { return nil }, nil
-}
-
-func (t *offlineRenderTerminal) Geometry() (domain.Geometry, error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.geometry, nil
-}
-
-func (t *offlineRenderTerminal) ResizeEvents() <-chan domain.Geometry {
-	ch := make(chan domain.Geometry)
-	close(ch)
-	return ch
-}
-
-func (t *offlineRenderTerminal) In() io.Reader { return strings.NewReader("") }
-
-func (t *offlineRenderTerminal) Out() io.Writer { return &offlineRenderTerminalWriter{terminal: t} }
-
-func (t *offlineRenderTerminal) Flush() error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.flushes++
-	return nil
-}
-
-func (t *offlineRenderTerminal) resize(geometry domain.Geometry) {
-	t.mu.Lock()
-	t.geometry = geometry
-	t.mu.Unlock()
-}
-
-// seed writes bytes exactly as an admitted attachment foreground would, so a
-// test can prove the composition never paints over session output.
-func (t *offlineRenderTerminal) seed(data string) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.out.WriteString(data)
-}
-
-// written returns the bytes the composition actually wrote and the flush count.
-func (t *offlineRenderTerminal) written() (string, int) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.out.String(), t.flushes
-}
-
-// offlineRenderTerminalWriter serializes writes through the terminal's own lock
-// so a test reads a consistent buffer, exactly as the composition's writer mutex
-// does in production.
-type offlineRenderTerminalWriter struct{ terminal *offlineRenderTerminal }
-
-func (w *offlineRenderTerminalWriter) Write(data []byte) (int, error) {
-	w.terminal.mu.Lock()
-	defer w.terminal.mu.Unlock()
-	return w.terminal.out.Write(data)
-}
 
 // offlineRenderPicker builds the production picker over one reachable local
 // daemon with a single session, so Render produces a real frame at any size.
@@ -160,8 +82,8 @@ func TestOfflineClientRenderRefusesNonPickerPresentations(t *testing.T) {
 	large := domain.Geometry{Size: domain.Size{Cols: 132, Rows: 43}}
 	const session = "\x1b[Hsession output"
 
-	terminal := newOfflineRenderTerminal(small)
-	terminal.seed(session)
+	terminal, output := newTerminalMock(t, small)
+	output.seed(session)
 	picker := offlineRenderPicker(t)
 
 	observed := make(chan client.State, 8)
@@ -172,12 +94,12 @@ func TestOfflineClientRenderRefusesNonPickerPresentations(t *testing.T) {
 		}
 	})
 
-	terminal.resize(large)
+	output.resize(large)
 	for _, presentation := range []client.Presentation{client.PresentConnecting, client.PresentAttached, client.PresentTerminating} {
 		t.Run(presentation.String()+" is never painted over", func(t *testing.T) {
 			state := client.State{Presentation: presentation, Connectivity: client.ConnectivityReady, Generation: 1}
 			render(state)
-			written, flushes := terminal.written()
+			written, flushes := output.written()
 			require.Equal(t, session, written, "%s must leave the session output byte for byte", presentation)
 			require.Zero(t, flushes, "%s must not flush the terminal", presentation)
 			select {
@@ -204,12 +126,12 @@ func TestOfflineClientRenderFenceIsPickerPresentation(t *testing.T) {
 	}
 	for _, state := range states {
 		t.Run(state.Presentation.String(), func(t *testing.T) {
-			terminal := newOfflineRenderTerminal(small)
+			terminal, terminalState := newTerminalMock(t, small)
 			render := testBrokerClientRender(terminal, offlineRenderPicker(t), nil)
 
 			render(state)
 
-			written, flushes := terminal.written()
+			written, flushes := terminalState.written()
 			if client.PickerPresentation(state) {
 				require.NotEmpty(t, written, "a picker-visible state must paint the picker")
 				require.Equal(t, 1, flushes, "a picker-visible state flushes exactly once")
@@ -229,65 +151,23 @@ func TestOfflineClientRenderPaintsPickerResize(t *testing.T) {
 	small := domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}
 	large := domain.Geometry{Size: domain.Size{Cols: 132, Rows: 43}}
 
-	terminal := newOfflineRenderTerminal(small)
+	terminal, state := newTerminalMock(t, small)
 	picker := offlineRenderPicker(t)
 	render := testBrokerClientRender(terminal, picker, nil)
 
 	render(client.State{Presentation: client.PresentPicker, Connectivity: client.ConnectivityReady, Generation: 1})
-	initial, flushes := terminal.written()
+	initial, flushes := state.written()
 	require.NotEmpty(t, initial, "the initial picker paint writes the frame at the reported geometry")
 	require.Contains(t, initial, "offline-render-session")
 	require.Equal(t, 1, flushes)
 
-	terminal.resize(large)
+	state.resize(large)
 	render(client.State{Presentation: client.PresentPicker, Connectivity: client.ConnectivityReady, Generation: 1})
-	resized, flushes := terminal.written()
+	resized, flushes := state.written()
 	require.True(t, strings.HasPrefix(resized, initial), "the resize repaint appends after the initial frame, never rewrites it")
 	require.Greater(t, len(resized), len(initial), "the picker resize repaint writes the frame at the new geometry")
 	require.Contains(t, strings.TrimPrefix(resized, initial), "offline-render-session", "the appended repaint is the picker frame at the new size")
 	require.Equal(t, 2, flushes)
-}
-
-// transactionRecordingTerminal is a composition terminal that also records the
-// UI output transactions the picker paint commits, so a test can prove the
-// picker frame and its published context are one unattached state.
-type transactionRecordingTerminal struct {
-	*offlineRenderTerminal
-	mu           sync.Mutex
-	contexts     []ports.UIContext
-	beginDepth   int
-	endSuccesses []bool
-}
-
-func newTransactionRecordingTerminal(geometry domain.Geometry) *transactionRecordingTerminal {
-	return &transactionRecordingTerminal{offlineRenderTerminal: newOfflineRenderTerminal(geometry)}
-}
-
-func (t *transactionRecordingTerminal) BeginOutput(context ports.UIContext) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.contexts = append(t.contexts, context)
-	t.beginDepth++
-}
-
-func (t *transactionRecordingTerminal) EndOutput(success bool) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.beginDepth--
-	t.endSuccesses = append(t.endSuccesses, success)
-}
-
-func (t *transactionRecordingTerminal) PublishContext(context ports.UIContext) error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.contexts = append(t.contexts, context)
-	return nil
-}
-
-func (t *transactionRecordingTerminal) published() []ports.UIContext {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return append([]ports.UIContext(nil), t.contexts...)
 }
 
 // TestOfflineClientPickerPaintCommitsPickerTransaction pins that the picker frame
@@ -296,21 +176,23 @@ func (t *transactionRecordingTerminal) published() []ports.UIContext {
 // no session identity and no actionable generation, and the transaction
 // succeeds only after the frame was written and flushed.
 func TestOfflineClientPickerPaintCommitsPickerTransaction(t *testing.T) {
-	terminal := newTransactionRecordingTerminal(domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
-	render := testBrokerClientRender(terminal, offlineRenderPicker(t), nil)
+	physical, terminalState := newTerminalMock(t, domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
+	transaction, transactionState := newUITransactionMock(t)
+	render := testBrokerClientRender(observedTerminal{Terminal: physical, UIOutputTransaction: transaction}, offlineRenderPicker(t), nil)
 
 	render(client.State{Presentation: client.PresentPicker, Connectivity: client.ConnectivityReady, Generation: 1})
-	written, _ := terminal.written()
+	written, _ := terminalState.written()
 	require.NotEmpty(t, written, "the picker paint writes the frame")
-	published := terminal.published()
+	published := transactionState.published()
 	require.NotEmpty(t, published, "the picker paint commits a context through the UI transaction")
 	for _, context := range published {
 		require.Equal(t, ports.UIStatusPicker, context.Status)
 		require.Zero(t, context.Generation, "a Picker context never carries an actionable generation")
 		require.Equal(t, ports.UIContext{Status: ports.UIStatusPicker}, context, "a Picker context carries no session metadata")
 	}
-	require.Equal(t, 0, terminal.beginDepth, "the transaction is balanced")
-	require.Equal(t, []bool{true}, terminal.endSuccesses, "the frame committed after write and flush")
+	depth, endSuccesses := transactionState.balance()
+	require.Equal(t, 0, depth, "the transaction is balanced")
+	require.Equal(t, []bool{true}, endSuccesses, "the frame committed after write and flush")
 }
 
 // TestBrokerClientFailureWritesOnlyNonRetryableErrors pins that a retryable
@@ -327,10 +209,10 @@ func TestBrokerClientFailureWritesOnlyNonRetryableErrors(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			terminal := newOfflineRenderTerminal(domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
+			terminal, state := newTerminalMock(t, domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
 			presentation := &brokerClientPresentation{terminal: terminal}
 			presentation.Failure(client.State{Connectivity: tt.connectivity}, errors.New("broker connection lost"))
-			written, _ := terminal.written()
+			written, _ := state.written()
 			require.Equal(t, tt.wantLine, strings.Contains(written, "broker connection lost"))
 		})
 	}
@@ -357,9 +239,9 @@ func TestBrokerClientConnectingNoticeIsDelayed(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			connecting := client.State{Presentation: client.PresentConnecting, Connectivity: client.ConnectivityReady, Generation: 1, SlowConnecting: tt.slow}
-			terminal := newOfflineRenderTerminal(domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
-			clock := newSandboxClock()
-			presentation := &brokerClientPresentation{terminal: terminal, picker: offlineRenderPicker(t), clock: clock}
+			terminal, state := newTerminalMock(t, domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
+			clk, clock := newSandboxClockMock(t)
+			presentation := &brokerClientPresentation{terminal: terminal, picker: offlineRenderPicker(t), clock: clk}
 			for i, step := range tt.steps {
 				clock.Advance(step)
 				if tt.reset && i == len(tt.steps)-1 {
@@ -367,7 +249,7 @@ func TestBrokerClientConnectingNoticeIsDelayed(t *testing.T) {
 				}
 				presentation.Render(connecting)
 			}
-			written, _ := terminal.written()
+			written, _ := state.written()
 			require.Equal(t, tt.painted, strings.Contains(written, "Connecting to session"))
 		})
 	}
@@ -377,9 +259,9 @@ func TestBrokerClientConnectingNoticeIsDelayed(t *testing.T) {
 // the plain picker shows, its first tick exactly when a held-back Connecting
 // notice becomes due, and a fresh timer after a transition ends.
 func TestBrokerClientSpinnerTimer(t *testing.T) {
-	terminal := newOfflineRenderTerminal(domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
-	clock := newSandboxClock()
-	presentation := &brokerClientPresentation{terminal: terminal, picker: offlineRenderPicker(t), clock: clock}
+	terminal, state := newTerminalMock(t, domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
+	clk, clock := newSandboxClockMock(t)
+	presentation := &brokerClientPresentation{terminal: terminal, picker: offlineRenderPicker(t), clock: clk}
 	connecting := client.State{Presentation: client.PresentConnecting, Connectivity: client.ConnectivityReady, Generation: 1}
 
 	presentation.Render(client.State{Presentation: client.PresentPicker, Connectivity: client.ConnectivityReady, Generation: 1})
@@ -402,7 +284,7 @@ func TestBrokerClientSpinnerTimer(t *testing.T) {
 			t.Fatal("the spinner never ticked when the notice became due")
 		}
 		presentation.AdvanceSpinner(connecting)
-		written, _ := terminal.written()
+		written, _ := state.written()
 		require.Contains(t, written, "Connecting to session")
 		presentation.StopSpinner()
 		presentation.Render(client.State{Presentation: client.PresentAttached, Connectivity: client.ConnectivityReady, Generation: 1})

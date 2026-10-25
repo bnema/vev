@@ -7,16 +7,17 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/adapters/brokerconfig"
 	"github.com/bnema/vev/internal/adapters/daemonmux"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol/wire"
+	wiremocks "github.com/bnema/vev/internal/protocol/wire/mocks"
 )
 
 // Broker-owned daemon start coverage (Plan 001 P7, UI-driver slice 1).
@@ -26,19 +27,6 @@ import (
 // scripted starter seams. Nothing here re-executes a daemon, binds a socket, or
 // reads a session: every assertion is about whether a spawn was elected and
 // which carriage was dialed, which is exactly the contract the broker owns.
-
-// stubRawCarriage is one inert raw framed carriage: enough to satisfy the dial
-// seam without a socket, a peer, or a goroutine.
-type stubRawCarriage struct{ closed atomic.Bool }
-
-func (c *stubRawCarriage) Send(wire.Envelope) error { return nil }
-
-func (c *stubRawCarriage) RecvBounded(uint64) (wire.Envelope, error) { return wire.Envelope{}, io.EOF }
-
-func (c *stubRawCarriage) Close() error {
-	c.closed.Store(true)
-	return nil
-}
 
 // scriptedDaemonStarter is a goroutine-safe recording starter: it counts dials
 // and spawns, keeps the exact target each dial received, and fails every dial
@@ -68,9 +56,12 @@ type scriptedDaemonStarter struct {
 	daemonOwner lifecycleOwnership
 }
 
-func (s *scriptedDaemonStarter) starter(backoff backoffConfig) brokerDaemonStarter {
+func (s *scriptedDaemonStarter) starter(t *testing.T, backoff backoffConfig) brokerDaemonStarter {
+	t.Helper()
 	return brokerDaemonStarter{
-		dial:    s.dial,
+		dial: func(ctx context.Context, address string) (daemonmux.RawFramedTransport, error) {
+			return s.dial(t, ctx, address)
+		},
 		spawn:   s.spawn,
 		backoff: backoff,
 		// The scripted daemon publishes exactly the carriage the test declared,
@@ -79,7 +70,7 @@ func (s *scriptedDaemonStarter) starter(backoff backoffConfig) brokerDaemonStart
 	}
 }
 
-func (s *scriptedDaemonStarter) dial(_ context.Context, carriage string) (daemonmux.RawFramedTransport, error) {
+func (s *scriptedDaemonStarter) dial(t *testing.T, _ context.Context, carriage string) (daemonmux.RawFramedTransport, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.dials++
@@ -97,7 +88,11 @@ func (s *scriptedDaemonStarter) dial(_ context.Context, carriage string) (daemon
 		}
 		return nil, os.ErrNotExist
 	}
-	return &stubRawCarriage{}, nil
+	transport := wiremocks.NewMockBoundedTransport(t)
+	transport.EXPECT().Send(mock.Anything).Return(nil).Maybe()
+	transport.EXPECT().RecvBounded(mock.Anything).Return(wire.Envelope{}, io.EOF).Maybe()
+	transport.EXPECT().Close().Return(nil).Maybe()
+	return transport, nil
 }
 
 func (s *scriptedDaemonStarter) spawn() error {
@@ -207,7 +202,7 @@ func TestDaemonStartExistingOnlyNeverSpawns(t *testing.T) {
 	isolateSandboxEnv(t)
 	dir, carriage := testDaemonCarriage(t)
 	scripted := &scriptedDaemonStarter{carriage: carriage}
-	withDaemonStarter(t, scripted.starter(fastDaemonStartBackoff))
+	withDaemonStarter(t, scripted.starter(t, fastDaemonStartBackoff))
 
 	target := startableLocalTarget(t, carriage, ports.BrokerDaemonExistingOnly)
 	raw, err := dialBrokerLocalDaemon(context.Background(), carriage, target)
@@ -233,7 +228,7 @@ func TestDaemonStartExistingOnlyReturnsRunningDaemonWithoutProbing(t *testing.T)
 	isolateSandboxEnv(t)
 	dir, carriage := testDaemonCarriage(t)
 	scripted := &scriptedDaemonStarter{carriage: carriage, available: func() bool { return true }}
-	withDaemonStarter(t, scripted.starter(fastDaemonStartBackoff))
+	withDaemonStarter(t, scripted.starter(t, fastDaemonStartBackoff))
 
 	target := startableLocalTarget(t, carriage, ports.BrokerDaemonExistingOnly)
 	raw, err := dialBrokerLocalDaemon(context.Background(), carriage, target)
@@ -260,7 +255,7 @@ func TestDaemonStartIfNeededSpawnsExactlyOnce(t *testing.T) {
 	isolateSandboxEnv(t)
 	dir, carriage := testDaemonCarriage(t)
 	scripted := &scriptedDaemonStarter{carriage: carriage}
-	withDaemonStarter(t, scripted.starter(fastDaemonStartBackoff))
+	withDaemonStarter(t, scripted.starter(t, fastDaemonStartBackoff))
 
 	target := startableLocalTarget(t, carriage, ports.BrokerDaemonStartIfNeeded)
 	raw, err := dialBrokerLocalDaemon(context.Background(), carriage, target)
@@ -281,7 +276,7 @@ func TestDaemonStartRefusesPolicyWithoutLaunchAuthority(t *testing.T) {
 	isolateSandboxEnv(t)
 	dir, carriage := testDaemonCarriage(t)
 	scripted := &scriptedDaemonStarter{carriage: carriage}
-	withDaemonStarter(t, scripted.starter(fastDaemonStartBackoff))
+	withDaemonStarter(t, scripted.starter(t, fastDaemonStartBackoff))
 
 	target := startableLocalTarget(t, carriage, ports.BrokerDaemonStartIfNeeded)
 	target.Policy.Launch = "sandbox-private"
@@ -307,7 +302,7 @@ func TestDaemonStartRefusesRegisteredEndpoint(t *testing.T) {
 	isolateSandboxEnv(t)
 	_, carriage := testDaemonCarriage(t)
 	scripted := &scriptedDaemonStarter{carriage: carriage}
-	withDaemonStarter(t, scripted.starter(fastDaemonStartBackoff))
+	withDaemonStarter(t, scripted.starter(t, fastDaemonStartBackoff))
 
 	target := startableLocalTarget(t, carriage, ports.BrokerDaemonStartIfNeeded)
 	target.Fence = ports.BrokerEndpointFence{Registration: brokerTestRegistration()}
@@ -328,7 +323,7 @@ func TestDaemonStartRefusesCarriageOutsideTheProvisionedRoute(t *testing.T) {
 	isolateSandboxEnv(t)
 	_, carriage := testDaemonCarriage(t)
 	scripted := &scriptedDaemonStarter{carriage: carriage}
-	withDaemonStarter(t, scripted.starter(fastDaemonStartBackoff))
+	withDaemonStarter(t, scripted.starter(t, fastDaemonStartBackoff))
 
 	target := startableLocalTarget(t, carriage, ports.BrokerDaemonStartIfNeeded)
 	for _, invalid := range []string{"", "relative/daemonmux.sock", carriage + "/.."} {
@@ -357,7 +352,7 @@ func TestDaemonStartRefusesForeignCarriageStart(t *testing.T) {
 	// The scripted daemon publishes and answers at the process' own carriage;
 	// the dial target names a different one.
 	scripted := &scriptedDaemonStarter{carriage: own, published: own}
-	withDaemonStarter(t, scripted.starter(fastDaemonStartBackoff))
+	withDaemonStarter(t, scripted.starter(t, fastDaemonStartBackoff))
 
 	target := startableLocalTarget(t, foreign, ports.BrokerDaemonStartIfNeeded)
 	_, err := dialBrokerDaemonCarriage(context.Background(), foreign, target)
@@ -382,7 +377,7 @@ func TestDaemonStartForeignCarriageWinsOverPolicyRefusal(t *testing.T) {
 	require.NoError(t, os.Chmod(foreignDir, 0o700))
 	foreign := filepath.Join(foreignDir, "daemonmux.sock")
 	scripted := &scriptedDaemonStarter{carriage: own, published: own}
-	withDaemonStarter(t, scripted.starter(fastDaemonStartBackoff))
+	withDaemonStarter(t, scripted.starter(t, fastDaemonStartBackoff))
 
 	target := startableLocalTarget(t, foreign, ports.BrokerDaemonStartIfNeeded)
 	target.Policy.Launch = "sandbox-private"
@@ -416,7 +411,7 @@ func TestDaemonStartDoesNotSpawnOnNonAbsenceFailure(t *testing.T) {
 				available: func() bool { return false },
 				dialErr:   tt.err,
 			}
-			withDaemonStarter(t, scripted.starter(fastDaemonStartBackoff))
+			withDaemonStarter(t, scripted.starter(t, fastDaemonStartBackoff))
 
 			target := startableLocalTarget(t, carriage, ports.BrokerDaemonStartIfNeeded)
 			_, err := dialBrokerLocalDaemon(context.Background(), carriage, target)
@@ -439,11 +434,12 @@ func TestDaemonStartDoesNotSpawnOnNonAbsenceFailure(t *testing.T) {
 // would take it, and the carriage becomes dialable once that "spawner" finishes.
 // The starter therefore records zero spawns of its own, every caller converges
 // on the published carriage, and no caller ever holds the lock itself.
+// real I/O: real flock lifecycle locks.
 func TestDaemonStartConcurrentRequestsShareOneElection(t *testing.T) {
 	isolateSandboxEnv(t)
 	dir, carriage := testDaemonCarriage(t)
 	scripted := &scriptedDaemonStarter{carriage: carriage}
-	withDaemonStarter(t, scripted.starter(fastDaemonStartBackoff))
+	withDaemonStarter(t, scripted.starter(t, fastDaemonStartBackoff))
 
 	// Another client's elected spawner holds the lock; the daemon it starts
 	// publishes the carriage shortly afterwards.
@@ -477,13 +473,20 @@ func TestDaemonStartConcurrentRequestsShareOneElection(t *testing.T) {
 		}()
 	}
 	// Publish the daemon the held election is starting, as its spawner does.
+	published := make(chan struct{})
 	go func() {
 		<-start
 		scripted.markRunning()
+		close(published)
 	}()
 	close(start)
 	// The held election ends once the carriage answers.
-	require.Eventually(t, func() bool { return scripted.isRunning() }, brokerTestWait, time.Millisecond)
+	select {
+	case <-published:
+	case <-time.After(brokerTestWait):
+		t.Fatal("the scripted daemon never published its carriage")
+	}
+	require.True(t, scripted.isRunning())
 	release()
 	wg.Wait()
 
@@ -502,7 +505,7 @@ func TestDaemonStartConcurrentExistingOnlyNeverSpawns(t *testing.T) {
 	isolateSandboxEnv(t)
 	_, carriage := testDaemonCarriage(t)
 	scripted := &scriptedDaemonStarter{carriage: carriage}
-	withDaemonStarter(t, scripted.starter(fastDaemonStartBackoff))
+	withDaemonStarter(t, scripted.starter(t, fastDaemonStartBackoff))
 
 	target := startableLocalTarget(t, carriage, ports.BrokerDaemonExistingOnly)
 	const callers = 8
@@ -547,7 +550,7 @@ func TestDaemonStartPropagatesTheWholeTarget(t *testing.T) {
 	// The pool-side connector already owns the whole target; the local start
 	// helper is what turns it into the carriage decision.
 	scripted := &scriptedDaemonStarter{carriage: carriage}
-	withDaemonStarter(t, scripted.starter(fastDaemonStartBackoff))
+	withDaemonStarter(t, scripted.starter(t, fastDaemonStartBackoff))
 
 	target := startableLocalTarget(t, carriage, ports.BrokerDaemonExistingOnly)
 	raw, err := dialBrokerLocalDaemon(context.Background(), carriage, target)
@@ -570,6 +573,7 @@ func TestDaemonStartPropagatesTheWholeTarget(t *testing.T) {
 // TestDaemonStartNeverFallsBackToASessionDial proves structurally that the
 // start path owns no session carriage: it never dials the daemon's public
 // session socket and never wraps a session transport.
+// real I/O: real unix-socket broker/daemon stack, real flock lifecycle locks.
 func TestDaemonStartNeverFallsBackToASessionDial(t *testing.T) {
 	sources := loadAppSources(t, false)
 	body, ok := sources["broker_daemon_start.go"]
@@ -612,7 +616,7 @@ func TestDaemonStartRefusesInvalidTarget(t *testing.T) {
 	isolateSandboxEnv(t)
 	_, carriage := testDaemonCarriage(t)
 	scripted := &scriptedDaemonStarter{carriage: carriage}
-	withDaemonStarter(t, scripted.starter(fastDaemonStartBackoff))
+	withDaemonStarter(t, scripted.starter(t, fastDaemonStartBackoff))
 
 	invalid := startableLocalTarget(t, carriage, ports.BrokerDaemonStartIfNeeded)
 	invalid.StartMode = 0

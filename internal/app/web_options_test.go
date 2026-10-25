@@ -77,6 +77,7 @@ func TestWebConfigPrecedence(t *testing.T) {
 	}
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestWebReadinessUsesLocalListener(t *testing.T) {
 	token, err := webterm.NewToken()
 	require.NoError(t, err)

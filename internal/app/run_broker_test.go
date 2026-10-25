@@ -14,15 +14,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"io"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/catalogue"
 )
@@ -60,145 +59,20 @@ func seamBrokerTestSnapshot() ports.BrokerSnapshot {
 	}
 }
 
-// seamBrokerStream is one scripted broker logical stream. It records every
-// typed client message and serves a fixed reply queue: an exhausted queue is an
-// EOF, which is exactly the lost-reply condition the caller must classify as
-// unknown rather than success.
-type seamBrokerStream struct {
-	mu      sync.Mutex
-	sent    []protocol.ClientMessage
-	replies []protocol.ServerMessage
-	closed  bool
-	done    chan struct{}
+// newSeamBroker is a scripted ports.BrokerService whose every open returns one
+// scripted stream serving a fixed reply queue and records the exact open
+// request, so a test can assert the start mode each caller authorized. An
+// exhausted queue is an EOF, which is exactly the lost-reply condition the
+// caller must classify as unknown rather than success.
+func newSeamBroker(t *testing.T, replies ...protocol.ServerMessage) (*portsmocks.MockBrokerService, *brokerServiceState, *brokerStreamState) {
+	t.Helper()
+	stream, streamState := newBrokerStreamMock(t, replies)
+	service, state := newBrokerServiceMock(t, seamBrokerTestSnapshot(), func(_ *portsmocks.MockBrokerService, state *brokerServiceState) {
+		state.subErr = errors.New("the seam broker service does not support subscriptions")
+		state.openStream = func(ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) { return stream, nil }
+	})
+	return service, state, streamState
 }
-
-func newSeamBrokerStream(replies ...protocol.ServerMessage) *seamBrokerStream {
-	return &seamBrokerStream{replies: replies, done: make(chan struct{})}
-}
-
-func (s *seamBrokerStream) SendClient(message protocol.ClientMessage) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.sent = append(s.sent, message)
-	return nil
-}
-
-func (s *seamBrokerStream) ReceiveServer() (protocol.ServerMessage, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(s.replies) == 0 {
-		return nil, io.EOF
-	}
-	reply := s.replies[0]
-	s.replies = s.replies[1:]
-	return reply, nil
-}
-
-func (s *seamBrokerStream) Capabilities() protocol.ConnectionCapabilities {
-	return protocol.ConnectionCapabilities{}
-}
-
-func (s *seamBrokerStream) LinkState() ports.LinkState         { return ports.LinkStateConnected }
-func (s *seamBrokerStream) LinkEvents() <-chan ports.LinkEvent { return nil }
-func (s *seamBrokerStream) Done() <-chan struct{}              { return s.done }
-func (s *seamBrokerStream) Err() error                         { return nil }
-
-func (s *seamBrokerStream) Close() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.closed {
-		s.closed = true
-		close(s.done)
-	}
-	return nil
-}
-
-// seamBrokerService is a scripted ports.BrokerService. Every open returns the
-// same scripted stream and records the exact open request, so a test can assert
-// the start mode each caller authorized.
-type seamBrokerService struct {
-	snapshot ports.BrokerSnapshot
-	stream   *seamBrokerStream
-
-	mu     sync.Mutex
-	next   ports.BrokerStreamID
-	opens  []ports.BrokerOpenStreamRequest
-	closed int
-}
-
-func newSeamBrokerService(stream *seamBrokerStream) *seamBrokerService {
-	return &seamBrokerService{snapshot: seamBrokerTestSnapshot(), stream: stream}
-}
-
-func (s *seamBrokerService) ConnectionID() ports.BrokerConnectionID {
-	return ports.BrokerConnectionID{4}
-}
-
-func (s *seamBrokerService) NextStreamID() (ports.BrokerStreamID, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.next++
-	return s.next, nil
-}
-
-func (s *seamBrokerService) Done() <-chan struct{} { return make(chan struct{}) }
-func (s *seamBrokerService) Err() error            { return nil }
-
-func (s *seamBrokerService) Snapshot() ports.BrokerSnapshot { return s.snapshot.Clone() }
-
-func (s *seamBrokerService) Subscribe() (ports.BrokerSubscription, error) {
-	return nil, errors.New("the seam broker service does not support subscriptions")
-}
-
-func (s *seamBrokerService) SubscribePreview(ports.BrokerPreviewRequest) (ports.BrokerPreviewSubscription, error) {
-	return nil, errors.New("the seam broker service does not support preview")
-}
-
-func (s *seamBrokerService) OpenStream(_ context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-	s.mu.Lock()
-	s.opens = append(s.opens, request)
-	s.mu.Unlock()
-	return s.stream, nil
-}
-
-func (s *seamBrokerService) CloseStream(ports.BrokerConnectionID, ports.BrokerStreamID) error {
-	return nil
-}
-
-func (s *seamBrokerService) AddHost(context.Context, string, ports.BrokerPolicy) (domain.RemoteRegistration, error) {
-	return domain.RemoteRegistration{}, nil
-}
-
-func (s *seamBrokerService) RemoveHost(context.Context, domain.RemoteRegistration) (bool, error) {
-	return false, nil
-}
-
-func (s *seamBrokerService) UpdateHostPolicy(context.Context, domain.RemoteRegistration, ports.BrokerPolicy) (domain.RemoteRegistration, error) {
-	return domain.RemoteRegistration{}, nil
-}
-
-func (s *seamBrokerService) RequestReconcile(string) {}
-
-func (s *seamBrokerService) Close() error {
-	s.mu.Lock()
-	s.closed++
-	s.mu.Unlock()
-	return nil
-}
-
-func (s *seamBrokerService) openedRequests() []ports.BrokerOpenStreamRequest {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return append([]ports.BrokerOpenStreamRequest(nil), s.opens...)
-}
-
-func (s *seamBrokerService) closeCount() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.closed
-}
-
-var _ ports.BrokerService = (*seamBrokerService)(nil)
 
 // withSeamBroker installs one scripted broker connection on the connectBroker
 // seam for the duration of a test, so no production broker is ever dialed.
@@ -262,10 +136,9 @@ func TestRunBrokerSnapshotListAllShowsNoDaemonAlongsideSessions(t *testing.T) {
 // live session list through BrokerOperations over the per-user broker and
 // renders it, so a local list never reads durable state or dials a daemon.
 func TestRunListRendersBrokerSessionsWithoutADaemon(t *testing.T) {
-	stream := newSeamBrokerStream(protocol.Sessions{Sessions: []protocol.SessionInfo{
+	service, state, _ := newSeamBroker(t, protocol.Sessions{Sessions: []protocol.SessionInfo{
 		{Name: "work", State: protocol.SessionUp, Tabs: 2, Attached: true},
 	}})
-	service := newSeamBrokerService(stream)
 	withSeamBroker(t, service)
 
 	got := captureStdout(t, func() {
@@ -274,8 +147,8 @@ func TestRunListRendersBrokerSessionsWithoutADaemon(t *testing.T) {
 	for _, want := range []string{"NAME", "work", "up", "2", "yes"} {
 		require.Contains(t, got, want)
 	}
-	require.Equal(t, 1, service.closeCount(), "the borrowed broker service is closed exactly once")
-	opens := service.openedRequests()
+	require.Equal(t, 1, state.closeCount(), "the borrowed broker service is closed exactly once")
+	opens := state.allOpened()
 	require.Len(t, opens, 1)
 	require.Equal(t, ports.BrokerStreamControl, opens[0].Purpose)
 	require.True(t, opens[0].Local)
@@ -341,8 +214,7 @@ func TestRunKillExplicitOutcomesTable(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			stream := newSeamBrokerStream(tt.replies...)
-			service := newSeamBrokerService(stream)
+			service, state, stream := newSeamBroker(t, tt.replies...)
 			withSeamBroker(t, service)
 
 			var err error
@@ -361,7 +233,7 @@ func TestRunKillExplicitOutcomesTable(t *testing.T) {
 			if tt.wantStdout != "" {
 				require.Contains(t, got, tt.wantStdout)
 			}
-			opens := service.openedRequests()
+			opens := state.allOpened()
 			require.Len(t, opens, 1, "exactly one control stream per kill")
 			require.Equal(t, ports.BrokerStreamControl, opens[0].Purpose)
 			require.Equal(t, 1, stream.sentCount(), "the kill is never replayed")
@@ -416,12 +288,11 @@ func TestRequestDaemonStopUsesExistingOnlyAndExplicitOutcomes(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			stream := newSeamBrokerStream(tt.replies...)
-			service := newSeamBrokerService(stream)
+			service, state, _ := newSeamBroker(t, tt.replies...)
 			withSeamBroker(t, service)
 
 			err := requestDaemonStop(context.Background())
-			opens := service.openedRequests()
+			opens := state.allOpened()
 			require.Len(t, opens, 1)
 			require.Equal(t, ports.BrokerStreamControl, opens[0].Purpose)
 			require.Equal(t, ports.BrokerDaemonExistingOnly, opens[0].StartMode,
@@ -439,28 +310,19 @@ func TestRequestDaemonStopUsesExistingOnlyAndExplicitOutcomes(t *testing.T) {
 	}
 }
 
-// sentCount reports how many typed messages one scripted stream received.
-func (s *seamBrokerStream) sentCount() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.sent)
-}
-
 // TestCreateDetachedLocalSessionUsesBrokerOperations proves nested `vev new`
 // creates through one broker control stream and never needs a daemon dialer.
 func TestCreateDetachedLocalSessionUsesBrokerOperations(t *testing.T) {
 	t.Setenv("VEV", "session=outer,tab=1,pane=1")
-	stream := newSeamBrokerStream(protocol.CommandResult{RequestID: 1, Outcome: protocol.CommandSucceeded})
-	service := newSeamBrokerService(stream)
+	service, state, stream := newSeamBroker(t, protocol.CommandResult{RequestID: 1, Outcome: protocol.CommandSucceeded})
 	withSeamBroker(t, service)
 
 	require.NoError(t, createDetachedLocalSession(context.Background(), "smoke"))
-	require.Equal(t, 1, service.closeCount())
-	require.Len(t, service.openedRequests(), 1)
-	stream.mu.Lock()
-	defer stream.mu.Unlock()
-	require.Len(t, stream.sent, 1)
-	request, ok := stream.sent[0].(protocol.CommandRequest)
+	require.Equal(t, 1, state.closeCount())
+	require.Len(t, state.allOpened(), 1)
+	sent := stream.sentMessages()
+	require.Len(t, sent, 1)
+	request, ok := sent[0].(protocol.CommandRequest)
 	require.True(t, ok)
 	require.Equal(t, "new-session", request.Slug)
 	require.Equal(t, []string{"smoke"}, request.Args)

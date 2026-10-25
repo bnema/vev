@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/adapters/brokerconfig"
@@ -21,6 +22,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/bnema/vev/internal/usecase/broker"
@@ -136,18 +138,28 @@ func (f *realLocalDaemonFixture) openStream(t *testing.T, request ports.BrokerOp
 	}
 	stream, err := physical.OpenStream(ctx, request)
 	require.NoError(t, err)
-	typed := brokerLogicalView{ClientConnection: sessionwire.BrokerCodec{}.Client(stream), BrokerEnvelopeStream: stream}
+	typed := newBrokerLogicalView(t, stream)
 	t.Cleanup(func() { _ = typed.Close() })
 	return typed
 }
 
-// brokerLogicalView is the typed client view of one raw logical stream.
-type brokerLogicalView struct {
-	ports.ClientConnection
-	ports.BrokerEnvelopeStream
+// newBrokerLogicalView is the typed client view of one raw logical stream: a
+// generated logical-connection mock that forwards to the typed client codec and
+// takes its Done/Err from the raw stream.
+func newBrokerLogicalView(t *testing.T, stream ports.BrokerEnvelopeStream) ports.BrokerLogicalConnection {
+	t.Helper()
+	typed := sessionwire.BrokerCodec{}.Client(stream)
+	view := portsmocks.NewMockBrokerLogicalConnection(t)
+	view.EXPECT().SendClient(mock.Anything).RunAndReturn(typed.SendClient).Maybe()
+	view.EXPECT().ReceiveServer().RunAndReturn(typed.ReceiveServer).Maybe()
+	view.EXPECT().Capabilities().RunAndReturn(typed.Capabilities).Maybe()
+	view.EXPECT().LinkState().RunAndReturn(typed.LinkState).Maybe()
+	view.EXPECT().LinkEvents().RunAndReturn(typed.LinkEvents).Maybe()
+	view.EXPECT().Done().RunAndReturn(stream.Done).Maybe()
+	view.EXPECT().Err().RunAndReturn(stream.Err).Maybe()
+	view.EXPECT().Close().RunAndReturn(typed.Close).Maybe()
+	return view
 }
-
-func (v brokerLogicalView) Close() error { return v.ClientConnection.Close() }
 
 // awaitWelcome receives server messages until the typed Welcome arrives.
 func awaitWelcome(t *testing.T, stream ports.BrokerLogicalConnection) protocol.Welcome {
@@ -183,6 +195,7 @@ func awaitWelcome(t *testing.T, stream ports.BrokerLogicalConnection) protocol.W
 // TestBrokerLocalProbeRealCatalogueEnablesExactAttach proves the broker-owned
 // local probe reads a real daemon's catalogue and that the catalogue it
 // publishes is exactly what makes an exact terminal attach resolvable.
+// real I/O: real unix-socket broker/daemon stack, a real PTY.
 func TestBrokerLocalProbeRealCatalogueEnablesExactAttach(t *testing.T) {
 	fixture := startRealLocalDaemon(t)
 	probe := fixture.probe(t)
@@ -253,6 +266,7 @@ func TestBrokerLocalProbeRealCatalogueEnablesExactAttach(t *testing.T) {
 
 // TestBrokerLocalProbeAbsentDaemonStaysUnavailable proves that without daemon
 // identity, production observation stays unknown and never dials or starts a daemon.
+// real I/O: real unix-socket broker/daemon stack.
 func TestBrokerLocalProbeAbsentDaemonStaysUnavailable(t *testing.T) {
 	layout := emptyProductionBrokerLayout(t, "")
 	stateDir := filepath.Dir(layout.Root)

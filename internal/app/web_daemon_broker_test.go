@@ -297,6 +297,9 @@ type webGatewayFixture struct {
 	mu            sync.Mutex
 	tabs          []*webBrowserTab
 	presentations map[client.Presentation]int
+	// presented is signaled (coalesced) on every observed presentation, so a
+	// barrier waits on the event instead of polling the counts.
+	presented chan struct{}
 }
 
 // startWebGatewayFixture provisions one private broker sandbox with a real
@@ -326,6 +329,7 @@ func startWebGatewayFixtureOver(t *testing.T, broker offlineClientFixture, conne
 		notices:       make(chan client.LifecycleNotice, 64),
 		failures:      make(chan error, 64),
 		presentations: make(map[client.Presentation]int),
+		presented:     make(chan struct{}, 1),
 	}
 	previousConnector := webTerminalConnector
 	previousCallbacks := terminalBrokerCallbacks
@@ -340,6 +344,10 @@ func startWebGatewayFixtureOver(t *testing.T, broker offlineClientFixture, conne
 				fixture.mu.Lock()
 				fixture.presentations[state.Presentation]++
 				fixture.mu.Unlock()
+				select {
+				case fixture.presented <- struct{}{}:
+				default:
+				}
 				select {
 				case fixture.states <- state:
 				default:
@@ -456,6 +464,20 @@ func (f *webGatewayFixture) awaitPresentation(t *testing.T, want client.Presenta
 	}
 }
 
+// awaitObserved waits on the presentation signal until the durable counts
+// satisfy ready.
+func (f *webGatewayFixture) awaitObserved(t *testing.T, ready func(map[client.Presentation]int) bool, what string) {
+	t.Helper()
+	deadline := time.After(brokerTestWait)
+	for !ready(f.observedPresentations()) {
+		select {
+		case <-f.presented:
+		case <-deadline:
+			t.Fatalf("%s; observed %v", what, f.observedPresentations())
+		}
+	}
+}
+
 // observedPresentations returns a defensive snapshot of all presentations
 // reported by every browser run in this fixture. Unlike states, this is a
 // durable barrier and therefore remains valid after awaitPresentation consumes
@@ -476,6 +498,7 @@ func (f *webGatewayFixture) observedPresentations() map[client.Presentation]int 
 // sessions are distinct and render their own real content, a real session
 // action round-trips through the browser path, and the broker still dials
 // exactly one shared physical carriage for both.
+// real I/O: real unix-socket broker/daemon stack.
 func TestWebGatewayTabsShareOneBrokerWithIndependentStreamsAndServices(t *testing.T) {
 	fixture := startWebGatewayFixture(t)
 
@@ -505,11 +528,9 @@ func TestWebGatewayTabsShareOneBrokerWithIndependentStreamsAndServices(t *testin
 	// picker flash first. Consult the durable observation barrier: the two
 	// Attached notifications above were consumed while synchronizing startup
 	// and must still count here.
-	require.Eventually(t, func() bool {
-		presentations := fixture.observedPresentations()
-		return presentations[client.PresentConnecting] >= 2 &&
-			presentations[client.PresentAttached] >= 2
-	}, brokerTestWait, 5*time.Millisecond, "both browser runs must present connecting and attached; observed %v", fixture.observedPresentations())
+	fixture.awaitObserved(t, func(presentations map[client.Presentation]int) bool {
+		return presentations[client.PresentConnecting] >= 2 && presentations[client.PresentAttached] >= 2
+	}, "both browser runs must present connecting and attached")
 	require.Zero(t, fixture.observedPresentations()[client.PresentPicker], "an initial creation never flashes the picker")
 
 	// Real content and real actions, and each tab renders only its own session.
@@ -528,6 +549,7 @@ func TestWebGatewayTabsShareOneBrokerWithIndependentStreamsAndServices(t *testin
 // only that tab's supervisor, service, and logical stream: the shared daemon,
 // the other tab, and the pooled physical carriage survive, and a new tab still
 // reaches a session through the same broker.
+// real I/O: real unix-socket broker/daemon stack.
 func TestWebGatewayTabClosingIsIsolated(t *testing.T) {
 	fixture := startWebGatewayFixture(t)
 
@@ -575,8 +597,9 @@ func TestWebGatewayTabClosingIsIsolated(t *testing.T) {
 // local destination is a local refusal. The tab reports the same bounded
 // selection-unavailable notice, opens no stream, stays usable in the picker, and
 // keeps serving frames.
+// real I/O: real unix-socket broker/daemon stack.
 func TestWebGatewayTabStaysPickerWhenDestinationIsRefused(t *testing.T) {
-	service := newTerminalCompositionService(ports.BrokerSnapshot{Epoch: terminalCompositionEpoch, Revision: 1})
+	service, state := newTerminalCompositionService(t, ports.BrokerSnapshot{Epoch: terminalCompositionEpoch, Revision: 1}, nil)
 	connector := portsmocks.NewMockBrokerConnector(t)
 	connector.EXPECT().Connect(mock.Anything).Return(service, nil).Maybe()
 	fixture := startWebGatewayFixtureOver(t, offlineClientFixture{}, func() ports.BrokerConnector {
@@ -588,7 +611,7 @@ func TestWebGatewayTabStaysPickerWhenDestinationIsRefused(t *testing.T) {
 	require.Equal(t, client.LifecycleNoticeSelectionUnavailable, fixture.awaitNotice(t).Kind)
 	fixture.awaitFailure(t)
 
-	require.Empty(t, service.openedRequests(), "a refused destination never opens a broker stream")
+	require.Empty(t, state.openedRequests(), "a refused destination never opens a broker stream")
 
 	// The run stays alive in the picker: it keeps painting and never ends the
 	// socket, exactly like the ordinary terminal run.
@@ -605,13 +628,18 @@ func TestWebGatewayTabStaysPickerWhenDestinationIsRefused(t *testing.T) {
 // broker connection does not end the browser run and does not leave the tab
 // attached: the supervisor reports the typed broker loss, returns to the picker,
 // and keeps serving frames while it retries.
+// real I/O: real unix-socket broker/daemon stack.
 func TestWebGatewayTabReturnsToPickerOnBrokerLoss(t *testing.T) {
-	service := newTerminalCompositionService(terminalCompositionSnapshot([]string{"work"}, nil))
+	service, _ := newTerminalCompositionService(t, terminalCompositionSnapshot([]string{"work"}, nil), nil)
 	connector := portsmocks.NewMockBrokerConnector(t)
+	retried := make(chan struct{})
 	var calls atomic.Int32
 	connector.EXPECT().Connect(mock.Anything).RunAndReturn(func(context.Context) (ports.BrokerNavigator, error) {
-		if calls.Add(1) == 1 {
+		switch calls.Add(1) {
+		case 1:
 			return service, nil
+		case 2:
+			close(retried)
 		}
 		return nil, errors.New("broker is gone")
 	}).Maybe()
@@ -637,8 +665,11 @@ func TestWebGatewayTabReturnsToPickerOnBrokerLoss(t *testing.T) {
 	default:
 	}
 	// A repaint can land before the first reconnect attempt, so wait for it.
-	require.Eventually(t, func() bool { return calls.Load() >= 2 }, brokerTestWait, 5*time.Millisecond,
-		"a lost connection must be retried, never fatal")
+	select {
+	case <-retried:
+	case <-time.After(brokerTestWait):
+		t.Fatal("a lost connection must be retried, never fatal")
+	}
 }
 
 // TestWebCompositionUsesTheBrokerConnector pins the production composition
@@ -664,11 +695,15 @@ func TestWebCompositionUsesTheBrokerConnector(t *testing.T) {
 // production connector through the gateway composition: constructing the
 // connector performs no I/O, so an absent broker is an ordinary attempt failure
 // under the supervisor, never a gateway startup error.
+// real I/O: real unix-socket broker/daemon stack.
 func TestWebGatewayTerminalIsNotDialedBeforeConnect(t *testing.T) {
+	connected := make(chan struct{})
 	var connects atomic.Int64
 	previous := connectProductionClientBroker
 	connectProductionClientBroker = func(context.Context) (ports.BrokerService, error) {
-		connects.Add(1)
+		if connects.Add(1) == 1 {
+			close(connected)
+		}
 		return nil, errors.New("broker not reachable")
 	}
 	t.Cleanup(func() { connectProductionClientBroker = previous })
@@ -679,8 +714,11 @@ func TestWebGatewayTerminalIsNotDialedBeforeConnect(t *testing.T) {
 	fixture.awaitPresentation(t, client.PresentConnecting)
 	// Construction performs no I/O: the gateway reaches the broker only through
 	// Connect, and an unreachable broker is an ordinary attempt failure.
-	require.Eventually(t, func() bool { return connects.Load() >= 1 }, brokerTestWait, 5*time.Millisecond,
-		"the gateway must reach the broker only through Connect")
+	select {
+	case <-connected:
+	case <-time.After(brokerTestWait):
+		t.Fatal("the gateway must reach the broker only through Connect")
+	}
 	// A broker that is never reachable keeps the tab alive and repainting.
 	before := tab.frameCount()
 	tab.awaitMoreFrames(t, before+1)

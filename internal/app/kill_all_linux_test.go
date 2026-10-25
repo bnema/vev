@@ -23,6 +23,7 @@ import (
 	"github.com/bnema/vev/internal/platform"
 )
 
+// real I/O: real subprocesses.
 func TestWaitProcessExit(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -185,6 +186,7 @@ func startIgnoringTerm(t *testing.T) (*exec.Cmd, <-chan *os.ProcessState) {
 	return cmd, done
 }
 
+// real I/O: real subprocesses.
 func TestStopWaveEscalatesToSigkillAndKeepsGoing(t *testing.T) {
 	stubborn, done := startIgnoringTerm(t)
 	polite := exec.Command("sleep", "30")
@@ -203,6 +205,7 @@ func TestStopWaveEscalatesToSigkillAndKeepsGoing(t *testing.T) {
 	require.Equal(t, []vevProcess{{pid: stubborn.Process.Pid, role: "daemon"}}, report.forced)
 }
 
+// real I/O: real unix-socket broker/daemon stack, real unix sockets.
 func TestRemoveDeadSockets(t *testing.T) {
 	dir, err := os.MkdirTemp("", "vevk")
 	require.NoError(t, err)
@@ -226,6 +229,7 @@ func TestRemoveDeadSockets(t *testing.T) {
 	require.FileExists(t, notSocket, "a regular file is never removed")
 }
 
+// real I/O: real unix-socket broker/daemon stack, real flock lifecycle locks, real unix sockets.
 func TestRemoveDeadSocketsSkipsBusyLifecycle(t *testing.T) {
 	dir, err := os.MkdirTemp("", "vevk")
 	require.NoError(t, err)
@@ -285,6 +289,7 @@ func TestPrintKillAllReport(t *testing.T) {
 
 // TestWaitProcessExitTreatsZombieAsGone pins that an exited child its parent
 // has not reaped yet counts as stopped.
+// real I/O: real subprocesses.
 func TestWaitProcessExitTreatsZombieAsGone(t *testing.T) {
 	cmd := exec.Command("sh", "-c", "exit 0")
 	require.NoError(t, cmd.Start())

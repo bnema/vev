@@ -78,14 +78,11 @@ func (s *readySubprocessSandbox) startBroker() {
 // waitForBrokerSocket waits until the broker has bound its endpoint.
 func (s *readySubprocessSandbox) waitForBrokerSocket(timeout time.Duration) bool {
 	s.t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if info, err := os.Lstat(s.socketPath()); err == nil && info.Mode()&os.ModeSocket != 0 {
-			return true
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	return false
+	// A socket appearing on disk publishes no event, so this polls.
+	return pollUntil(timeout, func() bool {
+		info, err := os.Lstat(s.socketPath())
+		return err == nil && info.Mode()&os.ModeSocket != 0
+	})
 }
 
 // cleanup terminates the background broker and every recorded serve process so
@@ -136,6 +133,7 @@ func decodeReadyReport(t *testing.T, raw string) readyDoc {
 // daemon entry, `--require local-authority` is satisfied with exit zero and the
 // broker epoch, and `--require local-catalogue` stays pending because the
 // provisioned local route is absent, so it is never falsely reported ready.
+// real I/O: real subprocesses.
 func TestBrokerReadySubprocessReadsARealBrokerAuthority(t *testing.T) {
 	sandbox := newReadySubprocessSandbox(t)
 	// One provisioned local binding whose daemon is not started: the broker
@@ -167,6 +165,7 @@ func TestBrokerReadySubprocessReadsARealBrokerAuthority(t *testing.T) {
 // TestBrokerReadySubprocessStaleSocketIsNeverReady proves a socket file left by
 // a dead owner is retried into the deadline: the probe reports timeout, never a
 // false ready, and never leaves a second socket behind.
+// real I/O: real subprocesses.
 func TestBrokerReadySubprocessStaleSocketIsNeverReady(t *testing.T) {
 	sandbox := newReadySubprocessSandbox(t)
 	require.NoError(t, os.MkdirAll(sandbox.layout.Runtime, 0o700))
@@ -191,6 +190,7 @@ func TestBrokerReadySubprocessStaleSocketIsNeverReady(t *testing.T) {
 // TestBrokerReadySubprocessBlockedHandshakeIsNeverReady proves a live endpoint
 // that never answers the broker preamble is never reported ready: the probe
 // stays inside its own bound and reports timeout.
+// real I/O: real subprocesses.
 func TestBrokerReadySubprocessBlockedHandshakeIsNeverReady(t *testing.T) {
 	sandbox := newReadySubprocessSandbox(t)
 	require.NoError(t, os.MkdirAll(sandbox.layout.Runtime, 0o700))
@@ -212,6 +212,7 @@ func TestBrokerReadySubprocessBlockedHandshakeIsNeverReady(t *testing.T) {
 // TestBrokerReadySubprocessNonSocketPathIsTerminal proves a path that exists but
 // is not a Unix socket is a terminal security failure (exit 4) rather than a
 // retryable absence, for both a regular file and a directory.
+// real I/O: real subprocesses.
 func TestBrokerReadySubprocessNonSocketPathIsTerminal(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -249,6 +250,7 @@ func TestBrokerReadySubprocessNonSocketPathIsTerminal(t *testing.T) {
 // TestBrokerReadySubprocessPermissionRefusalIsTerminal proves a path this
 // process may not inspect is a terminal security failure with exit 4, and never
 // a timeout or an absence that would invite a spawn.
+// real I/O: real subprocesses.
 func TestBrokerReadySubprocessPermissionRefusalIsTerminal(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("an unreadable directory does not deny root")
@@ -268,6 +270,7 @@ func TestBrokerReadySubprocessPermissionRefusalIsTerminal(t *testing.T) {
 
 // TestBrokerReadySubprocessAbsentSocketTimesOut proves a missing endpoint is
 // retried into the deadline and reported as a timeout with no broker spawned.
+// real I/O: real subprocesses.
 func TestBrokerReadySubprocessAbsentSocketTimesOut(t *testing.T) {
 	sandbox := newReadySubprocessSandbox(t)
 	_, statErr := os.Lstat(sandbox.socketPath())
@@ -285,6 +288,7 @@ func TestBrokerReadySubprocessAbsentSocketTimesOut(t *testing.T) {
 // that answers the broker setup with foreign framing is a terminal protocol
 // failure (exit 4) rather than a retryable absence, so a socket that is not the
 // expected broker is never waited out as if it were merely slow.
+// real I/O: real subprocesses.
 func TestBrokerReadySubprocessNonBrokerEndpointIsTerminal(t *testing.T) {
 	sandbox := newReadySubprocessSandbox(t)
 	require.NoError(t, os.MkdirAll(sandbox.layout.Runtime, 0o700))
@@ -320,6 +324,7 @@ func answerWithForeignBytes(listener net.Listener) {
 // TestBrokerReadySubprocessArgumentRefusalIsUsage proves the production dispatch
 // path refuses an invalid invocation with the usage exit code and prints no
 // report at all.
+// real I/O: real subprocesses.
 func TestBrokerReadySubprocessArgumentRefusalIsUsage(t *testing.T) {
 	sandbox := newReadySubprocessSandbox(t)
 

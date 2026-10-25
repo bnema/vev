@@ -32,6 +32,7 @@ import (
 	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/platform"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/daemon"
 	"github.com/bnema/vev/internal/usecase/recovery"
@@ -115,7 +116,7 @@ func startPersistentOfflineClientFixture(t *testing.T, shell string, shellArgs [
 		}
 	}()
 	streamSeen := make(chan struct{}, 16)
-	counting := &countingServerListener{ServerListener: aggregate, seen: streamSeen}
+	counting := newCountingServerListener(t, aggregate, streamSeen)
 	daemonOpts := []daemon.Option{daemon.WithShell(shell, shellArgs)}
 	var fixtureCatalogue *persist.Persister
 	if persistEnabled {
@@ -153,21 +154,14 @@ func startPersistentOfflineClientFixture(t *testing.T, shell string, shellArgs [
 	// initial navigation is not consumed against an artificial empty catalogue.
 	probe, err := brokeripc.NewConnector(socket, brokeripc.Config{}).Connect(ctx)
 	require.NoError(t, err)
-	subscription, err := probe.Subscribe()
-	require.NoError(t, err)
-	require.Eventually(t, func() bool {
-		for _, observation := range probe.Snapshot().Daemons {
+	awaitBrokerSnapshot(t, probe, func(snapshot ports.BrokerSnapshot) bool {
+		for _, observation := range snapshot.Daemons {
 			if observation.Local {
 				return true
 			}
 		}
-		select {
-		case <-subscription.Changed():
-		default:
-		}
 		return false
-	}, brokerTestWait, 5*time.Millisecond, "production broker never committed its local daemon authority")
-	subscription.Close()
+	}, "the production broker to commit its local daemon authority")
 	require.NoError(t, probe.Close())
 	t.Cleanup(func() {
 		cancel()
@@ -201,20 +195,24 @@ func startPersistentOfflineClientFixture(t *testing.T, shell string, shellArgs [
 	}
 }
 
-type countingServerListener struct {
-	ports.ServerListener
-	seen chan<- struct{}
-}
-
-func (l *countingServerListener) Accept() (ports.ServerConnection, error) {
-	connection, err := l.ServerListener.Accept()
-	if err == nil {
-		select {
-		case l.seen <- struct{}{}:
-		default:
+// newCountingServerListener wraps a real server listener in a generated mock
+// that forwards to it and signals seen on every accepted connection.
+func newCountingServerListener(t *testing.T, inner ports.ServerListener, seen chan<- struct{}) *portsmocks.MockServerListener {
+	t.Helper()
+	listener := portsmocks.NewMockServerListener(t)
+	listener.EXPECT().Accept().RunAndReturn(func() (ports.ServerConnection, error) {
+		connection, err := inner.Accept()
+		if err == nil {
+			select {
+			case seen <- struct{}{}:
+			default:
+			}
 		}
-	}
-	return connection, err
+		return connection, err
+	}).Maybe()
+	listener.EXPECT().Close().RunAndReturn(inner.Close).Maybe()
+	listener.EXPECT().Addr().RunAndReturn(inner.Addr).Maybe()
+	return listener
 }
 
 func awaitLogicalStream(t *testing.T, streams <-chan struct{}) {
@@ -256,6 +254,7 @@ func awaitUITerminalMarker(t *testing.T, terminal *uiterm.Terminal, marker strin
 // broker fixture persists a named session but never an ephemeral one: the
 // durable catalogue holds exactly the named record after both lifecycles, so
 // the ephemeral session survives only while its daemon does.
+// real I/O: real unix-socket broker/daemon stack.
 func TestOfflineEphemeralSessionIsNotPersistedViaBroker(t *testing.T) {
 	fixture := startPersistentOfflineClientFixture(t, "/bin/sh",
 		[]string{"-c", "sleep 0.1; printf ephemeral-ready; trap : TERM; while :; do read line || exit; done"}, true)
@@ -291,11 +290,11 @@ func TestOfflineEphemeralSessionIsNotPersistedViaBroker(t *testing.T) {
 
 	// The daemon persists on its own cadence; the durable catalogue must settle
 	// to exactly the named record and never gain the ephemeral one.
-	require.Eventually(t, func() bool {
+	// The catalogue is on disk and publishes no event, so this polls.
+	require.True(t, pollUntil(brokerTestWait, func() bool {
 		records, err := fixture.catalogue.Records()
-		require.NoError(t, err)
-		return len(records) == 1 && records[0].Name == "persisted"
-	}, brokerTestWait, brokerTestPollTick, "the durable catalogue must hold exactly the named session")
+		return err == nil && len(records) == 1 && records[0].Name == "persisted"
+	}), "the durable catalogue must hold exactly the named session")
 
 	records, err := fixture.catalogue.Records()
 	require.NoError(t, err)
@@ -304,6 +303,7 @@ func TestOfflineEphemeralSessionIsNotPersistedViaBroker(t *testing.T) {
 	}
 }
 
+// real I/O: real unix-socket broker/daemon stack, a real PTY.
 func TestOfflineClientTerminalReachesSessionThroughBrokerIPC(t *testing.T) {
 	fixture := startOfflineClientFixture(t)
 	ctx, cancel := context.WithCancel(t.Context())
@@ -330,6 +330,7 @@ func TestOfflineClientTerminalReachesSessionThroughBrokerIPC(t *testing.T) {
 // runUIDriverClient tests in ui_driver_client_test.go; the harness is the same
 // runUIDriverClient call production uses, so it is not re-tested here.
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestOfflineBrokerSharedTransportKeepsAttachmentsIndependent(t *testing.T) {
 	fixture := startOfflineClientFixture(t)
 	ctx, cancel := context.WithTimeout(context.Background(), brokerTestWait)
@@ -417,6 +418,7 @@ func TestOfflineBrokerSharedTransportKeepsAttachmentsIndependent(t *testing.T) {
 	}
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestOfflineBrokerPhysicalLossSettlesEverySharedStream(t *testing.T) {
 	fixture := startOfflineClientFixture(t)
 	ctx, cancel := context.WithTimeout(context.Background(), brokerTestWait)
@@ -541,6 +543,7 @@ func receiveOfflineMessage(t *testing.T, connection ports.BrokerLogicalConnectio
 	return nil
 }
 
+// real I/O: real unix-socket broker/daemon stack.
 func TestOfflineClientBrowserReachesSessionThroughBrokerIPC(t *testing.T) {
 	fixture := startOfflineClientFixture(t)
 	ctx, cancel := context.WithCancel(t.Context())
