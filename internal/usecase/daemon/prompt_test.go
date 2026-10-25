@@ -4,18 +4,14 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"testing/synctest"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 )
-
-type failingPTYFactory struct{ err error }
-
-func (f failingPTYFactory) Open(context.Context, string, []string, []string, string, domain.Geometry) (ports.PTY, error) {
-	return nil, f.err
-}
 
 func TestPromptModalGeometry(t *testing.T) {
 	base := domain.Size{Cols: 100, Rows: 40}
@@ -24,57 +20,66 @@ func TestPromptModalGeometry(t *testing.T) {
 }
 
 func TestEnterPromptRendersTitleAndPrefill(t *testing.T) {
-	p, release := newBlockingPTY(t)
-	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	defer release()
+	synctest.Test(t, func(t *testing.T) {
+		p, release := newBlockingPTY(t)
+		d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+		stopOverlayTimersAtCleanup(t, ac)
+		defer release()
 
-	d.enterPrompt(sess, ac, " Rename session ", "0", func(string) error { return nil })
-	out := awaitFrame(t, sends, "Output")
-	msg := unmarshalTestOutput(t, out.Payload)
-	require.Contains(t, string(msg.Data), "Rename session")
-	require.Contains(t, string(msg.Data), "> 0")
-	require.True(t, ac.overlays.promptActive())
+		d.enterPrompt(sess, ac, " Rename session ", "0", func(string) error { return nil })
+		out := requireEnvelope(t, sends, "Output")
+		msg := unmarshalTestOutput(t, out.Payload)
+		require.Contains(t, string(msg.Data), "Rename session")
+		require.Contains(t, string(msg.Data), "> 0")
+		require.True(t, ac.overlays.promptActive())
+	})
 }
 
 func TestPromptSubmitRenamesAndPromotesSession(t *testing.T) {
-	p, release := newBlockingPTY(t)
-	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	defer release()
-	sess.name = "0"
-	sess.ephemeral = true
+	synctest.Test(t, func(t *testing.T) {
+		p, release := newBlockingPTY(t)
+		d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+		stopOverlayTimersAtCleanup(t, ac)
+		defer release()
+		sess.name = "0"
+		sess.ephemeral = true
 
-	d.enterPrompt(sess, ac, " Rename session ", sess.name, func(name string) error { return d.renameSession(sess, name) })
-	awaitFrame(t, sends, "Output")
-	d.handlePromptInput(ac, []byte("work\r"))
-	repaint := awaitFrame(t, sends, "Output")
+		d.enterPrompt(sess, ac, " Rename session ", sess.name, func(name string) error { return d.renameSession(sess, name) })
+		requireEnvelope(t, sends, "Output")
+		d.handlePromptInput(ac, []byte("work\r"))
+		repaint := requireEnvelope(t, sends, "Output")
 
-	require.False(t, ac.overlays.promptActive())
-	require.Equal(t, "0work", sess.name)
-	require.False(t, sess.ephemeral)
-	out := unmarshalTestOutput(t, repaint.Payload)
-	require.Contains(t, string(out.Data), "0work")
-	require.NotContains(t, string(out.Data), "0work*")
+		require.False(t, ac.overlays.promptActive())
+		require.Equal(t, "0work", sess.name)
+		require.False(t, sess.ephemeral)
+		out := unmarshalTestOutput(t, repaint.Payload)
+		require.Contains(t, string(out.Data), "0work")
+		require.NotContains(t, string(out.Data), "0work*")
+	})
 }
 
 func TestPromptSubmitErrorKeepsPromptOpen(t *testing.T) {
-	p1, release1 := newBlockingPTY(t)
-	p2, release2 := newBlockingPTY(t)
-	d, sess, ac, sends := newManualSessionWithPTYs(t, p1)
-	defer release1()
-	defer release2()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	d.sessions["other"] = &session{sessionCore: sessionCore{id: "other", name: "taken"}, ctx: ctx, cancel: cancel, tabs: []*tab{newTestTabWithContext(p2, ctx, cancel)}}
+	synctest.Test(t, func(t *testing.T) {
+		p1, release1 := newBlockingPTY(t)
+		p2, release2 := newBlockingPTY(t)
+		d, sess, ac, sends := newManualSessionWithPTYs(t, p1)
+		stopOverlayTimersAtCleanup(t, ac)
+		defer release1()
+		defer release2()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		d.sessions["other"] = &session{sessionCore: sessionCore{id: "other", name: "taken"}, ctx: ctx, cancel: cancel, tabs: []*tab{newTestTabWithContext(p2, ctx, cancel)}}
 
-	d.enterPrompt(sess, ac, " Rename session ", "", func(name string) error { return d.renameSession(sess, name) })
-	awaitFrame(t, sends, "Output")
-	d.handlePromptInput(ac, []byte("taken\r"))
-	repaint := awaitFrame(t, sends, "Output")
+		d.enterPrompt(sess, ac, " Rename session ", "", func(name string) error { return d.renameSession(sess, name) })
+		requireEnvelope(t, sends, "Output")
+		d.handlePromptInput(ac, []byte("taken\r"))
+		repaint := requireEnvelope(t, sends, "Output")
 
-	require.True(t, ac.overlays.promptActive())
-	require.NotEqual(t, "taken", sess.name)
-	out := unmarshalTestOutput(t, repaint.Payload)
-	require.Contains(t, string(out.Data), "name already in use")
+		require.True(t, ac.overlays.promptActive())
+		require.NotEqual(t, "taken", sess.name)
+		out := unmarshalTestOutput(t, repaint.Payload)
+		require.Contains(t, string(out.Data), "name already in use")
+	})
 }
 
 func TestTransitionPromptFailuresStayVisible(t *testing.T) {
@@ -88,50 +93,58 @@ func TestTransitionPromptFailuresStayVisible(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			p, release := newBlockingPTY(t)
-			defer release()
-			d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+			synctest.Test(t, func(t *testing.T) {
+				p, release := newBlockingPTY(t)
+				defer release()
+				d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+				stopOverlayTimersAtCleanup(t, ac)
 
-			d.enterTransitionPrompt(sess, ac, " Create session ", "", func(string, *attachmentEffect) error {
-				return tt.submit
+				d.enterTransitionPrompt(sess, ac, " Create session ", "", func(string, *attachmentEffect) error {
+					return tt.submit
+				})
+				requireEnvelope(t, sends, "Output")
+				d.handlePromptInput(ac, []byte("example\r"))
+				repaint := requireEnvelope(t, sends, "Output")
+
+				require.True(t, ac.overlays.promptActive())
+				out := unmarshalTestOutput(t, repaint.Payload)
+				require.Contains(t, string(out.Data), tt.wantErr)
 			})
-			awaitFrame(t, sends, "Output")
-			d.handlePromptInput(ac, []byte("example\r"))
-			repaint := awaitFrame(t, sends, "Output")
-
-			require.True(t, ac.overlays.promptActive())
-			out := unmarshalTestOutput(t, repaint.Payload)
-			require.Contains(t, string(out.Data), tt.wantErr)
 		})
 	}
 }
 
 func TestPromptSubmitSessionSpawnFailureReportsOneSafeNotice(t *testing.T) {
-	p, release := newBlockingPTY(t)
-	defer release()
-	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	cause := errors.New("fork/exec /bin/sh: permission denied")
-	d.ptys = failingPTYFactory{err: cause}
+	synctest.Test(t, func(t *testing.T) {
+		p, release := newBlockingPTY(t)
+		defer release()
+		d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+		stopOverlayTimersAtCleanup(t, ac)
+		cause := errors.New("fork/exec /bin/sh: permission denied")
+		failing := portsmocks.NewMockPTYFactory(t)
+		failing.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil, cause).Maybe()
+		d.ptys = failing
 
-	// Submit through the actual prompt input boundary rather than calling its
-	// callback directly.
-	d.enterPrompt(sess, ac, " Create session ", "", func(name string) error {
-		return d.createSessionAndSwitch(sess, ac, name)
+		// Submit through the actual prompt input boundary rather than calling its
+		// callback directly.
+		d.enterPrompt(sess, ac, " Create session ", "", func(name string) error {
+			return d.createSessionAndSwitch(sess, ac, name)
+		})
+		requireEnvelope(t, sends, "Output")
+		d.handlePromptInput(ac, []byte("new\r"))
+		repaint := requireEnvelope(t, sends, "Output")
+		output := unmarshalTestOutput(t, repaint.Payload)
+		require.Contains(t, string(output.Data), "couldn't create session: shell failed to start")
+
+		history := d.notices.history()
+		require.Len(t, history, 1, "the prompt boundary must report the failure once")
+		notice := history[0]
+		require.Equal(t, domain.NoticeSessionSpawn, notice.Code)
+		require.Equal(t, "couldn't create session: shell failed to start", notice.Message)
+		require.NotContains(t, notice.Message, cause.Error())
+		require.Contains(t, notice.Details, cause.Error())
+		require.True(t, ac.overlays.promptActive(), "failed submission stays inline")
 	})
-	awaitFrame(t, sends, "Output")
-	d.handlePromptInput(ac, []byte("new\r"))
-	repaint := awaitFrame(t, sends, "Output")
-	output := unmarshalTestOutput(t, repaint.Payload)
-	require.Contains(t, string(output.Data), "couldn't create session: shell failed to start")
-
-	history := d.notices.history()
-	require.Len(t, history, 1, "the prompt boundary must report the failure once")
-	notice := history[0]
-	require.Equal(t, domain.NoticeSessionSpawn, notice.Code)
-	require.Equal(t, "couldn't create session: shell failed to start", notice.Message)
-	require.NotContains(t, notice.Message, cause.Error())
-	require.Contains(t, notice.Details, cause.Error())
-	require.True(t, ac.overlays.promptActive(), "failed submission stays inline")
 }
 
 func TestPromptSubmitValidationErrorStaysInlineOnly(t *testing.T) {
@@ -155,58 +168,67 @@ func TestPromptSubmitValidationErrorStaysInlineOnly(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			p, release := newBlockingPTY(t)
-			defer release()
-			d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-			if tt.setup != nil {
-				tt.setup(d)
-			}
+			synctest.Test(t, func(t *testing.T) {
+				p, release := newBlockingPTY(t)
+				defer release()
+				d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+				stopOverlayTimersAtCleanup(t, ac)
+				if tt.setup != nil {
+					tt.setup(d)
+				}
 
-			d.enterPrompt(sess, ac, " Create session ", "", func(name string) error {
-				return d.createSessionAndSwitch(sess, ac, name)
+				d.enterPrompt(sess, ac, " Create session ", "", func(name string) error {
+					return d.createSessionAndSwitch(sess, ac, name)
+				})
+				requireEnvelope(t, sends, "Output")
+				d.handlePromptInput(ac, tt.input)
+				repaint := requireEnvelope(t, sends, "Output")
+				output := unmarshalTestOutput(t, repaint.Payload)
+				require.Contains(t, string(output.Data), tt.wantErr.Error())
+
+				require.True(t, ac.overlays.promptActive())
+				require.Empty(t, d.notices.history())
 			})
-			awaitFrame(t, sends, "Output")
-			d.handlePromptInput(ac, tt.input)
-			repaint := awaitFrame(t, sends, "Output")
-			output := unmarshalTestOutput(t, repaint.Payload)
-			require.Contains(t, string(output.Data), tt.wantErr.Error())
-
-			require.True(t, ac.overlays.promptActive())
-			require.Empty(t, d.notices.history())
 		})
 	}
 }
 
 func TestPromptEscapeCancelsWithoutRename(t *testing.T) {
-	p, release := newBlockingPTY(t)
-	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	defer release()
-	oldName := sess.name
+	synctest.Test(t, func(t *testing.T) {
+		p, release := newBlockingPTY(t)
+		d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+		stopOverlayTimersAtCleanup(t, ac)
+		defer release()
+		oldName := sess.name
 
-	d.enterPrompt(sess, ac, " Rename session ", oldName, func(name string) error { return d.renameSession(sess, name) })
-	awaitFrame(t, sends, "Output")
-	d.handlePromptInput(ac, []byte("new\x1b"))
-	awaitFrame(t, sends, "Output")
+		d.enterPrompt(sess, ac, " Rename session ", oldName, func(name string) error { return d.renameSession(sess, name) })
+		requireEnvelope(t, sends, "Output")
+		d.handlePromptInput(ac, []byte("new\x1b"))
+		requireEnvelope(t, sends, "Output")
 
-	require.False(t, ac.overlays.promptActive())
-	require.Equal(t, oldName, sess.name)
+		require.False(t, ac.overlays.promptActive())
+		require.Equal(t, oldName, sess.name)
+	})
 }
 
 func TestPaletteRNSOpensRenamePrompt(t *testing.T) {
-	p, release := newBlockingPTY(t)
-	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	defer release()
-	sess.name = "0"
-	sess.ephemeral = true
+	synctest.Test(t, func(t *testing.T) {
+		p, release := newBlockingPTY(t)
+		d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+		stopOverlayTimersAtCleanup(t, ac)
+		defer release()
+		sess.name = "0"
+		sess.ephemeral = true
 
-	d.enterPalette(sess, ac)
-	awaitFrame(t, sends, "Output")
-	d.handlePaletteInput(ac, []byte("RNS\r"))
-	out := awaitFrame(t, sends, "Output")
+		d.enterPalette(sess, ac)
+		requireEnvelope(t, sends, "Output")
+		d.handlePaletteInput(ac, []byte("RNS\r"))
+		out := requireEnvelope(t, sends, "Output")
 
-	require.False(t, ac.overlays.paletteActive())
-	require.True(t, ac.overlays.promptActive())
-	msg := unmarshalTestOutput(t, out.Payload)
-	require.Contains(t, string(msg.Data), "Rename session")
-	require.Contains(t, string(msg.Data), "> 0")
+		require.False(t, ac.overlays.paletteActive())
+		require.True(t, ac.overlays.promptActive())
+		msg := unmarshalTestOutput(t, out.Payload)
+		require.Contains(t, string(msg.Data), "Rename session")
+		require.Contains(t, string(msg.Data), "> 0")
+	})
 }

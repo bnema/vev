@@ -6,13 +6,13 @@ import (
 	"maps"
 	"sync"
 	"testing"
-	"time"
+	"testing/synctest"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/domain/layout"
-	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/usecase/keys"
 )
@@ -127,30 +127,27 @@ func TestMutateTargetLayoutRejectsStaleTargetsBeforeMutation(t *testing.T) {
 }
 
 func TestPaneRearrangeResizeRunsWithoutDaemonStateLocks(t *testing.T) {
-	h := newPaneRearrangeHarness(t, domain.Size{Cols: 80, Rows: 22}, threeColumnTree())
-	locksAvailable := make(chan bool, 8)
-	for _, tracked := range h.ptys {
-		tracked.onResize = func() { locksAvailable <- h.stateLocksAvailable() }
-	}
+	synctest.Test(t, func(t *testing.T) {
+		h := newPaneRearrangeHarness(t, domain.Size{Cols: 80, Rows: 22}, threeColumnTree())
+		locksAvailable := make(chan bool, 8)
+		for _, tracked := range h.ptys {
+			tracked.onResize = func() { locksAvailable <- h.stateLocksAvailable() }
+		}
 
-	done := make(chan error, 1)
-	go func() {
-		done <- (daemonActions{d: h.daemon}).Run(daemonActionRequest{
-			kind: daemonActionConsumeOrExpelPane, target: h.target("pane-1"), direction: layout.Right,
-		})
-	}()
+		done := make(chan error, 1)
+		go func() {
+			done <- (daemonActions{d: h.daemon}).Run(daemonActionRequest{
+				kind: daemonActionConsumeOrExpelPane, target: h.target("pane-1"), direction: layout.Right,
+			})
+		}()
 
-	select {
-	case err := <-done:
-		require.NoError(t, err)
-	case <-time.After(2 * time.Second):
-		t.Fatal("pane rearrange blocked while PTY.Resize attempted to re-enter daemon state locks")
-	}
-	require.NotZero(t, h.totalResizes())
-	close(locksAvailable)
-	for available := range locksAvailable {
-		require.True(t, available, "PTY.Resize ran while a daemon, session, tab, or pane state lock was held")
-	}
+		require.NoError(t, requireReceived(t, done, "pane rearrange blocked while PTY.Resize attempted to re-enter daemon state locks"))
+		require.NotZero(t, h.totalResizes())
+		close(locksAvailable)
+		for available := range locksAvailable {
+			require.True(t, available, "PTY.Resize ran while a daemon, session, tab, or pane state lock was held")
+		}
+	})
 }
 
 func TestPaneRearrangeUsesExplicitTargetAndPreservesPaneIdentity(t *testing.T) {
@@ -294,28 +291,30 @@ func TestPaneRearrangeNoChangeAdapterSideEffects(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := newPaneRearrangeHarness(t, domain.Size{Cols: 80, Rows: 22}, threeColumnTree())
-			ac := &attachedClient{}
-			ac.setSession(h.session)
-			h.session.mu.Lock()
-			h.session.registerAttachmentLocked(ac)
-			h.session.mu.Unlock()
-			invalidations := make(chan renderInvalidation, 2)
-			rc := newRenderCoordinator(renderCoordinatorOptions{onInvalidate: func(inv renderInvalidation) { invalidations <- inv }})
-			rc.attach(ac)
-			h.session.installRenderCoordinator(rc)
-			before := h.snapshot()
+			synctest.Test(t, func(t *testing.T) {
+				h := newPaneRearrangeHarness(t, domain.Size{Cols: 80, Rows: 22}, threeColumnTree())
+				ac := &attachedClient{}
+				ac.setSession(h.session)
+				h.session.mu.Lock()
+				h.session.registerAttachmentLocked(ac)
+				h.session.mu.Unlock()
+				invalidations := make(chan renderInvalidation, 2)
+				rc := newRenderCoordinator(renderCoordinatorOptions{onInvalidate: func(inv renderInvalidation) { invalidations <- inv }})
+				rc.attach(ac)
+				h.session.installRenderCoordinator(rc)
+				before := h.snapshot()
 
-			require.NoError(t, tt.invoke(h, ac))
+				require.NoError(t, tt.invoke(h, ac))
 
-			require.Equal(t, before, h.snapshot(), "adapter no-change must not publish layout state")
-			require.Empty(t, h.daemon.notices.history())
-			if tt.wantCleanupInvalidation {
-				invalidation := awaitInvalidation(t, invalidations)
-				require.Equal(t, "palette.go", invalidation.producer)
-				require.True(t, invalidation.reset)
-			}
-			requireNoInvalidation(t, invalidations)
+				require.Equal(t, before, h.snapshot(), "adapter no-change must not publish layout state")
+				require.Empty(t, h.daemon.notices.history())
+				if tt.wantCleanupInvalidation {
+					invalidation := awaitInvalidation(t, invalidations)
+					require.Equal(t, "palette.go", invalidation.producer)
+					require.True(t, invalidation.reset)
+				}
+				requireNoInvalidation(t, invalidations)
+			})
 		})
 	}
 }
@@ -325,7 +324,7 @@ type paneRearrangeHarness struct {
 	session *session
 	tab     *tab
 	panes   map[layout.PaneID]*pane
-	ptys    map[layout.PaneID]*paneRearrangePTY
+	ptys    map[layout.PaneID]*paneRearrangeState
 	factory *portsmocks.MockPTYFactory
 }
 
@@ -345,19 +344,20 @@ func newPaneRearrangeHarness(t *testing.T, size domain.Size, tree *layout.Tree) 
 	d := newTestDaemon(t, factory, newStubClock(t))
 	ids := layout.LeafIDs(tree.Root)
 	require.NotEmpty(t, ids)
-	ptys := make(map[layout.PaneID]*paneRearrangePTY, len(ids))
+	ptys := make(map[layout.PaneID]*paneRearrangeState, len(ids))
+	mocks := make(map[layout.PaneID]*portsmocks.MockPTY, len(ids))
 	panes := make(map[layout.PaneID]*pane, len(ids))
 	for _, id := range ids {
-		ptys[id] = &paneRearrangePTY{}
+		mocks[id], ptys[id] = newPaneRearrangePTY(t)
 	}
-	tb := newTab(ptys[ids[0]], size)
+	tb := newTab(mocks[ids[0]], size)
 	first := tb.panes["pane-1"]
 	delete(tb.panes, "pane-1")
 	first.id = ids[0]
 	panes[ids[0]] = first
 	tb.panes[ids[0]] = first
 	for _, id := range ids[1:] {
-		p := newPane(id, ptys[id], size)
+		p := newPane(id, mocks[id], size)
 		panes[id] = p
 		tb.panes[id] = p
 	}
@@ -422,29 +422,29 @@ func (h *paneRearrangeHarness) snapshot() paneRearrangeSnapshot {
 	return snapshot
 }
 
+// stateLocksAvailable reports whether every daemon, session, tab and pane
+// state lock can be taken right now (TryLock, so a held lock reads as false
+// rather than blocking).
 func (h *paneRearrangeHarness) stateLocksAvailable() bool {
-	done := make(chan struct{})
-	go func() {
-		h.daemon.mu.Lock()
-		h.session.mu.Lock()
-		h.tab.mu.Lock()
-		for _, p := range h.panes {
-			p.mu.Lock()
+	var locked []*sync.Mutex
+	defer func() {
+		for i := len(locked) - 1; i >= 0; i-- {
+			locked[i].Unlock()
 		}
-		for _, p := range h.panes {
-			p.mu.Unlock()
-		}
-		h.tab.mu.Unlock()
-		h.session.mu.Unlock()
-		h.daemon.mu.Unlock()
-		close(done)
 	}()
-	select {
-	case <-done:
-		return true
-	case <-time.After(250 * time.Millisecond):
-		return false
+	for _, m := range []*sync.Mutex{&h.daemon.mu, &h.session.mu, &h.tab.mu} {
+		if !m.TryLock() {
+			return false
+		}
+		locked = append(locked, m)
 	}
+	for _, p := range h.panes {
+		if !p.mu.TryLock() {
+			return false
+		}
+		locked = append(locked, &p.mu)
+	}
+	return true
 }
 
 func threeColumnTree() *layout.Tree {
@@ -453,44 +453,49 @@ func threeColumnTree() *layout.Tree {
 	}}, Focus: "pane-1"}
 }
 
-type paneRearrangePTY struct {
+// paneRearrangeState is the observable state behind newPaneRearrangePTY's mock.
+type paneRearrangeState struct {
 	mu       sync.Mutex
 	resizes  []domain.Size
 	closes   int
 	onResize func()
 }
 
-func (*paneRearrangePTY) Read([]byte) (int, error)    { return 0, io.EOF }
-func (*paneRearrangePTY) Write(b []byte) (int, error) { return len(b), nil }
-func (p *paneRearrangePTY) Resize(geometry domain.Geometry) error {
-	p.mu.Lock()
-	p.resizes = append(p.resizes, geometry.Size)
-	hook := p.onResize
-	p.mu.Unlock()
-	if hook != nil {
-		hook()
-	}
-	return nil
+func newPaneRearrangePTY(t testing.TB) (*portsmocks.MockPTY, *paneRearrangeState) {
+	t.Helper()
+	st := &paneRearrangeState{}
+	p := portsmocks.NewMockPTY(t)
+	p.EXPECT().Read(mock.Anything).Return(0, io.EOF).Maybe()
+	p.EXPECT().Write(mock.Anything).RunAndReturn(func(b []byte) (int, error) { return len(b), nil }).Maybe()
+	p.EXPECT().Resize(mock.Anything).RunAndReturn(func(geometry domain.Geometry) error {
+		st.mu.Lock()
+		st.resizes = append(st.resizes, geometry.Size)
+		hook := st.onResize
+		st.mu.Unlock()
+		if hook != nil {
+			hook()
+		}
+		return nil
+	}).Maybe()
+	p.EXPECT().Close().RunAndReturn(func() error {
+		st.mu.Lock()
+		st.closes++
+		st.mu.Unlock()
+		return nil
+	}).Maybe()
+	p.EXPECT().Pid().Return(0).Maybe()
+	p.EXPECT().ForegroundPgid().Return(0, nil).Maybe()
+	return p, st
 }
-func (p *paneRearrangePTY) Close() error {
-	p.mu.Lock()
-	p.closes++
-	p.mu.Unlock()
-	return nil
-}
-func (*paneRearrangePTY) Pid() int                     { return 0 }
-func (*paneRearrangePTY) ForegroundPgid() (int, error) { return 0, nil }
 
-func (p *paneRearrangePTY) resizeCount() int {
+func (p *paneRearrangeState) resizeCount() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return len(p.resizes)
 }
 
-func (p *paneRearrangePTY) closeCount() int {
+func (p *paneRearrangeState) closeCount() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.closes
 }
-
-var _ ports.PTY = (*paneRearrangePTY)(nil)

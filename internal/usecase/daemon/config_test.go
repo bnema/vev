@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"testing"
+	"testing/synctest"
 
 	"github.com/stretchr/testify/require"
 
@@ -12,6 +13,9 @@ import (
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 )
 
+// captureKeyHandler records router output.
+//
+//testpolicy:double keys.MockHandler is generated into keys' own _test.go file and cannot be imported from daemon tests
 type captureKeyHandler struct {
 	actions []keys.Action
 	forward [][]byte
@@ -25,66 +29,71 @@ func (h *captureKeyHandler) Action(action keys.Action, _ []byte) {
 }
 
 func TestApplyConfigHotReloadSwapsBindingsAndCodes(t *testing.T) {
-	d := newTestDaemon(t, nil, newStubClock(t))
-	h := &captureKeyHandler{}
-	r := keys.NewRouter(newStubClock(t), h, &d.bindings)
+	synctest.Test(t, func(t *testing.T) {
+		d := newTestDaemon(t, nil, newStubClock(t))
+		h := &captureKeyHandler{}
+		r := keys.NewRouter(newStubClock(t), h, &d.bindings)
 
-	r.Route([]byte("\x1bh"))
-	require.Equal(t, []keys.Action{keys.ActionFocusPaneLeft}, h.actions)
+		r.Route([]byte("\x1bh"))
+		require.Equal(t, []keys.Action{keys.ActionFocusPaneLeft}, h.actions)
 
-	d.ApplyConfig(domain.Config{
-		Theme: domain.ThemeAuto,
-		BindingEntries: []domain.ConfigEntry{
-			{Key: "focus-pane-left", Value: "alt+q"},
-		},
-		Codes: map[string]string{
-			"new-tab": "nt",
-		},
+		d.ApplyConfig(domain.Config{
+			Theme: domain.ThemeAuto,
+			BindingEntries: []domain.ConfigEntry{
+				{Key: "focus-pane-left", Value: "alt+q"},
+			},
+			Codes: map[string]string{
+				"new-tab": "nt",
+			},
+		})
+
+		r.Route([]byte("\x1bh"))
+		require.Equal(t, []keys.Action{keys.ActionFocusPaneLeft}, h.actions, "old key should no longer be intercepted")
+		require.Equal(t, [][]byte{{'\x1b', 'h'}}, h.forward)
+		r.Route([]byte("\x1bq"))
+		require.Equal(t, []keys.Action{keys.ActionFocusPaneLeft, keys.ActionFocusPaneLeft}, h.actions)
+
+		cmd, ok := d.commandByEffectiveCode("NT")
+		require.True(t, ok)
+		require.Equal(t, "new-tab", cmd.Slug)
+		require.Equal(t, "NT", cmd.Code)
 	})
-
-	r.Route([]byte("\x1bh"))
-	require.Equal(t, []keys.Action{keys.ActionFocusPaneLeft}, h.actions, "old key should no longer be intercepted")
-	require.Equal(t, [][]byte{{'\x1b', 'h'}}, h.forward)
-	r.Route([]byte("\x1bq"))
-	require.Equal(t, []keys.Action{keys.ActionFocusPaneLeft, keys.ActionFocusPaneLeft}, h.actions)
-
-	cmd, ok := d.commandByEffectiveCode("NT")
-	require.True(t, ok)
-	require.Equal(t, "new-tab", cmd.Slug)
-	require.Equal(t, "NT", cmd.Code)
 }
 
 func TestApplyThemeCopiesTerminalPaletteAndHotReloadGatesIt(t *testing.T) {
-	p, release := newBlockingPTY(t)
-	defer release()
-	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
+	synctest.Test(t, func(t *testing.T) {
+		p, release := newBlockingPTY(t)
+		defer release()
+		d, sess, ac, _ := newManualSessionWithPTYs(t, p)
+		stopOverlayTimersAtCleanup(t, ac)
 
-	clientPalette := [16]renderer.RGB{}
-	clientPalette[1] = renderer.RGB{R: 1, G: 2, B: 3}
-	clientPalette[12] = renderer.RGB{R: 4, G: 5, B: 6}
-	d.applyTheme(sess, ac, protocol.Theme{
-		HasForeground: true,
-		Foreground:    renderer.RGB{R: 7, G: 8, B: 9},
-		HasBackground: true,
-		Background:    renderer.RGB{R: 10, G: 11, B: 12},
-		Palette:       clientPalette,
-		PaletteKnown:  1<<1 | 1<<12,
+		clientPalette := [16]renderer.RGB{}
+		clientPalette[1] = renderer.RGB{R: 1, G: 2, B: 3}
+		clientPalette[12] = renderer.RGB{R: 4, G: 5, B: 6}
+		d.applyTheme(sess, ac, protocol.Theme{
+			HasForeground: true,
+			Foreground:    renderer.RGB{R: 7, G: 8, B: 9},
+			HasBackground: true,
+			Background:    renderer.RGB{R: 10, G: 11, B: 12},
+			Palette:       clientPalette,
+			PaletteKnown:  1<<1 | 1<<12,
+		})
+
+		require.Equal(t, clientPalette, ac.getClientTheme().Palette)
+		require.Equal(t, uint16(1<<1|1<<12), ac.getClientTheme().PaletteKnown)
+		require.True(t, ac.getAppliedTheme().Raw.UsePalette)
+
+		cfg := domain.Defaults()
+		cfg.ThemePalette = false
+		d.ApplyConfig(cfg)
+
+		// ApplyConfig reuses the live client report and repaints without requiring
+		// a reconnect; only palette inheritance changes.
+		reloaded := ac.getAppliedTheme().Raw
+		require.Equal(t, clientPalette, reloaded.Palette)
+		require.Equal(t, uint16(1<<1|1<<12), reloaded.PaletteKnown)
+		require.False(t, reloaded.UsePalette)
 	})
-
-	require.Equal(t, clientPalette, ac.getClientTheme().Palette)
-	require.Equal(t, uint16(1<<1|1<<12), ac.getClientTheme().PaletteKnown)
-	require.True(t, ac.getAppliedTheme().Raw.UsePalette)
-
-	cfg := domain.Defaults()
-	cfg.ThemePalette = false
-	d.ApplyConfig(cfg)
-
-	// ApplyConfig reuses the live client report and repaints without requiring
-	// a reconnect; only palette inheritance changes.
-	reloaded := ac.getAppliedTheme().Raw
-	require.Equal(t, clientPalette, reloaded.Palette)
-	require.Equal(t, uint16(1<<1|1<<12), reloaded.PaletteKnown)
-	require.False(t, reloaded.UsePalette)
 }
 
 func TestEffectiveThemePaletteGate(t *testing.T) {
@@ -152,13 +161,15 @@ func TestEffectiveThemePaletteGate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d := newTestDaemon(t, nil, newStubClock(t))
-			d.ApplyConfig(tt.config)
+			synctest.Test(t, func(t *testing.T) {
+				d := newTestDaemon(t, nil, newStubClock(t))
+				d.ApplyConfig(tt.config)
 
-			got := d.effectiveTheme(clientTheme)
-			want := tt.want
-			want.UsePalette = tt.usePalette
-			require.Equal(t, want, got)
+				got := d.effectiveTheme(clientTheme)
+				want := tt.want
+				want.UsePalette = tt.usePalette
+				require.Equal(t, want, got)
+			})
 		})
 	}
 }
@@ -209,9 +220,11 @@ func TestApplyConfigPublishesOneSnapshot(t *testing.T) {
 		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			d := newTestDaemon(t, nil, newStubClock(t))
-			d.ApplyConfig(tt.cfg)
-			require.Equal(t, tt.want, d.config.Load())
+			synctest.Test(t, func(t *testing.T) {
+				d := newTestDaemon(t, nil, newStubClock(t))
+				d.ApplyConfig(tt.cfg)
+				require.Equal(t, tt.want, d.config.Load())
+			})
 		})
 	}
 }
@@ -252,122 +265,135 @@ func TestApplyConfigPublishesCopyConfig(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d := newTestDaemon(t, nil, newStubClock(t))
-			if tt.apply != nil {
-				tt.apply(d)
-			}
-			require.Equal(t, tt.want, d.currentCopyConfig())
+			synctest.Test(t, func(t *testing.T) {
+				d := newTestDaemon(t, nil, newStubClock(t))
+				if tt.apply != nil {
+					tt.apply(d)
+				}
+				require.Equal(t, tt.want, d.currentCopyConfig())
+			})
 		})
 	}
 }
 
 func TestApplyConfigPublishesImmutablePaletteSnapshot(t *testing.T) {
-	d := newTestDaemon(t, nil, newStubClock(t))
-	require.Equal(t, domain.Defaults().Palette, d.currentPaletteConfig())
+	synctest.Test(t, func(t *testing.T) {
+		d := newTestDaemon(t, nil, newStubClock(t))
+		require.Equal(t, domain.Defaults().Palette, d.currentPaletteConfig())
 
-	firstConfig := domain.Defaults()
-	firstConfig.Palette = domain.PaletteConfig{Anchor: domain.AnchorTopLeft, AnchorSet: true}
-	d.ApplyConfig(firstConfig)
-	first := d.currentPaletteConfig()
+		firstConfig := domain.Defaults()
+		firstConfig.Palette = domain.PaletteConfig{Anchor: domain.AnchorTopLeft, AnchorSet: true}
+		d.ApplyConfig(firstConfig)
+		first := d.currentPaletteConfig()
 
-	secondConfig := domain.Defaults()
-	secondConfig.Palette = domain.PaletteConfig{Anchor: domain.AnchorBottomRight, AnchorSet: true}
-	d.ApplyConfig(secondConfig)
-	second := d.currentPaletteConfig()
+		secondConfig := domain.Defaults()
+		secondConfig.Palette = domain.PaletteConfig{Anchor: domain.AnchorBottomRight, AnchorSet: true}
+		d.ApplyConfig(secondConfig)
+		second := d.currentPaletteConfig()
 
-	require.Equal(t, domain.PaletteConfig{Anchor: domain.AnchorTopLeft, AnchorSet: true}, first)
-	require.Equal(t, domain.PaletteConfig{Anchor: domain.AnchorBottomRight, AnchorSet: true}, second)
+		require.Equal(t, domain.PaletteConfig{Anchor: domain.AnchorTopLeft, AnchorSet: true}, first)
+		require.Equal(t, domain.PaletteConfig{Anchor: domain.AnchorBottomRight, AnchorSet: true}, second)
+	})
 }
 
 func TestApplyConfigRepaintsActivePaletteWithoutReplacingModel(t *testing.T) {
-	p, release := newBlockingPTY(t)
-	defer release()
-	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	d.enterPalette(sess, ac)
-	awaitFrame(t, sends, "Output")
-	d.handlePaletteInput(ac, []byte("new"))
-	awaitFrame(t, sends, "Output")
-	d.handlePaletteInput(ac, []byte{0x0e})
-	awaitFrame(t, sends, "Output")
+	synctest.Test(t, func(t *testing.T) {
+		p, release := newBlockingPTY(t)
+		defer release()
+		d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+		stopOverlayTimersAtCleanup(t, ac)
+		d.enterPalette(sess, ac)
+		requireEnvelope(t, sends, "Output")
+		d.handlePaletteInput(ac, []byte("new"))
+		requireEnvelope(t, sends, "Output")
+		d.handlePaletteInput(ac, []byte{0x0e})
+		requireEnvelope(t, sends, "Output")
 
-	ac.overlays.paletteMu.Lock()
-	model := ac.overlays.palette
-	query := model.Query()
-	selected, ok := model.Selected()
-	ac.overlays.paletteMu.Unlock()
-	require.True(t, ok)
+		ac.overlays.paletteMu.Lock()
+		model := ac.overlays.palette
+		query := model.Query()
+		selected, ok := model.Selected()
+		ac.overlays.paletteMu.Unlock()
+		require.True(t, ok)
 
-	cfg := domain.Defaults()
-	cfg.Palette = domain.PaletteConfig{Anchor: domain.AnchorTopLeft, AnchorSet: true}
-	d.ApplyConfig(cfg)
-	awaitFrame(t, sends, "Output")
+		cfg := domain.Defaults()
+		cfg.Palette = domain.PaletteConfig{Anchor: domain.AnchorTopLeft, AnchorSet: true}
+		d.ApplyConfig(cfg)
+		requireEnvelope(t, sends, "Output")
 
-	ac.overlays.paletteMu.Lock()
-	defer ac.overlays.paletteMu.Unlock()
-	require.Same(t, model, ac.overlays.palette)
-	require.Equal(t, query, ac.overlays.palette.Query())
-	selectedAfter, ok := ac.overlays.palette.Selected()
-	require.True(t, ok)
-	selectedCommand, ok := selected.Command()
-	require.True(t, ok)
-	selectedAfterCommand, ok := selectedAfter.Command()
-	require.True(t, ok)
-	require.Equal(t, selectedCommand.Slug, selectedAfterCommand.Slug)
-	require.Equal(t, selectedCommand.Code, selectedAfterCommand.Code)
+		ac.overlays.paletteMu.Lock()
+		defer ac.overlays.paletteMu.Unlock()
+		require.Same(t, model, ac.overlays.palette)
+		require.Equal(t, query, ac.overlays.palette.Query())
+		selectedAfter, ok := ac.overlays.palette.Selected()
+		require.True(t, ok)
+		selectedCommand, ok := selected.Command()
+		require.True(t, ok)
+		selectedAfterCommand, ok := selectedAfter.Command()
+		require.True(t, ok)
+		require.Equal(t, selectedCommand.Slug, selectedAfterCommand.Slug)
+		require.Equal(t, selectedCommand.Code, selectedAfterCommand.Code)
+	})
 }
 
 func TestApplyConfigPublishesImmutableFloatingSnapshot(t *testing.T) {
-	d := newTestDaemon(t, nil, newStubClock(t))
-	require.Equal(t, domain.Defaults().Floating, d.currentFloatingConfig())
+	synctest.Test(t, func(t *testing.T) {
+		d := newTestDaemon(t, nil, newStubClock(t))
+		require.Equal(t, domain.Defaults().Floating, d.currentFloatingConfig())
 
-	firstConfig := domain.Defaults()
-	firstConfig.Floating = domain.FloatingConfig{Command: "btop", Width: 70, Height: 60}
-	d.ApplyConfig(firstConfig)
-	first := d.currentFloatingConfig()
+		firstConfig := domain.Defaults()
+		firstConfig.Floating = domain.FloatingConfig{Command: "btop", Width: 70, Height: 60}
+		d.ApplyConfig(firstConfig)
+		first := d.currentFloatingConfig()
 
-	secondConfig := domain.Defaults()
-	secondConfig.Floating = domain.FloatingConfig{Command: "lazygit", Width: 90, Height: 85}
-	d.ApplyConfig(secondConfig)
-	second := d.currentFloatingConfig()
+		secondConfig := domain.Defaults()
+		secondConfig.Floating = domain.FloatingConfig{Command: "lazygit", Width: 90, Height: 85}
+		d.ApplyConfig(secondConfig)
+		second := d.currentFloatingConfig()
 
-	require.Equal(t, domain.FloatingConfig{Command: "btop", Width: 70, Height: 60}, first)
-	require.Equal(t, domain.FloatingConfig{Command: "lazygit", Width: 90, Height: 85}, second)
+		require.Equal(t, domain.FloatingConfig{Command: "btop", Width: 70, Height: 60}, first)
+		require.Equal(t, domain.FloatingConfig{Command: "lazygit", Width: 90, Height: 85}, second)
+	})
 }
 
 func TestApplyConfigPublishesImmutableNavSnapshot(t *testing.T) {
-	d := newTestDaemon(t, nil, newStubClock(t))
-	require.Equal(t, domain.NavConfig{}, d.currentNavConfig())
+	synctest.Test(t, func(t *testing.T) {
+		d := newTestDaemon(t, nil, newStubClock(t))
+		require.Equal(t, domain.NavConfig{}, d.currentNavConfig())
 
-	firstConfig := domain.Defaults()
-	firstConfig.Nav = domain.NavConfig{OverflowTabs: true}
-	d.ApplyConfig(firstConfig)
-	first := d.currentNavConfig()
+		firstConfig := domain.Defaults()
+		firstConfig.Nav = domain.NavConfig{OverflowTabs: true}
+		d.ApplyConfig(firstConfig)
+		first := d.currentNavConfig()
 
-	secondConfig := domain.Defaults()
-	secondConfig.Nav = domain.NavConfig{OverflowSessions: true}
-	d.ApplyConfig(secondConfig)
-	second := d.currentNavConfig()
+		secondConfig := domain.Defaults()
+		secondConfig.Nav = domain.NavConfig{OverflowSessions: true}
+		d.ApplyConfig(secondConfig)
+		second := d.currentNavConfig()
 
-	require.Equal(t, domain.NavConfig{OverflowTabs: true}, first)
-	require.Equal(t, domain.NavConfig{OverflowSessions: true}, second)
+		require.Equal(t, domain.NavConfig{OverflowTabs: true}, first)
+		require.Equal(t, domain.NavConfig{OverflowSessions: true}, second)
+	})
 }
 
 func TestApplyConfigPublishesImmutableTabsSnapshot(t *testing.T) {
-	d := newTestDaemon(t, nil, newStubClock(t))
-	require.Equal(t, domain.Defaults().Tabs, d.currentTabsConfig())
+	synctest.Test(t, func(t *testing.T) {
+		d := newTestDaemon(t, nil, newStubClock(t))
+		require.Equal(t, domain.Defaults().Tabs, d.currentTabsConfig())
 
-	firstConfig := domain.Defaults()
-	firstConfig.Tabs = domain.TabsConfig{TerminalTitle: false}
-	d.ApplyConfig(firstConfig)
-	first := d.currentTabsConfig()
+		firstConfig := domain.Defaults()
+		firstConfig.Tabs = domain.TabsConfig{TerminalTitle: false}
+		d.ApplyConfig(firstConfig)
+		first := d.currentTabsConfig()
 
-	secondConfig := domain.Defaults()
-	secondConfig.Tabs = domain.TabsConfig{TerminalTitle: true}
-	d.ApplyConfig(secondConfig)
-	second := d.currentTabsConfig()
+		secondConfig := domain.Defaults()
+		secondConfig.Tabs = domain.TabsConfig{TerminalTitle: true}
+		d.ApplyConfig(secondConfig)
+		second := d.currentTabsConfig()
 
-	require.Equal(t, domain.TabsConfig{TerminalTitle: false}, first)
-	require.Equal(t, domain.TabsConfig{TerminalTitle: true}, second)
+		require.Equal(t, domain.TabsConfig{TerminalTitle: false}, first)
+		require.Equal(t, domain.TabsConfig{TerminalTitle: true}, second)
+	})
 }
 
 func TestApplyConfigSnapshotRestoreProcesses(t *testing.T) {
@@ -408,143 +434,157 @@ func TestApplyConfigSnapshotRestoreProcesses(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d := newTestDaemon(t, nil, newStubClock(t))
-			if tt.cfg.Snapshot.RestoreProcessesSet || len(tt.cfg.Snapshot.RestoreProcesses) > 0 {
-				d.ApplyConfig(tt.cfg)
-			}
-			tt.check(t, d.restoreProcessAllowlistSnapshot())
+			synctest.Test(t, func(t *testing.T) {
+				d := newTestDaemon(t, nil, newStubClock(t))
+				if tt.cfg.Snapshot.RestoreProcessesSet || len(tt.cfg.Snapshot.RestoreProcesses) > 0 {
+					d.ApplyConfig(tt.cfg)
+				}
+				tt.check(t, d.restoreProcessAllowlistSnapshot())
+			})
 		})
 	}
 }
 
 func TestPaletteCommandsApplyOverridesAndResolveByCode(t *testing.T) {
-	d := newTestDaemon(t, nil, newStubClock(t))
-	d.ApplyConfig(domain.Config{
-		Theme: domain.ThemeAuto,
-		Codes: map[string]string{
-			"new-tab": "NN",
-		},
+	synctest.Test(t, func(t *testing.T) {
+		d := newTestDaemon(t, nil, newStubClock(t))
+		d.ApplyConfig(domain.Config{
+			Theme: domain.ThemeAuto,
+			Codes: map[string]string{
+				"new-tab": "NN",
+			},
+		})
+
+		commands := d.paletteCommands()
+		require.NotEmpty(t, commands)
+		require.Equal(t, "new-tab", commands[0].Slug)
+		require.Equal(t, "NN", commands[0].Code)
+
+		cmd, ok := d.commandByEffectiveCode("nn")
+		require.True(t, ok)
+		require.Equal(t, "new-tab", cmd.Slug)
+		require.Equal(t, "NN", cmd.Code)
 	})
-
-	commands := d.paletteCommands()
-	require.NotEmpty(t, commands)
-	require.Equal(t, "new-tab", commands[0].Slug)
-	require.Equal(t, "NN", commands[0].Code)
-
-	cmd, ok := d.commandByEffectiveCode("nn")
-	require.True(t, ok)
-	require.Equal(t, "new-tab", cmd.Slug)
-	require.Equal(t, "NN", cmd.Code)
 }
 
 func TestPaletteCommandsUseOverrideSnapshotForRecentAndListing(t *testing.T) {
-	d := newTestDaemon(t, nil, newStubClock(t))
-	d.ApplyConfig(domain.Config{
-		Theme: domain.ThemeAuto,
-		Codes: map[string]string{
-			"split-right": "SRX",
-		},
-	})
-	d.paletteHistory.record("SRX")
+	synctest.Test(t, func(t *testing.T) {
+		d := newTestDaemon(t, nil, newStubClock(t))
+		d.ApplyConfig(domain.Config{
+			Theme: domain.ThemeAuto,
+			Codes: map[string]string{
+				"split-right": "SRX",
+			},
+		})
+		d.paletteHistory.record("SRX")
 
-	commands := d.paletteCommands()
-	require.NotEmpty(t, commands)
-	require.Equal(t, "split-right", commands[0].Slug)
-	require.Equal(t, "SRX", commands[0].Code)
+		commands := d.paletteCommands()
+		require.NotEmpty(t, commands)
+		require.Equal(t, "split-right", commands[0].Slug)
+		require.Equal(t, "SRX", commands[0].Code)
 
-	seen := 0
-	for _, cmd := range commands {
-		if cmd.Slug == "split-right" {
-			seen++
-			require.Equal(t, "SRX", cmd.Code)
+		seen := 0
+		for _, cmd := range commands {
+			if cmd.Slug == "split-right" {
+				seen++
+				require.Equal(t, "SRX", cmd.Code)
+			}
 		}
-	}
-	require.Equal(t, 1, seen)
+		require.Equal(t, 1, seen)
+	})
 }
 
 func TestCodeOverrideConflictRestoresDefaultWithoutDuplicates(t *testing.T) {
-	d := newTestDaemon(t, nil, newStubClock(t))
-	d.ApplyConfig(domain.Config{
-		Theme: domain.ThemeAuto,
-		Codes: map[string]string{
-			"new-session": "CNT",
-			"new-tab":     "DET",
-		},
-	})
+	synctest.Test(t, func(t *testing.T) {
+		d := newTestDaemon(t, nil, newStubClock(t))
+		d.ApplyConfig(domain.Config{
+			Theme: domain.ThemeAuto,
+			Codes: map[string]string{
+				"new-session": "CNT",
+				"new-tab":     "DET",
+			},
+		})
 
-	commands := d.paletteCommands()
-	byCode := make(map[string]string, len(commands))
-	for _, cmd := range commands {
-		if existing, ok := byCode[cmd.Code]; ok {
-			t.Fatalf("duplicate effective code %q for %q and %q", cmd.Code, existing, cmd.Slug)
+		commands := d.paletteCommands()
+		byCode := make(map[string]string, len(commands))
+		for _, cmd := range commands {
+			if existing, ok := byCode[cmd.Code]; ok {
+				t.Fatalf("duplicate effective code %q for %q and %q", cmd.Code, existing, cmd.Slug)
+			}
+			byCode[cmd.Code] = cmd.Slug
 		}
-		byCode[cmd.Code] = cmd.Slug
-	}
-	require.Equal(t, "new-tab", byCode["CNT"])
-	require.Equal(t, "new-session", byCode["CNS"])
-	require.Equal(t, "detach", byCode["DET"])
+		require.Equal(t, "new-tab", byCode["CNT"])
+		require.Equal(t, "new-session", byCode["CNS"])
+		require.Equal(t, "detach", byCode["DET"])
+	})
 }
 
 func TestCodeOverrideVacatedDefaultIsReusableRegardlessOfSlugOrder(t *testing.T) {
-	d := newTestDaemon(t, nil, newStubClock(t))
-	d.ApplyConfig(domain.Config{
-		Theme: domain.ThemeAuto,
-		Codes: map[string]string{
-			"new-tab":     "NT",
-			"new-session": "CNT",
-		},
-	})
+	synctest.Test(t, func(t *testing.T) {
+		d := newTestDaemon(t, nil, newStubClock(t))
+		d.ApplyConfig(domain.Config{
+			Theme: domain.ThemeAuto,
+			Codes: map[string]string{
+				"new-tab":     "NT",
+				"new-session": "CNT",
+			},
+		})
 
-	commands := d.paletteCommands()
-	byCode := make(map[string]string, len(commands))
-	for _, cmd := range commands {
-		if existing, ok := byCode[cmd.Code]; ok {
-			t.Fatalf("duplicate effective code %q for %q and %q", cmd.Code, existing, cmd.Slug)
+		commands := d.paletteCommands()
+		byCode := make(map[string]string, len(commands))
+		for _, cmd := range commands {
+			if existing, ok := byCode[cmd.Code]; ok {
+				t.Fatalf("duplicate effective code %q for %q and %q", cmd.Code, existing, cmd.Slug)
+			}
+			byCode[cmd.Code] = cmd.Slug
 		}
-		byCode[cmd.Code] = cmd.Slug
-	}
-	require.Equal(t, "new-tab", byCode["NT"])
-	require.Equal(t, "new-session", byCode["CNT"])
+		require.Equal(t, "new-tab", byCode["NT"])
+		require.Equal(t, "new-session", byCode["CNT"])
+	})
 }
 
 func TestBuildCodeOverridesOrdersIndependentConflictWarnings(t *testing.T) {
-	d := newTestDaemon(t, nil, newStubClock(t))
+	synctest.Test(t, func(t *testing.T) {
+		d := newTestDaemon(t, nil, newStubClock(t))
 
-	_, warnings := d.buildCodeOverrides(map[string]string{
-		"new-session": "ZZ",
-		"new-tab":     "ZZ",
-		"split-left":  "YY",
-		"split-right": "YY",
+		_, warnings := d.buildCodeOverrides(map[string]string{
+			"new-session": "ZZ",
+			"new-tab":     "ZZ",
+			"split-left":  "YY",
+			"split-right": "YY",
+		})
+
+		require.Equal(t, []domain.Warning{
+			{Msg: `command code "YY" for "split-right" conflicts with "split-left"`},
+			{Msg: `command code "ZZ" for "new-tab" conflicts with "new-session"`},
+		}, warnings)
 	})
-
-	require.Equal(t, []domain.Warning{
-		{Msg: `command code "YY" for "split-right" conflicts with "split-left"`},
-		{Msg: `command code "ZZ" for "new-tab" conflicts with "new-session"`},
-	}, warnings)
 }
 
 func TestApplyConfigInvalidDefaultsWithoutPanic(t *testing.T) {
-	d := newTestDaemon(t, nil, newStubClock(t))
-	require.NotPanics(t, func() {
-		d.ApplyConfig(domain.Config{
-			Theme: domain.ThemeAuto,
-			BindingEntries: []domain.ConfigEntry{
-				{Key: "unknown-action", Value: "alt+x"},
-				{Key: "focus-pane-left", Value: "ctrl+x"},
-			},
-			Codes: map[string]string{
-				"new-tab":         "toolong",
-				"split-right":     "det",
-				"missing-command": "OK",
-			},
+	synctest.Test(t, func(t *testing.T) {
+		d := newTestDaemon(t, nil, newStubClock(t))
+		require.NotPanics(t, func() {
+			d.ApplyConfig(domain.Config{
+				Theme: domain.ThemeAuto,
+				BindingEntries: []domain.ConfigEntry{
+					{Key: "unknown-action", Value: "alt+x"},
+					{Key: "focus-pane-left", Value: "ctrl+x"},
+				},
+				Codes: map[string]string{
+					"new-tab":         "toolong",
+					"split-right":     "det",
+					"missing-command": "OK",
+				},
+			})
 		})
-	})
 
-	cmd, ok := d.commandByEffectiveCode("CNT")
-	require.True(t, ok)
-	require.Equal(t, "new-tab", cmd.Slug)
-	_, ok = d.commandByEffectiveCode("TOOLONG")
-	require.False(t, ok)
+		cmd, ok := d.commandByEffectiveCode("CNT")
+		require.True(t, ok)
+		require.Equal(t, "new-tab", cmd.Slug)
+		_, ok = d.commandByEffectiveCode("TOOLONG")
+		require.False(t, ok)
+	})
 }
 
 func TestConfigReloadNoticeMessageIncludesLineOnlyWhenKnown(t *testing.T) {
@@ -572,33 +612,35 @@ func TestConfigReloadNoticeMessageIncludesLineOnlyWhenKnown(t *testing.T) {
 }
 
 func TestApplyConfigSurfacesOneNoticeAggregatingAllWarnings(t *testing.T) {
-	d := newTestDaemon(t, nil, newStubClock(t))
-	d.ApplyConfig(domain.Config{
-		Theme: domain.ThemeAuto,
-		BindingEntries: []domain.ConfigEntry{
-			{Key: "unknown-action", Value: "alt+x"},
-		},
-		Codes: map[string]string{
-			"missing-command": "OK",
-			"new-tab":         "toolong",
-		},
-	})
+	synctest.Test(t, func(t *testing.T) {
+		d := newTestDaemon(t, nil, newStubClock(t))
+		d.ApplyConfig(domain.Config{
+			Theme: domain.ThemeAuto,
+			BindingEntries: []domain.ConfigEntry{
+				{Key: "unknown-action", Value: "alt+x"},
+			},
+			Codes: map[string]string{
+				"missing-command": "OK",
+				"new-tab":         "toolong",
+			},
+		})
 
-	history := d.notices.history()
-	var reloadNotices []domain.Notification
-	for _, n := range history {
-		if n.Code == domain.NoticeConfigReload {
-			reloadNotices = append(reloadNotices, n)
+		history := d.notices.history()
+		var reloadNotices []domain.Notification
+		for _, n := range history {
+			if n.Code == domain.NoticeConfigReload {
+				reloadNotices = append(reloadNotices, n)
+			}
 		}
-	}
-	require.Len(t, reloadNotices, 1, "expected exactly one config-reload notice per ApplyConfig call")
+		require.Len(t, reloadNotices, 1, "expected exactly one config-reload notice per ApplyConfig call")
 
-	n := reloadNotices[0]
-	require.Equal(t, domain.NoticeWarn, n.Severity)
-	require.Equal(t, domain.SessionID(""), n.SessionID, "config reload notice must be global")
-	require.Contains(t, n.Message, "config reloaded with 3 warning(s):")
-	require.NotContains(t, n.Message, "line 0:")
-	require.Contains(t, n.Details, `unknown action "unknown-action"`)
-	require.Contains(t, n.Details, `unknown command code slug "missing-command"`)
-	require.Contains(t, n.Details, `invalid command code for "new-tab"`)
+		n := reloadNotices[0]
+		require.Equal(t, domain.NoticeWarn, n.Severity)
+		require.Equal(t, domain.SessionID(""), n.SessionID, "config reload notice must be global")
+		require.Contains(t, n.Message, "config reloaded with 3 warning(s):")
+		require.NotContains(t, n.Message, "line 0:")
+		require.Contains(t, n.Details, `unknown action "unknown-action"`)
+		require.Contains(t, n.Details, `unknown command code slug "missing-command"`)
+		require.Contains(t, n.Details, `invalid command code for "new-tab"`)
+	})
 }

@@ -6,12 +6,15 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	renderer "github.com/bnema/vev-vt/ansi"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/domain/layout"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/internal/usecase/ui"
 )
@@ -161,55 +164,59 @@ func TestCalculatePreferredFloatingGeometry(t *testing.T) {
 }
 
 func TestResponsiveFloatingZeroContentDrawerRemainsCommittedAndTargeted(t *testing.T) {
-	cfg := domain.FloatingConfig{Width: 100, Height: 100}
-	geometry := calculateContentFloatingGeometry(domain.Size{Cols: 79, Rows: 2}, cfg)
-	require.False(t, geometry.valid())
-	require.True(t, geometry.committable())
-	require.Equal(t, domain.Rect{Width: 1, Height: 1}, geometry.ptyRect())
+	synctest.Test(t, func(t *testing.T) {
+		cfg := domain.FloatingConfig{Width: 100, Height: 100}
+		geometry := calculateContentFloatingGeometry(domain.Size{Cols: 79, Rows: 2}, cfg)
+		require.False(t, geometry.valid())
+		require.True(t, geometry.committable())
+		require.Equal(t, domain.Rect{Width: 1, Height: 1}, geometry.ptyRect())
 
-	d := newTestDaemon(t, nil, newStubClock(t))
-	d.ApplyConfig(domain.Config{Floating: cfg})
-	tb := newTab(nil, domain.Size{Cols: 79, Rows: 2})
-	sess := &session{sessionCore: sessionCore{name: "test"}, tabs: []*tab{tb}, ctx: t.Context()}
-	spec, err := d.newFloatingLaunchSpec(sess, tb, cfg, true)
-	require.NoError(t, err)
-	require.Equal(t, geometry, spec.geometry, "the 1x1 PTY fallback must not replace drawer presentation")
-	require.Equal(t, domain.Size{Cols: 1, Rows: 1}, spec.size)
+		d := newTestDaemon(t, nil, newStubClock(t))
+		d.ApplyConfig(domain.Config{Floating: cfg})
+		tb := newTab(nil, domain.Size{Cols: 79, Rows: 2})
+		sess := &session{sessionCore: sessionCore{name: "test"}, tabs: []*tab{tb}, ctx: t.Context()}
+		spec, err := d.newFloatingLaunchSpec(sess, tb, cfg, true)
+		require.NoError(t, err)
+		require.Equal(t, geometry, spec.geometry, "the 1x1 PTY fallback must not replace drawer presentation")
+		require.Equal(t, domain.Size{Cols: 1, Rows: 1}, spec.size)
 
-	floating := newPane("floating", nil, spec.size)
-	floating.popupGeometry = spec.geometry
-	installTestFloating(tb, floating, true)
-	tb.mu.Lock()
-	gotPane, gotGeometry, visible := tb.visibleFloatingSnapshotLocked(cfg)
-	require.Same(t, floating, tb.terminalTargetLocked())
-	tb.mu.Unlock()
-	require.True(t, visible)
-	require.Same(t, floating, gotPane)
-	require.Equal(t, geometry, gotGeometry)
+		floating := newPane("floating", nil, spec.size)
+		floating.popupGeometry = spec.geometry
+		installTestFloating(tb, floating, true)
+		tb.mu.Lock()
+		gotPane, gotGeometry, visible := tb.visibleFloatingSnapshotLocked(cfg)
+		require.Same(t, floating, tb.terminalTargetLocked())
+		tb.mu.Unlock()
+		require.True(t, visible)
+		require.Same(t, floating, gotPane)
+		require.Equal(t, geometry, gotGeometry)
+	})
 }
 
 func TestResponsiveFloatingResizeCommitsZeroContentDrawerWithoutPhysicalResize(t *testing.T) {
-	cfg := domain.FloatingConfig{Width: 100, Height: 100}
-	initial := calculateContentFloatingGeometry(domain.Size{Cols: 80, Rows: 22}, cfg)
-	requested := calculateContentFloatingGeometry(domain.Size{Cols: 79, Rows: 2}, cfg)
-	pty := &resizePTY{}
-	floating := newPane("floating", pty, rectSize(initial.Inner))
-	floating.rect = initial.Inner
-	floating.popupGeometry = initial
-	tb := newTab(nil, domain.Size{Cols: 79, Rows: 2})
-	installTestFloating(tb, floating, true)
-	d := newTestDaemon(t, nil, newStubClock(t))
-	d.ApplyConfig(domain.Config{Floating: cfg})
+	synctest.Test(t, func(t *testing.T) {
+		cfg := domain.FloatingConfig{Width: 100, Height: 100}
+		initial := calculateContentFloatingGeometry(domain.Size{Cols: 80, Rows: 22}, cfg)
+		requested := calculateContentFloatingGeometry(domain.Size{Cols: 79, Rows: 2}, cfg)
+		ptyMock, pty := newResizePTY(t, &resizeState{})
+		floating := newPane("floating", ptyMock, rectSize(initial.Inner))
+		floating.rect = initial.Inner
+		floating.popupGeometry = initial
+		tb := newTab(nil, domain.Size{Cols: 79, Rows: 2})
+		installTestFloating(tb, floating, true)
+		d := newTestDaemon(t, nil, newStubClock(t))
+		d.ApplyConfig(domain.Config{Floating: cfg})
 
-	sess := &session{tabs: []*tab{tb}}
-	failed, ok := sess.geometry.applyVisibleFloatingLayout(d, sess, tb, nil)
-	require.True(t, ok)
-	require.Empty(t, failed)
-	require.Empty(t, pty.sizes(), "a zero-inner drawer must not issue a synthetic PTY resize")
-	require.Equal(t, requested, floating.popupGeometry)
-	require.Equal(t, initial.Inner, floating.rect, "physical geometry remains at the last usable size")
-	require.Equal(t, initial.Inner.Width, floating.screen.Columns())
-	require.Equal(t, initial.Inner.Height, floating.screen.Rows())
+		sess := &session{tabs: []*tab{tb}}
+		failed, ok := sess.geometry.applyVisibleFloatingLayout(d, sess, tb, nil)
+		require.True(t, ok)
+		require.Empty(t, failed)
+		require.Empty(t, pty.sizes(), "a zero-inner drawer must not issue a synthetic PTY resize")
+		require.Equal(t, requested, floating.popupGeometry)
+		require.Equal(t, initial.Inner, floating.rect, "physical geometry remains at the last usable size")
+		require.Equal(t, initial.Inner.Width, floating.screen.Columns())
+		require.Equal(t, initial.Inner.Height, floating.screen.Rows())
+	})
 }
 
 func TestFloatingAxisGeometryEndpointsAndTinyBorders(t *testing.T) {
@@ -281,57 +288,59 @@ func TestComposeCapturedFloatingFrameDoesNotMutateSourceAndDamagesTitle(t *testi
 }
 
 func TestComposeCapturedFloatingFrameClipsRetainedGeometryAfterFailedShrink(t *testing.T) {
-	base := renderer.NewFrame(15, 7)
-	for y := range base.Height {
-		for x := range base.Width {
-			base.Set(x, y, renderer.Cell{Rune: '·'})
+	synctest.Test(t, func(t *testing.T) {
+		base := renderer.NewFrame(15, 7)
+		for y := range base.Height {
+			for x := range base.Width {
+				base.Set(x, y, renderer.Cell{Rune: '·'})
+			}
 		}
-	}
-	content := domain.Rect{Y: 1, Width: 15, Height: 5}
-	retained := calculateContentFloatingGeometry(
-		domain.Size{Cols: 100, Rows: 30},
-		domain.FloatingConfig{Width: 80, Height: 80},
-	)
-	pty := &resizePTY{err: errors.New("resize failed")}
-	floatingPane := newPane("floating", pty, rectSize(retained.Inner))
-	floatingPane.rect = retained.Inner
-	floatingPane.popupGeometry = retained
-	seed := renderer.NewFrame(floatingPane.screen.Columns(), floatingPane.screen.Rows())
-	for y := range seed.Height {
-		for x := range seed.Width {
-			seed.Set(x, y, renderer.Cell{Rune: rune('a' + y*10 + x)})
+		content := domain.Rect{Y: 1, Width: 15, Height: 5}
+		retained := calculateContentFloatingGeometry(
+			domain.Size{Cols: 100, Rows: 30},
+			domain.FloatingConfig{Width: 80, Height: 80},
+		)
+		ptyMock, _ := newResizePTY(t, &resizeState{err: errors.New("resize failed")})
+		floatingPane := newPane("floating", ptyMock, rectSize(retained.Inner))
+		floatingPane.rect = retained.Inner
+		floatingPane.popupGeometry = retained
+		seed := renderer.NewFrame(floatingPane.screen.Columns(), floatingPane.screen.Rows())
+		for y := range seed.Height {
+			for x := range seed.Width {
+				seed.Set(x, y, renderer.Cell{Rune: rune('a' + y*10 + x)})
+			}
 		}
-	}
-	writeTestFrame(t, floatingPane.screen, seed)
-	requested := calculateContentFloatingGeometry(rectSize(content), domain.FloatingConfig{Width: 80, Height: 80})
-	d := newTestDaemon(t, nil, newStubClock(t))
-	require.False(t, applyFloatingResizePlanForTest(d, floatingPane, requested))
-	require.Equal(t, retained, floatingPane.popupGeometry, "failed resize must retain the committed geometry")
-	floatingPane.mu.Lock()
-	captured := capturePaneRenderStateLockedInto(floatingPane, retained.Inner, capturedPaneRenderState{})
-	floatingPane.mu.Unlock()
+		writeTestFrame(t, floatingPane.screen, seed)
+		requested := calculateContentFloatingGeometry(rectSize(content), domain.FloatingConfig{Width: 80, Height: 80})
+		d := newTestDaemon(t, nil, newStubClock(t))
+		require.False(t, applyFloatingResizePlanForTest(d, floatingPane, requested))
+		require.Equal(t, retained, floatingPane.popupGeometry, "failed resize must retain the committed geometry")
+		floatingPane.mu.Lock()
+		captured := capturePaneRenderStateLockedInto(floatingPane, retained.Inner, capturedPaneRenderState{})
+		floatingPane.mu.Unlock()
 
-	var frame renderer.Frame
-	require.NotPanics(t, func() {
-		frame, _ = composeCapturedFloatingFrame(floatingComposeInput{
-			baseFrame: base,
-			floating: capturedFloatingRenderState{
-				visible:    true,
-				pane:       captured,
-				geometry:   retained,
-				generation: 1,
-			},
-			content: content,
-			full:    true,
+		var frame renderer.Frame
+		require.NotPanics(t, func() {
+			frame, _ = composeCapturedFloatingFrame(floatingComposeInput{
+				baseFrame: base,
+				floating: capturedFloatingRenderState{
+					visible:    true,
+					pane:       captured,
+					geometry:   retained,
+					generation: 1,
+				},
+				content: content,
+				full:    true,
+			})
 		})
-	})
 
-	for y := range 4 {
-		require.Equal(t, "···············", rowText(frame.Row(y)), "preserved frame row %d must remain outside the retained popup", y)
-	}
-	require.Equal(t, "··········┌────", rowText(frame.Row(4)), "only the visible top-border intersection is painted")
-	require.Equal(t, "··········│abcd", rowText(frame.Row(5)), "visible pane cells retain their source coordinates")
-	require.Equal(t, "··········│klmn", rowText(frame.Row(6)), "bottom clipping must not shift the retained source")
+		for y := range 4 {
+			require.Equal(t, "···············", rowText(frame.Row(y)), "preserved frame row %d must remain outside the retained popup", y)
+		}
+		require.Equal(t, "··········┌────", rowText(frame.Row(4)), "only the visible top-border intersection is painted")
+		require.Equal(t, "··········│abcd", rowText(frame.Row(5)), "visible pane cells retain their source coordinates")
+		require.Equal(t, "··········│klmn", rowText(frame.Row(6)), "bottom clipping must not shift the retained source")
+	})
 }
 
 func TestComposeCapturedFloatingFrameOffsetsSourceForClippedTopLeft(t *testing.T) {
@@ -550,86 +559,93 @@ func TestResizeFloatingPaneCommitsSameSizeGeometryWithoutPTYResize(t *testing.T)
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			pty := &resizePTY{}
-			p := newPane("floating", pty, rectSize(initial.Inner))
-			p.rect, p.popupGeometry = initial.Inner, initial
-			d := newTestDaemon(t, nil, newStubClock(t))
+			synctest.Test(t, func(t *testing.T) {
+				ptyMock, pty := newResizePTY(t, &resizeState{})
+				p := newPane("floating", ptyMock, rectSize(initial.Inner))
+				p.rect, p.popupGeometry = initial.Inner, initial
+				d := newTestDaemon(t, nil, newStubClock(t))
 
-			require.True(t, applyFloatingResizePlanForTest(d, p, tt.next))
-			require.Empty(t, pty.sizes(), "same-size geometry must not resize the PTY")
-			require.Equal(t, tt.next.Inner, p.rect)
-			require.Equal(t, tt.next, p.popupGeometry)
-			require.Equal(t, 6, p.screen.Columns())
-			require.Equal(t, 3, p.screen.Rows())
+				require.True(t, applyFloatingResizePlanForTest(d, p, tt.next))
+				require.Empty(t, pty.sizes(), "same-size geometry must not resize the PTY")
+				require.Equal(t, tt.next.Inner, p.rect)
+				require.Equal(t, tt.next, p.popupGeometry)
+				require.Equal(t, 6, p.screen.Columns())
+				require.Equal(t, 3, p.screen.Rows())
+			})
 		})
 	}
 }
 
 func TestComposeFloatingFrameRendersPaneOwnedCommandFallback(t *testing.T) {
-	d := newTestDaemon(t, nil, newStubClock(t))
-	d.shell = "/usr/bin/fish"
-	p := newPane("floating", nil, domain.Size{Cols: 6, Rows: 3})
-	p.title.displayFallback = floatingCommandFallback("btop --utf", d.shell)
-	require.Equal(t, "btop", d.refreshPaneDisplayTitle(nil, p, true))
+	synctest.Test(t, func(t *testing.T) {
+		d := newTestDaemon(t, nil, newStubClock(t))
+		d.shell = "/usr/bin/fish"
+		p := newPane("floating", nil, domain.Size{Cols: 6, Rows: 3})
+		p.title.displayFallback = floatingCommandFallback("btop --utf", d.shell)
+		require.Equal(t, "btop", d.refreshPaneDisplayTitle(nil, p, true))
 
-	base := renderer.NewFrame(40, 12)
-	content := domain.Rect{Y: 1, Width: 40, Height: 10}
-	cfg := domain.FloatingConfig{Width: 80, Height: 80}
-	geometry := calculateContentFloatingGeometry(domain.Size{Cols: content.Width, Rows: content.Height}, cfg)
-	captured := capturedPaneRenderState{frame: renderer.NewFrame(geometry.Inner.Width, geometry.Inner.Height), title: "btop", titleGeneration: 1}
-	frame, _ := composeCapturedFloatingFrame(floatingComposeInput{
-		baseFrame: base,
-		floating: capturedFloatingRenderState{
-			visible: true, pane: captured, geometry: geometry, title: captured.title, generation: 1, titleGeneration: captured.titleGeneration,
-		},
-		content: content,
-		theme:   themeui.Theme{},
+		base := renderer.NewFrame(40, 12)
+		content := domain.Rect{Y: 1, Width: 40, Height: 10}
+		cfg := domain.FloatingConfig{Width: 80, Height: 80}
+		geometry := calculateContentFloatingGeometry(domain.Size{Cols: content.Width, Rows: content.Height}, cfg)
+		captured := capturedPaneRenderState{frame: renderer.NewFrame(geometry.Inner.Width, geometry.Inner.Height), title: "btop", titleGeneration: 1}
+		frame, _ := composeCapturedFloatingFrame(floatingComposeInput{
+			baseFrame: base,
+			floating: capturedFloatingRenderState{
+				visible: true, pane: captured, geometry: geometry, title: captured.title, generation: 1, titleGeneration: captured.titleGeneration,
+			},
+			content: content,
+			theme:   themeui.Theme{},
+		})
+		geometry = geometry.translate(content.X, content.Y)
+		var gotTitle strings.Builder
+		for x := geometry.Bounds.X + 2; x < geometry.Bounds.X+geometry.Bounds.Width-2; x++ {
+			gotTitle.WriteRune(frame.At(x, geometry.Bounds.Y).Rune)
+		}
+		require.Equal(t, "btop", strings.TrimRight(gotTitle.String(), "─"))
 	})
-	geometry = geometry.translate(content.X, content.Y)
-	var gotTitle strings.Builder
-	for x := geometry.Bounds.X + 2; x < geometry.Bounds.X+geometry.Bounds.Width-2; x++ {
-		gotTitle.WriteRune(frame.At(x, geometry.Bounds.Y).Rune)
-	}
-	require.Equal(t, "btop", strings.TrimRight(gotTitle.String(), "─"))
 }
 
 func TestCaptureAndComposeFloatingFrameSynchronizesWithPTYReader(t *testing.T) {
-	p := newPane("floating", nil, domain.Size{Cols: 80, Rows: 24})
-	tb := newTab(nil, domain.Size{Cols: 80, Rows: 24})
-	installTestFloating(tb, p, true)
-	ac := &attachedClient{}
-	ac.initOverlays()
-	sess := &session{sessionCore: sessionCore{attachments: map[*attachedClient]struct{}{ac: {}}}, tabs: []*tab{tb}}
-	base := barState{}
-	cfg := domain.FloatingConfig{Width: 100, Height: 100}
+	synctest.Test(t, func(t *testing.T) {
+		p := newPane("floating", nil, domain.Size{Cols: 80, Rows: 24})
+		tb := newTab(nil, domain.Size{Cols: 80, Rows: 24})
+		installTestFloating(tb, p, true)
+		ac := &attachedClient{}
+		ac.initOverlays()
+		stopOverlayTimersAtCleanup(t, ac)
+		sess := &session{sessionCore: sessionCore{attachments: map[*attachedClient]struct{}{ac: {}}}, tabs: []*tab{tb}}
+		base := barState{}
+		cfg := domain.FloatingConfig{Width: 100, Height: 100}
 
-	start := make(chan struct{})
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		<-start
-		for range 500 {
-			p.mu.Lock()
-			p.screen.Write([]byte("\x1b[Hreader"))
-			p.mu.Unlock()
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		<-start
-		cache := composeCacheInput{}
-		for range 500 {
-			ac.sendMu.Lock()
-			state, ok := captureRenderState(sess, ac, renderCaptureRequest{bars: base, floatingCfg: cfg})
-			ac.sendMu.Unlock()
-			require.True(t, ok)
-			out := composeFrame(*state, cache)
-			cache = out.cache
-		}
-	}()
-	close(start)
-	wg.Wait()
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			for range 500 {
+				p.mu.Lock()
+				p.screen.Write([]byte("\x1b[Hreader"))
+				p.mu.Unlock()
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			cache := composeCacheInput{}
+			for range 500 {
+				ac.sendMu.Lock()
+				state, ok := captureRenderState(sess, ac, renderCaptureRequest{bars: base, floatingCfg: cfg})
+				ac.sendMu.Unlock()
+				require.True(t, ok)
+				out := composeFrame(*state, cache)
+				cache = out.cache
+			}
+		}()
+		close(start)
+		wg.Wait()
+	})
 }
 
 func TestDrawFloatingBorderOmitsTinyAxes(t *testing.T) {
@@ -875,190 +891,201 @@ func BenchmarkComposeCapturedFloatingFrameCached(b *testing.B) {
 }
 
 func TestToggleFloatingResizesHiddenPaneOnShowAndRetriesFailure(t *testing.T) {
-	d := newTestDaemon(t, nil, newStubClock(t))
-	d.ApplyConfig(domain.Config{Floating: domain.FloatingConfig{Width: 50, Height: 50}})
-	tb := newTab(nil, domain.Size{Cols: 80, Rows: 24})
-	sess := &session{tabs: []*tab{tb}}
+	synctest.Test(t, func(t *testing.T) {
+		d := newTestDaemon(t, nil, newStubClock(t))
+		d.ApplyConfig(domain.Config{Floating: domain.FloatingConfig{Width: 50, Height: 50}})
+		tb := newTab(nil, domain.Size{Cols: 80, Rows: 24})
+		sess := &session{tabs: []*tab{tb}}
 
-	initialGeometry := calculateContentFloatingGeometry(domain.Size{Cols: 80, Rows: 24}, d.currentFloatingConfig())
-	currentGeometry := calculateContentFloatingGeometry(domain.Size{Cols: 100, Rows: 40}, d.currentFloatingConfig())
-	initial := initialGeometry.Inner
-	current := currentGeometry.Inner
-	pty := &resizePTY{errs: []error{errors.New("first show fails"), nil}}
-	floating := newPane("floating", pty, rectSize(initial))
-	floating.rect = initial
-	floating.popupGeometry = initialGeometry
+		initialGeometry := calculateContentFloatingGeometry(domain.Size{Cols: 80, Rows: 24}, d.currentFloatingConfig())
+		currentGeometry := calculateContentFloatingGeometry(domain.Size{Cols: 100, Rows: 40}, d.currentFloatingConfig())
+		initial := initialGeometry.Inner
+		current := currentGeometry.Inner
+		ptyMock, pty := newResizePTY(t, &resizeState{errs: []error{errors.New("first show fails"), nil}})
+		floating := newPane("floating", ptyMock, rectSize(initial))
+		floating.rect = initial
+		floating.popupGeometry = initialGeometry
 
-	// Prewarming installs a hidden pane at the initial geometry.
-	tb.mu.Lock()
-	generation := tb.beginFloatingWarmLocked(false)
-	require.True(t, tb.installFloatingLocked(floating, generation))
-	require.Equal(t, floatingHidden, tb.floating.state)
-	require.False(t, tb.floating.desiredVisible)
-	tb.mu.Unlock()
-	// A client resize changes tab geometry but must leave the hidden PTY alone.
-	d.resize(sess, nil, domain.Size{Cols: 100, Rows: 42})
-	require.Empty(t, pty.sizes())
+		// Prewarming installs a hidden pane at the initial geometry.
+		tb.mu.Lock()
+		generation := tb.beginFloatingWarmLocked(false)
+		require.True(t, tb.installFloatingLocked(floating, generation))
+		require.Equal(t, floatingHidden, tb.floating.state)
+		require.False(t, tb.floating.desiredVisible)
+		tb.mu.Unlock()
+		// A client resize changes tab geometry but must leave the hidden PTY alone.
+		d.resize(sess, nil, domain.Size{Cols: 100, Rows: 42})
+		require.Empty(t, pty.sizes())
 
-	// Showing attempts the current size before paint. A failed resize retains
-	// the complete previously committed render and input geometry.
-	require.NoError(t, d.toggleFloating(sess, nil))
-	require.Equal(t, []domain.Size{rectSize(current)}, pty.sizes())
-	require.Equal(t, initial, floating.rect)
-	require.Equal(t, initial.Width, floating.screen.Columns())
-	require.Equal(t, initial.Height, floating.screen.Rows())
-	require.Equal(t, initialGeometry, floating.popupGeometry)
+		// Showing attempts the current size before paint. A failed resize retains
+		// the complete previously committed render and input geometry.
+		require.NoError(t, d.toggleFloating(sess, nil))
+		require.Equal(t, []domain.Size{rectSize(current)}, pty.sizes())
+		require.Equal(t, initial, floating.rect)
+		require.Equal(t, initial.Width, floating.screen.Columns())
+		require.Equal(t, initial.Height, floating.screen.Rows())
+		require.Equal(t, initialGeometry, floating.popupGeometry)
 
-	require.NoError(t, d.toggleFloating(sess, nil)) // hide
-	require.NoError(t, d.toggleFloating(sess, nil)) // retry show
-	require.Equal(t, []domain.Size{rectSize(current), rectSize(current)}, pty.sizes())
-	require.Equal(t, current, floating.rect)
-	require.Equal(t, current.Width, floating.screen.Columns())
-	require.Equal(t, current.Height, floating.screen.Rows())
-	require.Equal(t, currentGeometry, floating.popupGeometry)
+		require.NoError(t, d.toggleFloating(sess, nil)) // hide
+		require.NoError(t, d.toggleFloating(sess, nil)) // retry show
+		require.Equal(t, []domain.Size{rectSize(current), rectSize(current)}, pty.sizes())
+		require.Equal(t, current, floating.rect)
+		require.Equal(t, current.Width, floating.screen.Columns())
+		require.Equal(t, current.Height, floating.screen.Rows())
+		require.Equal(t, currentGeometry, floating.popupGeometry)
+	})
 }
 
 func TestFailedFloatingResizeKeepsCommittedRenderAndInputGeometry(t *testing.T) {
-	cfg := domain.FloatingConfig{Width: 50, Height: 50}
-	oldContent := domain.Rect{Width: 80, Height: 24}
-	newContent := domain.Rect{Y: 1, Width: 100, Height: 40}
-	oldGeometry := calculateContentFloatingGeometry(domain.Size{Cols: oldContent.Width, Rows: oldContent.Height}, cfg)
-	newGeometry := calculateContentFloatingGeometry(domain.Size{Cols: newContent.Width, Rows: newContent.Height}, cfg)
-	pty := &resizePTY{err: errors.New("resize failed")}
-	p := newPane("floating", pty, rectSize(oldGeometry.Inner))
-	p.rect = oldGeometry.Inner
-	p.popupGeometry = oldGeometry
-	tb := newTab(nil, domain.Size{Cols: newContent.Width, Rows: newContent.Height})
-	installTestFloating(tb, p, true)
-	d := newTestDaemon(t, nil, newStubClock(t))
-	d.ApplyConfig(domain.Config{Floating: cfg})
+	synctest.Test(t, func(t *testing.T) {
+		cfg := domain.FloatingConfig{Width: 50, Height: 50}
+		oldContent := domain.Rect{Width: 80, Height: 24}
+		newContent := domain.Rect{Y: 1, Width: 100, Height: 40}
+		oldGeometry := calculateContentFloatingGeometry(domain.Size{Cols: oldContent.Width, Rows: oldContent.Height}, cfg)
+		newGeometry := calculateContentFloatingGeometry(domain.Size{Cols: newContent.Width, Rows: newContent.Height}, cfg)
+		ptyMock, _ := newResizePTY(t, &resizeState{err: errors.New("resize failed")})
+		p := newPane("floating", ptyMock, rectSize(oldGeometry.Inner))
+		p.rect = oldGeometry.Inner
+		p.popupGeometry = oldGeometry
+		tb := newTab(nil, domain.Size{Cols: newContent.Width, Rows: newContent.Height})
+		installTestFloating(tb, p, true)
+		d := newTestDaemon(t, nil, newStubClock(t))
+		d.ApplyConfig(domain.Config{Floating: cfg})
 
-	require.False(t, applyFloatingResizePlanForTest(d, p, newGeometry))
-	tb.mu.Lock()
-	_, inputGeometry, visible := tb.visibleFloatingSnapshotLocked(cfg)
-	tb.mu.Unlock()
-	require.True(t, visible)
-	require.Equal(t, oldGeometry, inputGeometry)
+		require.False(t, applyFloatingResizePlanForTest(d, p, newGeometry))
+		tb.mu.Lock()
+		_, inputGeometry, visible := tb.visibleFloatingSnapshotLocked(cfg)
+		tb.mu.Unlock()
+		require.True(t, visible)
+		require.Equal(t, oldGeometry, inputGeometry)
 
-	p.mu.Lock()
-	captured := capturePaneRenderStateLockedInto(p, oldGeometry.Inner, capturedPaneRenderState{})
-	p.mu.Unlock()
-	base := renderer.NewFrame(newContent.Width, newContent.Height+2)
-	frame, _ := composeCapturedFloatingFrame(floatingComposeInput{
-		baseFrame: base,
-		floating: capturedFloatingRenderState{
-			visible:         true,
-			pane:            captured,
-			geometry:        oldGeometry,
-			title:           captured.title,
-			generation:      1,
-			titleGeneration: captured.titleGeneration,
-		},
-		content: newContent,
-		theme:   themeui.Theme{},
-		full:    true,
+		p.mu.Lock()
+		captured := capturePaneRenderStateLockedInto(p, oldGeometry.Inner, capturedPaneRenderState{})
+		p.mu.Unlock()
+		base := renderer.NewFrame(newContent.Width, newContent.Height+2)
+		frame, _ := composeCapturedFloatingFrame(floatingComposeInput{
+			baseFrame: base,
+			floating: capturedFloatingRenderState{
+				visible:         true,
+				pane:            captured,
+				geometry:        oldGeometry,
+				title:           captured.title,
+				generation:      1,
+				titleGeneration: captured.titleGeneration,
+			},
+			content: newContent,
+			theme:   themeui.Theme{},
+			full:    true,
+		})
+		oldFrameGeometry := oldGeometry.translate(newContent.X, newContent.Y)
+		newFrameGeometry := newGeometry.translate(newContent.X, newContent.Y)
+		require.Equal(t, '┌', frame.At(oldFrameGeometry.Bounds.X, oldFrameGeometry.Bounds.Y).Rune)
+		if newFrameGeometry.Bounds.X != oldFrameGeometry.Bounds.X || newFrameGeometry.Bounds.Y != oldFrameGeometry.Bounds.Y {
+			require.NotEqual(t, '┌', frame.At(newFrameGeometry.Bounds.X, newFrameGeometry.Bounds.Y).Rune)
+		}
 	})
-	oldFrameGeometry := oldGeometry.translate(newContent.X, newContent.Y)
-	newFrameGeometry := newGeometry.translate(newContent.X, newContent.Y)
-	require.Equal(t, '┌', frame.At(oldFrameGeometry.Bounds.X, oldFrameGeometry.Bounds.Y).Rune)
-	if newFrameGeometry.Bounds.X != oldFrameGeometry.Bounds.X || newFrameGeometry.Bounds.Y != oldFrameGeometry.Bounds.Y {
-		require.NotEqual(t, '┌', frame.At(newFrameGeometry.Bounds.X, newFrameGeometry.Bounds.Y).Rune)
-	}
 }
 
 func TestFloatingLayoutRejectsStaleResizeBeforePublishing(t *testing.T) {
-	cfg := domain.FloatingConfig{Width: 50, Height: 50}
-	oldSize := domain.Size{Cols: 80, Rows: 24}
-	newSize := domain.Size{Cols: 100, Rows: 40}
-	previousGeometry := calculateContentFloatingGeometry(domain.Size{Cols: 60, Rows: 20}, cfg)
-	oldGeometry := calculateContentFloatingGeometry(oldSize, cfg)
-	newGeometry := calculateContentFloatingGeometry(newSize, cfg)
-	pty := &resizePTY{entered: make(chan struct{}), release: make(chan struct{})}
-	p := newPane("floating", pty, rectSize(previousGeometry.Inner))
-	p.rect = previousGeometry.Inner
-	p.popupGeometry = previousGeometry
-	tb := newTab(nil, oldSize)
-	installTestFloating(tb, p, true)
-	d := newTestDaemon(t, nil, newStubClock(t))
-	d.ApplyConfig(domain.Config{Floating: cfg})
-	sess := &session{tabs: []*tab{tb}}
+	synctest.Test(t, func(t *testing.T) {
+		cfg := domain.FloatingConfig{Width: 50, Height: 50}
+		oldSize := domain.Size{Cols: 80, Rows: 24}
+		newSize := domain.Size{Cols: 100, Rows: 40}
+		previousGeometry := calculateContentFloatingGeometry(domain.Size{Cols: 60, Rows: 20}, cfg)
+		oldGeometry := calculateContentFloatingGeometry(oldSize, cfg)
+		newGeometry := calculateContentFloatingGeometry(newSize, cfg)
+		ptyMock, pty := newResizePTY(t, &resizeState{entered: make(chan struct{}), release: make(chan struct{})})
+		p := newPane("floating", ptyMock, rectSize(previousGeometry.Inner))
+		p.rect = previousGeometry.Inner
+		p.popupGeometry = previousGeometry
+		tb := newTab(nil, oldSize)
+		installTestFloating(tb, p, true)
+		d := newTestDaemon(t, nil, newStubClock(t))
+		d.ApplyConfig(domain.Config{Floating: cfg})
+		sess := &session{tabs: []*tab{tb}}
 
-	done := make(chan bool, 1)
-	go func() {
+		done := make(chan bool, 1)
+		go func() {
+			_, ok := sess.geometry.applyVisibleFloatingLayout(d, sess, tb, nil)
+			done <- ok
+		}()
+		<-pty.entered
+		tb.mu.Lock()
+		tb.size = newSize
+		tb.bumpLayoutGenerationLocked()
+		tb.mu.Unlock()
+		close(pty.release)
+		require.True(t, <-done)
+
+		p.mu.Lock()
+		require.Equal(t, previousGeometry.Inner, p.rect, "a stale floating apply must not publish its rectangle")
+		require.Equal(t, previousGeometry, p.popupGeometry, "a stale floating apply must not publish its geometry")
+		require.Equal(t, previousGeometry.Inner.Width, p.screen.Columns(), "a stale floating apply must not resize the screen")
+		require.Equal(t, previousGeometry.Inner.Height, p.screen.Rows(), "a stale floating apply must not resize the screen")
+		require.False(t, p.resizeApplying, "a stale floating apply must release its parser gate")
+		p.mu.Unlock()
+
 		_, ok := sess.geometry.applyVisibleFloatingLayout(d, sess, tb, nil)
-		done <- ok
-	}()
-	<-pty.entered
-	tb.mu.Lock()
-	tb.size = newSize
-	tb.bumpLayoutGenerationLocked()
-	tb.mu.Unlock()
-	close(pty.release)
-	require.True(t, <-done)
-
-	p.mu.Lock()
-	require.Equal(t, previousGeometry.Inner, p.rect, "a stale floating apply must not publish its rectangle")
-	require.Equal(t, previousGeometry, p.popupGeometry, "a stale floating apply must not publish its geometry")
-	require.Equal(t, previousGeometry.Inner.Width, p.screen.Columns(), "a stale floating apply must not resize the screen")
-	require.Equal(t, previousGeometry.Inner.Height, p.screen.Rows(), "a stale floating apply must not resize the screen")
-	require.False(t, p.resizeApplying, "a stale floating apply must release its parser gate")
-	p.mu.Unlock()
-
-	_, ok := sess.geometry.applyVisibleFloatingLayout(d, sess, tb, nil)
-	require.True(t, ok)
-	require.Equal(t, []domain.Size{rectSize(oldGeometry.Inner), rectSize(newGeometry.Inner)}, pty.sizes())
-	require.Equal(t, newGeometry.Inner, p.rect)
-	require.Equal(t, newGeometry, p.popupGeometry)
-	require.Equal(t, newGeometry.Inner.Width, p.screen.Columns())
-	require.Equal(t, newGeometry.Inner.Height, p.screen.Rows())
+		require.True(t, ok)
+		require.Equal(t, []domain.Size{rectSize(oldGeometry.Inner), rectSize(newGeometry.Inner)}, pty.sizes())
+		require.Equal(t, newGeometry.Inner, p.rect)
+		require.Equal(t, newGeometry, p.popupGeometry)
+		require.Equal(t, newGeometry.Inner.Width, p.screen.Columns())
+		require.Equal(t, newGeometry.Inner.Height, p.screen.Rows())
+	})
 }
 
 func TestResizeFloatingPaneFailureAndSerialization(t *testing.T) {
 	t.Run("failure preserves state", func(t *testing.T) {
-		pty := &resizePTY{err: errors.New("nope")}
-		p := newPane("floating", pty, domain.Size{Cols: 5, Rows: 4})
-		p.rect = domain.Rect{X: 8, Y: 3, Width: 5, Height: 4}
-		d := newTestDaemon(t, nil, newStubClock(t))
-		requested := floatingGeometry{Bounds: domain.Rect{X: 1, Y: 1, Width: 11, Height: 9}, Inner: domain.Rect{X: 2, Y: 2, Width: 9, Height: 7}}
-		require.False(t, applyFloatingResizePlanForTest(d, p, requested))
-		require.Equal(t, domain.Rect{X: 8, Y: 3, Width: 5, Height: 4}, p.rect)
-		require.Equal(t, floatingGeometry{}, p.popupGeometry)
-		require.Equal(t, 5, p.screen.Columns())
-		require.Equal(t, 4, p.screen.Rows())
+		synctest.Test(t, func(t *testing.T) {
+			ptyMock, _ := newResizePTY(t, &resizeState{err: errors.New("nope")})
+			p := newPane("floating", ptyMock, domain.Size{Cols: 5, Rows: 4})
+			p.rect = domain.Rect{X: 8, Y: 3, Width: 5, Height: 4}
+			d := newTestDaemon(t, nil, newStubClock(t))
+			requested := floatingGeometry{Bounds: domain.Rect{X: 1, Y: 1, Width: 11, Height: 9}, Inner: domain.Rect{X: 2, Y: 2, Width: 9, Height: 7}}
+			require.False(t, applyFloatingResizePlanForTest(d, p, requested))
+			require.Equal(t, domain.Rect{X: 8, Y: 3, Width: 5, Height: 4}, p.rect)
+			require.Equal(t, floatingGeometry{}, p.popupGeometry)
+			require.Equal(t, 5, p.screen.Columns())
+			require.Equal(t, 4, p.screen.Rows())
+		})
 	})
 
 	t.Run("competing resizes serialize", func(t *testing.T) {
-		pty := &resizePTY{entered: make(chan struct{}), release: make(chan struct{})}
-		p := newPane("floating", pty, domain.Size{Cols: 2, Rows: 2})
-		d := newTestDaemon(t, nil, newStubClock(t))
-		first := floatingGeometry{Bounds: domain.Rect{Width: 6, Height: 5}, Inner: domain.Rect{X: 1, Y: 1, Width: 4, Height: 3}}
-		second := floatingGeometry{Bounds: domain.Rect{Width: 10, Height: 8}, Inner: domain.Rect{X: 1, Y: 1, Width: 8, Height: 6}}
-		done1 := make(chan bool, 1)
-		done2 := make(chan bool, 1)
-		secondStarted := make(chan struct{})
-		go func() { done1 <- applyFloatingResizePlanForTest(d, p, first) }()
-		<-pty.entered
-		go func() {
-			close(secondStarted)
-			done2 <- applyFloatingResizePlanForTest(d, p, second)
-		}()
-		<-secondStarted
-		close(pty.release)
-		require.True(t, <-done1)
-		require.True(t, <-done2)
-		require.Equal(t, second.Inner, p.rect)
-		require.Equal(t, second, p.popupGeometry)
-		require.Equal(t, 1, pty.maxConcurrentCalls())
-		require.Equal(t, []domain.Size{{Cols: 4, Rows: 3}, {Cols: 8, Rows: 6}}, pty.sizes())
-		p.mu.Lock()
-		applying, pending := p.resizeApplying, append([]byte(nil), p.resizePending...)
-		p.mu.Unlock()
-		require.False(t, applying, "successful helper apply must release its parser gate")
-		require.Empty(t, pending, "successful helper apply must drain pending parser bytes")
+		synctest.Test(t, func(t *testing.T) {
+			ptyMock, pty := newResizePTY(t, &resizeState{entered: make(chan struct{}), release: make(chan struct{})})
+			p := newPane("floating", ptyMock, domain.Size{Cols: 2, Rows: 2})
+			d := newTestDaemon(t, nil, newStubClock(t))
+			first := floatingGeometry{Bounds: domain.Rect{Width: 6, Height: 5}, Inner: domain.Rect{X: 1, Y: 1, Width: 4, Height: 3}}
+			second := floatingGeometry{Bounds: domain.Rect{Width: 10, Height: 8}, Inner: domain.Rect{X: 1, Y: 1, Width: 8, Height: 6}}
+			done1 := make(chan bool, 1)
+			done2 := make(chan bool, 1)
+			secondStarted := make(chan struct{})
+			go func() { done1 <- applyFloatingResizePlanForTest(d, p, first) }()
+			<-pty.entered
+			go func() {
+				close(secondStarted)
+				done2 <- applyFloatingResizePlanForTest(d, p, second)
+			}()
+			<-secondStarted
+			close(pty.release)
+			require.True(t, <-done1)
+			require.True(t, <-done2)
+			require.Equal(t, second.Inner, p.rect)
+			require.Equal(t, second, p.popupGeometry)
+			require.Equal(t, 1, pty.maxConcurrentCalls())
+			require.Equal(t, []domain.Size{{Cols: 4, Rows: 3}, {Cols: 8, Rows: 6}}, pty.sizes())
+			p.mu.Lock()
+			applying, pending := p.resizeApplying, append([]byte(nil), p.resizePending...)
+			p.mu.Unlock()
+			require.False(t, applying, "successful helper apply must release its parser gate")
+			require.Empty(t, pending, "successful helper apply must drain pending parser bytes")
+		})
 	})
 }
 
-type resizePTY struct {
+// resizeState is the observable state behind newResizePTY's mock.
+type resizeState struct {
 	mu            sync.Mutex
 	resizes       []domain.Size
 	err           error
@@ -1069,38 +1096,45 @@ type resizePTY struct {
 	maxConcurrent int
 }
 
-func (p *resizePTY) Resize(geometry domain.Geometry) error {
-	p.mu.Lock()
-	p.resizes = append(p.resizes, geometry.Size)
-	p.activeCalls++
-	p.maxConcurrent = max(p.maxConcurrent, p.activeCalls)
-	n := len(p.resizes)
-	err := p.err
-	if n <= len(p.errs) {
-		err = p.errs[n-1]
-	}
-	p.mu.Unlock()
-	if n == 1 && p.entered != nil {
-		close(p.entered)
-		<-p.release
-	}
-	p.mu.Lock()
-	p.activeCalls--
-	p.mu.Unlock()
-	return err
+func newResizePTY(t testing.TB, p *resizeState) (*portsmocks.MockPTY, *resizeState) {
+	t.Helper()
+	m := portsmocks.NewMockPTY(t)
+	m.EXPECT().Resize(mock.Anything).RunAndReturn(func(geometry domain.Geometry) error {
+		p.mu.Lock()
+		p.resizes = append(p.resizes, geometry.Size)
+		p.activeCalls++
+		p.maxConcurrent = max(p.maxConcurrent, p.activeCalls)
+		n := len(p.resizes)
+		err := p.err
+		if n <= len(p.errs) {
+			err = p.errs[n-1]
+		}
+		p.mu.Unlock()
+		if n == 1 && p.entered != nil {
+			close(p.entered)
+			<-p.release
+		}
+		p.mu.Lock()
+		p.activeCalls--
+		p.mu.Unlock()
+		return err
+	}).Maybe()
+	m.EXPECT().Read(mock.Anything).Return(0, io.EOF).Maybe()
+	m.EXPECT().Write(mock.Anything).RunAndReturn(func(b []byte) (int, error) { return len(b), nil }).Maybe()
+	m.EXPECT().Close().Return(nil).Maybe()
+	m.EXPECT().Pid().Return(0).Maybe()
+	m.EXPECT().ForegroundPgid().Return(0, nil).Maybe()
+	return m, p
 }
-func (p *resizePTY) maxConcurrentCalls() int {
+
+func (p *resizeState) maxConcurrentCalls() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.maxConcurrent
 }
-func (p *resizePTY) sizes() []domain.Size {
+
+func (p *resizeState) sizes() []domain.Size {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return append([]domain.Size(nil), p.resizes...)
 }
-func (*resizePTY) Read([]byte) (int, error)     { return 0, io.EOF }
-func (*resizePTY) Write(b []byte) (int, error)  { return len(b), nil }
-func (*resizePTY) Close() error                 { return nil }
-func (*resizePTY) Pid() int                     { return 0 }
-func (*resizePTY) ForegroundPgid() (int, error) { return 0, nil }
