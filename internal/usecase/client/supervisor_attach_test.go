@@ -581,9 +581,9 @@ func TestSupervisorPendingSwapContinuesRatherThanExiting(t *testing.T) {
 	awaitPresentation(t, harness.sup, PresentAttachedPicker)
 
 	var mu sync.Mutex
-	second := newSessionTestStream()
+	second := newSessionStream(t)
 	harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-		return second, nil
+		return second.conn, nil
 	})
 	// Another daemon: the commit swaps instead of switching in place.
 	other := sessionTestRequest(false)
@@ -616,10 +616,10 @@ func TestSupervisorPendingSwapContinuesRatherThanExiting(t *testing.T) {
 func TestSupervisorSwapDropsKeysKeptForPreviousSession(t *testing.T) {
 	picker := newAttachTestPicker()
 	harness := startAttachHarness(t, picker)
-	base := newSessionTestStream()
-	first := &stallingSessionStream{sessionTestStream: base, entered: make(chan struct{}, 1), release: make(chan struct{})}
+	base := newSessionStream(t)
+	first := newStallingSessionStream(t, base)
 	harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-		return first, nil
+		return first.conn, nil
 	})
 	picker.commit(sessionTestRequest(true))
 	deliverReadyStream(t, base)
@@ -630,9 +630,9 @@ func TestSupervisorSwapDropsKeysKeptForPreviousSession(t *testing.T) {
 	<-first.entered
 
 	var mu sync.Mutex
-	second := newSessionTestStream()
+	second := newSessionStream(t)
 	harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-		return second, nil
+		return second.conn, nil
 	})
 	base.deliver(navigationOffer(1))
 	awaitPresentation(t, harness.sup, PresentAttachedPicker)
@@ -663,7 +663,7 @@ func TestSupervisorSwapDropsKeysKeptForPreviousSession(t *testing.T) {
 
 // awaitStreamHello waits until the admitted stream has sent its first client
 // message, polling the guarded stream pointer rather than a stale snapshot.
-func awaitStreamHello(t *testing.T, mu *sync.Mutex, stream **sessionTestStream) {
+func awaitStreamHello(t *testing.T, mu *sync.Mutex, stream **streamLog) {
 	t.Helper()
 	require.Eventually(t, func() bool {
 		mu.Lock()
@@ -673,7 +673,7 @@ func awaitStreamHello(t *testing.T, mu *sync.Mutex, stream **sessionTestStream) 
 }
 
 // deliverReadyStream scripts Welcome plus one committed initial publication.
-func deliverReadyStream(t *testing.T, stream *sessionTestStream) {
+func deliverReadyStream(t *testing.T, stream *streamLog) {
 	t.Helper()
 	stream.deliver(protocol.Welcome{SessionName: "alpha"})
 	stream.deliver(sessionTestOutput(1, "\x1b[Hready"))
@@ -727,7 +727,7 @@ func TestSupervisorReducerSlowConnecting(t *testing.T) {
 // dialer choice in the client.
 func TestSupervisorUIActionBindingUsesSingleAttachmentPump(t *testing.T) {
 	picker := newAttachTestPicker()
-	var stream *sessionTestStream
+	var stream *streamLog
 	var streamMu sync.Mutex
 	var ui *UI
 	harness := startAttachHarnessConfig(t, picker, func(cfg *SupervisorConfig) {
@@ -735,11 +735,11 @@ func TestSupervisorUIActionBindingUsesSingleAttachmentPump(t *testing.T) {
 		cfg.UI = ui
 	})
 	harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-		admitted := newSessionTestStream()
+		admitted := newSessionStream(t)
 		streamMu.Lock()
 		stream = admitted
 		streamMu.Unlock()
-		return admitted, nil
+		return admitted.conn, nil
 	})
 
 	// Picker ownership has no UI binding, so this would fail if actions could
@@ -831,9 +831,9 @@ func TestSupervisorUIActionBindingUsesSingleAttachmentPump(t *testing.T) {
 
 	// Reconnecting installs a fresh UI-owned generation. The prior generation
 	// remains stale even while another attachment is actionable.
-	reconnected := newSessionTestStream()
+	reconnected := newSessionStream(t)
 	harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-		return reconnected, nil
+		return reconnected.conn, nil
 	})
 	picker.commit(sessionTestRequest(true))
 	awaitHello(t, reconnected)
@@ -870,7 +870,7 @@ func TestSupervisorUIActionReleaseWaitsForInFlightOutput(t *testing.T) {
 	picker := newAttachTestPicker()
 	var (
 		streamMu sync.Mutex
-		stream   *sessionTestStream
+		stream   *streamLog
 		ui       *UI
 	)
 	harness := startAttachHarnessConfig(t, picker, func(cfg *SupervisorConfig) {
@@ -878,11 +878,11 @@ func TestSupervisorUIActionReleaseWaitsForInFlightOutput(t *testing.T) {
 		cfg.UI = ui
 	})
 	harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-		admitted := newSessionTestStream()
+		admitted := newSessionStream(t)
 		streamMu.Lock()
 		stream = admitted
 		streamMu.Unlock()
-		return admitted, nil
+		return admitted.conn, nil
 	})
 
 	// Installed before the commit, so the supervisor's publication goroutine
@@ -988,9 +988,9 @@ func TestSupervisorUIViewUpdateCommitsActionBoundaryWithoutBytes(t *testing.T) {
 		ui = NewUI(cfg.Terminal.(ports.UIState), cfg.Clock)
 		cfg.UI = ui
 	})
-	stream := newSessionTestStream()
+	stream := newSessionStream(t)
 	harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-		return stream, nil
+		return stream.conn, nil
 	})
 	picker.commit(sessionTestRequest(true))
 	awaitHello(t, stream)
@@ -1043,9 +1043,9 @@ func TestSupervisorUIViewUpdateCommitsActionBoundaryWithoutBytes(t *testing.T) {
 func TestSupervisorUIViewUpdateRequestsOneCoalescedReset(t *testing.T) {
 	picker := newAttachTestPicker()
 	harness := startAttachHarness(t, picker)
-	stream := newSessionTestStream()
+	stream := newSessionStream(t)
 	harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-		return stream, nil
+		return stream.conn, nil
 	})
 	picker.commit(sessionTestRequest(true))
 	awaitHello(t, stream)
@@ -1091,14 +1091,14 @@ func TestSupervisorAttachmentLocalRemoteParity(t *testing.T) {
 			harness := startAttachHarness(t, picker)
 			var (
 				streamMu sync.Mutex
-				stream   *sessionTestStream
+				stream   *streamLog
 			)
 			harness.service.setOpenStream(func(_ context.Context, _ ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-				admitted := newSessionTestStream()
+				admitted := newSessionStream(t)
 				streamMu.Lock()
 				stream = admitted
 				streamMu.Unlock()
-				return admitted, nil
+				return admitted.conn, nil
 			})
 			picker.commit(sessionTestRequest(local))
 
@@ -1145,18 +1145,16 @@ func TestSupervisorAttachmentDeadlineElapsedDuringOpenFailsWithoutRestart(t *tes
 	picker := newAttachTestPicker()
 	var (
 		streamMu sync.Mutex
-		stream   *sessionTestStream
+		stream   *streamLog
 	)
 	harness := startAttachHarness(t, picker)
 	clock := harness.clock
 	harness.service.setOpenStream(func(_ context.Context, _ ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 		// The accepted absolute deadline elapsed before this client saw it.
-		admitted := &sessionTestStreamWithDeadline{
-			sessionTestStream: newSessionTestStream(),
-			deadline:          clock.Now().Add(-time.Second),
-		}
+		log := newSessionStream(t)
+		admitted := sessionDeadline(t, log, clock.Now().Add(-time.Second))
 		streamMu.Lock()
-		stream = admitted.sessionTestStream
+		stream = log
 		streamMu.Unlock()
 		return admitted, nil
 	})
@@ -1186,17 +1184,15 @@ func TestSupervisorAttachmentDeadlineNotExtendedAcrossStages(t *testing.T) {
 	picker := newAttachTestPicker()
 	var (
 		streamMu sync.Mutex
-		stream   *sessionTestStream
+		stream   *streamLog
 	)
 	harness := startAttachHarness(t, picker)
 	clock := harness.clock
 	harness.service.setOpenStream(func(_ context.Context, _ ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-		admitted := &sessionTestStreamWithDeadline{
-			sessionTestStream: newSessionTestStream(),
-			deadline:          clock.Now().Add(5 * time.Second),
-		}
+		log := newSessionStream(t)
+		admitted := sessionDeadline(t, log, clock.Now().Add(5*time.Second))
 		streamMu.Lock()
-		stream = admitted.sessionTestStream
+		stream = log
 		streamMu.Unlock()
 		return admitted, nil
 	})
@@ -1241,17 +1237,15 @@ func TestSupervisorAttachmentLaterAcceptedDeadlineNeverExtendsBudget(t *testing.
 	picker := newAttachTestPicker()
 	var (
 		streamMu sync.Mutex
-		stream   *sessionTestStream
+		stream   *streamLog
 	)
 	harness := startAttachHarness(t, picker)
 	clock := harness.clock
 	harness.service.setOpenStream(func(_ context.Context, _ ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-		admitted := &sessionTestStreamWithDeadline{
-			sessionTestStream: newSessionTestStream(),
-			deadline:          clock.Now().Add(4 * protocol.HandshakeTimeout),
-		}
+		log := newSessionStream(t)
+		admitted := sessionDeadline(t, log, clock.Now().Add(4*protocol.HandshakeTimeout))
 		streamMu.Lock()
-		stream = admitted.sessionTestStream
+		stream = log
 		streamMu.Unlock()
 		return admitted, nil
 	})
@@ -1284,15 +1278,15 @@ func TestSupervisorAttachmentPreOpenBudgetWithoutProvider(t *testing.T) {
 	picker := newAttachTestPicker()
 	var (
 		streamMu sync.Mutex
-		stream   *sessionTestStream
+		stream   *streamLog
 	)
 	harness := startAttachHarness(t, picker)
 	harness.service.setOpenStream(func(_ context.Context, _ ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-		admitted := newSessionTestStream()
+		admitted := newSessionStream(t)
 		streamMu.Lock()
 		stream = admitted
 		streamMu.Unlock()
-		return admitted, nil
+		return admitted.conn, nil
 	})
 	picker.commit(sessionTestRequest(true))
 
@@ -1317,15 +1311,15 @@ func TestSupervisorAttachmentPreOpenBudgetWithoutProvider(t *testing.T) {
 
 func TestSupervisorAttachmentDeadlineDisarmedAfterPublication(t *testing.T) {
 	picker := newAttachTestPicker()
-	var stream *sessionTestStream
+	var stream *streamLog
 	var streamMu sync.Mutex
 	harness := startAttachHarness(t, picker)
 	harness.service.setOpenStream(func(_ context.Context, _ ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-		admitted := newSessionTestStream()
+		admitted := newSessionStream(t)
 		streamMu.Lock()
 		stream = admitted
 		streamMu.Unlock()
-		return admitted, nil
+		return admitted.conn, nil
 	})
 	picker.commit(sessionTestRequest(true))
 	awaitStreamHello(t, &streamMu, &stream)
@@ -1352,7 +1346,7 @@ func TestAttachmentDeadlineConcurrentExpiryAndRetirement(t *testing.T) {
 	}{
 		{name: "disarm", retire: (*attachmentDeadline).disarm},
 		{name: "adopt", retire: func(deadline *attachmentDeadline) {
-			_ = deadline.adopt(&sessionTestStreamWithDeadline{sessionTestStream: newSessionTestStream(), deadline: time.Unix(2000, 0)})
+			_ = deadline.adopt(sessionDeadline(t, newSessionStream(t), time.Unix(2000, 0)))
 		}},
 	}
 	for _, tt := range tests {
@@ -1515,7 +1509,7 @@ func TestSupervisorAttachmentLossResumesSameSession(t *testing.T) {
 				cfg.NotifyLifecycle = func(notice LifecycleNotice) { notices <- notice }
 				cfg.Jitter = resumeTestJitter
 			})
-			streams := make(chan *sessionTestStream, len(tc.steps)+2)
+			streams := make(chan *streamLog, len(tc.steps)+2)
 			var refusing, unavailable atomic.Bool
 			harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 				if refusing.Load() {
@@ -1524,9 +1518,9 @@ func TestSupervisorAttachmentLossResumesSameSession(t *testing.T) {
 				if unavailable.Load() {
 					return nil, ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: "route down"}
 				}
-				stream := newSessionTestStream()
+				stream := newSessionStream(t)
 				streams <- stream
-				return stream, nil
+				return stream.conn, nil
 			})
 			picker.commit(sessionTestRequest(false))
 			first := <-streams
@@ -1619,15 +1613,15 @@ func TestSupervisorAttachmentCancellationRetiresGeneration(t *testing.T) {
 	picker := newAttachTestPicker()
 	var (
 		streamMu sync.Mutex
-		stream   *sessionTestStream
+		stream   *streamLog
 	)
 	harness := startAttachHarness(t, picker)
 	harness.service.setOpenStream(func(_ context.Context, _ ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-		admitted := newSessionTestStream()
+		admitted := newSessionStream(t)
 		streamMu.Lock()
 		stream = admitted
 		streamMu.Unlock()
-		return admitted, nil
+		return admitted.conn, nil
 	})
 	picker.commit(sessionTestRequest(true))
 	require.Eventually(t, func() bool { return len(harness.service.openedRequests()) == 1 }, 5*time.Second, time.Millisecond)
@@ -1660,7 +1654,7 @@ func TestSupervisorConnectingWhileAcquisitionBlockedPublishesNoSessionMetadata(t
 	harness.service.setOpenStream(func(ctx context.Context, _ ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 		select {
 		case <-release:
-			return newSessionTestStream(), nil
+			return newSessionStream(t).conn, nil
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
@@ -1702,7 +1696,7 @@ func TestSupervisorPickerInputNeverReachesSession(t *testing.T) {
 	opened := false
 	harness.service.setOpenStream(func(_ context.Context, _ ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 		opened = true
-		return newSessionTestStream(), nil
+		return newSessionStream(t).conn, nil
 	})
 
 	harness.reader.push([]byte("j"))
@@ -1728,11 +1722,11 @@ func TestSupervisorAttachmentReachableFromRealPicker(t *testing.T) {
 	terminal := &attachTestTerminal{in: reader, available: true}
 	service := newSupervisorTestService(ports.BrokerConnectionID{1})
 	service.hub.publish(pickerTestSnapshot(3, 1, clock.Now(), "alpha"))
-	admittedStreams := make(chan *sessionTestStream, 1)
+	admittedStreams := make(chan *streamLog, 1)
 	service.setOpenStream(func(_ context.Context, _ ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-		admitted := newSessionTestStream()
+		admitted := newSessionStream(t)
 		admittedStreams <- admitted
-		return admitted, nil
+		return admitted.conn, nil
 	})
 
 	controller := newPickerController(clock, pickerTestFreshness, terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor})
@@ -1759,7 +1753,7 @@ func TestSupervisorAttachmentReachableFromRealPicker(t *testing.T) {
 	require.Equal(t, ports.BrokerAdmissionExact, opened.Admission)
 	require.Equal(t, ports.BrokerStreamID(1), opened.Stream)
 
-	var stream *sessionTestStream
+	var stream *streamLog
 	select {
 	case stream = <-admittedStreams:
 	case <-time.After(5 * time.Second):
@@ -1779,16 +1773,16 @@ func TestSupervisorAttachmentReachableFromRealPicker(t *testing.T) {
 func TestSupervisorAttachmentConcurrentCommitAndCancellation(t *testing.T) {
 	tests := []struct {
 		name string
-		run  func(*testing.T, *attachTestHarness, *attachTestPicker) *sessionTestStream
+		run  func(*testing.T, *attachTestHarness, *attachTestPicker) *streamLog
 	}{
-		{name: "open in flight", run: func(t *testing.T, harness *attachTestHarness, picker *attachTestPicker) *sessionTestStream {
+		{name: "open in flight", run: func(t *testing.T, harness *attachTestHarness, picker *attachTestPicker) *streamLog {
 			entered := make(chan struct{})
 			release := make(chan struct{})
-			stream := newSessionTestStream()
+			stream := newSessionStream(t)
 			harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 				close(entered)
 				<-release
-				return stream, nil
+				return stream.conn, nil
 			})
 			picker.commit(sessionTestRequest(true))
 			<-entered
@@ -1796,10 +1790,10 @@ func TestSupervisorAttachmentConcurrentCommitAndCancellation(t *testing.T) {
 			close(release)
 			return stream
 		}},
-		{name: "publication commit in flight", run: func(t *testing.T, harness *attachTestHarness, picker *attachTestPicker) *sessionTestStream {
-			stream := newSessionTestStream()
+		{name: "publication commit in flight", run: func(t *testing.T, harness *attachTestHarness, picker *attachTestPicker) *streamLog {
+			stream := newSessionStream(t)
 			harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-				return stream, nil
+				return stream.conn, nil
 			})
 			entered := make(chan struct{}, 1)
 			release := make(chan struct{})

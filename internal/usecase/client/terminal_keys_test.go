@@ -101,7 +101,7 @@ func TestAttachmentReportsHeldCtrl(t *testing.T) {
 	pump.keys.enable()
 	pump.start()
 	defer pump.stop()
-	stream := newSessionTestStream()
+	stream := newSessionStream(t)
 	host := newWorkerTestHost(newWorkerTestTerminal(), pump, nil)
 	cfg := sessionTestWorkerConfig(sessionTestRequest(true))
 	clock := newSupervisorTestClock()
@@ -110,7 +110,7 @@ func TestAttachmentReportsHeldCtrl(t *testing.T) {
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go func() { _, _ = host.Run(ctx, AttachmentToken{Generation: 4, Attempt: 1}, worker, stream) }()
+	go func() { _, _ = host.Run(ctx, AttachmentToken{Generation: 4, Attempt: 1}, worker, stream.conn) }()
 
 	awaitHello(t, stream)
 	stream.deliver(protocol.Welcome{SessionName: "alpha"})

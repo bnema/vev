@@ -3,19 +3,11 @@ package client
 import (
 	"testing"
 
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/stretchr/testify/require"
 )
-
-// windowTestStream reports fixed connection capabilities.
-type windowTestStream struct {
-	*sessionTestStream
-	window uint8
-}
-
-func (s windowTestStream) Capabilities() protocol.ConnectionCapabilities {
-	return protocol.ConnectionCapabilities{PreferredOutputWindow: s.window}
-}
 
 func TestRequestedOutputWindow(t *testing.T) {
 	tests := []struct {
@@ -29,8 +21,10 @@ func TestRequestedOutputWindow(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			stream := windowTestStream{sessionTestStream: newSessionTestStream(), window: tt.preferred}
-			require.Equal(t, tt.want, requestedOutputWindow(stream))
+			stream := newSessionStream(t, func(m *portsmocks.MockBrokerLogicalConnection, _ *streamLog) {
+				m.EXPECT().Capabilities().Return(protocol.ConnectionCapabilities{PreferredOutputWindow: tt.preferred}).Maybe()
+			})
+			require.Equal(t, tt.want, requestedOutputWindow(stream.conn))
 		})
 	}
 }
@@ -41,6 +35,6 @@ func TestRequestedOutputWindow(t *testing.T) {
 func TestHelloRequestsPipelinedOutput(t *testing.T) {
 	worker, err := newSessionAttachmentWorker(sessionAttachmentConfig{Request: sessionTestRequest(false), SessionEnvironment: SessionEnvironment{Provenance: SessionEnvironmentRemote}})
 	require.NoError(t, err)
-	hello := worker.hello(newSessionTestStream())
+	hello := worker.hello(newSessionStream(t).conn)
 	require.Equal(t, uint8(protocol.MaxOutputWindow), hello.MaxOutputInFlight)
 }

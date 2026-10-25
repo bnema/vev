@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/protocol"
@@ -16,12 +18,12 @@ import (
 // gatedSessionStream blocks every write until release is closed, like a
 // carriage stalled on a dead link, and can fail writes after release.
 type gatedSessionStream struct {
-	*sessionTestStream
+	*streamLog
 	release chan struct{}
 	fail    error
 }
 
-func (s *gatedSessionStream) SendClient(message protocol.ClientMessage) error {
+func (s *gatedSessionStream) send(message protocol.ClientMessage) error {
 	select {
 	case <-s.release:
 	case <-s.closed:
@@ -30,7 +32,7 @@ func (s *gatedSessionStream) SendClient(message protocol.ClientMessage) error {
 	if s.fail != nil {
 		return s.fail
 	}
-	return s.sessionTestStream.SendClient(message)
+	return s.streamLog.recordSend(message)
 }
 
 func TestAttachmentOutbox(t *testing.T) {
@@ -45,8 +47,8 @@ func TestAttachmentOutbox(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			stream := &gatedSessionStream{sessionTestStream: newSessionTestStream(), release: make(chan struct{}), fail: tt.fail}
-			outbox := newAttachmentOutbox(stream)
+			stream := newGatedSessionStream(t, tt.fail)
+			outbox := newAttachmentOutbox(stream.conn)
 			defer outbox.stop()
 
 			messages := []protocol.ClientMessage{
@@ -85,8 +87,8 @@ func TestAttachmentOutbox(t *testing.T) {
 }
 
 func TestAttachmentOutboxCloseUnblocksStalledWrite(t *testing.T) {
-	stream := &gatedSessionStream{sessionTestStream: newSessionTestStream(), release: make(chan struct{})}
-	outbox := newAttachmentOutbox(stream)
+	stream := newGatedSessionStream(t, nil)
+	outbox := newAttachmentOutbox(stream.conn)
 	require.NoError(t, outbox.SendClient(protocol.Detach{}))
 
 	require.NoError(t, outbox.Close())
@@ -315,14 +317,14 @@ func TestResumeWatchOverflowKeepsHeldPrefix(t *testing.T) {
 // stallingSessionStream passes writes through until stall is set; stalled
 // writes block until release closes, then fail with failErr when set.
 type stallingSessionStream struct {
-	*sessionTestStream
+	*streamLog
 	stall   atomic.Bool
 	entered chan struct{}
 	release chan struct{}
 	failErr error
 }
 
-func (s *stallingSessionStream) SendClient(message protocol.ClientMessage) error {
+func (s *stallingSessionStream) send(message protocol.ClientMessage) error {
 	if s.stall.Load() {
 		select {
 		case s.entered <- struct{}{}:
@@ -337,7 +339,7 @@ func (s *stallingSessionStream) SendClient(message protocol.ClientMessage) error
 			return s.failErr
 		}
 	}
-	return s.sessionTestStream.SendClient(message)
+	return s.streamLog.recordSend(message)
 }
 
 // TestAttachmentWorkerStalledLink drives the real worker over a link that
@@ -422,9 +424,9 @@ func TestAttachmentWorkerStalledLink(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			base := newSessionTestStream()
-			s := &stallingSessionStream{sessionTestStream: base, entered: make(chan struct{}, 1), release: make(chan struct{})}
-			h := startInputHarnessOn(t, nil, sessionTestRequest(true), nil, base, s)
+			base := newSessionStream(t)
+			s := newStallingSessionStream(t, base)
+			h := startInputHarnessOn(t, nil, sessionTestRequest(true), nil, base, s.conn)
 			require.Eventually(t, func() bool { return strings.Contains(h.term.written(), "ready") }, 5*time.Second, time.Millisecond)
 			// Let the initial Ack and focus report through, then stall.
 			require.Eventually(t, func() bool { return len(base.messages()) >= 2 }, 5*time.Second, time.Millisecond)
@@ -432,4 +434,23 @@ func TestAttachmentWorkerStalledLink(t *testing.T) {
 			tt.run(t, h, s)
 		})
 	}
+}
+
+func newGatedSessionStream(t *testing.T, fail error) *gatedSessionStream {
+	base := newSessionStream(t)
+	s := &gatedSessionStream{streamLog: base, release: make(chan struct{}), fail: fail}
+	configured := configureSessionStream(t, base, func(m *portsmocks.MockBrokerLogicalConnection, _ *streamLog) {
+		m.EXPECT().SendClient(mock.Anything).RunAndReturn(s.send).Maybe()
+	})
+	base.conn = configured.conn
+	return s
+}
+
+func newStallingSessionStream(t *testing.T, base *streamLog) *stallingSessionStream {
+	s := &stallingSessionStream{streamLog: base, entered: make(chan struct{}, 1), release: make(chan struct{})}
+	configured := configureSessionStream(t, base, func(m *portsmocks.MockBrokerLogicalConnection, _ *streamLog) {
+		m.EXPECT().SendClient(mock.Anything).RunAndReturn(s.send).Maybe()
+	})
+	base.conn = configured.conn
+	return s
 }

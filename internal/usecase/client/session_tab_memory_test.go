@@ -62,14 +62,14 @@ func TestSessionTabMemorySurvivesAttachmentSwap(t *testing.T) {
 			worker.(*sessionAttachmentWorker).noteCommitted(nil, other)
 
 			for _, explicit := range []domain.TabStableID{"", "t_explicit"} {
-				stream := newSessionTestStream()
+				stream := newSessionStream(t)
 				attachments := newSessionTestAttachments()
 				next, err := supervisor.newAttachmentWorker(request, attachmentTab{preferred: explicit}, nil, environment)
 				require.NoError(t, err)
 				host := newWorkerTestHost(terminal, nil, attachments.record)
 				events := make(chan AttachmentEvent, 1)
 				go func() {
-					event, _ := host.Run(t.Context(), AttachmentToken{Generation: 1, Attempt: 1}, next, stream)
+					event, _ := host.Run(t.Context(), AttachmentToken{Generation: 1, Attempt: 1}, next, stream.conn)
 					events <- event
 				}()
 				hello := awaitHello(t, stream)
@@ -79,7 +79,7 @@ func TestSessionTabMemorySurvivesAttachmentSwap(t *testing.T) {
 				}
 				require.Equal(t, want, hello.PreferredTabID)
 				require.NoError(t, protocol.ValidateHello(hello))
-				require.NoError(t, stream.Close())
+				require.NoError(t, stream.conn.Close())
 				<-events
 			}
 		})
@@ -87,14 +87,14 @@ func TestSessionTabMemorySurvivesAttachmentSwap(t *testing.T) {
 }
 
 func TestSessionTabMemorySamePeerRoundTrip(t *testing.T) {
-	stream := newSessionTestStream()
+	stream := newSessionStream(t)
 	terminal := newWorkerTestTerminal()
 	attachments := newSessionTestAttachments()
 	var memory sessionTabMemory
 	cfg := sessionTestWorkerConfig(sessionTestRequest(true))
 	cfg.Tabs = &memory
-	events := sessionTestRun(t, stream, terminal, cfg, attachments)
-	t.Cleanup(func() { _ = stream.Close(); <-events })
+	events := sessionTestRun(t, stream.conn, terminal, cfg, attachments)
+	t.Cleanup(func() { _ = stream.conn.Close(); <-events })
 	awaitHello(t, stream)
 	stream.deliver(protocol.Welcome{SessionName: "alpha"})
 	initial := sessionTestOutput(1, "initial")
@@ -166,9 +166,9 @@ func TestSessionTabMemoryPreservesStoppedRemoteSelector(t *testing.T) {
 	cfg.Tabs = &memory
 	cfg.Tab = attachmentTab{stopped: &selector}
 	cfg.SessionEnvironment = SessionEnvironment{Provenance: SessionEnvironmentRemote}
-	stream := newSessionTestStream()
-	events := sessionTestRun(t, stream, newWorkerTestTerminal(), cfg, newSessionTestAttachments())
-	t.Cleanup(func() { _ = stream.Close(); <-events })
+	stream := newSessionStream(t)
+	events := sessionTestRun(t, stream.conn, newWorkerTestTerminal(), cfg, newSessionTestAttachments())
+	t.Cleanup(func() { _ = stream.conn.Close(); <-events })
 	hello := awaitHello(t, stream)
 	require.Equal(t, &selector, hello.SessionTarget)
 	require.Empty(t, hello.PreferredTabID)

@@ -22,9 +22,9 @@ func TestSupervisorPublishesConnectingBeforeGrantAndPickerAfterDrain(t *testing.
 		ui = NewUI(cfg.Terminal.(ports.UIState), cfg.Clock)
 		cfg.UI = ui
 	})
-	stream := newSessionTestStream()
+	stream := newSessionStream(t)
 	harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-		return stream, nil
+		return stream.conn, nil
 	})
 
 	picker.commit(sessionTestRequest(true))

@@ -340,9 +340,9 @@ func TestInitialNavigationResolverIsConsultedAtMostOnce(t *testing.T) {
 	first := newSupervisorTestService(ports.BrokerConnectionID{1})
 	first.publishSnapshot(localDaemonSnapshot(7, 1))
 	second := newSupervisorTestService(ports.BrokerConnectionID{2})
-	stream := newSessionTestStream()
+	stream := newSessionStream(t)
 	first.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-		return stream, nil
+		return stream.conn, nil
 	})
 	connector := newSupervisorTestConnector(func(_ context.Context, call int) (ports.BrokerNavigator, error) {
 		if call == 1 {
@@ -478,7 +478,7 @@ func TestInitialNavigationResolverFailureIsSelectionUnavailable(t *testing.T) {
 	opened := false
 	service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 		opened = true
-		return newSessionTestStream(), nil
+		return newSessionStream(t).conn, nil
 	})
 	notices := make(chan LifecycleNotice, 4)
 	var calls atomic.Int64
@@ -533,7 +533,7 @@ func TestInitialNavigationWaitsForTargetObservation(t *testing.T) {
 			var opened atomic.Int64
 			service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 				opened.Add(1)
-				return newSessionTestStream(), nil
+				return newSessionStream(t).conn, nil
 			})
 			notices := make(chan LifecycleNotice, 4)
 			var calls atomic.Int64
@@ -621,9 +621,9 @@ func TestInitialNavigationDropsDecisionsTakenWhileHidden(t *testing.T) {
 	picker := newAttachTestPicker()
 
 	service := newSupervisorTestService(ports.BrokerConnectionID{1})
-	stream := newSessionTestStream()
+	stream := newSessionStream(t)
 	service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-		return stream, nil
+		return stream.conn, nil
 	})
 	connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) { return service, nil })
 	// A keystroke typed during the cold start: the hidden picker recorded a

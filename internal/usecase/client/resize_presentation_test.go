@@ -310,20 +310,21 @@ func (h *resizeSupervisorHarness) waitRun(t *testing.T) error {
 // resizeStreamRegistry admits one fresh scripted logical stream per open call
 // and lets a test reach the stream of a specific attachment attempt.
 type resizeStreamRegistry struct {
+	t       *testing.T
 	mu      sync.Mutex
-	streams []*sessionTestStream
+	streams []*streamLog
 }
 
 func (r *resizeStreamRegistry) open(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-	stream := newSessionTestStream()
+	stream := newSessionStream(r.t)
 	r.mu.Lock()
 	r.streams = append(r.streams, stream)
 	r.mu.Unlock()
-	return stream, nil
+	return stream.conn, nil
 }
 
 // stream waits until the index-th stream was admitted and returns it.
-func (r *resizeStreamRegistry) stream(t *testing.T, index int) *sessionTestStream {
+func (r *resizeStreamRegistry) stream(t *testing.T, index int) *streamLog {
 	t.Helper()
 	require.Eventually(t, func() bool {
 		r.mu.Lock()
@@ -336,7 +337,7 @@ func (r *resizeStreamRegistry) stream(t *testing.T, index int) *sessionTestStrea
 }
 
 // streamResizes returns the typed resize messages one attachment stream sent.
-func streamResizes(stream *sessionTestStream) []protocol.Resize {
+func streamResizes(stream *streamLog) []protocol.Resize {
 	var resizes []protocol.Resize
 	for _, message := range stream.messages() {
 		if resize, ok := message.(protocol.Resize); ok {
@@ -347,7 +348,7 @@ func streamResizes(stream *sessionTestStream) []protocol.Resize {
 }
 
 // awaitStreamResizes waits until the stream sent at least want resize messages.
-func awaitStreamResizes(t *testing.T, stream *sessionTestStream, want int) []protocol.Resize {
+func awaitStreamResizes(t *testing.T, stream *streamLog, want int) []protocol.Resize {
 	t.Helper()
 	require.Eventually(t, func() bool { return len(streamResizes(stream)) >= want }, 5*time.Second, time.Millisecond,
 		"the attachment stream never sent %d resize messages", want)
@@ -529,7 +530,7 @@ func TestAttachmentHostResizeBurstCoalescesAndKeepsGeometryWakeupsIndependent(t 
 	host.startGeometry(ctx)
 	defer host.stopGeometry()
 
-	fg := host.newForeground(AttachmentToken{Generation: 1, Attempt: 1}, newSessionTestStream())
+	fg := host.newForeground(AttachmentToken{Generation: 1, Attempt: 1}, newSessionStream(t).conn)
 	require.True(t, host.authority.grant(fg))
 
 	burst := []domain.Geometry{
@@ -577,7 +578,7 @@ func TestAttachmentHostResizeBurstCoalescesAndKeepsGeometryWakeupsIndependent(t 
 func TestSupervisorResizeDuringAttachmentSettlementPreservesSessionOutput(t *testing.T) {
 	picker := newAttachTestPicker()
 	harness := startResizeHarness(t, resizeHarnessOptions{picker: picker})
-	registry := &resizeStreamRegistry{}
+	registry := &resizeStreamRegistry{t: t}
 	harness.service.setOpenStream(registry.open)
 
 	picker.commit(sessionTestRequest(true))
@@ -635,7 +636,7 @@ func TestSupervisorResizeDuringAttachmentSettlementPreservesSessionOutput(t *tes
 func TestSupervisorResizeConnectingBurstStaysCoalescedAndBuffered(t *testing.T) {
 	picker := newAttachTestPicker()
 	harness := startResizeHarness(t, resizeHarnessOptions{picker: picker})
-	registry := &resizeStreamRegistry{}
+	registry := &resizeStreamRegistry{t: t}
 	harness.service.setOpenStream(registry.open)
 
 	picker.commit(sessionTestRequest(true))
@@ -701,7 +702,7 @@ func awaitAttachedSettlement(t *testing.T, harness *resizeSupervisorHarness) {
 func TestSupervisorAttachedResizeKeepsGeometryWakeupAndPreservesRepaint(t *testing.T) {
 	picker := newAttachTestPicker()
 	harness := startResizeHarness(t, resizeHarnessOptions{picker: picker})
-	registry := &resizeStreamRegistry{}
+	registry := &resizeStreamRegistry{t: t}
 	harness.service.setOpenStream(registry.open)
 
 	picker.commit(sessionTestRequest(true))
@@ -746,7 +747,7 @@ func TestSupervisorAttachedResizeKeepsGeometryWakeupAndPreservesRepaint(t *testi
 func TestSupervisorResizeAfterDetachReachesOnlyReplacementAttachment(t *testing.T) {
 	picker := newAttachTestPicker()
 	harness := startResizeHarness(t, resizeHarnessOptions{picker: picker})
-	registry := &resizeStreamRegistry{}
+	registry := &resizeStreamRegistry{t: t}
 	harness.service.setOpenStream(registry.open)
 
 	picker.commit(sessionTestRequest(true))

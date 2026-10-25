@@ -12,7 +12,7 @@ import (
 )
 
 // sentInput joins every Input message a stream carried, in order.
-func sentInput(stream *sessionTestStream) string {
+func sentInput(stream *streamLog) string {
 	var out strings.Builder
 	for _, message := range stream.messages() {
 		if input, ok := message.(protocol.Input); ok {
@@ -52,8 +52,8 @@ func TestResumeReplaysKeysHeldWhileConnecting(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			picker := newAttachTestPicker()
 			h := startAttachHarnessConfig(t, picker, func(cfg *SupervisorConfig) { cfg.Jitter = resumeTestJitter })
-			first := newSessionTestStream()
-			second := newSessionTestStream()
+			first := newSessionStream(t)
+			second := newSessionStream(t)
 			opened := make(chan int, 4)
 			failed := make(chan struct{})
 			release := make(chan struct{})
@@ -62,7 +62,7 @@ func TestResumeReplaysKeysHeldWhileConnecting(t *testing.T) {
 				count++
 				switch {
 				case count == 1:
-					return first, nil
+					return first.conn, nil
 				case tt.failFirst && count == 2:
 					opened <- count
 					select {
@@ -77,7 +77,7 @@ func TestResumeReplaysKeysHeldWhileConnecting(t *testing.T) {
 				case <-ctx.Done():
 					return nil, ctx.Err()
 				}
-				return second, nil
+				return second.conn, nil
 			})
 			awaitOpen := func() {
 				select {

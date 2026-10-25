@@ -42,11 +42,11 @@ func (p *attachTestPicker) opTaken() bool {
 
 // attachLiveSession commits one attachment on the harness and returns its
 // stream once the attachment is presented.
-func attachLiveSession(t *testing.T, harness *attachTestHarness, picker *attachTestPicker) *sessionTestStream {
+func attachLiveSession(t *testing.T, harness *attachTestHarness, picker *attachTestPicker) *streamLog {
 	t.Helper()
-	stream := newSessionTestStream()
+	stream := newSessionStream(t)
 	harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-		return stream, nil
+		return stream.conn, nil
 	})
 	picker.commit(sessionTestRequest(true))
 	awaitStreamHello(t, &sync.Mutex{}, &stream)
@@ -67,7 +67,7 @@ func awaitPresentation(t *testing.T, sup *Supervisor, want Presentation) {
 }
 
 // awaitSent waits for the first client message matching match.
-func awaitSent(t *testing.T, stream *sessionTestStream, what string, match func(protocol.ClientMessage) bool) protocol.ClientMessage {
+func awaitSent(t *testing.T, stream *streamLog, what string, match func(protocol.ClientMessage) bool) protocol.ClientMessage {
 	t.Helper()
 	var found protocol.ClientMessage
 	require.Eventually(t, func() bool {
@@ -82,7 +82,7 @@ func awaitSent(t *testing.T, stream *sessionTestStream, what string, match func(
 	return found
 }
 
-func countSent[T protocol.ClientMessage](stream *sessionTestStream) int {
+func countSent[T protocol.ClientMessage](stream *streamLog) int {
 	count := 0
 	for _, message := range stream.messages() {
 		if _, ok := message.(T); ok {
@@ -209,9 +209,9 @@ func TestPickerOverlayCommitElsewhereSwitchesAttachment(t *testing.T) {
 			awaitPresentation(t, harness.sup, PresentAttachedPicker)
 
 			var mu sync.Mutex
-			second := newSessionTestStream()
+			second := newSessionStream(t)
 			harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-				return second, nil
+				return second.conn, nil
 			})
 			other := sessionTestRequest(tt.local)
 			other.Target = beta
@@ -321,10 +321,10 @@ func TestPickerOverlaySettlesUIActions(t *testing.T) {
 				require.Equal(t, alpha, overlayContext.Route.Target)
 			}
 			var mu sync.Mutex
-			second := newSessionTestStream()
+			second := newSessionStream(t)
 			if tt.commit {
 				harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-					return second, nil
+					return second.conn, nil
 				})
 				// A remote target is another daemon, so it swaps.
 				other := sessionTestRequest(tt.inPlace)
@@ -427,9 +427,9 @@ func TestPickerCloseWithoutAttachment(t *testing.T) {
 			// Prove the close was consumed, then that the run survived it: a
 			// later commit is still admitted.
 			require.Eventually(t, picker.opTaken, 5*time.Second, time.Millisecond)
-			stream := newSessionTestStream()
+			stream := newSessionStream(t)
 			harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-				return stream, nil
+				return stream.conn, nil
 			})
 			picker.commit(sessionTestRequest(true))
 			awaitStreamHello(t, &sync.Mutex{}, &stream)
@@ -461,7 +461,7 @@ func moveOffer(interaction uint64) protocol.PickerOffer {
 
 // openMovePicker opens one move interaction on a live attachment and waits
 // until its box is drawn.
-func openMovePicker(t *testing.T, harness *attachTestHarness, stream *sessionTestStream, interaction uint64) {
+func openMovePicker(t *testing.T, harness *attachTestHarness, stream *streamLog, interaction uint64) {
 	t.Helper()
 	stream.deliver(moveOffer(interaction))
 	stream.deliver(moveSnapshot(interaction, 1))
@@ -475,12 +475,12 @@ func TestMovePickerOfferIsPresentedAndAnswered(t *testing.T) {
 	tests := []struct {
 		name  string
 		keys  []string
-		check func(t *testing.T, harness *attachTestHarness, stream *sessionTestStream)
+		check func(t *testing.T, harness *attachTestHarness, stream *streamLog)
 	}{
 		{
 			name: "enter commits the cursor destination",
 			keys: []string{"\x1b[B", "\r"},
-			check: func(t *testing.T, harness *attachTestHarness, stream *sessionTestStream) {
+			check: func(t *testing.T, harness *attachTestHarness, stream *streamLog) {
 				selection := awaitSent(t, stream, "PickerSelection", isSent[protocol.PickerSelection]).(protocol.PickerSelection)
 				require.Equal(t, uint64(7), selection.InteractionID)
 				require.Equal(t, "serving", selection.SourceID)
@@ -496,7 +496,7 @@ func TestMovePickerOfferIsPresentedAndAnswered(t *testing.T) {
 		{
 			name: "q cancels with a typed close",
 			keys: []string{"q"},
-			check: func(t *testing.T, harness *attachTestHarness, stream *sessionTestStream) {
+			check: func(t *testing.T, harness *attachTestHarness, stream *streamLog) {
 				closed := awaitSent(t, stream, "PickerClose", isSent[protocol.PickerClose]).(protocol.PickerClose)
 				require.Equal(t, uint64(7), closed.InteractionID)
 				awaitSent(t, stream, "OutputResetRequest", isSent[protocol.OutputResetRequest])
@@ -505,7 +505,7 @@ func TestMovePickerOfferIsPresentedAndAnswered(t *testing.T) {
 		{
 			name: "a lone escape cancels once its window elapses",
 			keys: []string{"\x1b"},
-			check: func(t *testing.T, harness *attachTestHarness, stream *sessionTestStream) {
+			check: func(t *testing.T, harness *attachTestHarness, stream *streamLog) {
 				// The input path first withholds the Escape as a possible
 				// DECRQM reply prefix; its ambiguity window hands it on.
 				var marker *supervisorTestTimer

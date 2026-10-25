@@ -20,9 +20,9 @@ func TestSessionPickerDetachRevokesForegroundBeforePicker(t *testing.T) {
 	harness := startAttachHarnessConfig(t, picker, func(cfg *SupervisorConfig) {
 		cfg.NotifyLifecycle = func(notice LifecycleNotice) { notices <- notice }
 	})
-	stream := newSessionTestStream()
+	stream := newSessionStream(t)
 	harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-		return stream, nil
+		return stream.conn, nil
 	})
 	picker.commit(sessionTestRequest(true))
 	awaitStreamHello(t, &sync.Mutex{}, &stream)
@@ -42,9 +42,9 @@ func TestSessionPickerDetachRevokesForegroundBeforePicker(t *testing.T) {
 	require.True(t, picker.owns())
 	require.Len(t, harness.service.openedRequests(), 1, "picker transfer must not reattach")
 	// Reopening is possible only through a fresh client-owned selection.
-	next := newSessionTestStream()
+	next := newSessionStream(t)
 	harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-		return next, nil
+		return next.conn, nil
 	})
 	picker.commit(sessionTestRequest(true))
 	awaitStreamHello(t, &sync.Mutex{}, &next)

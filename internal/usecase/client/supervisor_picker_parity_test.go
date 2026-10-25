@@ -133,10 +133,10 @@ func TestSupervisorPickerKill(t *testing.T) {
 
 			var mu sync.Mutex
 			controls := make([]*brokerOpsTestStream, 0, 1)
-			session := newSessionTestStream()
+			session := newSessionStream(t)
 			harness.service.setOpenStream(func(_ context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 				if request.Purpose != ports.BrokerStreamControl {
-					return session, nil
+					return session.conn, nil
 				}
 				control := newBrokerOpsTestStream()
 				mu.Lock()

@@ -21,14 +21,14 @@ func TestResumeCancelDuringStreamOpen(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			picker := newAttachTestPicker()
 			h := startAttachHarnessConfig(t, picker, func(cfg *SupervisorConfig) { cfg.Jitter = resumeTestJitter })
-			first := newSessionTestStream()
+			first := newSessionStream(t)
 			opened := make(chan struct{})
 			cancelled := make(chan struct{})
 			count := 0
 			h.service.setOpenStream(func(ctx context.Context, _ ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 				count++
 				if count == 1 {
-					return first, nil
+					return first.conn, nil
 				}
 				close(opened)
 				<-ctx.Done()
@@ -87,14 +87,14 @@ func TestResumeHeldKeysNeverReachThePicker(t *testing.T) {
 func assertHeldKeysDroppedAtPicker(t *testing.T, cancel bool) {
 	picker := newAttachTestPicker()
 	h := startAttachHarnessConfig(t, picker, func(cfg *SupervisorConfig) { cfg.Jitter = resumeTestJitter })
-	first := newSessionTestStream()
+	first := newSessionStream(t)
 	opened := make(chan struct{}, 1)
 	refuse := make(chan struct{})
 	count := 0
 	h.service.setOpenStream(func(ctx context.Context, _ ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 		count++
 		if count == 1 {
-			return first, nil
+			return first.conn, nil
 		}
 		opened <- struct{}{}
 		select {

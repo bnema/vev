@@ -32,7 +32,7 @@ func (r *inputTestReader) Read(p []byte) (int, error) {
 }
 
 type inputHarness struct {
-	stream *sessionTestStream
+	stream *streamLog
 	pump   *terminalInputPump
 	term   *workerTestTerminal
 	clock  *supervisorTestClock
@@ -50,15 +50,15 @@ func startInputHarness(t *testing.T, themes *terminalThemeState) *inputHarness {
 
 func startInputHarnessWithConfig(t *testing.T, themes *terminalThemeState, request ports.BrokerOpenStreamRequest, clipboard ports.ClipboardReader) *inputHarness {
 	t.Helper()
-	return startInputHarnessOn(t, themes, request, clipboard, newSessionTestStream(), nil)
+	return startInputHarnessOn(t, themes, request, clipboard, newSessionStream(t), nil)
 }
 
 // startInputHarnessOn runs the harness over stream; transport, when non-nil,
 // is what the worker writes through (a wrapper over stream).
-func startInputHarnessOn(t *testing.T, themes *terminalThemeState, request ports.BrokerOpenStreamRequest, clipboard ports.ClipboardReader, stream *sessionTestStream, transport ports.BrokerLogicalConnection) *inputHarness {
+func startInputHarnessOn(t *testing.T, themes *terminalThemeState, request ports.BrokerOpenStreamRequest, clipboard ports.ClipboardReader, stream *streamLog, transport ports.BrokerLogicalConnection) *inputHarness {
 	t.Helper()
 	if transport == nil {
-		transport = stream
+		transport = stream.conn
 	}
 	reader := &inputTestReader{chunks: make(chan []byte, 16)}
 	pump := newTerminalInputPump(reader)

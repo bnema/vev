@@ -648,7 +648,7 @@ func TestSessionAttachmentHelloCarriesTab(t *testing.T) {
 			}
 			worker, err := newSessionAttachmentWorker(sessionAttachmentConfig{Request: request, Geometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}, SessionEnvironment: SessionEnvironment{Provenance: provenance}, Tab: tt.tab})
 			require.NoError(t, err)
-			hello := worker.hello(newSessionTestStream())
+			hello := worker.hello(newSessionStream(t).conn)
 			require.Equal(t, tt.wantPreferred, hello.PreferredTabID)
 			require.Equal(t, tt.wantTarget, hello.SessionTarget)
 			require.NoError(t, protocol.ValidateHello(hello))

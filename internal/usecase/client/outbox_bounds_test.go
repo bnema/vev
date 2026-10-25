@@ -12,8 +12,8 @@ import (
 func TestOutboxFullCancellation(t *testing.T) {
 	for _, foreground := range []bool{false, true} {
 		t.Run(map[bool]string{false: "context", true: "foreground"}[foreground], func(t *testing.T) {
-			stream := &gatedSessionStream{sessionTestStream: newSessionTestStream(), release: make(chan struct{})}
-			box := newAttachmentOutbox(stream)
+			stream := newGatedSessionStream(t, nil)
+			box := newAttachmentOutbox(stream.conn)
 			defer box.join()
 			for range outboxMaxPending {
 				require.NoError(t, box.SendClient(protocol.Ack{}))
@@ -45,8 +45,8 @@ func TestOutboxFullCancellation(t *testing.T) {
 // TestOutboxFullAdmitsAfterProgress checks that a caller blocked on a full
 // outbox is admitted once the sender writes and frees space.
 func TestOutboxFullAdmitsAfterProgress(t *testing.T) {
-	stream := &gatedSessionStream{sessionTestStream: newSessionTestStream(), release: make(chan struct{})}
-	box := newAttachmentOutbox(stream)
+	stream := newGatedSessionStream(t, nil)
+	box := newAttachmentOutbox(stream.conn)
 	defer box.join()
 	for range outboxMaxPending {
 		require.NoError(t, box.SendClient(protocol.Ack{}))
@@ -69,8 +69,8 @@ func TestOutboxFullAdmitsAfterProgress(t *testing.T) {
 }
 
 func TestOutboxMixedUnsentInput(t *testing.T) {
-	stream := &gatedSessionStream{sessionTestStream: newSessionTestStream(), release: make(chan struct{})}
-	box := newAttachmentOutbox(stream)
+	stream := newGatedSessionStream(t, nil)
+	box := newAttachmentOutbox(stream.conn)
 	defer box.join()
 	for _, message := range []protocol.ClientMessage{protocol.Ack{}, protocol.Input{Data: []byte("a")}, protocol.TerminalFocus{}, protocol.Input{Data: []byte("b")}} {
 		require.NoError(t, box.SendClient(message))

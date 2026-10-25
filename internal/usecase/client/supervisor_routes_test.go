@@ -31,7 +31,7 @@ func routeTestCatalogue(revision ports.BrokerRevision, remoteBell bool) ports.Br
 }
 
 // sentRouteSnapshots returns every route snapshot the attachment published.
-func sentRouteSnapshots(stream *sessionTestStream) []protocol.RecentRouteSnapshot {
+func sentRouteSnapshots(stream *streamLog) []protocol.RecentRouteSnapshot {
 	var out []protocol.RecentRouteSnapshot
 	for _, message := range stream.messages() {
 		if snapshot, ok := message.(protocol.RecentRouteSnapshot); ok {
@@ -41,7 +41,7 @@ func sentRouteSnapshots(stream *sessionTestStream) []protocol.RecentRouteSnapsho
 	return out
 }
 
-func awaitRouteSnapshot(t *testing.T, stream *sessionTestStream, what string, match func(protocol.RecentRouteSnapshot) bool) protocol.RecentRouteSnapshot {
+func awaitRouteSnapshot(t *testing.T, stream *streamLog, what string, match func(protocol.RecentRouteSnapshot) bool) protocol.RecentRouteSnapshot {
 	t.Helper()
 	var found protocol.RecentRouteSnapshot
 	require.Eventually(t, func() bool {
@@ -114,7 +114,7 @@ func TestSupervisorSettlesDaemonNavigation(t *testing.T) {
 		// refuseInPlace answers the in-place switch with a daemon refusal.
 		refuseInPlace bool
 		wantOpen      func(*testing.T, ports.BrokerOpenStreamRequest)
-		wantReply     func(*testing.T, *sessionTestStream)
+		wantReply     func(*testing.T, *streamLog)
 	}{
 		{
 			name: "recent route to another daemon swaps",
@@ -135,7 +135,7 @@ func TestSupervisorSettlesDaemonNavigation(t *testing.T) {
 				entry, _ := routeEntryNamed(s, "beta")
 				return protocol.RouteNavigationAction{SnapshotGeneration: s.Generation, Key: entry.Key, Generation: entry.Generation}
 			},
-			wantReply: func(t *testing.T, stream *sessionTestStream) {
+			wantReply: func(t *testing.T, stream *streamLog) {
 				request := awaitSent(t, stream, "SamePeerSwitchRequest", isSent[protocol.SamePeerSwitchRequest]).(protocol.SamePeerSwitchRequest)
 				require.Equal(t, beta, request.Target)
 			},
@@ -157,7 +157,7 @@ func TestSupervisorSettlesDaemonNavigation(t *testing.T) {
 			request: func(s protocol.RecentRouteSnapshot) protocol.ServerMessage {
 				return protocol.RouteNavigationAction{SnapshotGeneration: s.Generation, Key: 999, Generation: 1}
 			},
-			wantReply: func(t *testing.T, stream *sessionTestStream) {
+			wantReply: func(t *testing.T, stream *streamLog) {
 				failure := awaitSent(t, stream, "RouteNavigationFailure", isSent[protocol.RouteNavigationFailure]).(protocol.RouteNavigationFailure)
 				require.Equal(t, protocol.RouteNavigationFailure{Key: 999, Generation: 1, Code: protocol.RouteFailureStaleSelection}, failure)
 			},
@@ -179,7 +179,7 @@ func TestSupervisorSettlesDaemonNavigation(t *testing.T) {
 			request: func(s protocol.RecentRouteSnapshot) protocol.ServerMessage {
 				return protocol.RouteCreateSessionAction{RequestID: 4, SnapshotGeneration: s.Generation, Key: 999, Generation: 1, SessionName: "fresh"}
 			},
-			wantReply: func(t *testing.T, stream *sessionTestStream) {
+			wantReply: func(t *testing.T, stream *streamLog) {
 				failure := awaitSent(t, stream, "SessionCreationFailure", isSent[protocol.SessionCreationFailure]).(protocol.SessionCreationFailure)
 				require.Equal(t, protocol.SessionCreationFailure{RequestID: 4, Code: protocol.RouteFailureStaleSelection}, failure)
 			},
@@ -190,7 +190,7 @@ func TestSupervisorSettlesDaemonNavigation(t *testing.T) {
 				target := beta
 				return protocol.AttachTarget{Session: "beta", Intent: protocol.IntentAttach, ExactTarget: &target, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned, SamePeer: true}
 			},
-			wantReply: func(t *testing.T, stream *sessionTestStream) {
+			wantReply: func(t *testing.T, stream *streamLog) {
 				request := awaitSent(t, stream, "SamePeerSwitchRequest", isSent[protocol.SamePeerSwitchRequest]).(protocol.SamePeerSwitchRequest)
 				require.Equal(t, beta, request.Target)
 				require.NotZero(t, request.RequestID)
@@ -222,12 +222,12 @@ func TestSupervisorSettlesDaemonNavigation(t *testing.T) {
 			})
 
 			var mu sync.Mutex
-			var second *sessionTestStream
+			var second *streamLog
 			harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 				mu.Lock()
 				defer mu.Unlock()
-				second = newSessionTestStream()
-				return second, nil
+				second = newSessionStream(t)
+				return second.conn, nil
 			})
 			stream.deliver(tt.request(snapshot))
 			if tt.refuseInPlace {
@@ -278,9 +278,9 @@ func TestSupervisorRouteSnapshotExcludesServingHost(t *testing.T) {
 	snapshot.Revision = 2
 	harness.service.publishSnapshot(snapshot)
 
-	stream := newSessionTestStream()
+	stream := newSessionStream(t)
 	harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-		return stream, nil
+		return stream.conn, nil
 	})
 	picker.commit(sessionTestRequest(false))
 	awaitStreamHello(t, &sync.Mutex{}, &stream)
@@ -304,7 +304,7 @@ func TestSupervisorSamePeerSwitchSettlesUIAction(t *testing.T) {
 	tests := []struct {
 		name string
 		// settle delivers the daemon's answer to the confirmed switch.
-		settle func(*sessionTestStream, protocol.SamePeerSwitchRequest)
+		settle func(*streamLog, protocol.SamePeerSwitchRequest)
 		// sourceReceipt delivers a daemon receipt on the source boundary; the
 		// daemon may also lose the source fence and never answer it.
 		sourceReceipt bool
@@ -312,7 +312,7 @@ func TestSupervisorSamePeerSwitchSettlesUIAction(t *testing.T) {
 	}{
 		{
 			name: "destination output completes the action without a daemon receipt",
-			settle: func(stream *sessionTestStream, _ protocol.SamePeerSwitchRequest) {
+			settle: func(stream *streamLog, _ protocol.SamePeerSwitchRequest) {
 				destination := sessionTestOutput(4, "\x1b[Hbeta")
 				destination.Epoch = 2
 				destination.Context.Route.Target = beta
@@ -322,7 +322,7 @@ func TestSupervisorSamePeerSwitchSettlesUIAction(t *testing.T) {
 		{
 			name:          "a source-boundary receipt waits for the destination output",
 			sourceReceipt: true,
-			settle: func(stream *sessionTestStream, _ protocol.SamePeerSwitchRequest) {
+			settle: func(stream *streamLog, _ protocol.SamePeerSwitchRequest) {
 				destination := sessionTestOutput(4, "\x1b[Hbeta")
 				destination.Epoch = 2
 				destination.Context.Route.Target = beta
@@ -332,7 +332,7 @@ func TestSupervisorSamePeerSwitchSettlesUIAction(t *testing.T) {
 		{
 			name:          "a refused switch fails the action",
 			sourceReceipt: true,
-			settle: func(stream *sessionTestStream, request protocol.SamePeerSwitchRequest) {
+			settle: func(stream *streamLog, request protocol.SamePeerSwitchRequest) {
 				stream.deliver(protocol.SamePeerSwitchFailure{RequestID: request.RequestID, Code: protocol.SamePeerSwitchStaleTarget})
 			},
 			wantErr: ports.UIErrNavigationFailed,

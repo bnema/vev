@@ -140,13 +140,13 @@ func TestNilTerminalFocusStateIsUnknown(t *testing.T) {
 func TestAttachmentDeclaresFocusInHelloThenReportsChanges(t *testing.T) {
 	pump := newTerminalInputPump(blockingReader{})
 	pump.focus.set(domain.TerminalFocusUnfocused)
-	stream := newSessionTestStream()
+	stream := newSessionStream(t)
 	host := newWorkerTestHost(newWorkerTestTerminal(), pump, nil)
 	worker, err := newSessionAttachmentWorker(sessionTestWorkerConfig(sessionTestRequest(true)))
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go func() { _, _ = host.Run(ctx, AttachmentToken{Generation: 4, Attempt: 1}, worker, stream) }()
+	go func() { _, _ = host.Run(ctx, AttachmentToken{Generation: 4, Attempt: 1}, worker, stream.conn) }()
 
 	hello := awaitHello(t, stream)
 	require.Equal(t, domain.TerminalFocusUnfocused, hello.TerminalFocus)

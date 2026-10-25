@@ -31,9 +31,9 @@ func TestP54LifecycleActionsAreDistinct(t *testing.T) {
 				cfg.LifecycleActions = actions
 				cfg.NotifyLifecycle = func(notice LifecycleNotice) { notices <- notice }
 			})
-			stream := newSessionTestStream()
+			stream := newSessionStream(t)
 			harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-				return stream, nil
+				return stream.conn, nil
 			})
 			picker.commit(sessionTestRequest(true))
 			awaitStreamHello(t, &sync.Mutex{}, &stream)
@@ -55,14 +55,14 @@ func TestP54LifecycleActionsAreDistinct(t *testing.T) {
 func TestP54AttachmentOutcomesReturnToPicker(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
-		settle func(*sessionTestStream)
+		settle func(*streamLog)
 		notice LifecycleNoticeKind
 	}{
 		// ReasonDetach (the explicit user detach) is intentionally excluded here:
 		// TestSupervisorDetachedReasonDeterminesExitOrPicker pins that it exits
 		// the client instead of returning to the picker.
-		{name: "server shutdown", settle: func(s *sessionTestStream) { s.deliver(protocol.Detached{Reason: protocol.ReasonServerShutdown}) }, notice: LifecycleNoticeSessionEnded},
-		{name: "session deletion", settle: func(s *sessionTestStream) { s.deliver(protocol.Detached{Reason: protocol.ReasonSessionKilled}) }, notice: LifecycleNoticeSessionEnded},
+		{name: "server shutdown", settle: func(s *streamLog) { s.deliver(protocol.Detached{Reason: protocol.ReasonServerShutdown}) }, notice: LifecycleNoticeSessionEnded},
+		{name: "session deletion", settle: func(s *streamLog) { s.deliver(protocol.Detached{Reason: protocol.ReasonSessionKilled}) }, notice: LifecycleNoticeSessionEnded},
 		// A stream loss after attachment resumes the same session instead:
 		// TestSupervisorAttachmentLossResumesSameSession pins that path.
 	} {
@@ -71,9 +71,9 @@ func TestP54AttachmentOutcomesReturnToPicker(t *testing.T) {
 			notices := make(chan LifecycleNotice, 4)
 			harness := startAttachHarness(t, picker)
 			harness.sup.cfg.NotifyLifecycle = func(notice LifecycleNotice) { notices <- notice }
-			stream := newSessionTestStream()
+			stream := newSessionStream(t)
 			harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-				return stream, nil
+				return stream.conn, nil
 			})
 			picker.commit(sessionTestRequest(true))
 			require.Eventually(t, func() bool { return len(stream.messages()) > 0 }, 5*time.Second, time.Millisecond)
@@ -132,9 +132,9 @@ func TestP54InitialNavigationCreatesEphemeralThroughBroker(t *testing.T) {
 	terminal := &attachTestTerminal{in: reader}
 	service := newSupervisorTestService(ports.BrokerConnectionID{1})
 	service.publishSnapshot(localDaemonSnapshot(3, 1))
-	stream := newSessionTestStream()
+	stream := newSessionStream(t)
 	service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-		return stream, nil
+		return stream.conn, nil
 	})
 	sup := mustSupervisor(t, SupervisorConfig{Connector: newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) { return service, nil }), Terminal: terminal, Clock: clock, Jitter: func() float64 { return 0 }, Picker: picker, InitialNavigation: navigation})
 	done := make(chan error, 1)
@@ -161,9 +161,9 @@ func TestP54InitialNavigationIsNotReplayedAfterReconnect(t *testing.T) {
 	first := newSupervisorTestService(ports.BrokerConnectionID{1})
 	first.publishSnapshot(localDaemonSnapshot(1, 1))
 	second := newSupervisorTestService(ports.BrokerConnectionID{2})
-	stream := newSessionTestStream()
+	stream := newSessionStream(t)
 	first.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-		return stream, nil
+		return stream.conn, nil
 	})
 	connector := newSupervisorTestConnector(func(_ context.Context, call int) (ports.BrokerNavigator, error) {
 		if call == 1 {
@@ -201,9 +201,9 @@ func TestP54InitialNavigationIsNotReplayedAfterReconnect(t *testing.T) {
 func TestP54SingleReaderDeliversAttachedByteAfterRealSupervisorHandoff(t *testing.T) {
 	picker := newAttachTestPicker()
 	harness := startAttachHarness(t, picker)
-	stream := newSessionTestStream()
+	stream := newSessionStream(t)
 	harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-		return stream, nil
+		return stream.conn, nil
 	})
 	picker.commit(sessionTestRequest(true))
 	require.Eventually(t, func() bool { return len(stream.messages()) > 0 }, 5*time.Second, time.Millisecond)
@@ -302,7 +302,7 @@ func TestP54AttachmentFinalizeDropsUnleasedPendingBeforePicker(t *testing.T) {
 	lifetime.releasePicker()
 	host := newAttachmentHost(attachmentHostConfig{Input: lifetime.pump})
 	host.ownerBoundary = true
-	fg := host.newForeground(AttachmentToken{Generation: 1}, newSessionTestStream())
+	fg := host.newForeground(AttachmentToken{Generation: 1}, newSessionStream(t).conn)
 	require.True(t, host.authority.grant(fg))
 	reader.push([]byte("ls\r"))
 	require.Eventually(t, func() bool {
@@ -326,7 +326,7 @@ func TestP54AttachmentFinalizeDropsPreservedResidualBeforePicker(t *testing.T) {
 	lifetime.releasePicker()
 	host := newAttachmentHost(attachmentHostConfig{Input: lifetime.pump})
 	host.ownerBoundary = true
-	fg := host.newForeground(AttachmentToken{Generation: 1}, newSessionTestStream())
+	fg := host.newForeground(AttachmentToken{Generation: 1}, newSessionStream(t).conn)
 	require.True(t, host.authority.grant(fg))
 	reader.push([]byte("\r"))
 	event, ok := fg.Input(context.Background())
@@ -386,7 +386,7 @@ func TestP54InputDecisionProtocol(t *testing.T) {
 	pump := newTerminalInputPump(nil)
 	<-pump.space
 	host := newAttachmentHost(attachmentHostConfig{Input: pump})
-	fg := host.newForeground(AttachmentToken{Generation: 1}, newSessionTestStream())
+	fg := host.newForeground(AttachmentToken{Generation: 1}, newSessionStream(t).conn)
 	require.True(t, host.authority.grant(fg))
 	pump.mu.Lock()
 	pump.pending = &terminalReadResult{data: []byte("once")}
@@ -398,7 +398,7 @@ func TestP54InputDecisionProtocol(t *testing.T) {
 	fg.PreserveInput(event.Data)
 	fg.AckInput() // refused: already decided
 	host.authority.revoke(fg)
-	next := host.newForeground(AttachmentToken{Generation: 2}, newSessionTestStream())
+	next := host.newForeground(AttachmentToken{Generation: 2}, newSessionStream(t).conn)
 	require.True(t, host.authority.grant(next))
 	replayed, ok := next.Input(context.Background())
 	require.True(t, ok)
@@ -422,13 +422,13 @@ func TestP54GeometryIsPerAttachmentAndCarriesAcrossPicker(t *testing.T) {
 	resizes <- first
 	resizes <- latest
 	require.Eventually(t, func() bool { geometry, ok := host.latestGeometry(); return ok && geometry.Size == latest.Size }, 5*time.Second, time.Millisecond)
-	fg1 := host.newForeground(AttachmentToken{Generation: 1}, newSessionTestStream())
+	fg1 := host.newForeground(AttachmentToken{Generation: 1}, newSessionStream(t).conn)
 	require.True(t, host.authority.grant(fg1))
 	geometry, ok := fg1.Resize(context.Background())
 	require.True(t, ok)
 	require.Equal(t, latest.Size, geometry.Size)
 	host.authority.revoke(fg1)
-	fg2 := host.newForeground(AttachmentToken{Generation: 2}, newSessionTestStream())
+	fg2 := host.newForeground(AttachmentToken{Generation: 2}, newSessionStream(t).conn)
 	require.True(t, host.authority.grant(fg2))
 	geometry, ok = fg2.Resize(context.Background())
 	require.True(t, ok)
@@ -440,7 +440,7 @@ func TestP54GeometryIsPerAttachmentAndCarriesAcrossPicker(t *testing.T) {
 func TestP54LifecycleSkipsStaleTokenAndDeliversLiveDetach(t *testing.T) {
 	actions := make(chan AttachmentLifecycleAction, 2)
 	host := newAttachmentHost(attachmentHostConfig{Actions: actions})
-	fg := host.newForeground(AttachmentToken{Generation: 2, Attempt: 3}, newSessionTestStream())
+	fg := host.newForeground(AttachmentToken{Generation: 2, Attempt: 3}, newSessionStream(t).conn)
 	require.True(t, host.authority.grant(fg))
 	actions <- AttachmentLifecycleAction{Token: AttachmentToken{Generation: 1, Attempt: 9}, Kind: AttachmentDetachAndExit}
 	actions <- AttachmentLifecycleAction{Token: fg.token, Kind: AttachmentDetachToPicker}
@@ -459,7 +459,7 @@ func TestP54LifecycleInterleavingsRace(t *testing.T) {
 		host.resizes = resizes
 		ctx, cancel := context.WithCancel(context.Background())
 		host.startGeometry(ctx)
-		fg := host.newForeground(AttachmentToken{Generation: 1}, newSessionTestStream())
+		fg := host.newForeground(AttachmentToken{Generation: 1}, newSessionStream(t).conn)
 		require.True(t, host.authority.grant(fg))
 		var wg sync.WaitGroup
 		wg.Add(3)
@@ -486,7 +486,7 @@ func TestResumeKeysSurviveFinish(t *testing.T) {
 	lifetime.releasePicker()
 	host := newAttachmentHost(attachmentHostConfig{Input: lifetime.pump})
 	host.ownerBoundary = true
-	fg := host.newForeground(AttachmentToken{Generation: 1}, newSessionTestStream())
+	fg := host.newForeground(AttachmentToken{Generation: 1}, newSessionStream(t).conn)
 	require.True(t, host.authority.grant(fg))
 	reader.push([]byte("ls\r"))
 	event, ok := fg.Input(context.Background())
@@ -494,7 +494,7 @@ func TestResumeKeysSurviveFinish(t *testing.T) {
 	fg.PreserveInput(event.Data)
 	fg.finish()
 
-	next := host.newForeground(AttachmentToken{Generation: 2}, newSessionTestStream())
+	next := host.newForeground(AttachmentToken{Generation: 2}, newSessionStream(t).conn)
 	require.True(t, host.authority.grant(next))
 	replayed, ok := next.Input(context.Background())
 	require.True(t, ok)

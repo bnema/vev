@@ -14,14 +14,14 @@ func TestOutboxDrain(t *testing.T) {
 	linkErr := errors.New("link lost")
 	for _, mode := range []string{"written", "timeout", "cancelled", "failed", "revoked"} {
 		t.Run(mode, func(t *testing.T) {
-			stream := &gatedSessionStream{sessionTestStream: newSessionTestStream(), release: make(chan struct{})}
-			box := newAttachmentOutbox(stream)
+			stream := newGatedSessionStream(t, nil)
+			box := newAttachmentOutbox(stream.conn)
 			defer box.join()
 			require.NoError(t, box.SendClient(protocol.Detach{}))
 			clock := newSupervisorTestClock()
 			worker := &sessionAttachmentWorker{cfg: sessionAttachmentConfig{Clock: clock}}
 			host := newAttachmentHost(attachmentHostConfig{})
-			fg := host.newForeground(AttachmentToken{Generation: 1}, stream)
+			fg := host.newForeground(AttachmentToken{Generation: 1}, stream.conn)
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			result := make(chan error, 1)
