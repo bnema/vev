@@ -183,7 +183,7 @@ func TestLayoutApplicationRetriesOnlyAcceptedFailedGeometry(t *testing.T) {
 		require.Equal(t, []domain.Size{{Cols: 100, Rows: 20}}, pty.requested())
 		require.Equal(t, domain.Size{Cols: 80, Rows: 23}, domain.Size{Cols: p.screen.Columns(), Rows: p.screen.Rows()}, "failed apply must not publish a VT resize")
 		timer.fire()
-		awaitSignal(t, secondResize, "accepted failure was not retried")
+		requireReceived(t, secondResize, "accepted failure was not retried")
 		require.Equal(t, []domain.Size{{Cols: 100, Rows: 20}, {Cols: 100, Rows: 20}}, pty.requested())
 		synctest.Wait()
 		p.mu.Lock()
@@ -272,7 +272,7 @@ func TestLayoutApplicationDoesNotHoldTabLock(t *testing.T) {
 			sess.geometry.applyTabLayout(d, sess, tb)
 			close(done)
 		}()
-		awaitSignal(t, entered, "PTY resize did not start")
+		requireReceived(t, entered, "PTY resize did not start")
 
 		locked := make(chan struct{})
 		go func() {
@@ -281,9 +281,9 @@ func TestLayoutApplicationDoesNotHoldTabLock(t *testing.T) {
 			tb.mu.Unlock()
 			close(locked)
 		}()
-		awaitSignal(t, locked, "tab lock remained held across PTY resize")
+		requireReceived(t, locked, "tab lock remained held across PTY resize")
 		close(release)
-		awaitSignal(t, done, "layout application did not finish")
+		requireReceived(t, done, "layout application did not finish")
 	})
 }
 
@@ -306,7 +306,7 @@ func TestLayoutApplicationRejectsStalePaneIdentity(t *testing.T) {
 			sess.geometry.applyTabLayout(d, sess, tb)
 			close(done)
 		}()
-		awaitSignal(t, entered, "stale PTY resize did not start")
+		requireReceived(t, entered, "stale PTY resize did not start")
 
 		newPTY := portsmocks.NewMockPTY(t)
 		replacement := newPane("pane-1", newPTY, domain.Size{Cols: 20, Rows: 10})
@@ -316,7 +316,7 @@ func TestLayoutApplicationRejectsStalePaneIdentity(t *testing.T) {
 		tb.bumpLayoutGenerationLocked()
 		tb.mu.Unlock()
 		close(release)
-		awaitSignal(t, done, "stale layout did not retry")
+		requireReceived(t, done, "stale layout did not retry")
 
 		require.Equal(t, domain.Rect{Width: 20, Height: 10}, oldPane.rect, "stale pane rectangle was published")
 		require.Equal(t, 20, oldPane.screen.Columns(), "stale pane screen was published")
@@ -394,12 +394,12 @@ func TestLayoutApplicationRejectsStaleCloseFocusAndSize(t *testing.T) {
 
 			done := make(chan struct{})
 			go func() { sess.geometry.applyTabLayout(d, sess, tb); close(done) }()
-			awaitSignal(t, entered, "old stack apply did not block")
+			requireReceived(t, entered, "old stack apply did not block")
 			tb.mu.Lock()
 			require.True(t, focusPlacementLocked(tb, p2.id))
 			tb.mu.Unlock()
 			close(release)
-			awaitSignal(t, done, "stale stack apply did not retry")
+			requireReceived(t, done, "stale stack apply did not retry")
 
 			require.Equal(t, domain.Rect{Width: 80, Height: 23}, p1.rect, "collapsed pane received stale geometry")
 			p1.mu.Lock()
@@ -426,7 +426,7 @@ func TestLayoutApplicationRejectsStaleCloseFocusAndSize(t *testing.T) {
 
 			oldDone := make(chan struct{})
 			go func() { sess.geometry.applyTabLayout(d, sess, tb); close(oldDone) }()
-			awaitSignal(t, entered, "old size apply did not block")
+			requireReceived(t, entered, "old size apply did not block")
 			resizeDone := make(chan bool, 1)
 			go func() {
 				resizeDone <- sess.geometry.requestResize(d, sess, nil, domain.Size{Cols: 100, Rows: 30}, true)
@@ -439,19 +439,13 @@ func TestLayoutApplicationRejectsStaleCloseFocusAndSize(t *testing.T) {
 			tb.mu.Unlock()
 			require.Equal(t, domain.Rect{Width: 20, Height: 10}, p.rect, "stale size published before release")
 			close(release)
-			awaitSignal(t, oldDone, "old size apply did not finish")
+			requireReceived(t, oldDone, "old size apply did not finish")
 			require.True(t, <-resizeDone)
 			require.Equal(t, domain.Rect{Width: 100, Height: 28}, p.rect)
 			require.Equal(t, domain.Size{Cols: 100, Rows: 28}, domain.Size{Cols: p.screen.Columns(), Rows: p.screen.Rows()})
 			require.Equal(t, []domain.Size{{Cols: 80, Rows: 23}, {Cols: 100, Rows: 28}}, pty.requested())
 		})
 	})
-}
-
-// awaitSignal runs inside a synctest bubble: after quiescence ch must be ready.
-func awaitSignal(t *testing.T, ch <-chan struct{}, message string) {
-	t.Helper()
-	requireReceived(t, ch, message)
 }
 
 func TestSplitPaneCreatesFocusedShellInRequestedPosition(t *testing.T) {
