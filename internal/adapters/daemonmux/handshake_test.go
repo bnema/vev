@@ -3,6 +3,7 @@ package daemonmux
 import (
 	"context"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -94,21 +95,23 @@ func awaitSentFrame(t *testing.T, carrier *carrierFixture) []byte {
 // accepted, yields the server authority, leaves the carrier open, and offers
 // exactly the requested policy and ceilings.
 func TestClientHandshakeAcceptsVerifiedResponse(t *testing.T) {
-	carrier := newCarrierFixture(t)
-	carrier.inbound <- fakeFrame{payload: encodedAcceptedResponse(t, nil)}
+	synctest.Test(t, func(t *testing.T) {
+		carrier := newCarrierFixture(t)
+		carrier.inbound <- fakeFrame{payload: encodedAcceptedResponse(t, nil)}
 
-	result, err := RunClientHandshake(context.Background(), carrier.mock, handshakeEndpoint(testIdentity(), testPolicy()), DefaultMuxCeilings())
-	require.NoError(t, err)
-	require.Equal(t, testIdentity(), result.Identity)
-	require.Equal(t, testIncarnation(), result.Incarnation)
-	require.Equal(t, testPolicy(), result.Policy)
-	require.Equal(t, DefaultMuxCeilings(), result.Ceilings)
-	require.Equal(t, 0, carrier.closeCalls())
+		result, err := RunClientHandshake(context.Background(), carrier.mock, handshakeEndpoint(testIdentity(), testPolicy()), DefaultMuxCeilings())
+		require.NoError(t, err)
+		require.Equal(t, testIdentity(), result.Identity)
+		require.Equal(t, testIncarnation(), result.Incarnation)
+		require.Equal(t, testPolicy(), result.Policy)
+		require.Equal(t, DefaultMuxCeilings(), result.Ceilings)
+		require.Equal(t, 0, carrier.closeCalls())
 
-	request, err := DecodePreambleRequestBytes(awaitSentFrame(t, carrier))
-	require.NoError(t, err)
-	require.Equal(t, DefaultMuxCeilings(), request.Ceilings)
-	require.Equal(t, testPolicy(), request.Policy)
+		request, err := DecodePreambleRequestBytes(awaitSentFrame(t, carrier))
+		require.NoError(t, err)
+		require.Equal(t, DefaultMuxCeilings(), request.Ceilings)
+		require.Equal(t, testPolicy(), request.Policy)
+	})
 }
 
 // TestClientHandshakeRejectsUntrustedResponses is the client authority table:
@@ -248,17 +251,19 @@ func TestClientHandshakeRejectsUntrustedResponses(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			carrier := newCarrierFixture(t)
-			carrier.inbound <- fakeFrame{payload: test.response(t)}
+			synctest.Test(t, func(t *testing.T) {
+				carrier := newCarrierFixture(t)
+				carrier.inbound <- fakeFrame{payload: test.response(t)}
 
-			_, err := RunClientHandshake(context.Background(), carrier.mock, handshakeEndpoint(testIdentity(), testPolicy()), test.offered)
-			require.ErrorIs(t, err, ErrHandshakeRejected)
-			if test.code != 0 {
-				var refusal *HandshakeRefusal
-				require.ErrorAs(t, err, &refusal)
-				require.Equal(t, test.code, refusal.Code)
-			}
-			require.Equal(t, 1, carrier.closeCalls())
+				_, err := RunClientHandshake(context.Background(), carrier.mock, handshakeEndpoint(testIdentity(), testPolicy()), test.offered)
+				require.ErrorIs(t, err, ErrHandshakeRejected)
+				if test.code != 0 {
+					var refusal *HandshakeRefusal
+					require.ErrorAs(t, err, &refusal)
+					require.Equal(t, test.code, refusal.Code)
+				}
+				require.Equal(t, 1, carrier.closeCalls())
+			})
 		})
 	}
 }
@@ -267,34 +272,36 @@ func TestClientHandshakeRejectsUntrustedResponses(t *testing.T) {
 // request with the immutable binding and the element-wise minima, and leaves
 // the carrier open.
 func TestServerHandshakeAcceptsAndNegotiates(t *testing.T) {
-	binding := mustServerBinding(t)
-	clientCeilings := MuxCeilings{
-		MaxReceiveEnvelopeBytes: MinMuxEnvelopeBytes,
-		StreamChunkLimit:        8,
-		MaxStreams:              4,
-		MaxAggregateBytes:       MinMuxAggregateBytes,
-	}
-	serverCeilings := DefaultMuxCeilings()
-	serverCeilings.MaxStreams = 2
+	synctest.Test(t, func(t *testing.T) {
+		binding := mustServerBinding(t)
+		clientCeilings := MuxCeilings{
+			MaxReceiveEnvelopeBytes: MinMuxEnvelopeBytes,
+			StreamChunkLimit:        8,
+			MaxStreams:              4,
+			MaxAggregateBytes:       MinMuxAggregateBytes,
+		}
+		serverCeilings := DefaultMuxCeilings()
+		serverCeilings.MaxStreams = 2
 
-	carrier := newCarrierFixture(t)
-	carrier.inbound <- fakeFrame{payload: encodedRequest(t, clientCeilings, testPolicy(), nil)}
+		carrier := newCarrierFixture(t)
+		carrier.inbound <- fakeFrame{payload: encodedRequest(t, clientCeilings, testPolicy(), nil)}
 
-	result, err := RunServerHandshake(context.Background(), carrier.mock, binding, serverCeilings)
-	require.NoError(t, err)
-	require.Equal(t, binding, result.Binding)
-	require.Equal(t, EffectiveMuxCeilings(clientCeilings, serverCeilings), result.Ceilings)
-	require.Equal(t, testPolicy(), result.Policy, "the accepted policy is the provisioned member")
-	require.Equal(t, ports.SessionOriginLocal, result.Origin, "the accepted origin is the provisioned locality")
-	require.Equal(t, 0, carrier.closeCalls())
+		result, err := RunServerHandshake(context.Background(), carrier.mock, binding, serverCeilings)
+		require.NoError(t, err)
+		require.Equal(t, binding, result.Binding)
+		require.Equal(t, EffectiveMuxCeilings(clientCeilings, serverCeilings), result.Ceilings)
+		require.Equal(t, testPolicy(), result.Policy, "the accepted policy is the provisioned member")
+		require.Equal(t, ports.SessionOriginLocal, result.Origin, "the accepted origin is the provisioned locality")
+		require.Equal(t, 0, carrier.closeCalls())
 
-	decoded, err := DecodePreambleResponseBytes(awaitSentFrame(t, carrier))
-	require.NoError(t, err)
-	require.True(t, decoded.Accepted)
-	require.Equal(t, testIdentity(), decoded.Identity)
-	require.Equal(t, testIncarnation(), decoded.Incarnation)
-	require.Equal(t, testPolicy(), decoded.Policy)
-	require.Equal(t, result.Ceilings, decoded.Ceilings)
+		decoded, err := DecodePreambleResponseBytes(awaitSentFrame(t, carrier))
+		require.NoError(t, err)
+		require.True(t, decoded.Accepted)
+		require.Equal(t, testIdentity(), decoded.Identity)
+		require.Equal(t, testIncarnation(), decoded.Incarnation)
+		require.Equal(t, testPolicy(), decoded.Policy)
+		require.Equal(t, result.Ceilings, decoded.Ceilings)
+	})
 }
 
 // TestServerHandshakeEnforcesBindingPolicy proves a request differing in one
@@ -318,24 +325,26 @@ func TestServerHandshakeEnforcesBindingPolicy(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			requested := testPolicy()
-			test.mutate(&requested)
+			synctest.Test(t, func(t *testing.T) {
+				requested := testPolicy()
+				test.mutate(&requested)
 
-			carrier := newCarrierFixture(t)
-			carrier.inbound <- fakeFrame{payload: encodedRequest(t, DefaultMuxCeilings(), requested, nil)}
+				carrier := newCarrierFixture(t)
+				carrier.inbound <- fakeFrame{payload: encodedRequest(t, DefaultMuxCeilings(), requested, nil)}
 
-			_, err := RunServerHandshake(context.Background(), carrier.mock, binding, DefaultMuxCeilings())
-			var refusal *HandshakeRefusal
-			require.ErrorAs(t, err, &refusal)
-			require.Equal(t, uint32(RejectionLimitRefused), refusal.Code)
-			require.Equal(t, 1, carrier.closeCalls())
+				_, err := RunServerHandshake(context.Background(), carrier.mock, binding, DefaultMuxCeilings())
+				var refusal *HandshakeRefusal
+				require.ErrorAs(t, err, &refusal)
+				require.Equal(t, uint32(RejectionLimitRefused), refusal.Code)
+				require.Equal(t, 1, carrier.closeCalls())
 
-			raw := &wire.MuxPreambleResponse{}
-			require.NoError(t, proto.Unmarshal(awaitSentFrame(t, carrier), raw))
-			require.False(t, raw.GetAccepted())
-			require.Nil(t, raw.GetAcceptedPolicy())
-			require.Empty(t, raw.GetDaemonIdentity())
-			require.Empty(t, raw.GetIncarnation())
+				raw := &wire.MuxPreambleResponse{}
+				require.NoError(t, proto.Unmarshal(awaitSentFrame(t, carrier), raw))
+				require.False(t, raw.GetAccepted())
+				require.Nil(t, raw.GetAcceptedPolicy())
+				require.Empty(t, raw.GetDaemonIdentity())
+				require.Empty(t, raw.GetIncarnation())
+			})
 		})
 	}
 }
@@ -395,18 +404,20 @@ func TestServerHandshakeRefusesMalformedRequest(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			carrier := newCarrierFixture(t)
-			carrier.inbound <- fakeFrame{payload: test.request(t)}
+			synctest.Test(t, func(t *testing.T) {
+				carrier := newCarrierFixture(t)
+				carrier.inbound <- fakeFrame{payload: test.request(t)}
 
-			_, err := RunServerHandshake(context.Background(), carrier.mock, binding, DefaultMuxCeilings())
-			var refusal *HandshakeRefusal
-			require.ErrorAs(t, err, &refusal)
-			require.Equal(t, test.code, refusal.Code)
-			require.Equal(t, 1, carrier.closeCalls())
+				_, err := RunServerHandshake(context.Background(), carrier.mock, binding, DefaultMuxCeilings())
+				var refusal *HandshakeRefusal
+				require.ErrorAs(t, err, &refusal)
+				require.Equal(t, test.code, refusal.Code)
+				require.Equal(t, 1, carrier.closeCalls())
 
-			decoded, err := DecodePreambleResponseBytes(awaitSentFrame(t, carrier))
-			require.ErrorIs(t, err, ErrPreambleRejected)
-			require.Equal(t, test.code, decoded.Code)
+				decoded, err := DecodePreambleResponseBytes(awaitSentFrame(t, carrier))
+				require.ErrorIs(t, err, ErrPreambleRejected)
+				require.Equal(t, test.code, decoded.Code)
+			})
 		})
 	}
 }
@@ -416,36 +427,48 @@ func TestServerHandshakeRefusesMalformedRequest(t *testing.T) {
 // configuration sentinel.
 func TestHandshakeRefusesInvalidConfiguration(t *testing.T) {
 	t.Run("client nil carrier", func(t *testing.T) {
-		_, err := RunClientHandshake(context.Background(), nil, handshakeEndpoint(testIdentity(), testPolicy()), DefaultMuxCeilings())
-		require.ErrorIs(t, err, ErrHandshakeConfig)
+		synctest.Test(t, func(t *testing.T) {
+			_, err := RunClientHandshake(context.Background(), nil, handshakeEndpoint(testIdentity(), testPolicy()), DefaultMuxCeilings())
+			require.ErrorIs(t, err, ErrHandshakeConfig)
+		})
 	})
 	t.Run("client invalid endpoint", func(t *testing.T) {
-		carrier := newCarrierFixture(t)
-		_, err := RunClientHandshake(context.Background(), carrier.mock, handshakeEndpoint("", testPolicy()), DefaultMuxCeilings())
-		require.ErrorIs(t, err, ErrHandshakeConfig)
-		require.Equal(t, 1, carrier.closeCalls())
+		synctest.Test(t, func(t *testing.T) {
+			carrier := newCarrierFixture(t)
+			_, err := RunClientHandshake(context.Background(), carrier.mock, handshakeEndpoint("", testPolicy()), DefaultMuxCeilings())
+			require.ErrorIs(t, err, ErrHandshakeConfig)
+			require.Equal(t, 1, carrier.closeCalls())
+		})
 	})
 	t.Run("client invalid ceilings", func(t *testing.T) {
-		carrier := newCarrierFixture(t)
-		_, err := RunClientHandshake(context.Background(), carrier.mock, handshakeEndpoint(testIdentity(), testPolicy()), MuxCeilings{})
-		require.ErrorIs(t, err, ErrHandshakeConfig)
-		require.Equal(t, 1, carrier.closeCalls())
+		synctest.Test(t, func(t *testing.T) {
+			carrier := newCarrierFixture(t)
+			_, err := RunClientHandshake(context.Background(), carrier.mock, handshakeEndpoint(testIdentity(), testPolicy()), MuxCeilings{})
+			require.ErrorIs(t, err, ErrHandshakeConfig)
+			require.Equal(t, 1, carrier.closeCalls())
+		})
 	})
 	t.Run("server nil carrier", func(t *testing.T) {
-		_, err := RunServerHandshake(context.Background(), nil, mustServerBinding(t), DefaultMuxCeilings())
-		require.ErrorIs(t, err, ErrHandshakeConfig)
+		synctest.Test(t, func(t *testing.T) {
+			_, err := RunServerHandshake(context.Background(), nil, mustServerBinding(t), DefaultMuxCeilings())
+			require.ErrorIs(t, err, ErrHandshakeConfig)
+		})
 	})
 	t.Run("server invalid binding", func(t *testing.T) {
-		carrier := newCarrierFixture(t)
-		_, err := RunServerHandshake(context.Background(), carrier.mock, ServerBinding{}, DefaultMuxCeilings())
-		require.ErrorIs(t, err, ErrHandshakeConfig)
-		require.Equal(t, 1, carrier.closeCalls())
+		synctest.Test(t, func(t *testing.T) {
+			carrier := newCarrierFixture(t)
+			_, err := RunServerHandshake(context.Background(), carrier.mock, ServerBinding{}, DefaultMuxCeilings())
+			require.ErrorIs(t, err, ErrHandshakeConfig)
+			require.Equal(t, 1, carrier.closeCalls())
+		})
 	})
 	t.Run("server invalid ceilings", func(t *testing.T) {
-		carrier := newCarrierFixture(t)
-		_, err := RunServerHandshake(context.Background(), carrier.mock, mustServerBinding(t), MuxCeilings{})
-		require.ErrorIs(t, err, ErrHandshakeConfig)
-		require.Equal(t, 1, carrier.closeCalls())
+		synctest.Test(t, func(t *testing.T) {
+			carrier := newCarrierFixture(t)
+			_, err := RunServerHandshake(context.Background(), carrier.mock, mustServerBinding(t), MuxCeilings{})
+			require.ErrorIs(t, err, ErrHandshakeConfig)
+			require.Equal(t, 1, carrier.closeCalls())
+		})
 	})
 }
 
@@ -513,12 +536,14 @@ func TestHandshakeHonorsCallerContext(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			ctx, cancel := test.ctx()
-			defer cancel()
-			carrier := newCarrierFixture(t)
-			err := test.run(ctx, carrier)
-			require.ErrorIs(t, err, test.want)
-			require.Equal(t, 1, carrier.closeCalls())
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := test.ctx()
+				defer cancel()
+				carrier := newCarrierFixture(t)
+				err := test.run(ctx, carrier)
+				require.ErrorIs(t, err, test.want)
+				require.Equal(t, 1, carrier.closeCalls())
+			})
 		})
 	}
 }
@@ -527,48 +552,50 @@ func TestHandshakeHonorsCallerContext(t *testing.T) {
 // in-memory link and proves they agree on the element-wise minima and the
 // binding the daemon enforced.
 func TestHandshakeEndToEndNegotiates(t *testing.T) {
-	clientCarrier, serverCarrier := newMemCarrierPair(t, 4)
-	clientCeilings := MuxCeilings{
-		MaxReceiveEnvelopeBytes: MinMuxEnvelopeBytes,
-		StreamChunkLimit:        8,
-		MaxStreams:              4,
-		MaxAggregateBytes:       MinMuxAggregateBytes,
-	}
-	serverCeilings := DefaultMuxCeilings()
-	serverCeilings.MaxStreams = 2
-	binding := mustServerBinding(t)
-	endpoint := handshakeEndpoint(testIdentity(), testPolicy())
+	synctest.Test(t, func(t *testing.T) {
+		clientCarrier, serverCarrier := newMemCarrierPair(t, 4)
+		clientCeilings := MuxCeilings{
+			MaxReceiveEnvelopeBytes: MinMuxEnvelopeBytes,
+			StreamChunkLimit:        8,
+			MaxStreams:              4,
+			MaxAggregateBytes:       MinMuxAggregateBytes,
+		}
+		serverCeilings := DefaultMuxCeilings()
+		serverCeilings.MaxStreams = 2
+		binding := mustServerBinding(t)
+		endpoint := handshakeEndpoint(testIdentity(), testPolicy())
 
-	type clientOutcome struct {
-		result ClientHandshakeResult
-		err    error
-	}
-	type serverOutcome struct {
-		result ServerHandshakeResult
-		err    error
-	}
-	clientCh := make(chan clientOutcome, 1)
-	serverCh := make(chan serverOutcome, 1)
+		type clientOutcome struct {
+			result ClientHandshakeResult
+			err    error
+		}
+		type serverOutcome struct {
+			result ServerHandshakeResult
+			err    error
+		}
+		clientCh := make(chan clientOutcome, 1)
+		serverCh := make(chan serverOutcome, 1)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	go func() {
-		result, err := RunClientHandshake(ctx, clientCarrier, endpoint, clientCeilings)
-		clientCh <- clientOutcome{result, err}
-	}()
-	go func() {
-		result, err := RunServerHandshake(ctx, serverCarrier, binding, serverCeilings)
-		serverCh <- serverOutcome{result, err}
-	}()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		go func() {
+			result, err := RunClientHandshake(ctx, clientCarrier, endpoint, clientCeilings)
+			clientCh <- clientOutcome{result, err}
+		}()
+		go func() {
+			result, err := RunServerHandshake(ctx, serverCarrier, binding, serverCeilings)
+			serverCh <- serverOutcome{result, err}
+		}()
 
-	client := <-clientCh
-	server := <-serverCh
-	require.NoError(t, client.err)
-	require.NoError(t, server.err)
-	require.Equal(t, testIdentity(), client.result.Identity)
-	require.Equal(t, testIncarnation(), client.result.Incarnation)
-	require.Equal(t, testPolicy(), client.result.Policy)
-	require.Equal(t, binding, server.result.Binding)
-	require.Equal(t, EffectiveMuxCeilings(clientCeilings, serverCeilings), client.result.Ceilings)
-	require.Equal(t, server.result.Ceilings, client.result.Ceilings)
+		client := <-clientCh
+		server := <-serverCh
+		require.NoError(t, client.err)
+		require.NoError(t, server.err)
+		require.Equal(t, testIdentity(), client.result.Identity)
+		require.Equal(t, testIncarnation(), client.result.Incarnation)
+		require.Equal(t, testPolicy(), client.result.Policy)
+		require.Equal(t, binding, server.result.Binding)
+		require.Equal(t, EffectiveMuxCeilings(clientCeilings, serverCeilings), client.result.Ceilings)
+		require.Equal(t, server.result.Ceilings, client.result.Ceilings)
+	})
 }
