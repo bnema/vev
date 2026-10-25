@@ -124,7 +124,7 @@ func TestSupervisorPickerKill(t *testing.T) {
 		}, wantNotice: "couldn't kill alpha: no such session: alpha"},
 		{name: "outcome unknown is never replayed", reply: func(s *brokerOpsTestStream) {
 			s.failReceive(errors.New("carriage lost"))
-			_ = s.Close()
+			_ = s.recordClose()
 		}, wantNotice: "kill alpha: outcome unknown"},
 		{name: "from the overlay", overlay: true, reply: func(s *brokerOpsTestStream) {
 			s.deliver(protocol.KillResult{RequestID: brokerOperationRequestID, Outcome: protocol.KillSucceeded})
@@ -144,11 +144,11 @@ func TestSupervisorPickerKill(t *testing.T) {
 					if request.Purpose != ports.BrokerStreamControl {
 						return session.conn, nil
 					}
-					control := newBrokerOpsTestStream()
+					control := newBrokerOpsTestStream(t)
 					mu.Lock()
 					controls = append(controls, control)
 					mu.Unlock()
-					return control, nil
+					return control.port, nil
 				})
 				if tt.overlay {
 					picker.commit(sessionTestRequest(true))

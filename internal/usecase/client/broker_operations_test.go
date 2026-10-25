@@ -11,6 +11,7 @@ import (
 
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/ports"
@@ -28,6 +29,7 @@ const brokerOpsTestEpoch = ports.BrokerEpoch(0x5a)
 // ReceiveServer on Close exactly as the ports.BrokerLogicalConnection contract
 // requires.
 type brokerOpsTestStream struct {
+	port     *portsmocks.MockBrokerLogicalConnection
 	mu       sync.Mutex
 	sent     []protocol.ClientMessage
 	sendErr  error
@@ -39,11 +41,24 @@ type brokerOpsTestStream struct {
 	closes    int
 }
 
-func newBrokerOpsTestStream() *brokerOpsTestStream {
-	return &brokerOpsTestStream{
+func newBrokerOpsTestStream(t *testing.T, opts ...func(*portsmocks.MockBrokerLogicalConnection)) *brokerOpsTestStream {
+	s := &brokerOpsTestStream{
 		incoming: make(chan protocol.ServerMessage, 8),
 		closed:   make(chan struct{}),
 	}
+	s.port = portsmocks.NewMockBrokerLogicalConnection(t)
+	for _, opt := range opts {
+		opt(s.port)
+	}
+	s.port.EXPECT().SendClient(mock.Anything).RunAndReturn(s.recordSend).Maybe()
+	s.port.EXPECT().ReceiveServer().RunAndReturn(s.recordReceive).Maybe()
+	s.port.EXPECT().Capabilities().Return(protocol.ConnectionCapabilities{}).Maybe()
+	s.port.EXPECT().LinkState().Return(ports.LinkStateConnected).Maybe()
+	s.port.EXPECT().LinkEvents().Return(nil).Maybe()
+	s.port.EXPECT().Close().RunAndReturn(s.recordClose).Maybe()
+	s.port.EXPECT().Done().Return((<-chan struct{})(s.closed)).Maybe()
+	s.port.EXPECT().Err().Return(nil).Maybe()
+	return s
 }
 
 func (s *brokerOpsTestStream) failSend(err error) {
@@ -58,7 +73,7 @@ func (s *brokerOpsTestStream) failReceive(err error) {
 	s.mu.Unlock()
 }
 
-func (s *brokerOpsTestStream) SendClient(message protocol.ClientMessage) error {
+func (s *brokerOpsTestStream) recordSend(message protocol.ClientMessage) error {
 	s.mu.Lock()
 	if s.sendErr != nil {
 		err := s.sendErr
@@ -70,7 +85,7 @@ func (s *brokerOpsTestStream) SendClient(message protocol.ClientMessage) error {
 	return nil
 }
 
-func (s *brokerOpsTestStream) ReceiveServer() (protocol.ServerMessage, error) {
+func (s *brokerOpsTestStream) recordReceive() (protocol.ServerMessage, error) {
 	select {
 	case message := <-s.incoming:
 		return message, nil
@@ -94,11 +109,7 @@ func (s *brokerOpsTestStream) Capabilities() protocol.ConnectionCapabilities {
 	return protocol.ConnectionCapabilities{}
 }
 
-func (s *brokerOpsTestStream) LinkState() ports.LinkState { return ports.LinkStateConnected }
-
-func (s *brokerOpsTestStream) LinkEvents() <-chan ports.LinkEvent { return nil }
-
-func (s *brokerOpsTestStream) Close() error {
+func (s *brokerOpsTestStream) recordClose() error {
 	s.closeOnce.Do(func() {
 		s.mu.Lock()
 		s.closes++
@@ -107,10 +118,6 @@ func (s *brokerOpsTestStream) Close() error {
 	})
 	return nil
 }
-
-func (s *brokerOpsTestStream) Done() <-chan struct{} { return s.closed }
-
-func (s *brokerOpsTestStream) Err() error { return nil }
 
 func (s *brokerOpsTestStream) deliver(message protocol.ServerMessage) {
 	select {
@@ -146,6 +153,7 @@ func (s *brokerOpsTestStream) awaitDispatch(t *testing.T) {
 // brokerOpsTestService is a scripted BrokerService. It records every open, the
 // reconcile hints it received, and whether the borrowed service was closed.
 type brokerOpsTestService struct {
+	port     *portsmocks.MockBrokerNavigator
 	id       ports.BrokerConnectionID
 	snapshot ports.BrokerSnapshot
 
@@ -157,33 +165,33 @@ type brokerOpsTestService struct {
 	open       func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error)
 }
 
-func newBrokerOpsTestService(id ports.BrokerConnectionID, snapshot ports.BrokerSnapshot) *brokerOpsTestService {
-	return &brokerOpsTestService{id: id, snapshot: snapshot}
+func newBrokerOpsTestService(t *testing.T, id ports.BrokerConnectionID, snapshot ports.BrokerSnapshot, opts ...func(*portsmocks.MockBrokerNavigator)) *brokerOpsTestService {
+	s := &brokerOpsTestService{id: id, snapshot: snapshot}
+	s.port = portsmocks.NewMockBrokerNavigator(t)
+	for _, opt := range opts {
+		opt(s.port)
+	}
+	s.port.EXPECT().ConnectionID().Return(s.id).Maybe()
+	s.port.EXPECT().NextStreamID().RunAndReturn(s.recordNextStreamID).Maybe()
+	s.port.EXPECT().Done().RunAndReturn(func() <-chan struct{} { return make(chan struct{}) }).Maybe()
+	s.port.EXPECT().Err().Return(nil).Maybe()
+	s.port.EXPECT().Snapshot().RunAndReturn(func() ports.BrokerSnapshot { return s.snapshot.Clone() }).Maybe()
+	s.port.EXPECT().Subscribe().Return(nil, errors.New("broker ops test service does not support subscriptions")).Maybe()
+	s.port.EXPECT().SubscribePreview(mock.Anything).Return(nil, errors.New("broker ops test service does not support preview")).Maybe()
+	s.port.EXPECT().OpenStream(mock.Anything, mock.Anything).RunAndReturn(s.recordOpenStream).Maybe()
+	s.port.EXPECT().RequestReconcile(mock.Anything).Run(s.recordRequestReconcile).Maybe()
+	s.port.EXPECT().Close().RunAndReturn(s.recordClose).Maybe()
+	return s
 }
 
-func (s *brokerOpsTestService) ConnectionID() ports.BrokerConnectionID { return s.id }
-
-func (s *brokerOpsTestService) NextStreamID() (ports.BrokerStreamID, error) {
+func (s *brokerOpsTestService) recordNextStreamID() (ports.BrokerStreamID, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.nextStream++
 	return s.nextStream, nil
 }
 
-func (s *brokerOpsTestService) Done() <-chan struct{} { return make(chan struct{}) }
-func (s *brokerOpsTestService) Err() error            { return nil }
-
-func (s *brokerOpsTestService) Snapshot() ports.BrokerSnapshot { return s.snapshot.Clone() }
-
-func (s *brokerOpsTestService) Subscribe() (ports.BrokerSubscription, error) {
-	return nil, errors.New("broker ops test service does not support subscriptions")
-}
-
-func (s *brokerOpsTestService) SubscribePreview(ports.BrokerPreviewRequest) (ports.BrokerPreviewSubscription, error) {
-	return nil, errors.New("broker ops test service does not support preview")
-}
-
-func (s *brokerOpsTestService) OpenStream(ctx context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+func (s *brokerOpsTestService) recordOpenStream(ctx context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 	s.mu.Lock()
 	s.opens = append(s.opens, request)
 	open := s.open
@@ -212,20 +220,18 @@ func (s *brokerOpsTestService) closeCount() int {
 	return s.closes
 }
 
-func (s *brokerOpsTestService) RequestReconcile(endpoint string) {
+func (s *brokerOpsTestService) recordRequestReconcile(endpoint string) {
 	s.mu.Lock()
 	s.reconciles = append(s.reconciles, endpoint)
 	s.mu.Unlock()
 }
 
-func (s *brokerOpsTestService) Close() error {
+func (s *brokerOpsTestService) recordClose() error {
 	s.mu.Lock()
 	s.closes++
 	s.mu.Unlock()
 	return nil
 }
-
-var _ ports.BrokerNavigator = (*brokerOpsTestService)(nil)
 
 func brokerOpsTestLocalSnapshot() ports.BrokerSnapshot {
 	now := time.Unix(1000, 0)
@@ -262,12 +268,12 @@ func brokerOpsTestRemoteRoute() BrokerOperationRoute {
 // open returns the supplied stream.
 func brokerOpsTestOperation(t *testing.T, snapshot ports.BrokerSnapshot, stream *brokerOpsTestStream) (*BrokerOperations, *brokerOpsTestService, *supervisorTestClock) {
 	t.Helper()
-	service := newBrokerOpsTestService(ports.BrokerConnectionID{7}, snapshot)
+	service := newBrokerOpsTestService(t, ports.BrokerConnectionID{7}, snapshot)
 	service.open = func(_ context.Context, _ ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-		return stream, nil
+		return stream.port, nil
 	}
 	clock := newSupervisorTestClock(t)
-	ops, err := NewBrokerOperations(service, clock.port)
+	ops, err := NewBrokerOperations(service.port, clock.port)
 	require.NoError(t, err)
 	return ops, service, clock
 }
@@ -276,9 +282,9 @@ func brokerOpsTestOperation(t *testing.T, snapshot ports.BrokerSnapshot, stream 
 // typed-nil service or clock is refused rather than deferred to a panic.
 func TestBrokerOperationsConstructorRefusesMissingDependencies(t *testing.T) {
 	clock := newSupervisorTestClock(t)
-	service := newBrokerOpsTestService(ports.BrokerConnectionID{1}, brokerOpsTestLocalSnapshot())
+	service := newBrokerOpsTestService(t, ports.BrokerConnectionID{1}, brokerOpsTestLocalSnapshot())
 
-	var typedNilService *brokerOpsTestService
+	var typedNilService *portsmocks.MockBrokerNavigator
 	var typedNilClock *portsmocks.MockClock
 
 	tests := []struct {
@@ -287,11 +293,11 @@ func TestBrokerOperationsConstructorRefusesMissingDependencies(t *testing.T) {
 		clock   ports.Clock
 		wantErr bool
 	}{
-		{name: "valid", service: service, clock: clock.port},
+		{name: "valid", service: service.port, clock: clock.port},
 		{name: "nil service", service: nil, clock: clock.port, wantErr: true},
 		{name: "typed nil service", service: typedNilService, clock: clock.port, wantErr: true},
-		{name: "nil clock", service: service, clock: nil, wantErr: true},
-		{name: "typed nil clock", service: service, clock: typedNilClock, wantErr: true},
+		{name: "nil clock", service: service.port, clock: nil, wantErr: true},
+		{name: "typed nil clock", service: service.port, clock: typedNilClock, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -426,7 +432,7 @@ func TestBrokerOperationsPreDispatchRefusalsAreNotSent(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				stream := newBrokerOpsTestStream()
+				stream := newBrokerOpsTestStream(t)
 				ops, service, _ := brokerOpsTestOperation(t, brokerOpsTestLocalSnapshot(), stream)
 				tt.call(t, ops)
 				require.Empty(t, service.openedRequests(), "a not-sent refusal must open no stream")
@@ -441,11 +447,11 @@ func TestBrokerOperationsPreDispatchRefusalsAreNotSent(t *testing.T) {
 // definite not-sent outcome rather than an indeterminate one.
 func TestBrokerOperationOpenFailureIsNotSent(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		service := newBrokerOpsTestService(ports.BrokerConnectionID{7}, brokerOpsTestLocalSnapshot())
+		service := newBrokerOpsTestService(t, ports.BrokerConnectionID{7}, brokerOpsTestLocalSnapshot())
 		service.open = func(_ context.Context, _ ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 			return nil, ports.BrokerError{Code: ports.BrokerErrorIncompatible}
 		}
-		ops, err := NewBrokerOperations(service, newSupervisorTestClock(t).port)
+		ops, err := NewBrokerOperations(service.port, newSupervisorTestClock(t).port)
 		require.NoError(t, err)
 
 		_, err = ops.Command(context.Background(), brokerOpsTestLocalRoute(), protocol.CommandRequest{Version: protocol.Version, Slug: "next-tab"})
@@ -469,7 +475,7 @@ func TestBrokerOperationsListUsesOneControlStream(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				stream := newBrokerOpsTestStream()
+				stream := newBrokerOpsTestStream(t)
 				stream.deliver(protocol.Sessions{Sessions: []protocol.SessionInfo{{Name: "alpha", State: protocol.SessionUp}}})
 				ops, service, _ := brokerOpsTestOperation(t, brokerOpsTestLocalSnapshot(), stream)
 
@@ -487,7 +493,7 @@ func TestBrokerOperationsListUsesOneControlStream(t *testing.T) {
 				require.Empty(t, request.Env)
 				require.Equal(t, tt.startMode, request.StartMode)
 				require.True(t, request.Local)
-				require.Equal(t, service.ConnectionID(), request.Connection)
+				require.Equal(t, service.id, request.Connection)
 				require.NotZero(t, request.Stream)
 				require.Equal(t, brokerOpsTestEpoch, request.Epoch)
 
@@ -522,7 +528,7 @@ func TestBrokerOperationsListLostReplyIsError(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				stream := newBrokerOpsTestStream()
+				stream := newBrokerOpsTestStream(t)
 				tt.prepare(stream)
 				ops, service, _ := brokerOpsTestOperation(t, brokerOpsTestLocalSnapshot(), stream)
 				sessions, err := ops.List(context.Background(), brokerOpsTestLocalRoute())
@@ -574,7 +580,7 @@ func TestBrokerOperationsCommandCorrelation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				stream := newBrokerOpsTestStream()
+				stream := newBrokerOpsTestStream(t)
 				stream.deliver(tt.reply)
 				ops, service, _ := brokerOpsTestOperation(t, brokerOpsTestLocalSnapshot(), stream)
 				result, err := ops.Command(context.Background(), brokerOpsTestLocalRoute(), protocol.CommandRequest{Version: protocol.Version, Slug: "next-tab"})
@@ -597,7 +603,7 @@ func TestBrokerOperationsCommandCorrelation(t *testing.T) {
 // hidden behind a plain context error.
 func TestBrokerOperationsCommandDaemonUnknownIsVerbatim(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		stream := newBrokerOpsTestStream()
+		stream := newBrokerOpsTestStream(t)
 		stream.deliver(protocol.CommandResult{RequestID: 1, Outcome: protocol.CommandOutcomeUnknown, Text: "daemon could not finish"})
 		ops, service, _ := brokerOpsTestOperation(t, brokerOpsTestLocalSnapshot(), stream)
 
@@ -671,7 +677,7 @@ func TestBrokerOperationsKillCorrelation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				stream := newBrokerOpsTestStream()
+				stream := newBrokerOpsTestStream(t)
 				stream.deliver(tt.reply)
 				ops, service, _ := brokerOpsTestOperation(t, brokerOpsTestLocalSnapshot(), stream)
 				result, err := tt.call(context.Background(), ops, brokerOpsTestLocalRoute())
@@ -728,7 +734,7 @@ func TestBrokerOperationsKillShapes(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				stream := newBrokerOpsTestStream()
+				stream := newBrokerOpsTestStream(t)
 				stream.deliver(protocol.KillResult{RequestID: 1, Outcome: protocol.KillSucceeded})
 				ops, service, _ := brokerOpsTestOperation(t, brokerOpsTestLocalSnapshot(), stream)
 
@@ -758,7 +764,7 @@ func TestBrokerOperationsKillShapes(t *testing.T) {
 // acknowledgement never arrives: a close or EOF is never a success.
 func TestBrokerOperationsStopDaemonLostAcknowledgementIsUnknown(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		stream := newBrokerOpsTestStream()
+		stream := newBrokerOpsTestStream(t)
 		stream.failReceive(io.EOF)
 		ops, service, _ := brokerOpsTestOperation(t, brokerOpsTestLocalSnapshot(), stream)
 
@@ -775,7 +781,7 @@ func TestBrokerOperationsStopDaemonLostAcknowledgementIsUnknown(t *testing.T) {
 // partial delivery, so it becomes a synthetic OutcomeUnknown for a mutation.
 func TestBrokerOperationsSendErrorIsOutcomeUnknown(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		stream := newBrokerOpsTestStream()
+		stream := newBrokerOpsTestStream(t)
 		stream.failSend(errors.New("write: broken pipe"))
 		ops, service, _ := brokerOpsTestOperation(t, brokerOpsTestLocalSnapshot(), stream)
 
@@ -815,7 +821,7 @@ func TestBrokerOperationsDispatchBoundsAreOutcomeUnknown(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				stream := newBrokerOpsTestStream()
+				stream := newBrokerOpsTestStream(t)
 				ops, service, clock := brokerOpsTestOperation(t, brokerOpsTestLocalSnapshot(), stream)
 				ctx, cancel := context.WithCancel(context.Background())
 				defer cancel()
@@ -852,7 +858,7 @@ func TestBrokerOperationsDispatchBoundsAreOutcomeUnknown(t *testing.T) {
 // that the timer was disarmed before return.
 func TestBrokerOperationsLateReplyCannotChangeVerdict(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		stream := newBrokerOpsTestStream()
+		stream := newBrokerOpsTestStream(t)
 		ops, _, clock := brokerOpsTestOperation(t, brokerOpsTestLocalSnapshot(), stream)
 
 		type outcome struct {
@@ -889,7 +895,7 @@ func TestBrokerOperationsLateReplyCannotChangeVerdict(t *testing.T) {
 // reconcile against its endpoint.
 func TestBrokerOperationsRemoteRouteUsesExactRegistration(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		stream := newBrokerOpsTestStream()
+		stream := newBrokerOpsTestStream(t)
 		stream.deliver(protocol.KillResult{RequestID: 1, Outcome: protocol.KillOutcomeUnknown, Text: "daemon shutting down"})
 		ops, service, _ := brokerOpsTestOperation(t, brokerOpsTestRemoteSnapshot(), stream)
 
@@ -914,7 +920,7 @@ func TestBrokerOperationsRemoteRouteUsesExactRegistration(t *testing.T) {
 // resolved by endpoint alone.
 func TestBrokerOperationsReplacedRegistrationIsNotSent(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		stream := newBrokerOpsTestStream()
+		stream := newBrokerOpsTestStream(t)
 		ops, service, _ := brokerOpsTestOperation(t, brokerOpsTestRemoteSnapshot(), stream)
 
 		replaced := BrokerOperationRoute{
@@ -932,7 +938,7 @@ func TestBrokerOperationsReplacedRegistrationIsNotSent(t *testing.T) {
 // shape.
 func TestBrokerOperationsCommandCopiesArgsAtAdmission(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		stream := newBrokerOpsTestStream()
+		stream := newBrokerOpsTestStream(t)
 		stream.deliver(protocol.CommandResult{RequestID: 1, Outcome: protocol.CommandSucceeded})
 		ops, _, _ := brokerOpsTestOperation(t, brokerOpsTestLocalSnapshot(), stream)
 
@@ -959,15 +965,15 @@ func TestBrokerOperationsConcurrentStreamsDoNotCollide(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		const operations = 16
 
-		service := newBrokerOpsTestService(ports.BrokerConnectionID{7}, brokerOpsTestLocalSnapshot())
+		service := newBrokerOpsTestService(t, ports.BrokerConnectionID{7}, brokerOpsTestLocalSnapshot())
 		openGate := make(chan struct{})
 		service.open = func(_ context.Context, _ ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 			<-openGate
-			stream := newBrokerOpsTestStream()
+			stream := newBrokerOpsTestStream(t)
 			stream.deliver(protocol.KillResult{RequestID: 1, Outcome: protocol.KillSucceeded})
-			return stream, nil
+			return stream.port, nil
 		}
-		ops, err := NewBrokerOperations(service, newSupervisorTestClock(t).port)
+		ops, err := NewBrokerOperations(service.port, newSupervisorTestClock(t).port)
 		require.NoError(t, err)
 
 		var wg sync.WaitGroup
@@ -1010,18 +1016,18 @@ func TestBrokerOperationsConcurrentStreamsDoNotCollide(t *testing.T) {
 // sibling's reply.
 func TestBrokerOperationsClosingOneStreamPreservesSibling(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		cancelled := newBrokerOpsTestStream()
-		sibling := newBrokerOpsTestStream()
+		cancelled := newBrokerOpsTestStream(t)
+		sibling := newBrokerOpsTestStream(t)
 		sibling.deliver(protocol.KillResult{RequestID: 1, Outcome: protocol.KillSucceeded})
 
-		service := newBrokerOpsTestService(ports.BrokerConnectionID{7}, brokerOpsTestLocalSnapshot())
+		service := newBrokerOpsTestService(t, ports.BrokerConnectionID{7}, brokerOpsTestLocalSnapshot())
 		service.open = func(_ context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 			if request.Stream == 1 {
-				return cancelled, nil
+				return cancelled.port, nil
 			}
-			return sibling, nil
+			return sibling.port, nil
 		}
-		ops, err := NewBrokerOperations(service, newSupervisorTestClock(t).port)
+		ops, err := NewBrokerOperations(service.port, newSupervisorTestClock(t).port)
 		require.NoError(t, err)
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -1054,7 +1060,7 @@ func TestBrokerOperationsClosingOneStreamPreservesSibling(t *testing.T) {
 // the service it borrows, across success and refusal.
 func TestBrokerOperationsBorrowedServiceStaysOpen(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		stream := newBrokerOpsTestStream()
+		stream := newBrokerOpsTestStream(t)
 		stream.deliver(protocol.KillResult{RequestID: 1, Outcome: protocol.KillSucceeded})
 		ops, service, _ := brokerOpsTestOperation(t, brokerOpsTestLocalSnapshot(), stream)
 
@@ -1072,15 +1078,15 @@ func TestBrokerOperationsBorrowedServiceStaysOpen(t *testing.T) {
 // state.
 func TestBrokerOperationsConcurrentSafeAccess(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		service := newBrokerOpsTestService(ports.BrokerConnectionID{7}, brokerOpsTestLocalSnapshot())
+		service := newBrokerOpsTestService(t, ports.BrokerConnectionID{7}, brokerOpsTestLocalSnapshot())
 		service.open = func(_ context.Context, _ ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-			stream := newBrokerOpsTestStream()
+			stream := newBrokerOpsTestStream(t)
 			stream.deliver(protocol.Sessions{})
 			stream.deliver(protocol.KillResult{RequestID: 1, Outcome: protocol.KillSucceeded})
 			stream.deliver(protocol.CommandResult{RequestID: 1, Outcome: protocol.CommandSucceeded})
-			return stream, nil
+			return stream.port, nil
 		}
-		ops, err := NewBrokerOperations(service, newSupervisorTestClock(t).port)
+		ops, err := NewBrokerOperations(service.port, newSupervisorTestClock(t).port)
 		require.NoError(t, err)
 
 		var wg sync.WaitGroup
@@ -1111,7 +1117,7 @@ func TestBrokerOperationsAcquisitionBoundIsNotSent(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		require.Equal(t, 10*time.Second, brokerOperationTimeout)
 
-		service := newBrokerOpsTestService(ports.BrokerConnectionID{7}, brokerOpsTestLocalSnapshot())
+		service := newBrokerOpsTestService(t, ports.BrokerConnectionID{7}, brokerOpsTestLocalSnapshot())
 		// A real adapter honors the bounded context; this one blocks until the bound
 		// lapses, exactly as a socket that accepts but never admits would.
 		service.open = func(ctx context.Context, _ ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
@@ -1119,7 +1125,7 @@ func TestBrokerOperationsAcquisitionBoundIsNotSent(t *testing.T) {
 			return nil, ctx.Err()
 		}
 		clock := newSupervisorTestClock(t)
-		ops, err := NewBrokerOperations(service, clock.port)
+		ops, err := NewBrokerOperations(service.port, clock.port)
 		require.NoError(t, err)
 
 		done := make(chan error, 1)
