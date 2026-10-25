@@ -23,6 +23,7 @@ func canonicalQUICRoute(endpoint string) ports.BrokerRouteSpec {
 // import seam: when the caller supplies an empty initial membership, the import
 // is recorded as completed with no records, and a later reopen never falls back
 // to re-importing the legacy source that is still named in Options.
+// real I/O: reads and writes real files in temp directories.
 func TestInitialImportEmptyCompletesAndNeverReimports(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "broker")
 	o := options(t)
@@ -65,6 +66,7 @@ func TestInitialImportEmptyCompletesAndNeverReimports(t *testing.T) {
 // TestRecoveryRetainsRoutes proves the retained recovery record carries the
 // canonical routes as durable authority: reopening from recovery alone (state.json
 // removed) restores the same routed membership.
+// real I/O: reads and writes real files in temp directories.
 func TestRecoveryRetainsRoutes(t *testing.T) {
 	o := options(t)
 	store, err := Open(o)
@@ -93,6 +95,7 @@ func TestRecoveryRetainsRoutes(t *testing.T) {
 // TestCorruptRouteStateFailsClosed proves a committed state whose route is
 // invalid is never silently replaced or repaired: Open reports invalid durable
 // state and leaves the exact bytes it read in place for offline recovery.
+// real I/O: reads and writes real files in temp directories.
 func TestCorruptRouteStateFailsClosed(t *testing.T) {
 	o := options(t)
 	store, err := Open(o)
@@ -125,6 +128,7 @@ func TestCorruptRouteStateFailsClosed(t *testing.T) {
 // migration: a state written without routes is upgraded exactly once, a fault at
 // any upgrade boundary never leaves an unreadable state behind, and reopening
 // completes the upgrade so the restored membership carries canonical routes.
+// real I/O: reads and writes real files in temp directories.
 func TestRouteUpgradeIsAtomicAcrossReopen(t *testing.T) {
 	// seedStripped opens and closes a valid routed store, then rewrites its
 	// committed state without routes, exactly as a pre-route process would have

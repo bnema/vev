@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// real I/O: reads and writes real files in temp directories.
 func TestRecoveryCorruption(t *testing.T) {
 	o := options(t)
 	s, err := Open(o)
