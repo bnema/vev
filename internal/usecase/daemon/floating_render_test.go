@@ -8,11 +8,13 @@ import (
 	"testing"
 	"testing/synctest"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	renderer "github.com/bnema/vev-vt/ansi"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/domain/layout"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/internal/usecase/ui"
 )
@@ -196,8 +198,8 @@ func TestResponsiveFloatingResizeCommitsZeroContentDrawerWithoutPhysicalResize(t
 		cfg := domain.FloatingConfig{Width: 100, Height: 100}
 		initial := calculateContentFloatingGeometry(domain.Size{Cols: 80, Rows: 22}, cfg)
 		requested := calculateContentFloatingGeometry(domain.Size{Cols: 79, Rows: 2}, cfg)
-		pty := &resizePTY{}
-		floating := newPane("floating", pty, rectSize(initial.Inner))
+		ptyMock, pty := newResizePTY(t, &resizeState{})
+		floating := newPane("floating", ptyMock, rectSize(initial.Inner))
 		floating.rect = initial.Inner
 		floating.popupGeometry = initial
 		tb := newTab(nil, domain.Size{Cols: 79, Rows: 2})
@@ -298,8 +300,8 @@ func TestComposeCapturedFloatingFrameClipsRetainedGeometryAfterFailedShrink(t *t
 			domain.Size{Cols: 100, Rows: 30},
 			domain.FloatingConfig{Width: 80, Height: 80},
 		)
-		pty := &resizePTY{err: errors.New("resize failed")}
-		floatingPane := newPane("floating", pty, rectSize(retained.Inner))
+		ptyMock, _ := newResizePTY(t, &resizeState{err: errors.New("resize failed")})
+		floatingPane := newPane("floating", ptyMock, rectSize(retained.Inner))
 		floatingPane.rect = retained.Inner
 		floatingPane.popupGeometry = retained
 		seed := renderer.NewFrame(floatingPane.screen.Columns(), floatingPane.screen.Rows())
@@ -558,8 +560,8 @@ func TestResizeFloatingPaneCommitsSameSizeGeometryWithoutPTYResize(t *testing.T)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				pty := &resizePTY{}
-				p := newPane("floating", pty, rectSize(initial.Inner))
+				ptyMock, pty := newResizePTY(t, &resizeState{})
+				p := newPane("floating", ptyMock, rectSize(initial.Inner))
 				p.rect, p.popupGeometry = initial.Inner, initial
 				d := newTestDaemon(t, nil, newStubClock(t))
 
@@ -899,8 +901,8 @@ func TestToggleFloatingResizesHiddenPaneOnShowAndRetriesFailure(t *testing.T) {
 		currentGeometry := calculateContentFloatingGeometry(domain.Size{Cols: 100, Rows: 40}, d.currentFloatingConfig())
 		initial := initialGeometry.Inner
 		current := currentGeometry.Inner
-		pty := &resizePTY{errs: []error{errors.New("first show fails"), nil}}
-		floating := newPane("floating", pty, rectSize(initial))
+		ptyMock, pty := newResizePTY(t, &resizeState{errs: []error{errors.New("first show fails"), nil}})
+		floating := newPane("floating", ptyMock, rectSize(initial))
 		floating.rect = initial
 		floating.popupGeometry = initialGeometry
 
@@ -941,8 +943,8 @@ func TestFailedFloatingResizeKeepsCommittedRenderAndInputGeometry(t *testing.T) 
 		newContent := domain.Rect{Y: 1, Width: 100, Height: 40}
 		oldGeometry := calculateContentFloatingGeometry(domain.Size{Cols: oldContent.Width, Rows: oldContent.Height}, cfg)
 		newGeometry := calculateContentFloatingGeometry(domain.Size{Cols: newContent.Width, Rows: newContent.Height}, cfg)
-		pty := &resizePTY{err: errors.New("resize failed")}
-		p := newPane("floating", pty, rectSize(oldGeometry.Inner))
+		ptyMock, _ := newResizePTY(t, &resizeState{err: errors.New("resize failed")})
+		p := newPane("floating", ptyMock, rectSize(oldGeometry.Inner))
 		p.rect = oldGeometry.Inner
 		p.popupGeometry = oldGeometry
 		tb := newTab(nil, domain.Size{Cols: newContent.Width, Rows: newContent.Height})
@@ -992,8 +994,8 @@ func TestFloatingLayoutRejectsStaleResizeBeforePublishing(t *testing.T) {
 		previousGeometry := calculateContentFloatingGeometry(domain.Size{Cols: 60, Rows: 20}, cfg)
 		oldGeometry := calculateContentFloatingGeometry(oldSize, cfg)
 		newGeometry := calculateContentFloatingGeometry(newSize, cfg)
-		pty := &resizePTY{entered: make(chan struct{}), release: make(chan struct{})}
-		p := newPane("floating", pty, rectSize(previousGeometry.Inner))
+		ptyMock, pty := newResizePTY(t, &resizeState{entered: make(chan struct{}), release: make(chan struct{})})
+		p := newPane("floating", ptyMock, rectSize(previousGeometry.Inner))
 		p.rect = previousGeometry.Inner
 		p.popupGeometry = previousGeometry
 		tb := newTab(nil, oldSize)
@@ -1036,8 +1038,8 @@ func TestFloatingLayoutRejectsStaleResizeBeforePublishing(t *testing.T) {
 func TestResizeFloatingPaneFailureAndSerialization(t *testing.T) {
 	t.Run("failure preserves state", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			pty := &resizePTY{err: errors.New("nope")}
-			p := newPane("floating", pty, domain.Size{Cols: 5, Rows: 4})
+			ptyMock, _ := newResizePTY(t, &resizeState{err: errors.New("nope")})
+			p := newPane("floating", ptyMock, domain.Size{Cols: 5, Rows: 4})
 			p.rect = domain.Rect{X: 8, Y: 3, Width: 5, Height: 4}
 			d := newTestDaemon(t, nil, newStubClock(t))
 			requested := floatingGeometry{Bounds: domain.Rect{X: 1, Y: 1, Width: 11, Height: 9}, Inner: domain.Rect{X: 2, Y: 2, Width: 9, Height: 7}}
@@ -1051,8 +1053,8 @@ func TestResizeFloatingPaneFailureAndSerialization(t *testing.T) {
 
 	t.Run("competing resizes serialize", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			pty := &resizePTY{entered: make(chan struct{}), release: make(chan struct{})}
-			p := newPane("floating", pty, domain.Size{Cols: 2, Rows: 2})
+			ptyMock, pty := newResizePTY(t, &resizeState{entered: make(chan struct{}), release: make(chan struct{})})
+			p := newPane("floating", ptyMock, domain.Size{Cols: 2, Rows: 2})
 			d := newTestDaemon(t, nil, newStubClock(t))
 			first := floatingGeometry{Bounds: domain.Rect{Width: 6, Height: 5}, Inner: domain.Rect{X: 1, Y: 1, Width: 4, Height: 3}}
 			second := floatingGeometry{Bounds: domain.Rect{Width: 10, Height: 8}, Inner: domain.Rect{X: 1, Y: 1, Width: 8, Height: 6}}
@@ -1082,7 +1084,8 @@ func TestResizeFloatingPaneFailureAndSerialization(t *testing.T) {
 	})
 }
 
-type resizePTY struct {
+// resizeState is the observable state behind newResizePTY's mock.
+type resizeState struct {
 	mu            sync.Mutex
 	resizes       []domain.Size
 	err           error
@@ -1093,38 +1096,45 @@ type resizePTY struct {
 	maxConcurrent int
 }
 
-func (p *resizePTY) Resize(geometry domain.Geometry) error {
-	p.mu.Lock()
-	p.resizes = append(p.resizes, geometry.Size)
-	p.activeCalls++
-	p.maxConcurrent = max(p.maxConcurrent, p.activeCalls)
-	n := len(p.resizes)
-	err := p.err
-	if n <= len(p.errs) {
-		err = p.errs[n-1]
-	}
-	p.mu.Unlock()
-	if n == 1 && p.entered != nil {
-		close(p.entered)
-		<-p.release
-	}
-	p.mu.Lock()
-	p.activeCalls--
-	p.mu.Unlock()
-	return err
+func newResizePTY(t testing.TB, p *resizeState) (*portsmocks.MockPTY, *resizeState) {
+	t.Helper()
+	m := portsmocks.NewMockPTY(t)
+	m.EXPECT().Resize(mock.Anything).RunAndReturn(func(geometry domain.Geometry) error {
+		p.mu.Lock()
+		p.resizes = append(p.resizes, geometry.Size)
+		p.activeCalls++
+		p.maxConcurrent = max(p.maxConcurrent, p.activeCalls)
+		n := len(p.resizes)
+		err := p.err
+		if n <= len(p.errs) {
+			err = p.errs[n-1]
+		}
+		p.mu.Unlock()
+		if n == 1 && p.entered != nil {
+			close(p.entered)
+			<-p.release
+		}
+		p.mu.Lock()
+		p.activeCalls--
+		p.mu.Unlock()
+		return err
+	}).Maybe()
+	m.EXPECT().Read(mock.Anything).Return(0, io.EOF).Maybe()
+	m.EXPECT().Write(mock.Anything).RunAndReturn(func(b []byte) (int, error) { return len(b), nil }).Maybe()
+	m.EXPECT().Close().Return(nil).Maybe()
+	m.EXPECT().Pid().Return(0).Maybe()
+	m.EXPECT().ForegroundPgid().Return(0, nil).Maybe()
+	return m, p
 }
-func (p *resizePTY) maxConcurrentCalls() int {
+
+func (p *resizeState) maxConcurrentCalls() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.maxConcurrent
 }
-func (p *resizePTY) sizes() []domain.Size {
+
+func (p *resizeState) sizes() []domain.Size {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return append([]domain.Size(nil), p.resizes...)
 }
-func (*resizePTY) Read([]byte) (int, error)     { return 0, io.EOF }
-func (*resizePTY) Write(b []byte) (int, error)  { return len(b), nil }
-func (*resizePTY) Close() error                 { return nil }
-func (*resizePTY) Pid() int                     { return 0 }
-func (*resizePTY) ForegroundPgid() (int, error) { return 0, nil }
