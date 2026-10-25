@@ -13,17 +13,18 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/stretchr/testify/require"
 )
 
 // newTestAuthority composes one offline authority over an observation-disabled
 // registry, a bounded pool, and a supervisor on a long grace.
-func newTestAuthority(t testing.TB, epoch ports.BrokerEpoch, probe ports.BrokerHostProbe, connector poolConnector) (*Authority, *Registry, *Pool, *Supervisor, *manualClock, *testStore) {
+func newTestAuthority(t testing.TB, epoch ports.BrokerEpoch, probe any, connector poolConnector) (*Authority, *Registry, *Pool, *Supervisor, *manualClock, *testStore) {
 	t.Helper()
 	clock := newManualClock(t, time.Unix(0, 0))
 	store := newTestStore()
-	registry, err := NewRegistryWithConfig(epoch, hostStoreFixture(t, store), probe, clock.mock, nil, RegistryConfig{ObservationDisabled: true})
+	registry, err := NewRegistryWithConfig(epoch, hostStoreFixture(t, store), mockProbe(t, probe), clock.mock, nil, RegistryConfig{ObservationDisabled: true})
 	require.NoError(t, err)
 	t.Cleanup(func() { registry.store.close() })
 	authority, pool, supervisor, _ := composeTestAuthority(t, epoch, registry, connector, clock)
@@ -38,14 +39,14 @@ func newTestAuthority(t testing.TB, epoch ports.BrokerEpoch, probe ports.BrokerH
 // clock is returned so a test can drive the idle lifecycle.
 func composeTestAuthority(t testing.TB, epoch ports.BrokerEpoch, registry *Registry, connector poolConnector, clock *manualClock) (*Authority, *Pool, *Supervisor, *manualClock) {
 	t.Helper()
-	resolver := poolResolver(func(_ context.Context, r ports.BrokerOpenStreamRequest) (ports.BrokerDialTarget, error) {
+	resolver := mockResolver(t, func(_ context.Context, r ports.BrokerOpenStreamRequest) (ports.BrokerDialTarget, error) {
 		return ports.BrokerDialTarget{Fence: ports.BrokerEndpointFence{Local: true}, Policy: r.Policy, Address: "fake", StartMode: r.StartMode, ExpectedIdentity: ports.BrokerExpectedIdentity{Identity: "canonical", Bound: true}}, nil
 	})
-	pool, err := NewPool(epoch, resolver, registry, connector, clock.mock, PoolLimits{Physical: 4, Clients: 8, Streams: 16, StreamsPerClient: 16, Warm: 4, Idle: time.Minute})
+	pool, err := NewPool(epoch, resolver, registry, mockConnector(t, connector), clock.mock, PoolLimits{Physical: 4, Clients: 8, Streams: 16, StreamsPerClient: 16, Warm: 4, Idle: time.Minute})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, pool.Close()) })
 	supervisor, idleClock := newTestSupervisor(t, time.Hour)
-	authority, err := NewAuthority(epoch, registry, pool, supervisor, testSessionCodec{})
+	authority, err := NewAuthority(epoch, registry, pool, supervisor, portsmocks.NewMockSessionCodec(t))
 	require.NoError(t, err)
 	// The caller owns Registry.Run (see NewAuthority): start the single run and
 	// cancel it at cleanup, so the registry's durable writer is drained and its
@@ -63,7 +64,7 @@ func composeTestAuthority(t testing.TB, epoch ports.BrokerEpoch, registry *Regis
 func newServiceMembershipFixture(t testing.TB, store any, mode MembershipMode) (*Authority, *Registry, *Supervisor, *manualClock) {
 	t.Helper()
 	clock := newManualClock(t, time.Unix(0, 0))
-	registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, store), nil, clock.mock, nil, RegistryConfig{
+	registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, store), mockProbe(t, nil), clock.mock, nil, RegistryConfig{
 		MembershipMode:       mode,
 		ObservationDisabled:  true,
 		IncarnationGenerator: (&incarnationSequencer{}).generate,
@@ -218,48 +219,48 @@ func TestAuthorityValidation(t *testing.T) {
 		// Live membership mutation is composed in this slice, so the authority no
 		// longer refuses a registry that owns remote membership its connections can
 		// now manage: a mutable remote registry is served.
-		mutableRemote, err := NewRegistryWithConfig(1, hostStoreFixture(t, newTestStore()), newTestProbe(1), clock.mock, nil, RegistryConfig{MembershipMode: MembershipMutable})
+		mutableRemote, err := NewRegistryWithConfig(1, hostStoreFixture(t, newTestStore()), mockProbe(t, newTestProbe(1)), clock.mock, nil, RegistryConfig{MembershipMode: MembershipMutable})
 		require.NoError(t, err)
 		t.Cleanup(func() { mutableRemote.store.close() })
 		t.Cleanup(mutableRemote.settle)
 		require.NoError(t, mutableRemote.setHosts(hostRecords(registration(t, "user@host:22", 1))))
-		_, err = NewAuthority(1, mutableRemote, pool, supervisor, testSessionCodec{})
+		_, err = NewAuthority(1, mutableRemote, pool, supervisor, portsmocks.NewMockSessionCodec(t))
 		require.NoError(t, err, "a mutable remote registry must be served")
 
 		// A local-only observer is served: its entry is configured authority rather
 		// than membership, so it has nothing for the authority's connections to
 		// manage either.
-		localOnly, err := NewRegistryWithConfig(1, hostStoreFixture(t, newTestStore()), nil, clock.mock, nil, RegistryConfig{Local: &LocalObservation{
+		localOnly, err := NewRegistryWithConfig(1, hostStoreFixture(t, newTestStore()), mockProbe(t, nil), clock.mock, nil, RegistryConfig{Local: &LocalObservation{
 			DisplayOrigin: "local",
 			Policy:        poolPolicy(),
 			Probe:         newScriptedLocalProbe(1),
 		}})
 		require.NoError(t, err)
 		t.Cleanup(localOnly.settle)
-		_, err = NewAuthority(1, localOnly, pool, supervisor, testSessionCodec{})
+		_, err = NewAuthority(1, localOnly, pool, supervisor, portsmocks.NewMockSessionCodec(t))
 		require.NoError(t, err, "a local-only observer must be served")
 
 		// Construction still rejects remote observation without a probe: a registry
 		// that would observe remotes but owns no probe cannot be constructed, so no
 		// authority ever receives one.
-		_, err = NewRegistry(1, hostStoreFixture(t, newTestStore()), nil, clock.mock, nil)
+		_, err = NewRegistry(1, hostStoreFixture(t, newTestStore()), mockProbe(t, nil), clock.mock, nil)
 		require.ErrorContains(t, err, "invalid registry dependencies", "remote observation without a probe must be refused")
 
-		disabled, err := NewRegistryWithConfig(1, hostStoreFixture(t, newTestStore()), nil, clock.mock, nil, RegistryConfig{ObservationDisabled: true})
+		disabled, err := NewRegistryWithConfig(1, hostStoreFixture(t, newTestStore()), mockProbe(t, nil), clock.mock, nil, RegistryConfig{ObservationDisabled: true})
 		require.NoError(t, err)
 		t.Cleanup(func() { disabled.store.close() })
 		t.Cleanup(disabled.settle)
-		_, err = NewAuthority(2, disabled, pool, supervisor, testSessionCodec{})
+		_, err = NewAuthority(2, disabled, pool, supervisor, portsmocks.NewMockSessionCodec(t))
 		require.Error(t, err, "an epoch mismatch must be refused")
 
-		_, err = NewAuthority(1, nil, pool, supervisor, testSessionCodec{})
+		_, err = NewAuthority(1, nil, pool, supervisor, portsmocks.NewMockSessionCodec(t))
 		require.Error(t, err, "a missing registry must be refused")
-		_, err = NewAuthority(1, disabled, nil, supervisor, testSessionCodec{})
+		_, err = NewAuthority(1, disabled, nil, supervisor, portsmocks.NewMockSessionCodec(t))
 		require.Error(t, err, "a missing pool must be refused")
-		_, err = NewAuthority(1, disabled, pool, nil, testSessionCodec{})
+		_, err = NewAuthority(1, disabled, pool, nil, portsmocks.NewMockSessionCodec(t))
 		require.Error(t, err, "a missing supervisor must be refused")
 
-		_, err = NewAuthority(1, disabled, pool, supervisor, testSessionCodec{})
+		_, err = NewAuthority(1, disabled, pool, supervisor, portsmocks.NewMockSessionCodec(t))
 		require.NoError(t, err)
 
 	})
@@ -345,7 +346,7 @@ func TestServiceOpenStreamRequestsLocalReprobeOnOpenAndClose(t *testing.T) {
 		clock := newManualClock(t, time.Unix(100, 0))
 		store := newTestStore()
 		local := newScriptedLocalProbe(3)
-		registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, store), nil, clock.mock, nil, RegistryConfig{
+		registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, store), mockProbe(t, nil), clock.mock, nil, RegistryConfig{
 			Local: &LocalObservation{DisplayOrigin: "local", Policy: poolPolicy(), Probe: local},
 		})
 		require.NoError(t, err)
@@ -894,7 +895,7 @@ func TestServiceRequestReconcileDelegatesToRegistry(t *testing.T) {
 		registration := registration(t, "user@host:22", 1)
 		store.hosts = ports.BrokerHosts{Revision: 1, Hosts: []ports.BrokerHostRecord{{Registration: registration, Pinned: true, Policy: poolPolicy(), Route: canonicalRoute(poolPolicy(), registration.Endpoint)}}}
 		probe := newTestProbe(2)
-		registry, err := NewRegistry(1, hostStoreFixture(t, store), probe, clock.mock, nil)
+		registry, err := NewRegistry(1, hostStoreFixture(t, store), mockProbe(t, probe), clock.mock, nil)
 		require.NoError(t, err)
 		t.Cleanup(func() { registry.store.close() })
 		registry.jitter = identityJitter
@@ -1203,7 +1204,7 @@ func TestRegistryObservationDisabledRestoresAndPublishes(t *testing.T) {
 				Availability: domain.RemoteAvailabilityReachable,
 			}},
 		}
-		r, err := NewRegistryWithConfig(1, hostStoreFixture(t, store), nil, clock.mock, nil, RegistryConfig{ObservationDisabled: true})
+		r, err := NewRegistryWithConfig(1, hostStoreFixture(t, store), mockProbe(t, nil), clock.mock, nil, RegistryConfig{ObservationDisabled: true})
 		require.NoError(t, err)
 		t.Cleanup(func() { r.store.close() })
 
@@ -1225,7 +1226,7 @@ func TestRegistryObservationDisabledIssuesNoProbesOrTimers(t *testing.T) {
 		clock := newManualClock(t, time.Unix(0, 0))
 		store := newTestStore()
 		probe := newTestProbe(4)
-		r, err := NewRegistryWithConfig(1, hostStoreFixture(t, store), probe, clock.mock, nil, RegistryConfig{ObservationDisabled: true})
+		r, err := NewRegistryWithConfig(1, hostStoreFixture(t, store), mockProbe(t, probe), clock.mock, nil, RegistryConfig{ObservationDisabled: true})
 		require.NoError(t, err)
 		t.Cleanup(func() { r.store.close() })
 		require.NoError(t, r.setHosts(hostRecords(registration(t, "user@host:22", 1))))
@@ -1254,7 +1255,7 @@ func TestRegistryObservationDisabledDrainsWriter(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		clock := newManualClock(t, time.Unix(0, 0))
 		store := newBlockingStore()
-		r, err := NewRegistryWithConfig(1, hostStoreFixture(t, store), nil, clock.mock, nil, RegistryConfig{ObservationDisabled: true})
+		r, err := NewRegistryWithConfig(1, hostStoreFixture(t, store), mockProbe(t, nil), clock.mock, nil, RegistryConfig{ObservationDisabled: true})
 		require.NoError(t, err)
 		t.Cleanup(func() { r.store.close() })
 
@@ -1291,7 +1292,7 @@ func TestRegistryObservationDisabledDrainsWriter(t *testing.T) {
 }
 
 func TestServiceConfigValidation(t *testing.T) {
-	valid := serviceConfig{epoch: 1, id: ports.BrokerConnectionID{1}, previewID: ports.BrokerConnectionID{2}, registry: &Registry{}, pool: &Pool{}, supervisor: &Supervisor{}, lease: &Lease{}, clock: newManualClock(t, time.Unix(0, 0)).mock, codec: testSessionCodec{}}
+	valid := serviceConfig{epoch: 1, id: ports.BrokerConnectionID{1}, previewID: ports.BrokerConnectionID{2}, registry: &Registry{}, pool: &Pool{}, supervisor: &Supervisor{}, lease: &Lease{}, clock: newManualClock(t, time.Unix(0, 0)).mock, codec: portsmocks.NewMockSessionCodec(t)}
 	tests := []struct {
 		name   string
 		mutate func(*serviceConfig)
@@ -1318,16 +1319,6 @@ func TestServiceConfigValidation(t *testing.T) {
 			})
 		})
 	}
-}
-
-// testSessionCodec is used only for scripted preview streams; raw traffic is never decoded.
-type testSessionCodec struct{}
-
-func (testSessionCodec) Client(stream ports.BrokerEnvelopeStream) ports.ClientConnection {
-	if pooled, ok := stream.(*pooledStream); ok {
-		stream = pooled.BrokerEnvelopeStream
-	}
-	return stream.(*previewWatchConn)
 }
 
 // mutationGateContext is a stdlib context seam: admission parks durably before

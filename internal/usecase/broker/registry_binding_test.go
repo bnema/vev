@@ -13,7 +13,7 @@ import (
 func TestRegistryBindsAuthenticatedIdentityDurablyAndIdempotently(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		store := newMembershipStore()
-		registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, store), nil, newManualClock(t, time.Unix(1, 0)).mock, nil, RegistryConfig{MembershipMode: MembershipMutable, ObservationDisabled: true})
+		registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, store), mockProbe(t, nil), newManualClock(t, time.Unix(1, 0)).mock, nil, RegistryConfig{MembershipMode: MembershipMutable, ObservationDisabled: true})
 		require.NoError(t, err)
 		t.Cleanup(func() { registry.store.close() })
 		policy := poolPolicy()
@@ -43,7 +43,7 @@ func TestRegistryBindsAuthenticatedIdentityDurablyAndIdempotently(t *testing.T) 
 func TestRegistryRejectsAuthenticatedIdentityAcrossIncompatiblePolicies(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		store := newMembershipStore()
-		registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, store), nil, newManualClock(t, time.Unix(1, 0)).mock, nil, RegistryConfig{MembershipMode: MembershipMutable, ObservationDisabled: true})
+		registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, store), mockProbe(t, nil), newManualClock(t, time.Unix(1, 0)).mock, nil, RegistryConfig{MembershipMode: MembershipMutable, ObservationDisabled: true})
 		require.NoError(t, err)
 		t.Cleanup(func() { registry.store.close() })
 		policy := poolPolicy()
@@ -67,7 +67,7 @@ func TestRegistryRejectsAuthenticatedIdentityAcrossIncompatiblePolicies(t *testi
 func TestRegistryIdentityBindingIsFencedAcrossRemoveReadd(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		store := newMembershipStore()
-		registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, store), nil, newManualClock(t, time.Unix(1, 0)).mock, nil, RegistryConfig{MembershipMode: MembershipMutable, ObservationDisabled: true})
+		registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, store), mockProbe(t, nil), newManualClock(t, time.Unix(1, 0)).mock, nil, RegistryConfig{MembershipMode: MembershipMutable, ObservationDisabled: true})
 		require.NoError(t, err)
 		t.Cleanup(func() { registry.store.close() })
 		policy := poolPolicy()

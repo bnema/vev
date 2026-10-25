@@ -86,7 +86,7 @@ func TestRegistryProbeDeadlineReleasesAttempt(t *testing.T) {
 						return observe(ctx)
 					})
 				}
-				registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, newTestStore()), remote, clock.mock, nil, RegistryConfig{Local: localProbe, ProbeTimeout: probeTimeout})
+				registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, newTestStore()), mockProbe(t, remote), clock.mock, nil, RegistryConfig{Local: localProbe, ProbeTimeout: probeTimeout})
 				require.NoError(t, err)
 				t.Cleanup(func() { registry.store.close() })
 				registry.jitter = identityJitter

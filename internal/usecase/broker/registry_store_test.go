@@ -32,7 +32,7 @@ func TestRegistryRestoresAuthoritativeMembership(t *testing.T) {
 				}
 				store.EXPECT().Load().Return(snapshot, nil).Once()
 				store.EXPECT().LoadHosts().Return(hosts, nil).Once()
-				r, err := NewRegistry(2, hostStoreFixture(t, store), newTestProbe(1), newManualClock(t, time.Unix(100, 0)).mock, nil)
+				r, err := NewRegistry(2, hostStoreFixture(t, store), mockProbe(t, newTestProbe(1)), newManualClock(t, time.Unix(100, 0)).mock, nil)
 				require.NoError(t, err)
 				t.Cleanup(func() { r.store.close() })
 				got := r.Snapshot()
@@ -75,7 +75,7 @@ func TestRegistryRejectsAuthorityAndLoadFailures(t *testing.T) {
 				store := portsmocks.NewMockBrokerHostStore(t)
 				store.EXPECT().Load().Return(ports.BrokerSnapshot{}, nil).Once()
 				store.EXPECT().LoadHosts().Return(hosts, nil).Once()
-				registry, err := NewRegistry(1, hostStoreFixture(t, store), newTestProbe(1), clock.mock, nil)
+				registry, err := NewRegistry(1, hostStoreFixture(t, store), mockProbe(t, newTestProbe(1)), clock.mock, nil)
 				require.Error(t, err)
 				require.Nil(t, registry)
 
@@ -86,7 +86,7 @@ func TestRegistryRejectsAuthorityAndLoadFailures(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			store := portsmocks.NewMockBrokerHostStore(t)
 			store.EXPECT().Load().Return(ports.BrokerSnapshot{}, loadErr).Once()
-			registry, err := NewRegistry(1, hostStoreFixture(t, store), newTestProbe(1), clock.mock, nil)
+			registry, err := NewRegistry(1, hostStoreFixture(t, store), mockProbe(t, newTestProbe(1)), clock.mock, nil)
 			require.ErrorIs(t, err, loadErr)
 			require.Nil(t, registry)
 
@@ -97,7 +97,7 @@ func TestRegistryRejectsAuthorityAndLoadFailures(t *testing.T) {
 			store := portsmocks.NewMockBrokerHostStore(t)
 			store.EXPECT().Load().Return(ports.BrokerSnapshot{}, nil).Once()
 			store.EXPECT().LoadHosts().Return(ports.BrokerHosts{}, authorityErr).Once()
-			registry, err := NewRegistry(1, hostStoreFixture(t, store), newTestProbe(1), clock.mock, nil)
+			registry, err := NewRegistry(1, hostStoreFixture(t, store), mockProbe(t, newTestProbe(1)), clock.mock, nil)
 			require.ErrorIs(t, err, authorityErr)
 			require.Nil(t, registry)
 
@@ -118,7 +118,7 @@ func TestRegistryRestoreIsReadOnlyAndPublicationLocal(t *testing.T) {
 		}}}, nil).Once()
 		store.EXPECT().LoadHosts().Return(ports.BrokerHosts{Revision: 99, Hosts: []ports.BrokerHostRecord{{Registration: reg, Pinned: true, Policy: poolPolicy(), Route: canonicalRoute(poolPolicy(), reg.Endpoint)}}}, nil).Once()
 
-		r, err := NewRegistry(6, hostStoreFixture(t, store), newTestProbe(1), clock.mock, nil)
+		r, err := NewRegistry(6, hostStoreFixture(t, store), mockProbe(t, newTestProbe(1)), clock.mock, nil)
 		require.NoError(t, err)
 		t.Cleanup(func() { r.store.close() })
 		snapshot := r.Snapshot()

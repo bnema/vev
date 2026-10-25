@@ -20,14 +20,18 @@ import (
 // Stateful fakes make terminal races and blocked I/O explicit; no real carriage.
 type poolResolver func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerDialTarget, error)
 
-func (f poolResolver) ResolveDialTarget(c context.Context, r ports.BrokerOpenStreamRequest) (ports.BrokerDialTarget, error) {
-	return f(c, r)
+func mockResolver(t testing.TB, f poolResolver) *portsmocks.MockBrokerRouteAuthority {
+	m := portsmocks.NewMockBrokerRouteAuthority(t)
+	m.EXPECT().ResolveDialTarget(mock.Anything, mock.Anything).RunAndReturn(f).Maybe()
+	return m
 }
 
 type poolConnector func(context.Context, ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error)
 
-func (f poolConnector) Connect(c context.Context, r ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
-	return f(c, r)
+func mockConnector(t testing.TB, f poolConnector) *portsmocks.MockBrokerEndpointConnector {
+	m := portsmocks.NewMockBrokerEndpointConnector(t)
+	m.EXPECT().Connect(mock.Anything, mock.Anything).RunAndReturn(f).Maybe()
+	return m
 }
 
 func newFakeLogical(t testing.TB) *portsmocks.MockBrokerEnvelopeStream {
@@ -105,7 +109,7 @@ func setupPool(t testing.TB, connector poolConnector) (*Pool, *manualClock) {
 	binder.EXPECT().BindAuthenticatedIdentity(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, request ports.BrokerIdentityBindingRequest) (ports.BrokerDaemonIdentity, error) {
 		return request.Identity, nil
 	}).Maybe()
-	p, err := NewPool(1, resolver, binder, connector, clock.mock, PoolLimits{Physical: 2, Clients: 128, Streams: 128, StreamsPerClient: 128, Warm: 2, Idle: time.Minute})
+	p, err := NewPool(1, resolver, binder, mockConnector(t, connector), clock.mock, PoolLimits{Physical: 2, Clients: 128, Streams: 128, StreamsPerClient: 128, Warm: 2, Idle: time.Minute})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, p.Close()) })
 	return p, clock
@@ -301,7 +305,7 @@ func TestPoolPendingAcquisitionSeparatesStartMode(t *testing.T) {
 		// The endpoint is first-contact: it binds no identity, so acquisition
 		// coalescing is decided by the pending key, which is exactly where the start
 		// mode has to participate.
-		p.routes = poolResolver(func(_ context.Context, r ports.BrokerOpenStreamRequest) (ports.BrokerDialTarget, error) {
+		p.routes = mockResolver(t, func(_ context.Context, r ports.BrokerOpenStreamRequest) (ports.BrokerDialTarget, error) {
 			return ports.BrokerDialTarget{
 				Fence: ports.BrokerEndpointFence{Registration: r.Registration}, Policy: r.Policy,
 				Address: "fake", StartMode: r.StartMode,
@@ -461,7 +465,7 @@ func TestPoolPolicyAndIdentityVerification(t *testing.T) {
 					return mockPhysical(t, &fakePhysical{endpoint: e, done: make(chan struct{})}), nil
 				})
 				if mode == "resolver" {
-					p.routes = poolResolver(func(_ context.Context, r ports.BrokerOpenStreamRequest) (ports.BrokerDialTarget, error) {
+					p.routes = mockResolver(t, func(_ context.Context, r ports.BrokerOpenStreamRequest) (ports.BrokerDialTarget, error) {
 						policy := r.Policy
 						policy.Trust = "other"
 						return ports.BrokerDialTarget{Fence: ports.BrokerEndpointFence{Local: true}, Policy: policy, Address: "fake", StartMode: r.StartMode, ExpectedIdentity: ports.BrokerExpectedIdentity{Identity: "canonical", Bound: true}}, nil

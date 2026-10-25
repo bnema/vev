@@ -24,7 +24,7 @@ import (
 // the test observes only the durable membership path.
 func newDurableMutableRegistry(t *testing.T, epoch ports.BrokerEpoch, store ports.BrokerHostStore) *Registry {
 	t.Helper()
-	registry, err := NewRegistryWithConfig(epoch, hostStoreFixture(t, store), nil, newManualClock(t, time.Unix(100, 0)).mock, nil, RegistryConfig{
+	registry, err := NewRegistryWithConfig(epoch, hostStoreFixture(t, store), mockProbe(t, nil), newManualClock(t, time.Unix(100, 0)).mock, nil, RegistryConfig{
 		MembershipMode:      MembershipMutable,
 		ObservationDisabled: true,
 	})
@@ -180,7 +180,7 @@ func TestRegistryReplaceHostsRefusesUnpublishableMembershipBeforeCAS(t *testing.
 	store := openDurableStore(t, dir, nil)
 	require.NoError(t, store.ReplaceHosts(1, []ports.BrokerHostRecord{valid}))
 
-	registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, store), nil, newManualClock(t, time.Unix(100, 0)).mock, nil, RegistryConfig{ObservationDisabled: true})
+	registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, store), mockProbe(t, nil), newManualClock(t, time.Unix(100, 0)).mock, nil, RegistryConfig{ObservationDisabled: true})
 	require.NoError(t, err)
 	t.Cleanup(func() { registry.store.close() })
 	defer registry.settle()
@@ -217,7 +217,7 @@ func TestRegistryReplaceHostsRefusesUnpublishableMembershipBeforeCAS(t *testing.
 	// reopening restores and publishes the original host.
 	require.NoError(t, store.Close())
 	reopened := openDurableStore(t, dir, nil)
-	restarted, err := NewRegistryWithConfig(2, hostStoreFixture(t, reopened), nil, newManualClock(t, time.Unix(200, 0)).mock, nil, RegistryConfig{ObservationDisabled: true})
+	restarted, err := NewRegistryWithConfig(2, hostStoreFixture(t, reopened), mockProbe(t, nil), newManualClock(t, time.Unix(200, 0)).mock, nil, RegistryConfig{ObservationDisabled: true})
 	require.NoError(t, err)
 	t.Cleanup(func() { restarted.store.close() })
 	defer restarted.settle()

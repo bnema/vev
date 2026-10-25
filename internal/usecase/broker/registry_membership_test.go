@@ -100,7 +100,7 @@ func (s *membershipStore) durableAuthority() ports.BrokerHosts {
 func newMutableRegistry(t *testing.T, store any, clock *manualClock, generator func() ([16]byte, error)) (*Registry, *testProbe) {
 	t.Helper()
 	probe := newTestProbe(2)
-	registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, store), probe, clock.mock, nil, RegistryConfig{
+	registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, store), mockProbe(t, probe), clock.mock, nil, RegistryConfig{
 		MembershipMode:       MembershipMutable,
 		IncarnationGenerator: generator,
 		ObservationDisabled:  false,
@@ -254,7 +254,7 @@ func TestRegistryMembershipModeRejectsUnknownMode(t *testing.T) {
 		// The mock has no expectations: any store call during construction fails
 		// the test, so a refusal must happen before the durable store is touched.
 		store := portsmocks.NewMockBrokerHostStore(t)
-		registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, store), newTestProbe(1), newManualClock(t, time.Unix(100, 0)).mock, nil,
+		registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, store), mockProbe(t, newTestProbe(1)), newManualClock(t, time.Unix(100, 0)).mock, nil,
 			RegistryConfig{MembershipMode: MembershipMode(9)})
 		require.ErrorContains(t, err, "invalid membership mode")
 		require.Nil(t, registry)
@@ -271,7 +271,7 @@ func TestRegistryImmutableMembershipRefusesEveryMutation(t *testing.T) {
 	store := portsmocks.NewMockBrokerHostStore(t)
 	store.EXPECT().Load().Return(ports.BrokerSnapshot{}, nil).Once()
 	store.EXPECT().LoadHosts().Return(ports.BrokerHosts{Revision: 3, Hosts: []ports.BrokerHostRecord{pinnedRecord(reg, poolPolicy())}}, nil).Once()
-	registry, err := NewRegistry(1, hostStoreFixture(t, store), newTestProbe(1), newManualClock(t, time.Unix(100, 0)).mock, nil)
+	registry, err := NewRegistry(1, hostStoreFixture(t, store), mockProbe(t, newTestProbe(1)), newManualClock(t, time.Unix(100, 0)).mock, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { registry.store.close() })
 	authority := registry.authority

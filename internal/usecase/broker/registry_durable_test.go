@@ -36,7 +36,7 @@ func TestRegistryDurableReplaceHostsRestart(t *testing.T) {
 			store, err := brokerstore.Open(brokerstore.Options{Dir: dir})
 			require.NoError(t, err)
 			defer store.Close()
-			r, err := NewRegistry(ports.BrokerEpoch(i+1), hostStoreFixture(t, store), newTestProbe(1), newManualClock(t, time.Unix(100, 0)).mock, nil)
+			r, err := NewRegistry(ports.BrokerEpoch(i+1), hostStoreFixture(t, store), mockProbe(t, newTestProbe(1)), newManualClock(t, time.Unix(100, 0)).mock, nil)
 			require.NoError(t, err)
 			t.Cleanup(func() { r.store.close() })
 			defer r.settle()
@@ -78,7 +78,7 @@ func TestRegistryDurableConflictDoesNotMutateProjection(t *testing.T) {
 			defer store.Close()
 			record := ports.BrokerHostRecord{Registration: registration(t, "host", 1), Pinned: true, Policy: poolPolicy(), Route: canonicalRoute(poolPolicy(), "host")}
 			require.NoError(t, store.ReplaceHosts(1, []ports.BrokerHostRecord{record}))
-			r, err := NewRegistry(1, hostStoreFixture(t, store), newTestProbe(1), newManualClock(t, time.Unix(100, 0)).mock, nil)
+			r, err := NewRegistry(1, hostStoreFixture(t, store), mockProbe(t, newTestProbe(1)), newManualClock(t, time.Unix(100, 0)).mock, nil)
 			require.NoError(t, err)
 			t.Cleanup(func() { r.store.close() })
 			defer r.settle()
@@ -110,7 +110,7 @@ func TestRegistryReplaceHostsStoreFailureIsSynchronous(t *testing.T) {
 	record := ports.BrokerHostRecord{Registration: registration(t, "host", 1), Pinned: true, Policy: poolPolicy(), Route: canonicalRoute(poolPolicy(), "host")}
 	records := []ports.BrokerHostRecord{record}
 	store.EXPECT().ReplaceHosts(uint64(7), records).Return(context.DeadlineExceeded).Once()
-	r, err := NewRegistry(1, hostStoreFixture(t, store), newTestProbe(1), newManualClock(t, time.Unix(100, 0)).mock, nil)
+	r, err := NewRegistry(1, hostStoreFixture(t, store), mockProbe(t, newTestProbe(1)), newManualClock(t, time.Unix(100, 0)).mock, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { r.store.close() })
 	before := r.Snapshot()
@@ -149,7 +149,7 @@ func TestRegistryDurableChurnFlushesLatestMembership(t *testing.T) {
 	store, err := brokerstore.Open(brokerstore.Options{Dir: filepath.Join(t.TempDir(), "broker")})
 	require.NoError(t, err)
 	defer store.Close()
-	r, err := NewRegistry(1, hostStoreFixture(t, store), newTestProbe(1), newManualClock(t, time.Unix(100, 0)).mock, nil)
+	r, err := NewRegistry(1, hostStoreFixture(t, store), mockProbe(t, newTestProbe(1)), newManualClock(t, time.Unix(100, 0)).mock, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { r.store.close() })
 	defer r.settle()
@@ -186,7 +186,7 @@ func TestRegistryDurableRoundTripObservedIdentity(t *testing.T) {
 
 	store, err := brokerstore.Open(brokerstore.Options{Dir: dir})
 	require.NoError(t, err)
-	r, err := NewRegistry(1, hostStoreFixture(t, store), newTestProbe(1), newManualClock(t, time.Unix(100, 0)).mock, nil)
+	r, err := NewRegistry(1, hostStoreFixture(t, store), mockProbe(t, newTestProbe(1)), newManualClock(t, time.Unix(100, 0)).mock, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { r.store.close() })
 	require.NoError(t, r.ReplaceHosts([]ports.BrokerHostRecord{record}))
@@ -223,7 +223,7 @@ func TestRegistryDurableRoundTripObservedIdentity(t *testing.T) {
 	require.Equal(t, ports.BrokerDaemonIncarnation{4, 5}, persisted.Daemons[0].Incarnation)
 	require.Equal(t, protocol.Version, persisted.Daemons[0].ProtocolVersion)
 	require.Equal(t, protocol.CapabilityResume, persisted.Daemons[0].Capabilities)
-	r2, err := NewRegistry(2, hostStoreFixture(t, reopened), newTestProbe(1), newManualClock(t, time.Unix(200, 0)).mock, nil)
+	r2, err := NewRegistry(2, hostStoreFixture(t, reopened), mockProbe(t, newTestProbe(1)), newManualClock(t, time.Unix(200, 0)).mock, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { r2.store.close() })
 	defer r2.settle()

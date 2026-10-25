@@ -87,9 +87,9 @@ func requireNoLocalProbeWithin(t *testing.T, probe *scriptedLocalProbe, window t
 
 // newLocalTestRegistry builds a registry that observes the broker's own machine
 // daemon through localProbe, beside an optional remote probe.
-func newLocalTestRegistry(t *testing.T, store any, remoteProbe ports.BrokerHostProbe, localProbe LocalProbe, clock *manualClock) *Registry {
+func newLocalTestRegistry(t *testing.T, store any, remoteProbe any, localProbe LocalProbe, clock *manualClock) *Registry {
 	t.Helper()
-	registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, store), remoteProbe, clock.mock, nil, RegistryConfig{
+	registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, store), mockProbe(t, remoteProbe), clock.mock, nil, RegistryConfig{
 		Local: &LocalObservation{DisplayOrigin: "local", Policy: poolPolicy(), Probe: localProbe},
 	})
 	require.NoError(t, err)
@@ -343,7 +343,7 @@ func TestRegistryLocalObservationConstruction(t *testing.T) {
 	tests := []struct {
 		name        string
 		cfg         RegistryConfig
-		remoteProbe ports.BrokerHostProbe
+		remoteProbe any
 	}{
 		{
 			name:        "observation-disabled registry cannot observe locally",
@@ -379,7 +379,7 @@ func TestRegistryLocalObservationConstruction(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				_, err := NewRegistryWithConfig(1, hostStoreFixture(t, newTestStore()), tt.remoteProbe, clock.mock, nil, tt.cfg)
+				_, err := NewRegistryWithConfig(1, hostStoreFixture(t, newTestStore()), mockProbe(t, tt.remoteProbe), clock.mock, nil, tt.cfg)
 				require.Error(t, err)
 
 			})
@@ -394,7 +394,7 @@ func TestRegistryLocalOnlyRequiresNoRemoteProbe(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		clock := newManualClock(t, time.Unix(100, 0))
 		local := newScriptedLocalProbe(1)
-		registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, newTestStore()), nil, clock.mock, nil, RegistryConfig{
+		registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, newTestStore()), mockProbe(t, nil), clock.mock, nil, RegistryConfig{
 			Local: &LocalObservation{DisplayOrigin: "local", Policy: poolPolicy(), Probe: local},
 		})
 		require.NoError(t, err)
@@ -529,7 +529,7 @@ func TestRegistryLocalOnlyRefusesRestoredRemoteMembership(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			store := newTestStore()
 			store.hosts = ports.BrokerHosts{Revision: 1, Hosts: hostRecords(reg)}
-			_, err := NewRegistryWithConfig(1, hostStoreFixture(t, store), nil, clock.mock, nil, RegistryConfig{Local: local()})
+			_, err := NewRegistryWithConfig(1, hostStoreFixture(t, store), mockProbe(t, nil), clock.mock, nil, RegistryConfig{Local: local()})
 			require.Error(t, err)
 			require.Contains(t, err.Error(), "remote hosts require a host probe")
 
@@ -538,7 +538,7 @@ func TestRegistryLocalOnlyRefusesRestoredRemoteMembership(t *testing.T) {
 
 	t.Run("projectMembership refuses restored remote membership directly", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, newTestStore()), nil, clock.mock, nil, RegistryConfig{Local: local()})
+			registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, newTestStore()), mockProbe(t, nil), clock.mock, nil, RegistryConfig{Local: local()})
 			require.NoError(t, err)
 			t.Cleanup(func() { registry.store.close() })
 			// Empty restored membership is accepted: the local-only registry owns no
@@ -600,7 +600,7 @@ func TestRegistryMutableAddHostLocalOnlyNoRemoteProbe(t *testing.T) {
 		clock := newManualClock(t, time.Unix(100, 0))
 		store := newMembershipStore()
 		local := newScriptedLocalProbe(1)
-		registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, store), nil, clock.mock, nil, RegistryConfig{
+		registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, store), mockProbe(t, nil), clock.mock, nil, RegistryConfig{
 			MembershipMode:       MembershipMutable,
 			IncarnationGenerator: (&incarnationSequencer{}).generate,
 			Local:                &LocalObservation{DisplayOrigin: "local", Policy: poolPolicy(), Probe: local},

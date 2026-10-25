@@ -10,6 +10,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -36,7 +37,7 @@ func TestPoolAdapterFailures(t *testing.T) {
 						}}), nil
 					})
 					if stage == "resolver" {
-						p.routes = poolResolver(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerDialTarget, error) {
+						p.routes = mockResolver(t, func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerDialTarget, error) {
 							return ports.BrokerDialTarget{}, tc.err
 						})
 					}
@@ -70,7 +71,7 @@ func TestPoolRejectedPaths(t *testing.T) {
 				case "epoch":
 					req.Epoch++
 				case "invalid endpoint":
-					p.routes = poolResolver(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerDialTarget, error) {
+					p.routes = mockResolver(t, func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerDialTarget, error) {
 						return ports.BrokerDialTarget{}, nil
 					})
 				case "retiring":
@@ -228,9 +229,6 @@ type bufferedPoolTimer struct {
 	active bool
 }
 
-func (t *bufferedPoolTimer) C() <-chan time.Time      { return t.ch }
-func (t *bufferedPoolTimer) Stop() bool               { was := t.active; t.active = false; return was }
-func (t *bufferedPoolTimer) Reset(time.Duration) bool { was := t.active; t.active = true; return was }
 func TestPoolTimerStopDrain(t *testing.T) {
 	for _, name := range []string{"active", "expired buffered", "expired consumed", "stopped"} {
 		t.Run(name, func(t *testing.T) {
@@ -239,14 +237,18 @@ func TestPoolTimerStopDrain(t *testing.T) {
 				if name == "expired buffered" {
 					timer.ch <- time.Time{}
 				}
-				stopPoolTimer(timer)
-				timer.Reset(time.Minute)
+				m := portsmocks.NewMockTimer(t)
+				m.EXPECT().C().Return((<-chan time.Time)(timer.ch)).Maybe()
+				m.EXPECT().Stop().RunAndReturn(func() bool { was := timer.active; timer.active = false; return was }).Maybe()
+				m.EXPECT().Reset(mock.Anything).RunAndReturn(func(time.Duration) bool { was := timer.active; timer.active = true; return was }).Maybe()
+				stopPoolTimer(m)
+				m.Reset(time.Minute)
 				select {
-				case <-timer.C():
+				case <-m.C():
 					t.Fatal("stale expiry survived reset")
 				default:
 				}
-				stopPoolTimer(timer)
+				stopPoolTimer(m)
 				require.False(t, timer.active)
 
 			})
@@ -289,7 +291,7 @@ func TestPoolCaps(t *testing.T) {
 				defer s.Close()
 				if name == "physical" {
 					p.limits.Streams = 2
-					p.routes = poolResolver(func(_ context.Context, r ports.BrokerOpenStreamRequest) (ports.BrokerDialTarget, error) {
+					p.routes = mockResolver(t, func(_ context.Context, r ports.BrokerOpenStreamRequest) (ports.BrokerDialTarget, error) {
 						return ports.BrokerDialTarget{Fence: ports.BrokerEndpointFence{Local: true}, Policy: r.Policy, Address: "route", StartMode: r.StartMode, ExpectedIdentity: ports.BrokerExpectedIdentity{Identity: "other", Bound: true}}, nil
 					})
 				}

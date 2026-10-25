@@ -9,10 +9,12 @@ import (
 	"time"
 
 	renderer "github.com/bnema/vev-vt"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 )
 
@@ -20,6 +22,8 @@ import (
 // server step; ReceiveServer blocks until a step arrives or the stream closes,
 // exactly like a live daemon connection.
 type previewWatchConn struct {
+	typed  *portsmocks.MockClientConnection
+	raw    *portsmocks.MockBrokerEnvelopeStream
 	stream ports.BrokerStreamID
 	sent   chan protocol.ClientMessage
 	steps  chan previewStep
@@ -32,11 +36,25 @@ type previewStep struct {
 	err     error
 }
 
-func newPreviewWatchConn(stream ports.BrokerStreamID) *previewWatchConn {
-	return &previewWatchConn{stream: stream, sent: make(chan protocol.ClientMessage, 4), steps: make(chan previewStep, 8), done: make(chan struct{})}
+func newPreviewWatchConn(t testing.TB, stream ports.BrokerStreamID) *previewWatchConn {
+	c := &previewWatchConn{stream: stream, sent: make(chan protocol.ClientMessage, 4), steps: make(chan previewStep, 8), done: make(chan struct{})}
+	c.typed = portsmocks.NewMockClientConnection(t)
+	c.typed.EXPECT().SendClient(mock.Anything).RunAndReturn(c.sendClient).Maybe()
+	c.typed.EXPECT().ReceiveServer().RunAndReturn(c.receiveServer).Maybe()
+	c.typed.EXPECT().Capabilities().Return(protocol.ConnectionCapabilities{OutputDataLimit: protocol.MaxOutputDataLen}).Maybe()
+	c.typed.EXPECT().LinkState().Return(ports.LinkStateConnected).Maybe()
+	c.typed.EXPECT().LinkEvents().Return(nil).Maybe()
+	c.typed.EXPECT().Close().RunAndReturn(c.close).Maybe()
+	c.raw = portsmocks.NewMockBrokerEnvelopeStream(t)
+	c.raw.EXPECT().Done().Return((<-chan struct{})(c.done)).Maybe()
+	c.raw.EXPECT().Err().Return(nil).Maybe()
+	c.raw.EXPECT().Close().RunAndReturn(c.close).Maybe()
+	c.raw.EXPECT().SendEnvelope(mock.Anything).Return(nil).Maybe()
+	c.raw.EXPECT().RecvEnvelope().RunAndReturn(func() ([]byte, error) { <-c.done; return nil, errors.New("closed") }).Maybe()
+	return c
 }
 
-func (c *previewWatchConn) SendClient(message protocol.ClientMessage) error {
+func (c *previewWatchConn) sendClient(message protocol.ClientMessage) error {
 	select {
 	case <-c.done:
 		return errors.New("closed")
@@ -45,7 +63,7 @@ func (c *previewWatchConn) SendClient(message protocol.ClientMessage) error {
 	}
 }
 
-func (c *previewWatchConn) ReceiveServer() (protocol.ServerMessage, error) {
+func (c *previewWatchConn) receiveServer() (protocol.ServerMessage, error) {
 	select {
 	case <-c.done:
 		return nil, errors.New("closed")
@@ -54,16 +72,7 @@ func (c *previewWatchConn) ReceiveServer() (protocol.ServerMessage, error) {
 	}
 }
 
-func (c *previewWatchConn) Capabilities() protocol.ConnectionCapabilities {
-	return protocol.ConnectionCapabilities{OutputDataLimit: protocol.MaxOutputDataLen}
-}
-func (c *previewWatchConn) LinkState() ports.LinkState         { return ports.LinkStateConnected }
-func (c *previewWatchConn) LinkEvents() <-chan ports.LinkEvent { return nil }
-func (c *previewWatchConn) SendEnvelope([]byte) error          { return nil }
-func (c *previewWatchConn) RecvEnvelope() ([]byte, error)      { <-c.done; return nil, errors.New("closed") }
-func (c *previewWatchConn) Done() <-chan struct{}              { return c.done }
-func (c *previewWatchConn) Err() error                         { return nil }
-func (c *previewWatchConn) Close() error {
+func (c *previewWatchConn) close() error {
 	c.once.Do(func() { close(c.done) })
 	return nil
 }
@@ -77,17 +86,22 @@ func (c *previewWatchConn) fail(err error) { c.steps <- previewStep{err: err} }
 // previewTestConnector dials one scripted physical whose every logical open
 // yields a fresh watch stream, published on opened for the test to drive.
 type previewTestConnector struct {
+	mu       sync.Mutex
+	streams  []*previewWatchConn
 	t        testing.TB
 	opened   chan *previewWatchConn
 	scripted *fakePhysical
 }
 
-func (c *previewTestConnector) Connect(_ context.Context, e ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
+func (c *previewTestConnector) connect(_ context.Context, e ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
 	if c.scripted == nil {
 		c.scripted = &fakePhysical{endpoint: e, done: make(chan struct{}), open: func(_ context.Context, r ports.BrokerOpenStreamRequest) (ports.BrokerEnvelopeStream, error) {
-			conn := newPreviewWatchConn(r.Stream)
+			conn := newPreviewWatchConn(c.t, r.Stream)
+			c.mu.Lock()
+			c.streams = append(c.streams, conn)
+			c.mu.Unlock()
 			c.opened <- conn
-			return conn, nil
+			return conn.raw, nil
 		}}
 	}
 	return mockPhysical(c.t, c.scripted), nil
@@ -126,11 +140,25 @@ func newPreviewFixture(t *testing.T, target domain.RemoteSessionTarget) *preview
 	t.Helper()
 	connector := &previewTestConnector{t: t, opened: make(chan *previewWatchConn, 8)}
 	clock := newManualClock(t, time.Unix(0, 0))
-	registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, newTestStore()), nil, clock.mock, nil, RegistryConfig{ObservationDisabled: true})
+	registry, err := NewRegistryWithConfig(1, hostStoreFixture(t, newTestStore()), mockProbe(t, nil), clock.mock, nil, RegistryConfig{ObservationDisabled: true})
 	require.NoError(t, err)
 	t.Cleanup(func() { registry.store.close() })
-	authority, _, _, _ := composeTestAuthority(t, 1, registry, connector.Connect, clock)
-	authority.codec = testSessionCodec{}
+	authority, _, _, _ := composeTestAuthority(t, 1, registry, connector.connect, clock)
+	codec := portsmocks.NewMockSessionCodec(t)
+	codec.EXPECT().Client(mock.Anything).RunAndReturn(func(stream ports.BrokerEnvelopeStream) ports.ClientConnection {
+		if pooled, ok := stream.(*pooledStream); ok {
+			stream = pooled.BrokerEnvelopeStream
+		}
+		connector.mu.Lock()
+		defer connector.mu.Unlock()
+		for _, conn := range connector.streams {
+			if conn.raw == stream {
+				return conn.typed
+			}
+		}
+		panic("unknown preview stream")
+	}).Maybe()
+	authority.codec = codec
 	service, err := authority.AdmitClient(context.Background())
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, service.Close()) })
@@ -414,4 +442,10 @@ func TestServicePreviewRouteValidation(t *testing.T) {
 	stale := previewRequestFor(f.service, 1, previewTarget(0x11, "tab-alpha"))
 	_, err := f.service.SubscribePreview(stale)
 	require.ErrorIs(t, err, ports.BrokerAdmissionStale, "a generation is never reused")
+}
+
+func mockPreviewConnector(t testing.TB, c *previewTestConnector) *portsmocks.MockBrokerEndpointConnector {
+	m := portsmocks.NewMockBrokerEndpointConnector(t)
+	m.EXPECT().Connect(mock.Anything, mock.Anything).RunAndReturn(c.connect).Maybe()
+	return m
 }

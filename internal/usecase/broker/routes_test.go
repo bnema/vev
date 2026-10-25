@@ -20,7 +20,7 @@ type routeHosts struct {
 	found  bool
 }
 
-func (h *routeHosts) LookupHost(ctx context.Context, endpoint string) (ports.BrokerHostRecord, bool, error) {
+func (h *routeHosts) lookupHost(ctx context.Context, endpoint string) (ports.BrokerHostRecord, bool, error) {
 	return h.record, h.found && endpoint == h.record.Registration.Endpoint, ctx.Err()
 }
 
@@ -66,7 +66,7 @@ func TestRoutesResolveRemoteTarget(t *testing.T) {
 				if tt.change != nil {
 					tt.change(hosts, &request)
 				}
-				routes := &Routes{Hosts: hosts, Address: testRouteAddress}
+				routes := &Routes{Hosts: mockRouteHosts(t, hosts), Address: testRouteAddress}
 				target, err := routes.ResolveDialTarget(context.Background(), request)
 				if tt.wantCode != 0 {
 					var brokerErr ports.BrokerError
@@ -106,7 +106,7 @@ func TestRoutesAuthorizeRemoteDialRejectsChangedAuthority(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				hosts := &routeHosts{record: record, found: true}
-				routes := &Routes{Hosts: hosts, Address: testRouteAddress}
+				routes := &Routes{Hosts: mockRouteHosts(t, hosts), Address: testRouteAddress}
 				target, err := routes.ResolveDialTarget(context.Background(), testRouteRequest(record))
 				require.NoError(t, err)
 				tt.change(hosts)
@@ -138,7 +138,7 @@ func TestRoutesLocalDelegatesAndFailsClosed(t *testing.T) {
 		require.Error(t, err, "no local binding authorizes no local dial")
 		_, err = (&Routes{}).ResolveDialTarget(context.Background(), testRouteRequest(testRouteRecord(t)))
 		require.Error(t, err, "no committed membership authorizes no remote dial")
-		_, err = (&Routes{Hosts: &routeHosts{}, Address: testRouteAddress}).AuthorizeRemoteDial(context.Background(), want)
+		_, err = (&Routes{Hosts: mockRouteHosts(t, &routeHosts{}), Address: testRouteAddress}).AuthorizeRemoteDial(context.Background(), want)
 		require.Error(t, err, "a local target never selects a remote route")
 
 		cancelled, cancel := context.WithCancel(context.Background())
@@ -147,4 +147,10 @@ func TestRoutesLocalDelegatesAndFailsClosed(t *testing.T) {
 		require.ErrorIs(t, err, context.Canceled)
 
 	})
+}
+
+func mockRouteHosts(t testing.TB, h *routeHosts) *portsmocks.MockBrokerHostAuthorityReader {
+	m := portsmocks.NewMockBrokerHostAuthorityReader(t)
+	m.EXPECT().LookupHost(mock.Anything, mock.Anything).RunAndReturn(h.lookupHost).Maybe()
+	return m
 }
