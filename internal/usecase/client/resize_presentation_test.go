@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
@@ -49,17 +50,15 @@ type resizeTestTerminal struct {
 	geometry   domain.Geometry
 }
 
-func newResizeTestTerminal(in io.Reader, geometry domain.Geometry) *resizeTestTerminal {
-	return &resizeTestTerminal{
-		attachTestTerminal: &attachTestTerminal{in: in},
-		resizes:            make(chan domain.Geometry, 8),
-		geometry:           geometry,
-	}
+func newResizeTestTerminal(t *testing.T, in io.Reader, geometry domain.Geometry) *resizeTestTerminal {
+	log := &resizeTestTerminal{resizes: make(chan domain.Geometry, 8), geometry: geometry}
+	log.attachTestTerminal = newAttachTerminal(t, in, false, func(m *portsmocks.MockTerminal, _ *attachTestTerminal) {
+		m.EXPECT().ResizeEvents().Return((<-chan domain.Geometry)(log.resizes)).Maybe()
+		m.EXPECT().Geometry().RunAndReturn(log.currentGeometry).Maybe()
+	})
+	return log
 }
-
-func (t *resizeTestTerminal) ResizeEvents() <-chan domain.Geometry { return t.resizes }
-
-func (t *resizeTestTerminal) Geometry() (domain.Geometry, error) {
+func (t *resizeTestTerminal) currentGeometry() (domain.Geometry, error) {
 	t.geometryMu.Lock()
 	defer t.geometryMu.Unlock()
 	return t.geometry, nil
@@ -116,7 +115,7 @@ func newResizeRenderRecorder(terminal *resizeTestTerminal) *resizeRenderRecorder
 const resizeRenderPaint = "<picker-frame>"
 
 func (r *resizeRenderRecorder) render(state State) {
-	geometry, _ := r.terminal.Geometry()
+	geometry, _ := r.terminal.port.Geometry()
 	sample := resizeRenderSample{state: state, geometry: geometry}
 	r.mu.Lock()
 	r.all = append(r.all, sample)
@@ -125,7 +124,7 @@ func (r *resizeRenderRecorder) render(state State) {
 	// writes its frame only while the shared fence admits the state. A mutation
 	// that widened the fence would therefore land bytes a test can observe.
 	if PickerPresentation(state) {
-		_, _ = r.terminal.Out().Write([]byte(resizeRenderPaint))
+		_, _ = r.terminal.port.Out().Write([]byte(resizeRenderPaint))
 	}
 	select {
 	case r.renders <- sample:
@@ -242,7 +241,7 @@ func startResizeHarness(t *testing.T, options resizeHarnessOptions) *resizeSuper
 	if geometry == (domain.Geometry{}) {
 		geometry = domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}
 	}
-	terminal := newResizeTestTerminal(reader, geometry)
+	terminal := newResizeTestTerminal(t, reader, geometry)
 	if options.closeResizes {
 		terminal.closeResizeEvents()
 	}
@@ -256,7 +255,7 @@ func startResizeHarness(t *testing.T, options resizeHarnessOptions) *resizeSuper
 	recorder := newResizeRenderRecorder(terminal)
 	sup := mustSupervisor(t, SupervisorConfig{
 		Connector: connector,
-		Terminal:  terminal,
+		Terminal:  terminal.port,
 		Clock:     clock,
 		Jitter:    func() float64 { return 0 },
 		Picker:    options.picker,
@@ -865,11 +864,11 @@ func TestResizeCollectorAndSupervisorJoinOnClosedEventsAndCancellation(t *testin
 // a connecting repaint would change the renderer count and append picker bytes
 // over the session output. A supervisor without a renderer is a no-op.
 func TestSupervisorResizeInvalidationRendersOnlyPickerPresentations(t *testing.T) {
-	terminal := newResizeTestTerminal(newAttachTestReader(), domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
+	terminal := newResizeTestTerminal(t, newAttachTestReader(), domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
 	recorder := newResizeRenderRecorder(terminal)
 	sup := mustSupervisor(t, SupervisorConfig{
 		Connector: newSupervisorTestConnector(nil),
-		Terminal:  terminal,
+		Terminal:  terminal.port,
 		Clock:     newSupervisorTestClock(),
 		Render:    recorder.render,
 	})
@@ -931,10 +930,10 @@ func TestSupervisorPresentationInvalidationNilHostIsSafe(t *testing.T) {
 
 		// A fully built supervisor exposes its host's signal; once the host is
 		// gone the helper must fall back to nil rather than panic.
-		terminal := newResizeTestTerminal(newAttachTestReader(), domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
+		terminal := newResizeTestTerminal(t, newAttachTestReader(), domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
 		sup := mustSupervisor(t, SupervisorConfig{
 			Connector: newSupervisorTestConnector(nil),
-			Terminal:  terminal,
+			Terminal:  terminal.port,
 			Clock:     newSupervisorTestClock(),
 		})
 		require.NotNil(t, sup.presentationInvalidation(), "a live host exposes its coalesced invalidation")
@@ -943,11 +942,11 @@ func TestSupervisorPresentationInvalidationNilHostIsSafe(t *testing.T) {
 	})
 
 	t.Run("a wait with a nil host still settles", func(t *testing.T) {
-		terminal := newResizeTestTerminal(newAttachTestReader(), domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
+		terminal := newResizeTestTerminal(t, newAttachTestReader(), domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
 		clock := newSupervisorTestClock()
 		sup := mustSupervisor(t, SupervisorConfig{
 			Connector: newSupervisorTestConnector(nil),
-			Terminal:  terminal,
+			Terminal:  terminal.port,
 			Clock:     clock,
 			Jitter:    func() float64 { return 0 },
 		})
@@ -985,11 +984,11 @@ func TestSupervisorPresentationInvalidationNilHostIsSafe(t *testing.T) {
 	})
 
 	t.Run("a wait with a nil host settles on cancellation", func(t *testing.T) {
-		terminal := newResizeTestTerminal(newAttachTestReader(), domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
+		terminal := newResizeTestTerminal(t, newAttachTestReader(), domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
 		clock := newSupervisorTestClock()
 		sup := mustSupervisor(t, SupervisorConfig{
 			Connector: newSupervisorTestConnector(nil),
-			Terminal:  terminal,
+			Terminal:  terminal.port,
 			Clock:     clock,
 			Jitter:    func() float64 { return 0 },
 		})

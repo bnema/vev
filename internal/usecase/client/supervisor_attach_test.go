@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
@@ -26,8 +28,15 @@ import (
 // attachTestTerminal is the supervisor-owned terminal double: it records output,
 // flushes, raw entrances/restores, and UI publication boundaries so a test can
 // prove exactly what a committed attachment wrote.
+type attachTerminalMocks struct {
+	*portsmocks.MockTerminal
+	*portsmocks.MockUIOutputTransaction
+	*portsmocks.MockUIState
+}
+
 type attachTestTerminal struct {
-	in io.Reader
+	port attachTerminalMocks
+	in   io.Reader
 
 	mu             sync.Mutex
 	out            bytes.Buffer
@@ -63,9 +72,9 @@ type attachTestEvent struct {
 	state  uint64
 }
 
-func (t *attachTestTerminal) EnableKittyKeyboard(int) error { return nil }
+func (t *attachTestTerminal) recordEnableKittyKeyboard(int) error { return nil }
 
-func (t *attachTestTerminal) EnterRaw() (func() error, error) {
+func (t *attachTestTerminal) recordEnterRaw() (func() error, error) {
 	return func() error {
 		t.mu.Lock()
 		t.restores++
@@ -74,24 +83,24 @@ func (t *attachTestTerminal) EnterRaw() (func() error, error) {
 	}, nil
 }
 
-func (t *attachTestTerminal) Geometry() (domain.Geometry, error) {
+func (t *attachTestTerminal) recordGeometry() (domain.Geometry, error) {
 	return domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}, nil
 }
 
-func (t *attachTestTerminal) ResizeEvents() <-chan domain.Geometry { return nil }
+func (t *attachTestTerminal) recordResizeEvents() <-chan domain.Geometry { return nil }
 
-func (t *attachTestTerminal) In() io.Reader { return t.in }
+func (t *attachTestTerminal) recordIn() io.Reader { return t.in }
 
-func (t *attachTestTerminal) Out() io.Writer { return &attachTestWriter{term: t} }
+func (t *attachTestTerminal) recordOut() io.Writer { return &attachTestWriter{term: t} }
 
-func (t *attachTestTerminal) Flush() error {
+func (t *attachTestTerminal) recordFlush() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.flushes++
 	return nil
 }
 
-func (t *attachTestTerminal) BeginOutput(ctx ports.UIContext) {
+func (t *attachTestTerminal) recordBeginOutput(ctx ports.UIContext) {
 	t.mu.Lock()
 	if ctx.AttachmentHandle == "" && len(t.publications) != 0 && ctx.Status == ports.UIStatusAttached {
 		ctx.AttachmentHandle = t.publications[len(t.publications)-1].AttachmentHandle
@@ -108,7 +117,7 @@ func (t *attachTestTerminal) BeginOutput(ctx ports.UIContext) {
 	t.mu.Unlock()
 }
 
-func (t *attachTestTerminal) EndOutput(success bool) {
+func (t *attachTestTerminal) recordEndOutput(success bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.successes = append(t.successes, success)
@@ -134,7 +143,7 @@ func (t *attachTestTerminal) EndOutput(success bool) {
 	t.pending = ports.UIContext{}
 }
 
-func (t *attachTestTerminal) PublishContext(uiContext ports.UIContext) error {
+func (t *attachTestTerminal) recordPublishContext(uiContext ports.UIContext) error {
 	if t.publishMatch == nil || t.publishMatch(uiContext) {
 		if t.publishEntered != nil {
 			select {
@@ -174,7 +183,7 @@ func (t *attachTestTerminal) PublishContext(uiContext ports.UIContext) error {
 	return nil
 }
 
-func (t *attachTestTerminal) Snapshot() (ports.UISnapshot, error) {
+func (t *attachTestTerminal) recordSnapshot() (ports.UISnapshot, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	var ctx ports.UIContext
@@ -187,12 +196,12 @@ func (t *attachTestTerminal) Snapshot() (ports.UISnapshot, error) {
 	return ports.UISnapshot{Revision: t.revision, Context: ctx}, nil
 }
 
-func (t *attachTestTerminal) Boundary() (ports.UIActionResult, error) {
-	snapshot, err := t.Snapshot()
+func (t *attachTestTerminal) recordBoundary() (ports.UIActionResult, error) {
+	snapshot, err := t.recordSnapshot()
 	return ports.UIActionResult{Revision: snapshot.Revision, Context: snapshot.Context}, err
 }
 
-func (t *attachTestTerminal) Changes() <-chan struct{} {
+func (t *attachTestTerminal) recordChanges() <-chan struct{} {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.changes == nil {
@@ -414,7 +423,7 @@ func startAttachHarnessConfig(t *testing.T, picker pickerHost, configure func(*S
 	reader := newAttachTestReader()
 	// available starts true, exactly like a real composition terminal: a
 	// presentation-only publication is observable before any frame drains.
-	terminal := &attachTestTerminal{in: reader, available: true}
+	terminal := newAttachTerminal(t, reader, true)
 	service := newSupervisorTestService(ports.BrokerConnectionID{1})
 	service.publish(3, 1)
 
@@ -423,7 +432,7 @@ func startAttachHarnessConfig(t *testing.T, picker pickerHost, configure func(*S
 	})
 	cfg := SupervisorConfig{
 		Connector: connector,
-		Terminal:  terminal,
+		Terminal:  terminal.port,
 		Clock:     clock,
 		Jitter:    func() float64 { return 0 },
 		Picker:    picker,
@@ -1073,7 +1082,7 @@ func TestSupervisorWithoutUIDoesNotBindActions(t *testing.T) {
 }
 
 func TestUIActionWithoutInputReturnsUnavailable(t *testing.T) {
-	ui := NewUI(&attachTestTerminal{}, newSupervisorTestClock())
+	ui := NewUI(newAttachTerminal(t, nil, false).port, newSupervisorTestClock())
 	_, err := ui.Action(t.Context(), ports.UIActionRequest{Attachment: ui.Handle(), Generation: 1, Text: "x"})
 	var uiErr *ports.UIError
 	require.ErrorAs(t, err, &uiErr)
@@ -1719,7 +1728,7 @@ func TestSupervisorAttachmentReachableFromRealPicker(t *testing.T) {
 	clock := newSupervisorTestClock()
 	reader := newPickerChunkReader()
 	t.Cleanup(reader.close)
-	terminal := &attachTestTerminal{in: reader, available: true}
+	terminal := newAttachTerminal(t, reader, true)
 	service := newSupervisorTestService(ports.BrokerConnectionID{1})
 	service.hub.publish(pickerTestSnapshot(3, 1, clock.Now(), "alpha"))
 	admittedStreams := make(chan *streamLog, 1)
@@ -1733,7 +1742,7 @@ func TestSupervisorAttachmentReachableFromRealPicker(t *testing.T) {
 	connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) { return service, nil })
 	sup := mustSupervisor(t, SupervisorConfig{
 		Connector: connector,
-		Terminal:  terminal,
+		Terminal:  terminal.port,
 		Clock:     clock,
 		Jitter:    func() float64 { return 0 },
 		Picker:    controller,
@@ -1831,4 +1840,26 @@ func TestSupervisorAttachmentConcurrentCommitAndCancellation(t *testing.T) {
 			require.NotEqual(t, PresentAttached, harness.sup.State().Presentation)
 		})
 	}
+}
+
+func newAttachTerminal(t *testing.T, in io.Reader, available bool, opts ...func(*portsmocks.MockTerminal, *attachTestTerminal)) *attachTestTerminal {
+	log := &attachTestTerminal{in: in, available: available}
+	log.port = attachTerminalMocks{portsmocks.NewMockTerminal(t), portsmocks.NewMockUIOutputTransaction(t), portsmocks.NewMockUIState(t)}
+	for _, opt := range opts {
+		opt(log.port.MockTerminal, log)
+	}
+	log.port.MockTerminal.EXPECT().EnableKittyKeyboard(mock.Anything).RunAndReturn(log.recordEnableKittyKeyboard).Maybe()
+	log.port.MockTerminal.EXPECT().EnterRaw().RunAndReturn(log.recordEnterRaw).Maybe()
+	log.port.MockTerminal.EXPECT().Geometry().RunAndReturn(log.recordGeometry).Maybe()
+	log.port.MockTerminal.EXPECT().ResizeEvents().RunAndReturn(log.recordResizeEvents).Maybe()
+	log.port.MockTerminal.EXPECT().In().RunAndReturn(log.recordIn).Maybe()
+	log.port.MockTerminal.EXPECT().Out().RunAndReturn(log.recordOut).Maybe()
+	log.port.MockTerminal.EXPECT().Flush().RunAndReturn(log.recordFlush).Maybe()
+	log.port.MockUIOutputTransaction.EXPECT().BeginOutput(mock.Anything).Run(log.recordBeginOutput).Maybe()
+	log.port.MockUIOutputTransaction.EXPECT().EndOutput(mock.Anything).Run(log.recordEndOutput).Maybe()
+	log.port.MockUIOutputTransaction.EXPECT().PublishContext(mock.Anything).RunAndReturn(log.recordPublishContext).Maybe()
+	log.port.MockUIState.EXPECT().Snapshot().RunAndReturn(log.recordSnapshot).Maybe()
+	log.port.MockUIState.EXPECT().Boundary().RunAndReturn(log.recordBoundary).Maybe()
+	log.port.MockUIState.EXPECT().Changes().RunAndReturn(log.recordChanges).Maybe()
+	return log
 }

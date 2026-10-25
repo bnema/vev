@@ -129,14 +129,14 @@ func TestP54InitialNavigationCreatesEphemeralThroughBroker(t *testing.T) {
 	defer cancel()
 	clock := newSupervisorTestClock()
 	reader := newAttachTestReader()
-	terminal := &attachTestTerminal{in: reader}
+	terminal := newAttachTerminal(t, reader, false)
 	service := newSupervisorTestService(ports.BrokerConnectionID{1})
 	service.publishSnapshot(localDaemonSnapshot(3, 1))
 	stream := newSessionStream(t)
 	service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 		return stream.conn, nil
 	})
-	sup := mustSupervisor(t, SupervisorConfig{Connector: newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) { return service, nil }), Terminal: terminal, Clock: clock, Jitter: func() float64 { return 0 }, Picker: picker, InitialNavigation: navigation})
+	sup := mustSupervisor(t, SupervisorConfig{Connector: newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) { return service, nil }), Terminal: terminal.port, Clock: clock, Jitter: func() float64 { return 0 }, Picker: picker, InitialNavigation: navigation})
 	done := make(chan error, 1)
 	go func() { done <- sup.Run(ctx) }()
 	require.Eventually(t, func() bool { return len(service.openedRequests()) == 1 }, 5*time.Second, time.Millisecond)
@@ -155,7 +155,7 @@ func TestP54InitialNavigationIsNotReplayedAfterReconnect(t *testing.T) {
 	defer cancel()
 	clock := newSupervisorTestClock()
 	reader := newAttachTestReader()
-	terminal := &attachTestTerminal{in: reader}
+	terminal := newAttachTerminal(t, reader, false)
 	picker := newAttachTestPicker()
 	navigation := InitialNavigation{Kind: InitialNavigationCreateEphemeral, Destination: ports.BrokerEndpointFence{Local: true}}
 	first := newSupervisorTestService(ports.BrokerConnectionID{1})
@@ -171,7 +171,7 @@ func TestP54InitialNavigationIsNotReplayedAfterReconnect(t *testing.T) {
 		}
 		return second, nil
 	})
-	sup := mustSupervisor(t, SupervisorConfig{Connector: connector, Terminal: terminal, Clock: clock, Jitter: func() float64 { return 0 }, Picker: picker, InitialNavigation: navigation})
+	sup := mustSupervisor(t, SupervisorConfig{Connector: connector, Terminal: terminal.port, Clock: clock, Jitter: func() float64 { return 0 }, Picker: picker, InitialNavigation: navigation})
 	done := make(chan error, 1)
 	go func() { done <- sup.Run(ctx) }()
 	require.Equal(t, 1, connector.awaitStart(t))

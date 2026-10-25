@@ -334,7 +334,7 @@ func TestInitialNavigationResolverIsConsultedAtMostOnce(t *testing.T) {
 	defer cancel()
 	clock := newSupervisorTestClock()
 	reader := newAttachTestReader()
-	terminal := &attachTestTerminal{in: reader}
+	terminal := newAttachTerminal(t, reader, false)
 	picker := newAttachTestPicker()
 
 	first := newSupervisorTestService(ports.BrokerConnectionID{1})
@@ -356,7 +356,7 @@ func TestInitialNavigationResolverIsConsultedAtMostOnce(t *testing.T) {
 	var mutatedOnce atomic.Bool
 	cfg := SupervisorConfig{
 		Connector: connector,
-		Terminal:  terminal,
+		Terminal:  terminal.port,
 		Clock:     clock,
 		Jitter:    func() float64 { return 0 },
 		Picker:    picker,
@@ -471,7 +471,7 @@ func TestInitialNavigationResolverFailureIsSelectionUnavailable(t *testing.T) {
 	defer cancel()
 	clock := newSupervisorTestClock()
 	reader := newAttachTestReader()
-	terminal := &attachTestTerminal{in: reader}
+	terminal := newAttachTerminal(t, reader, false)
 	picker := newAttachTestPicker()
 	service := newSupervisorTestService(ports.BrokerConnectionID{1})
 	service.publishSnapshot(localDaemonSnapshot(3, 1))
@@ -485,7 +485,7 @@ func TestInitialNavigationResolverFailureIsSelectionUnavailable(t *testing.T) {
 	resolverErr := errors.New("no such target")
 	sup := mustSupervisor(t, SupervisorConfig{
 		Connector: newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) { return service, nil }),
-		Terminal:  terminal, Clock: clock, Jitter: func() float64 { return 0 }, Picker: picker,
+		Terminal:  terminal.port, Clock: clock, Jitter: func() float64 { return 0 }, Picker: picker,
 		NotifyLifecycle: func(notice LifecycleNotice) { notices <- notice },
 		ResolveInitialNavigation: func(ports.BrokerSnapshot) (InitialNavigation, error) {
 			calls.Add(1)
@@ -526,7 +526,7 @@ func TestInitialNavigationWaitsForTargetObservation(t *testing.T) {
 			defer cancel()
 			clock := newSupervisorTestClock()
 			reader := newAttachTestReader()
-			terminal := &attachTestTerminal{in: reader}
+			terminal := newAttachTerminal(t, reader, false)
 			picker := newAttachTestPicker()
 			service := newSupervisorTestService(ports.BrokerConnectionID{1})
 			service.publishSnapshot(localDaemonSnapshot(3, 1))
@@ -539,7 +539,7 @@ func TestInitialNavigationWaitsForTargetObservation(t *testing.T) {
 			var calls atomic.Int64
 			sup := mustSupervisor(t, SupervisorConfig{
 				Connector: newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) { return service, nil }),
-				Terminal:  terminal, Clock: clock, Jitter: func() float64 { return 0 }, Picker: picker,
+				Terminal:  terminal.port, Clock: clock, Jitter: func() float64 { return 0 }, Picker: picker,
 				NotifyLifecycle: func(notice LifecycleNotice) { notices <- notice },
 				ResolveInitialNavigation: func(snapshot ports.BrokerSnapshot) (InitialNavigation, error) {
 					calls.Add(1)
@@ -617,7 +617,7 @@ func TestInitialNavigationDropsDecisionsTakenWhileHidden(t *testing.T) {
 	defer cancel()
 	clock := newSupervisorTestClock()
 	reader := newAttachTestReader()
-	terminal := &attachTestTerminal{in: reader}
+	terminal := newAttachTerminal(t, reader, false)
 	picker := newAttachTestPicker()
 
 	service := newSupervisorTestService(ports.BrokerConnectionID{1})
@@ -631,7 +631,7 @@ func TestInitialNavigationDropsDecisionsTakenWhileHidden(t *testing.T) {
 	picker.recordOp(pickerOp{commit: true}, "row", ports.BrokerOpenStreamRequest{})
 
 	sup := mustSupervisor(t, SupervisorConfig{
-		Connector: connector, Terminal: terminal, Clock: clock,
+		Connector: connector, Terminal: terminal.port, Clock: clock,
 		Jitter: func() float64 { return 0 }, Picker: picker,
 		InitialNavigation: InitialNavigation{Kind: InitialNavigationCreateEphemeral, Destination: ports.BrokerEndpointFence{Local: true}},
 	})
