@@ -1,29 +1,15 @@
 package daemon
 
 import (
-	"context"
 	"crypto/rand"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/ports"
 	recoveryusecase "github.com/bnema/vev/internal/usecase/recovery"
 )
-
-type testLifecycleRepository struct{ ports.SnapshotRepository }
-
-func (testLifecycleRepository) DeleteIncarnation(context.Context, domain.IncarnationID) error {
-	return nil
-}
-func (testLifecycleRepository) SnapshotIncarnations(context.Context) ([]domain.IncarnationID, error) {
-	return nil, nil
-}
-func (testLifecycleRepository) CollectIncarnationGarbage(context.Context, domain.IncarnationID, *domain.CheckpointRef) error {
-	return nil
-}
 
 // WithStore is package-test composition glue. Production injects the same
 // recovery coordinator explicitly from internal/app.
@@ -42,7 +28,7 @@ func WithStore(t testing.TB, store ports.Store) Option {
 		d.catalogueRecordsProvided = true
 		repository := d.snapshotRepository
 		if repository == nil {
-			repository = testLifecycleRepository{}
+			repository = newSnapshotRepositoryMock(t)
 		}
 		d.recovery = recoveryusecase.NewCoordinator(catalogue, repository, rand.Reader)
 	}
