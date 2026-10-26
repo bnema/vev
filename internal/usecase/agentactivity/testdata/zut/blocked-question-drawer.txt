@@ -1,0 +1,32 @@
+# zut d9588df derived at 60x30: narrow pane: question dialog drawer hides the status bar
+---
+  answer 25 with some words
+
+▌
+▌ question 26
+▌
+
+  answer 26 with some words
+
+▌
+▌ question 27
+▌
+
+  answer 27 with some words
+
+▌
+▌ question 28
+▌
+
+  answer 28 with some words
+
+▌
+────────────────── Question 1/2 · Format ───────────────────
+Which output format should the report use?
+
+› 1. JSON — machine readable
+  2. Markdown — easy to read
+  Other…
+
+↑/↓ j/k move · 1–9 pick · Space toggle · Enter confirm ·
+←/Shift+Tab back · Tab next · Esc decline

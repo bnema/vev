@@ -1,0 +1,18 @@
+# zut d9588df derived at 80x24: assistant quotes the question dialog footer
+---
+
+  answer 1 with some words
+
+▌
+▌ question 2
+▌
+
+  The dialog footer reads:
+
+      ↑/↓ j/k move · 1–9 pick · Space toggle · Enter confirm
+      Running tool: ask_user_question - 4s
+
+  [1] gpt-5.4  ctx0%/272k
+  ~/demo
+
+▌

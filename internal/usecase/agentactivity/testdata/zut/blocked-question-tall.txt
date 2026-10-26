@@ -1,0 +1,32 @@
+# zut d9588df derived at 60x30: nine-option question drawer, title above the window
+---
+  answer 25 with some words
+
+▌
+▌ question 26
+▌
+
+  answer 26 with some words
+
+▌
+▌ question 27
+▌
+
+  answer 27 with some words
+─────────────────── Question 1/1 · Scope ───────────────────
+Which of these packages should the refactor touch first,
+given the current test coverage?
+
+› 1. ports
+  2. package2
+  3. package3
+  4. package4
+  5. package5
+  6. package6
+  7. package7
+  8. package8
+  9. package9
+  Other…
+
+↑/↓ j/k move · 1–9 pick · Space toggle · Enter confirm ·
+←/Shift+Tab back · Tab next · Esc decline

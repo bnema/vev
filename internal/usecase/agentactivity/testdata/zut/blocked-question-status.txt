@@ -1,0 +1,52 @@
+# zut d9588df derived at 200x50: tall pane: question dialog above the window, tool status visible
+---
+▌
+
+  answer 22 with some words
+
+▌
+▌ question 23
+▌
+
+  answer 23 with some words
+
+▌
+▌ question 24
+▌
+
+  answer 24 with some words
+
+▌
+▌ question 25
+▌
+
+  answer 25 with som╭─────────────────────────────────────────────────────────────────── Question 1/2 · Format ────────────────────────────────────────────────────────────────────╮
+                    │Which output format should the report use?                                                                                                                    │
+▌                   │                                                                                                                                                              │
+▌ question 26       │› 1. JSON — machine readable                                                                                                                                  │
+▌                   │  2. Markdown — easy to read                                                                                                                                  │
+                    │  Other…                                                                                                                                                      │
+  answer 26 with som│                                                                                                                                                              │
+                    │↑/↓ j/k move · 1–9 pick · Space toggle · Enter confirm · ←/Shift+Tab back · Tab next · Esc decline                                                            │
+▌                   ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+▌ question 27
+▌
+
+  answer 27 with some words
+
+▌
+▌ question 28
+▌
+
+  answer 28 with some words
+
+▌
+▌ question 29
+▌
+
+  answer 29 with some words
+
+  ⠋ Running tool: ask_user_question - 4s  [1] gpt-5.4  ctx0%/272k
+  ~/demo
+
+▌

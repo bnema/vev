@@ -1,0 +1,42 @@
+# zut d9588df derived at 120x40: question dialog while typing a custom answer
+---
+▌
+▌ question 0
+▌
+
+  answer 0 with some words
+
+  ⠋ Running tool: ask_user_question - 4s  [1] gpt-5.4  ctx0%/272k
+  ~/demo
+
+▌
+
+
+
+
+
+
+            ╭─────────────────────────────────── Question 1/2 · Format ────────────────────────────────────╮
+            │Which output format should the report use?                                                    │
+            │                                                                                              │
+            │> yaml please▏                                                                                │
+            │                                                                                              │
+            │Enter submit · Esc back/cancel · Shift+Tab previous                                           │
+            ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

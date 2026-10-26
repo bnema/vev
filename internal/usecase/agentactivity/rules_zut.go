@@ -34,6 +34,19 @@ var (
 	// The busy prefix while a tool call waits for confirmation. It stays
 	// visible when a tall pane centres the dialog above the window.
 	zutApprovalRe = regexp.MustCompile(`^\s*` + zutFrame + ` Waiting for approval: .* - ` + zutElapsed)
+	// The ask_user_question dialog (modes/question_dialog.go) is a floating
+	// pane like the confirm dialog. Its title row "Question N/M" can sit
+	// above the window when the question has many options, so its footer is
+	// matched instead: the key hints while choosing, or while typing a custom
+	// answer. The footer starts at the pane's content edge: column 0 in a
+	// drawer, right after the │ border in a box. Chat text is indented, so a
+	// quoted footer does not match. The footer may wrap; only its first
+	// segment is matched.
+	zutQuestionFooterRe = regexp.MustCompile(`(?:^|│)(?:↑/↓ j/k move · 1–9 pick · |Enter submit · Esc back/cancel · )`)
+	// The busy prefix while the question tool runs. zut skips the confirm
+	// gate for it, so the tool runs only while the dialog waits for answers.
+	// It stays visible when a tall pane centres the dialog above the window.
+	zutAskingRe = regexp.MustCompile(`^\s*` + zutFrame + ` Running tool: ask_user_question - ` + zutElapsed)
 	// The prompt marker ▌ also prefixes chat messages and the editor.
 	zutPromptRe = regexp.MustCompile(`^\s*▌`)
 	// A running resident child: "<spinner> <name> · <activity> · activity
@@ -69,6 +82,9 @@ var zutTable = table{
 			lineAny(BottomRows, zutConfirmRe), lineAny(12, zutYesRe), textAny(12, "esc to refuse"),
 		)},
 		{signal: blocked("zut.approval"), all: conds(line(8, zutApprovalRe))},
+		// The box may be drawn over prompt rows of the transcript.
+		{signal: blocked("zut.question"), all: conds(lineAny(BottomRows, zutQuestionFooterRe))},
+		{signal: blocked("zut.asking"), all: conds(line(8, zutAskingRe))},
 		{signal: working("zut.busy"), all: conds(line(8, zutWorkingRe))},
 		// zut draws the panel directly below the input prompt, so only rows
 		// below the prompt count; quoted rows in chat above it do not. zut
