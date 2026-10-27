@@ -8,8 +8,8 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 
-	vt "github.com/bnema/vev-vt"
-	renderer "github.com/bnema/vev-vt/ansi"
+	vt "bnema.dev/vev-vt"
+	renderer "bnema.dev/vev-vt/ansi"
 )
 
 // collectAll runs one GC pass the way the recovery coordinator does: every

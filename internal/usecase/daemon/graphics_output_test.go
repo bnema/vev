@@ -12,8 +12,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	vt "github.com/bnema/vev-vt"
-	"github.com/bnema/vev-vt/graphics"
+	vt "bnema.dev/vev-vt"
+	"bnema.dev/vev-vt/graphics"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/domain/layout"
 	"github.com/bnema/vev/internal/domain/terminalcap"

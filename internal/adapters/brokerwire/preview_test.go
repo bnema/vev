@@ -16,7 +16,7 @@ import (
 	"fmt"
 	"testing"
 
-	renderer "github.com/bnema/vev-vt"
+	renderer "bnema.dev/vev-vt"
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 

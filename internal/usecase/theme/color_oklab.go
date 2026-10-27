@@ -3,7 +3,7 @@ package theme
 import (
 	"math"
 
-	renderer "github.com/bnema/vev-vt"
+	renderer "bnema.dev/vev-vt"
 )
 
 // oklab is the perceptually uniform OKLab representation of an sRGB color.

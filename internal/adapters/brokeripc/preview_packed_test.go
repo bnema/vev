@@ -6,7 +6,7 @@ import (
 	"io"
 	"testing"
 
-	renderer "github.com/bnema/vev-vt"
+	renderer "bnema.dev/vev-vt"
 	"github.com/bnema/vev/internal/adapters/brokerwire"
 	"github.com/bnema/vev/internal/adapters/protoconv"
 	"github.com/bnema/vev/internal/adapters/sessionwire"

@@ -7,8 +7,8 @@ import (
 	"io"
 	"sync"
 
-	vt "github.com/bnema/vev-vt"
-	renderer "github.com/bnema/vev-vt/core"
+	vt "bnema.dev/vev-vt"
+	renderer "bnema.dev/vev-vt/core"
 	"github.com/bnema/vev/internal/adapters/term"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"testing/synctest"
 
-	renderer "github.com/bnema/vev-vt"
+	renderer "bnema.dev/vev-vt"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 

@@ -3,8 +3,8 @@ module github.com/bnema/vev
 go 1.27
 
 require (
+	bnema.dev/vev-vt v0.8.0
 	github.com/bnema/kvconf v0.1.2
-	github.com/bnema/vev-vt v0.7.3
 	github.com/coder/websocket v1.8.15
 	github.com/quic-go/quic-go v0.64.1
 	github.com/rivo/uniseg v0.4.7

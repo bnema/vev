@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/bnema/vev-vt/protocol/terminalquery"
+	"bnema.dev/vev-vt/protocol/terminalquery"
 
 	"github.com/bnema/vev/internal/ports"
 )

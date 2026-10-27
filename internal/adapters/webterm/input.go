@@ -6,7 +6,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/bnema/vev-vt/html/browser"
+	"bnema.dev/vev-vt/html/browser"
 	"github.com/bnema/vev/internal/domain"
 )
 

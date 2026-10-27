@@ -4,8 +4,8 @@ import (
 	"strings"
 	"unicode"
 
-	vt "github.com/bnema/vev-vt"
-	renderer "github.com/bnema/vev-vt/ansi"
+	vt "bnema.dev/vev-vt"
+	renderer "bnema.dev/vev-vt/ansi"
 )
 
 // Pos identifies a terminal display cell in a document. Valid positions are

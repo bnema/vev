@@ -6,8 +6,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	vt "github.com/bnema/vev-vt"
-	renderer "github.com/bnema/vev-vt/ansi"
+	vt "bnema.dev/vev-vt"
+	renderer "bnema.dev/vev-vt/ansi"
 )
 
 func TestSnapshotChunkCacheIsScopedToNamedSession(t *testing.T) {

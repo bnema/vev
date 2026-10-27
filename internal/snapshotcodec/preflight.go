@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"math"
 
-	vt "github.com/bnema/vev-vt"
+	vt "bnema.dev/vev-vt"
 	"github.com/bnema/vev/internal/domain/layout"
 )
 

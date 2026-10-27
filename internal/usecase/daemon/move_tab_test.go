@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
-	renderer "github.com/bnema/vev-vt/ansi"
+	renderer "bnema.dev/vev-vt/ansi"
 	"github.com/bnema/vev/internal/domain"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	recoveryusecase "github.com/bnema/vev/internal/usecase/recovery"

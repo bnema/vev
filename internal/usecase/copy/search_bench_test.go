@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	vt "github.com/bnema/vev-vt"
-	renderer "github.com/bnema/vev-vt/ansi"
+	vt "bnema.dev/vev-vt"
+	renderer "bnema.dev/vev-vt/ansi"
 )
 
 var benchmarkMatchesSink []SearchMatch

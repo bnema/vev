@@ -11,8 +11,8 @@ import (
 	"strconv"
 	"sync/atomic"
 
-	renderer "github.com/bnema/vev-vt"
-	"github.com/bnema/vev-vt/graphics"
+	renderer "bnema.dev/vev-vt"
+	"bnema.dev/vev-vt/graphics"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/domain/layout"
 	"github.com/bnema/vev/internal/protocol"

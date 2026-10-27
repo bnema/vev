@@ -14,9 +14,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bnema/vev-vt/core"
-	htmlrenderer "github.com/bnema/vev-vt/html"
-	"github.com/bnema/vev-vt/html/browser"
+	"bnema.dev/vev-vt/core"
+	htmlrenderer "bnema.dev/vev-vt/html"
+	"bnema.dev/vev-vt/html/browser"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/coder/websocket"
 )

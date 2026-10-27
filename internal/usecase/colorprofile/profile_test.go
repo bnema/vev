@@ -3,7 +3,7 @@ package colorprofile
 import (
 	"testing"
 
-	ansi "github.com/bnema/vev-vt/ansi"
+	ansi "bnema.dev/vev-vt/ansi"
 	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/stretchr/testify/require"
 )

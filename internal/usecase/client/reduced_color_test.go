@@ -7,7 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	ansirenderer "github.com/bnema/vev-vt/ansi"
+	ansirenderer "bnema.dev/vev-vt/ansi"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/picker"

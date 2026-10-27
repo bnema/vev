@@ -8,7 +8,7 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/bnema/vev-vt/protocol/terminalquery"
+	"bnema.dev/vev-vt/protocol/terminalquery"
 	"github.com/stretchr/testify/require"
 
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"

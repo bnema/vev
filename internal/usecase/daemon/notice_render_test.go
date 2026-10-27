@@ -7,7 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	vt "github.com/bnema/vev-vt"
+	vt "bnema.dev/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"

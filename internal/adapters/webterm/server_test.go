@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bnema/vev-vt/html/browser"
+	"bnema.dev/vev-vt/html/browser"
 	"github.com/coder/websocket"
 	"github.com/stretchr/testify/require"
 )

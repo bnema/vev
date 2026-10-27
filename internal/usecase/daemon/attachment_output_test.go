@@ -6,9 +6,9 @@ import (
 	"testing"
 	"testing/synctest"
 
-	vt "github.com/bnema/vev-vt"
-	renderer "github.com/bnema/vev-vt/ansi"
-	"github.com/bnema/vev-vt/graphics"
+	vt "bnema.dev/vev-vt"
+	renderer "bnema.dev/vev-vt/ansi"
+	"bnema.dev/vev-vt/graphics"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/domain/layout"
 	"github.com/bnema/vev/internal/domain/terminalcap"

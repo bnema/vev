@@ -1,8 +1,8 @@
 package daemon
 
 import (
-	renderer "github.com/bnema/vev-vt"
-	vevgraphics "github.com/bnema/vev-vt/graphics"
+	renderer "bnema.dev/vev-vt"
+	vevgraphics "bnema.dev/vev-vt/graphics"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/domain/layout"
 	"github.com/bnema/vev/internal/protocol"

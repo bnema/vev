@@ -188,7 +188,7 @@ latency:
 
 ```sh
 go test ./internal/usecase/daemon -run '^$' -bench '^BenchmarkDaemonHistory' -benchtime=1x -benchmem
-go test github.com/bnema/vev-vt/ansi github.com/bnema/vev-vt ./internal/adapters/ipc -run '^$' -bench=. -benchmem
+go test bnema.dev/vev-vt/ansi bnema.dev/vev-vt ./internal/adapters/ipc -run '^$' -bench=. -benchmem
 go test ./internal/usecase/daemon -run '^$' -bench '^BenchmarkComposeCapturedFloatingFrameCached$' -benchmem
 ```
 

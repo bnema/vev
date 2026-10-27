@@ -4,7 +4,7 @@ import (
 	"math"
 	"testing"
 
-	renderer "github.com/bnema/vev-vt/ansi"
+	renderer "bnema.dev/vev-vt/ansi"
 	"github.com/stretchr/testify/require"
 )
 

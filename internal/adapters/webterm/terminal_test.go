@@ -7,7 +7,7 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/bnema/vev-vt/html/browser"
+	"bnema.dev/vev-vt/html/browser"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/stretchr/testify/require"
 )

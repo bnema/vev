@@ -4,7 +4,7 @@ import (
 	"math"
 	"testing"
 
-	renderer "github.com/bnema/vev-vt"
+	renderer "bnema.dev/vev-vt"
 )
 
 func TestRGBToOKLabKnownValues(t *testing.T) {

@@ -1,7 +1,7 @@
 package daemon
 
 import (
-	renderer "github.com/bnema/vev-vt"
+	renderer "bnema.dev/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 )

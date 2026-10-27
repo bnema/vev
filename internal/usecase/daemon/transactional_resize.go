@@ -3,7 +3,7 @@ package daemon
 import (
 	"context"
 
-	vt "github.com/bnema/vev-vt"
+	vt "bnema.dev/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/domain/layout"
 	"github.com/bnema/vev/internal/ports"
