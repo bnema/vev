@@ -5,6 +5,7 @@ package app
 import (
 	"context"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/bnema/vev/internal/adapters/clock"
@@ -22,7 +23,7 @@ import (
 // service, waits for its discovery response, and then waits for the run's single
 // logical stream admission.
 //
-//testpolicy:realtime real unix-socket broker/daemon stack and subprocesses
+// Callers must run inside a synctest bubble.
 func startScriptedUIDriverRun(t *testing.T, service ports.BrokerService, state *brokerServiceState, navigation client.InitialNavigation, resolver client.InitialNavigationResolver) *uiDriverFixtureRun {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
@@ -35,11 +36,8 @@ func startScriptedUIDriverRun(t *testing.T, service ports.BrokerService, state *
 		_ = stream.Close()
 		cancel()
 		terminal.Close()
-		select {
-		case <-run.done:
-		case <-time.After(brokerTestWait):
-			t.Error("the scripted UI driver did not stop")
-		}
+		<-run.done
+		synctest.Wait()
 	})
 	connector := portsmocks.NewMockBrokerConnector(t)
 	connector.EXPECT().Connect(mock.Anything).Return(service, nil).Maybe()
@@ -56,13 +54,10 @@ func startScriptedUIDriverRun(t *testing.T, service ports.BrokerService, state *
 		}, stream)
 	}()
 	run.Ready(t)
-	for len(state.openedRequests()) == 0 {
-		select {
-		case <-state.openedSignal:
-		case <-time.After(brokerTestWait):
-			t.Fatal("the run never admitted its logical stream")
-		}
-	}
+	// Admission is recorded before OpenStream constructs its stream mock. Let
+	// attach setup finish before assertions or cleanup can inspect those mocks.
+	synctest.Wait()
+	require.NotEmpty(t, state.openedRequests(), "the run must admit its logical stream")
 	return run
 }
 
@@ -123,24 +118,26 @@ func TestUIDriverCreationRoutes(t *testing.T) {
 // one named admission, the daemon commits the identity, and the run dials no
 // daemon itself.
 func TestUIDriverNamedAttachLetsTheDaemonResolve(t *testing.T) {
-	snapshot := terminalCompositionSnapshot([]string{"work"}, nil)
-	navigation, resolver, err := terminalBrokerNavigation(protocol.IntentAttach, "work", "")
-	require.NoError(t, err)
-	require.Nil(t, resolver, "a local name needs no catalogue resolution")
-	require.Equal(t, client.InitialNavigationAttachNamed, navigation.Kind)
+	synctest.Test(t, func(t *testing.T) {
+		snapshot := terminalCompositionSnapshot([]string{"work"}, nil)
+		navigation, resolver, err := terminalBrokerNavigation(protocol.IntentAttach, "work", "")
+		require.NoError(t, err)
+		require.Nil(t, resolver, "a local name needs no catalogue resolution")
+		require.Equal(t, client.InitialNavigationAttachNamed, navigation.Kind)
 
-	service, state := newTerminalCompositionService(t, snapshot, nil)
-	run := startScriptedUIDriverRun(t, service, state, navigation, resolver)
-	require.NotNil(t, run)
+		service, state := newTerminalCompositionService(t, snapshot, nil)
+		run := startScriptedUIDriverRun(t, service, state, navigation, resolver)
+		require.NotNil(t, run)
 
-	opened := state.openedRequests()
-	require.Len(t, opened, 1, "attach work opens exactly one broker stream")
-	request := opened[0]
-	require.NoError(t, request.Validate())
-	require.Equal(t, ports.BrokerAdmissionAttachNamed, request.Admission)
-	require.True(t, request.Local)
-	require.Equal(t, "work", request.Name)
-	require.Equal(t, protocol.ExactSessionTarget{}, request.Target)
+		opened := state.openedRequests()
+		require.Len(t, opened, 1, "attach work opens exactly one broker stream")
+		request := opened[0]
+		require.NoError(t, request.Validate())
+		require.Equal(t, ports.BrokerAdmissionAttachNamed, request.Admission)
+		require.True(t, request.Local)
+		require.Equal(t, "work", request.Name)
+		require.Equal(t, protocol.ExactSessionTarget{}, request.Target)
+	})
 }
 
 // TestUIDriverRefusedTargetStaysPickerAndKeepsServing pins the local-refusal
