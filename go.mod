@@ -4,9 +4,10 @@ go 1.27
 
 require (
 	github.com/bnema/kvconf v0.1.2
-	github.com/bnema/vev-vt v0.7.2
+	github.com/bnema/vev-vt v0.7.3
 	github.com/coder/websocket v1.8.15
 	github.com/quic-go/quic-go v0.64.1
+	github.com/rivo/uniseg v0.4.7
 	github.com/stretchr/testify v1.12.1
 	golang.org/x/sys v0.49.0
 	google.golang.org/protobuf v1.36.13-0.20261016172727-e9ee2a76ab8e
@@ -66,7 +67,6 @@ require (
 	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/petermattis/goid v0.0.0-20260918085751-abfca077860b // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
-	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/rs/cors v1.11.1 // indirect
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
 	github.com/segmentio/asm v1.2.1 // indirect
