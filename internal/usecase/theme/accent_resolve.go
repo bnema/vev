@@ -46,6 +46,23 @@ type accentGroup struct {
 // only fixed arrays and bitsets so this pure hot-reload operation makes no
 // per-call heap allocations.
 func ResolveAccent(t Theme, policy domain.ThemeAccent) Accent {
+	if policy.Mode == domain.ThemeAccentRGB {
+		color := renderer.RGB{R: policy.RGB[0], G: policy.RGB[1], B: policy.RGB[2]}
+		// Explicit RGB, like an explicit slot, bypasses auto eligibility.
+		// BuildRamp still enforces text and surface contrast.
+		slot := uint8(4)
+		distance := 1e9
+		for i := range t.Palette {
+			if t.PaletteKnown&(uint16(1)<<i) == 0 {
+				continue
+			}
+			d := okLabDistance(rgbToOKLab(color), rgbToOKLab(t.Palette[i]))
+			if d < distance {
+				slot, distance = uint8(i), d
+			}
+		}
+		return resolvedAccent(t, color, slot)
+	}
 	if !t.UsePalette {
 		return Accent{}
 	}

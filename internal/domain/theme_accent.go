@@ -1,7 +1,7 @@
 package domain
 
-// ThemeAccentMode selects whether vev infers a terminal accent or uses one
-// explicit ANSI slot.
+// ThemeAccentMode selects automatic palette inference, an explicit ANSI slot,
+// or an explicit RGB color.
 type ThemeAccentMode uint8
 
 const (
@@ -9,6 +9,8 @@ const (
 	ThemeAccentAuto ThemeAccentMode = iota
 	// ThemeAccentSlot selects one explicit ANSI palette slot.
 	ThemeAccentSlot
+	// ThemeAccentRGB selects an explicit sRGB color.
+	ThemeAccentRGB
 )
 
 // ThemeAccent is the parsed terminal accent policy. Slot is meaningful only
@@ -16,4 +18,6 @@ const (
 type ThemeAccent struct {
 	Mode ThemeAccentMode
 	Slot uint8
+	// RGB holds red, green, blue when Mode is ThemeAccentRGB.
+	RGB [3]uint8
 }

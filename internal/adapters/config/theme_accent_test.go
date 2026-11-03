@@ -121,6 +121,6 @@ func TestWatchThemeAccentInvalidReloadFallsBackToAuto(t *testing.T) {
 
 	got := nextChange(t, changes)
 	require.Equal(t, domain.ThemeAccent{Mode: domain.ThemeAccentAuto}, got.cfg.ThemeAccent)
-	require.Equal(t, []domain.Warning{{Line: 1, Msg: "invalid theme.accent \"invalid\""}}, got.warnings)
+	require.Equal(t, []domain.Warning{sourceWarning(domain.Warning{Line: 1, Msg: `invalid theme.accent "invalid"`}, configSource{path, 1})}, got.warnings)
 	stop()
 }

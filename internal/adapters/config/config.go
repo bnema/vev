@@ -26,6 +26,24 @@ var (
 // are accepted with a warning; the last value wins while first-seen action order
 // is preserved for binding conflict resolution.
 func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
+	expanded, err := expandIncludes(r, "")
+	if err != nil {
+		return domain.Defaults(), nil, err
+	}
+	return parseExpanded(expanded)
+}
+
+func parseExpanded(expanded *expandedConfig) (domain.Config, []domain.Warning, error) {
+	cfg, warnings, err := parseData(expanded.data.Bytes())
+	for i, w := range warnings {
+		if w.Line > 0 && w.Line <= len(expanded.sources) {
+			warnings[i] = sourceWarning(w, expanded.sources[w.Line-1])
+		}
+	}
+	return cfg, append(warnings, expanded.warnings...), err
+}
+
+func parseData(data []byte) (domain.Config, []domain.Warning, error) {
 	cfg := domain.Defaults()
 	var warnings []domain.Warning
 	seenBindingKeys := make(map[string]bool)
@@ -43,7 +61,9 @@ func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 	seenScrollbackKeys := make(map[string]bool)
 	seenWebKeys := make(map[string]bool)
 
-	entries, syntax, err := kvconf.Parse(r, parseOptions)
+	options := parseOptions
+	options.MaxBytes = -1 // sources were bounded individually before expansion
+	entries, syntax, err := kvconf.Parse(bytes.NewReader(data), options)
 	if err != nil {
 		return domain.Defaults(), nil, err
 	}
@@ -319,14 +339,14 @@ func syntaxWarnings(in []kvconf.Warning) []domain.Warning {
 
 // Load reads path and parses it. Missing config files are treated as defaults.
 func Load(path string) (domain.Config, []domain.Warning, error) {
-	data, err := kvconf.ReadFile(path, parseOptions)
+	expanded, err := readConfigIncludes(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return domain.Defaults(), nil, nil
 	}
 	if err != nil {
 		return domain.Defaults(), nil, err
 	}
-	return Parse(bytes.NewReader(data))
+	return parseExpanded(expanded)
 }
 
 // Watch follows path with native file notifications (kvconf.Watch) and calls
@@ -358,7 +378,7 @@ func watch(ctx context.Context, path string, opts kvconf.WatchOptions, onChange 
 
 	changed := make(chan struct{}, 1)
 	watchErr := make(chan error, 1)
-	go func() { watchErr <- kvWatch(ctx, path, opts, changed) }()
+	go func() { watchErr <- watchConfigFiles(ctx, path, opts, changed) }()
 
 	for {
 		select {
@@ -379,7 +399,7 @@ func watch(ctx context.Context, path string, opts kvconf.WatchOptions, onChange 
 			// rather than lose live reload until the daemon restarts. The
 			// warning rides on the current config, which must not reset.
 			opts.Poll = fallbackPoll
-			go func() { watchErr <- kvWatch(ctx, path, opts, changed) }()
+			go func() { watchErr <- watchConfigFiles(ctx, path, opts, changed) }()
 			if cfg, warnings, err2 := Load(path); err2 == nil {
 				lastErrMsg = ""
 				onChange(cfg, append(warnings, domain.Warning{Msg: fmt.Sprintf("config watcher: %v; polling every %s", err, fallbackPoll)}))

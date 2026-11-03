@@ -271,16 +271,47 @@ If the daemon refuses to start because its session data is broken, do not edit t
 | Setting | Effect |
 |---|---|
 | `theme = auto` | Follow your terminal's colors and light/dark mode. |
-| `theme = dark` / `light` | Neutral built-in colors. Ignores `theme.palette` and `theme.accent`. |
-| `theme.palette = off` | Neutral colors, no accent. |
+| `theme = dark` / `light` | Neutral built-in colors. Ignores palette accents; explicit RGB accents still apply. |
+| `theme.palette = off` | Neutral colors, no palette accent (explicit RGB still applies). |
 | `theme.accent = auto` | Pick an accent from your terminal's ANSI colors (blue if unsure). |
 | `theme.accent = 0`–`15` | Use exactly that ANSI color as the accent. |
+| `theme.accent = rgb:74e7d4` | Use an explicit six-digit sRGB hex accent (hex digits are case-insensitive). |
 | `bar.background = off` | Keep the terminal background behind the top and bottom bars (useful with a transparent terminal). Tabs and recent sessions keep their colors. No effect on 16-color and mono terminals, where bars already use it. |
 
 - vev only colors its own UI (bars, borders, palette). Pane content is never recolored.
 - Tinted backgrounds need a truecolor or 256-color terminal. On 16-color and monochrome terminals vev uses bold, reverse, and faint instead. See [terminal colors](terminal.md#colors).
 - `terminal.colors` forces the color mode of your terminal (`auto`, `truecolor`, `256`, `16`, `mono`). `VEV_COLORS` overrides it. See [terminal colors](terminal.md#colors).
 - vev follows light/dark switches your terminal reports. It cannot see palette changes the terminal does not report.
+
+### Generated theme files
+
+Add this to your main config:
+
+```conf
+include ~/.config/vev/noctalia.conf
+```
+
+Have Noctalia generate the included file with, for example:
+
+```conf
+theme.accent = rgb:74e7d4
+```
+
+No post-hook command or signal is needed: the existing config watcher also
+watches included files, including atomic replacements and files created later.
+Do not send SIGHUP (attached clients use it to detach).
+
+Includes are inserted in place: later assignments win. Paths support `~/`,
+absolute paths, and paths relative to the containing config file. Double-quoted
+paths are supported. Missing files are silently skipped. Includes are one level only: directives inside included files are skipped with
+a warning. At most 16 include directives in the main file are processed; further
+directives warn and are skipped. Each file retains the existing size limit.
+Warnings identify the original file and line.
+`#` retains its existing comment meaning; use `rgb:` rather than `#rrggbb`.
+Explicit RGB bypasses automatic accent eligibility, like an explicit slot;
+chrome still uses the existing contrast-safe ramp. Without semantic foreground
+or background colors it uses an indexed fallback. ANSI16 uses the nearest known
+palette slot (blue slot 4 if none is known); monochrome uses attributes only.
 
 ## Bindings
 

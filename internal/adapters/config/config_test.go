@@ -882,6 +882,8 @@ func startWatch(t *testing.T, path string) (<-chan watchChange, func()) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for the watcher to be ready")
 	}
+	// Consume the unconditional installation reload before callers mutate files.
+	nextChange(t, changes)
 	return changes, func() {
 		t.Helper()
 		cancel()
@@ -993,7 +995,11 @@ func TestWatchReloadsOnChange(t *testing.T) {
 			if tt.wantAnyWarn {
 				require.NotEmpty(t, got.warnings)
 			} else {
-				require.Equal(t, tt.wantWarnings, got.warnings)
+				wantWarnings := append([]domain.Warning(nil), tt.wantWarnings...)
+				for i := range wantWarnings {
+					wantWarnings[i] = sourceWarning(wantWarnings[i], configSource{path, wantWarnings[i].Line})
+				}
+				require.Equal(t, wantWarnings, got.warnings)
 			}
 			stop()
 		})
@@ -1065,6 +1071,7 @@ func ptr[T any](v T) *T { return &v }
 func TestWatchFallsBackToPolling(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config")
 	writeAtomic(t, path, []byte("theme = light\n"))
+	trigger := make(chan struct{})
 	var polled atomic.Bool
 	orig := kvWatch
 	t.Cleanup(func() { kvWatch = orig })
@@ -1073,10 +1080,22 @@ func TestWatchFallsBackToPolling(t *testing.T) {
 			return errors.New("too many open files")
 		}
 		polled.Store(true)
+		if opts.Ready != nil {
+			close(opts.Ready)
+		}
+		select {
+		case <-trigger:
+			select {
+			case out <- struct{}{}:
+			case <-ctx.Done():
+			}
+		case <-ctx.Done():
+		}
 		<-ctx.Done()
 		return ctx.Err()
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 	changes := make(chan watchChange, 4)
 	done := make(chan error, 1)
 	go func() {
@@ -1088,7 +1107,20 @@ func TestWatchFallsBackToPolling(t *testing.T) {
 	require.Equal(t, domain.ThemeLight, got.cfg.Theme, "the current config is kept")
 	require.Len(t, got.warnings, 1)
 	require.Contains(t, got.warnings[0].Msg, "polling every")
+	// The fallback first publishes its installation reload.
+	got = nextChange(t, changes)
+	require.Equal(t, domain.ThemeLight, got.cfg.Theme)
+	writeAtomic(t, path, []byte("theme = dark\n"))
+	close(trigger)
+	got = nextChange(t, changes)
+	require.Equal(t, domain.ThemeDark, got.cfg.Theme)
+	require.Empty(t, got.warnings)
 	cancel()
-	require.ErrorIs(t, <-done, context.Canceled)
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out stopping fallback watcher")
+	}
 	require.True(t, polled.Load())
 }
