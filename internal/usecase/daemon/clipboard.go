@@ -7,9 +7,9 @@ import (
 	"errors"
 	"os"
 
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/protocol"
-	scopy "github.com/bnema/vev/internal/usecase/copy"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/internal/protocol"
+	scopy "bnema.dev/vev/internal/usecase/copy"
 )
 
 // maxImagePushSize independently caps an accepted ImagePush payload,

@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	renderer "bnema.dev/vev-vt"
-	"github.com/bnema/vev/internal/domain"
+	"bnema.dev/vev/internal/domain"
 )
 
 func cell(r rune, style renderer.Style, continuation bool) renderer.Cell {

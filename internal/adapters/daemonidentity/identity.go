@@ -12,8 +12,8 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/pkg/safedir"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/pkg/safedir"
 )
 
 const (

@@ -1,8 +1,8 @@
 package sessionwire
 
 import (
-	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
+	"bnema.dev/vev/internal/protocol"
+	"bnema.dev/vev/internal/protocol/wire"
 )
 
 func pickerOfferToWire(message protocol.PickerOffer) (*wire.PickerOffer, error) {

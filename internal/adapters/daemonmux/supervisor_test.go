@@ -7,9 +7,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/protocol"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/internal/protocol"
 )
 
 // connectRaw builds one broker PhysicalConnection over an already established

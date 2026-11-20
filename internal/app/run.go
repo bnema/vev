@@ -15,17 +15,17 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/bnema/vev/internal/adapters/clock"
-	"github.com/bnema/vev/internal/adapters/config"
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/logging"
-	"github.com/bnema/vev/internal/platform"
-	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/usecase/client"
+	"bnema.dev/vev/internal/adapters/clock"
+	"bnema.dev/vev/internal/adapters/config"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/logging"
+	"bnema.dev/vev/internal/platform"
+	"bnema.dev/vev/internal/protocol"
+	"bnema.dev/vev/internal/usecase/client"
 )
 
 // Build metadata. Defaults describe a plain `go build`; releases overwrite
-// them via -ldflags "-X github.com/bnema/vev/internal/app.version=..." (and
+// them via -ldflags "-X bnema.dev/vev/internal/app.version=..." (and
 // .commit / .date) — see .goreleaser.yaml.
 var (
 	version = "0.1.0-dev"

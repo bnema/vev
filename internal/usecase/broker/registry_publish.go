@@ -3,7 +3,7 @@ package broker
 import (
 	"sync"
 
-	"github.com/bnema/vev/internal/ports"
+	"bnema.dev/vev/internal/ports"
 )
 
 // Snapshot returns a defensive immutable copy without I/O.

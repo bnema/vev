@@ -3,7 +3,7 @@ package layout
 import (
 	"testing"
 
-	"github.com/bnema/vev/internal/domain"
+	"bnema.dev/vev/internal/domain"
 	"github.com/stretchr/testify/require"
 )
 

@@ -16,7 +16,7 @@ import (
 
 	"github.com/stretchr/testify/mock"
 
-	"github.com/bnema/vev/pkg/safedir"
+	"bnema.dev/vev/pkg/safedir"
 )
 
 // real I/O: exercises OS process inspection, subprocesses or file-backed terminal I/O.

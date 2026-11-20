@@ -7,9 +7,9 @@ import (
 
 	renderer "bnema.dev/vev-vt"
 	ansirenderer "bnema.dev/vev-vt/ansi"
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/usecase/picker"
-	"github.com/bnema/vev/internal/usecase/ui"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/usecase/picker"
+	"bnema.dev/vev/internal/usecase/ui"
 )
 
 // drawClientToast draws a client-local toast without changing terminal state.

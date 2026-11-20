@@ -4,8 +4,8 @@ import (
 	"testing"
 	"testing/synctest"
 
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/usecase/picker"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/usecase/picker"
 	"github.com/stretchr/testify/require"
 )
 

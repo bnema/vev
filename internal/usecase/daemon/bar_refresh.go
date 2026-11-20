@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bnema/vev/internal/domain"
+	"bnema.dev/vev/internal/domain"
 )
 
 type barScriptExecutor interface {

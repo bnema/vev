@@ -15,9 +15,9 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/protocol"
+	"bnema.dev/vev/internal/protocol/wire"
 )
 
 func mustEncodeOutput(m protocol.Output) []byte {

@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/bnema/vev/internal/ports"
+	"bnema.dev/vev/internal/ports"
 )
 
 // Resolver is the immutable ports.BrokerRouteAuthority over one parsed

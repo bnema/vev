@@ -70,8 +70,8 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/ports"
 )
 
 // Stream queue bounds. The stream-count and aggregate-bytes ceilings are the

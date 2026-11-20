@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/bnema/vev/internal/adapters/sessionwire"
-	"github.com/bnema/vev/internal/ports"
-	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"bnema.dev/vev/internal/adapters/sessionwire"
+	"bnema.dev/vev/internal/ports"
+	portsmocks "bnema.dev/vev/internal/ports/mocks"
 	"github.com/stretchr/testify/mock"
 )
 

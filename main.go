@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/bnema/vev/internal/app"
+	"bnema.dev/vev/internal/app"
 )
 
 func main() {

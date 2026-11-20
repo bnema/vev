@@ -6,9 +6,9 @@ import (
 	"slices"
 	"time"
 
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/usecase/picker"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/protocol"
+	"bnema.dev/vev/internal/usecase/picker"
 )
 
 // This file retains the serving-daemon move-destination interaction. It must

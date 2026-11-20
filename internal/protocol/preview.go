@@ -8,7 +8,7 @@ import (
 	"unicode/utf8"
 
 	renderer "bnema.dev/vev-vt"
-	"github.com/bnema/vev/internal/domain"
+	"bnema.dev/vev/internal/domain"
 )
 
 // RemotePreviewSchemaVersion is independent from the attachment protocol version.

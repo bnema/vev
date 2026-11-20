@@ -7,8 +7,8 @@ import (
 	"testing"
 	"testing/synctest"
 
-	"github.com/bnema/vev/internal/adapters/brokerwire"
-	"github.com/bnema/vev/internal/protocol"
+	"bnema.dev/vev/internal/adapters/brokerwire"
+	"bnema.dev/vev/internal/protocol"
 	"github.com/stretchr/testify/require"
 )
 

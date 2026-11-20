@@ -17,7 +17,7 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/bnema/vev/pkg/safedir"
+	"bnema.dev/vev/pkg/safedir"
 )
 
 type discardTerminalOutput struct{}

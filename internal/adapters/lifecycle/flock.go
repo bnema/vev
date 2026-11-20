@@ -14,7 +14,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bnema/vev/pkg/safedir"
+	"bnema.dev/vev/pkg/safedir"
 )
 
 // ErrBusy reports that another process currently owns durable session state.

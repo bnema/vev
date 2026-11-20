@@ -6,8 +6,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/domain"
-	scopy "github.com/bnema/vev/internal/usecase/copy"
+	"bnema.dev/vev/internal/domain"
+	scopy "bnema.dev/vev/internal/usecase/copy"
 )
 
 func TestDetachMoveAttachmentsUsesStableSnapshotOrder(t *testing.T) {

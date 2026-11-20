@@ -2,8 +2,8 @@ package theme
 
 import (
 	renderer "bnema.dev/vev-vt"
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/domain/terminalcap"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/domain/terminalcap"
 )
 
 // reducedColor reports whether chrome for c must be built from attributes and

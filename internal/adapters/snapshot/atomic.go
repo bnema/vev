@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/pkg/safedir"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/pkg/safedir"
 )
 
 func (r *Repository) ensureSession(id domain.IncarnationID) error {

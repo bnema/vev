@@ -4,8 +4,8 @@ import (
 	"testing"
 
 	renderer "bnema.dev/vev-vt"
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/domain/layout"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/domain/layout"
 	"github.com/stretchr/testify/require"
 )
 

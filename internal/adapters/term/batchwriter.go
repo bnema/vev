@@ -5,7 +5,7 @@ import (
 	"io"
 	"sync"
 
-	"github.com/bnema/vev/internal/ports"
+	"bnema.dev/vev/internal/ports"
 )
 
 // batchWriter is a thread-safe buffered writer. Writes accumulate in an

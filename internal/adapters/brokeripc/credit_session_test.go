@@ -6,8 +6,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/adapters/brokerwire"
-	"github.com/bnema/vev/internal/ports"
+	"bnema.dev/vev/internal/adapters/brokerwire"
+	"bnema.dev/vev/internal/ports"
 )
 
 // TestStreamCreditGrantDispatch proves how the session settles one client

@@ -15,12 +15,12 @@ import (
 	"github.com/stretchr/testify/require"
 
 	renderer "bnema.dev/vev-vt"
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/domain/layout"
-	"github.com/bnema/vev/internal/ports"
-	portsmocks "github.com/bnema/vev/internal/ports/mocks"
-	"github.com/bnema/vev/internal/protocol/wire"
-	scopy "github.com/bnema/vev/internal/usecase/copy"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/domain/layout"
+	"bnema.dev/vev/internal/ports"
+	portsmocks "bnema.dev/vev/internal/ports/mocks"
+	"bnema.dev/vev/internal/protocol/wire"
+	scopy "bnema.dev/vev/internal/usecase/copy"
 )
 
 func TestLayoutGenerationMutationBookkeeping(t *testing.T) {

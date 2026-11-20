@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/ports"
 )
 
 // PoolLimits bound live physical keys, clients, reservations (including I/O in

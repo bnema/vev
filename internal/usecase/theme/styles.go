@@ -4,7 +4,7 @@ import (
 	"math"
 
 	renderer "bnema.dev/vev-vt"
-	"github.com/bnema/vev/internal/domain"
+	"bnema.dev/vev/internal/domain"
 )
 
 const accentContrastMin = 3.0

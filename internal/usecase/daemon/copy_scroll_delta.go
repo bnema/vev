@@ -2,8 +2,8 @@ package daemon
 
 import (
 	renderer "bnema.dev/vev-vt"
-	"github.com/bnema/vev/internal/domain"
-	scopy "github.com/bnema/vev/internal/usecase/copy"
+	"bnema.dev/vev/internal/domain"
+	scopy "bnema.dev/vev/internal/usecase/copy"
 )
 
 // Only successfully emitted composition caches carry this metadata forward.

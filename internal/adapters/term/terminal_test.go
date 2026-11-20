@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bnema/vev/internal/domain"
+	"bnema.dev/vev/internal/domain"
 )
 
 // pipePair returns an os.Pipe and a goroutine that continuously copies

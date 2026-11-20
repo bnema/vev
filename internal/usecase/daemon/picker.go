@@ -6,11 +6,11 @@ import (
 	"sort"
 	"time"
 
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/usecase/agentactivity"
-	"github.com/bnema/vev/internal/usecase/picker"
-	"github.com/bnema/vev/internal/usecase/ui"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/protocol"
+	"bnema.dev/vev/internal/usecase/agentactivity"
+	"bnema.dev/vev/internal/usecase/picker"
+	"bnema.dev/vev/internal/usecase/ui"
 )
 
 // The picker's floating geometry lives in the picker package: the presenting

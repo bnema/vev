@@ -25,7 +25,7 @@ import (
 
 	"google.golang.org/protobuf/encoding/protowire"
 
-	"github.com/bnema/vev/internal/protocol/wire"
+	"bnema.dev/vev/internal/protocol/wire"
 )
 
 // errOutputDataExceedsLimit reports one Output whose uncompressed terminal

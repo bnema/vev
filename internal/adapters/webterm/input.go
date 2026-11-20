@@ -7,7 +7,7 @@ import (
 	"unicode/utf8"
 
 	"bnema.dev/vev-vt/html/browser"
-	"github.com/bnema/vev/internal/domain"
+	"bnema.dev/vev/internal/domain"
 )
 
 // Handle translates validated browser events into ordinary terminal input.

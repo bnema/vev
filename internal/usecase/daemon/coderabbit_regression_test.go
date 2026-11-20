@@ -13,12 +13,12 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/domain"
-	portsmocks "github.com/bnema/vev/internal/ports/mocks"
-	"github.com/bnema/vev/internal/protocol"
-	snapcodec "github.com/bnema/vev/internal/snapshotcodec"
-	"github.com/bnema/vev/internal/usecase/picker"
-	recoveryusecase "github.com/bnema/vev/internal/usecase/recovery"
+	"bnema.dev/vev/internal/domain"
+	portsmocks "bnema.dev/vev/internal/ports/mocks"
+	"bnema.dev/vev/internal/protocol"
+	snapcodec "bnema.dev/vev/internal/snapshotcodec"
+	"bnema.dev/vev/internal/usecase/picker"
+	recoveryusecase "bnema.dev/vev/internal/usecase/recovery"
 )
 
 func TestRestoreAmbiguousBadVersionLoadFailurePreservesCheckpoint(t *testing.T) {

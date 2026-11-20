@@ -7,7 +7,7 @@ import (
 
 	"github.com/stretchr/testify/mock"
 
-	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	portsmocks "bnema.dev/vev/internal/ports/mocks"
 )
 
 // recordingWriter records each Write call it receives, copying the bytes

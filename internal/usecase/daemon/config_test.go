@@ -7,10 +7,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	renderer "bnema.dev/vev-vt"
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/usecase/keys"
-	themeui "github.com/bnema/vev/internal/usecase/theme"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/protocol"
+	"bnema.dev/vev/internal/usecase/keys"
+	themeui "bnema.dev/vev/internal/usecase/theme"
 )
 
 // captureKeyHandler records router output.

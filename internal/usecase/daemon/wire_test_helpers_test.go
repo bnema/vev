@@ -1,8 +1,8 @@
 package daemon
 
 import (
-	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
+	"bnema.dev/vev/internal/protocol"
+	"bnema.dev/vev/internal/protocol/wire"
 )
 
 func mustMarshalOutput(m protocol.Output) wire.Envelope {

@@ -5,7 +5,7 @@ import (
 	"time"
 
 	renderer "bnema.dev/vev-vt"
-	"github.com/bnema/vev/internal/protocol"
+	"bnema.dev/vev/internal/protocol"
 )
 
 // Palette queries always have a DECRQM boundary. The first marker drains

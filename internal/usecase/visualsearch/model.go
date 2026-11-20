@@ -4,9 +4,9 @@ import (
 	"strconv"
 
 	renderer "bnema.dev/vev-vt"
-	"github.com/bnema/vev/internal/domain"
-	scopy "github.com/bnema/vev/internal/usecase/copy"
-	"github.com/bnema/vev/internal/usecase/ui"
+	"bnema.dev/vev/internal/domain"
+	scopy "bnema.dev/vev/internal/usecase/copy"
+	"bnema.dev/vev/internal/usecase/ui"
 )
 
 type Model struct {

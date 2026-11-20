@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	vt "bnema.dev/vev-vt"
-	"github.com/bnema/vev/internal/domain"
+	"bnema.dev/vev/internal/domain"
 )
 
 func TestCopyWheelReplayMatchesFullComposition(t *testing.T) {

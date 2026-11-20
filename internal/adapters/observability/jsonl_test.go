@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bnema/vev/internal/ports"
-	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"bnema.dev/vev/internal/ports"
+	portsmocks "bnema.dev/vev/internal/ports/mocks"
 )
 
 // real I/O: writes and reads JSONL trace files.

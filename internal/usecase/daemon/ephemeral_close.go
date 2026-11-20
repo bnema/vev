@@ -3,7 +3,7 @@ package daemon
 import (
 	"errors"
 
-	"github.com/bnema/vev/internal/protocol"
+	"bnema.dev/vev/internal/protocol"
 )
 
 // reapAbandonedEphemeral removes an ephemeral session whose last attachment

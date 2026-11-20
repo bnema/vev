@@ -8,10 +8,10 @@ import (
 	"math"
 
 	vt "bnema.dev/vev-vt"
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/domain/layout"
-	"github.com/bnema/vev/internal/protocol"
-	snapcodec "github.com/bnema/vev/internal/snapshotcodec"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/domain/layout"
+	"bnema.dev/vev/internal/protocol"
+	snapcodec "bnema.dev/vev/internal/snapshotcodec"
 )
 
 func (d *Daemon) closeRestoreDone() {

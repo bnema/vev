@@ -10,11 +10,11 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/adapters/brokerwire"
-	"github.com/bnema/vev/internal/adapters/ipc"
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
+	"bnema.dev/vev/internal/adapters/brokerwire"
+	"bnema.dev/vev/internal/adapters/ipc"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/internal/protocol"
+	"bnema.dev/vev/internal/protocol/wire"
 )
 
 // Session shutdown ordering (GO-007). A bridged stream writes through its own

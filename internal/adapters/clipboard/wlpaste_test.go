@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bnema/vev/internal/ports"
+	"bnema.dev/vev/internal/ports"
 )
 
 func TestPickImageMimePrefersPngOverOtherImageTypes(t *testing.T) {

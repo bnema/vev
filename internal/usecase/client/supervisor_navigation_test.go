@@ -4,7 +4,7 @@ import (
 	"testing"
 	"testing/synctest"
 
-	"github.com/bnema/vev/internal/protocol"
+	"bnema.dev/vev/internal/protocol"
 )
 
 func TestNavigationState(t *testing.T) {

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bnema/vev/internal/protocol/wire"
+	"bnema.dev/vev/internal/protocol/wire"
 )
 
 func BenchmarkTransportSend(b *testing.B) {

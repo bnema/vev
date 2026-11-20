@@ -3,7 +3,7 @@ package daemon
 import (
 	"errors"
 
-	"github.com/bnema/vev/internal/protocol"
+	"bnema.dev/vev/internal/protocol"
 )
 
 func (d *Daemon) registerAttachmentUIFence(effect *attachmentEffect, actionID uint64) bool {

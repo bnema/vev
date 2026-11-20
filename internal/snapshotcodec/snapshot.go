@@ -4,7 +4,7 @@
 // the snapshot repository adapter can consume it.
 package snapshotcodec
 
-import "github.com/bnema/vev/internal/domain/layout"
+import "bnema.dev/vev/internal/domain/layout"
 
 // Session is the durable transfer representation for a named daemon session.
 type Session struct {

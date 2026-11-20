@@ -3,8 +3,8 @@ package ports
 import (
 	"context"
 
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/protocol/catalogue"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/protocol/catalogue"
 )
 
 // RemoteHostStore persists pinned and learned remote host targets as

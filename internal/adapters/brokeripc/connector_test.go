@@ -7,7 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/ports"
+	"bnema.dev/vev/internal/ports"
 )
 
 // awaitDone waits for one broker service to become terminal.

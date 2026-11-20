@@ -3,7 +3,7 @@ package ports
 import (
 	"io"
 
-	"github.com/bnema/vev/internal/domain"
+	"bnema.dev/vev/internal/domain"
 )
 
 // Terminal is the client-side controlling terminal.

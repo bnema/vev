@@ -7,7 +7,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/bnema/vev/pkg/safedir"
+	"bnema.dev/vev/pkg/safedir"
 )
 
 func main() {

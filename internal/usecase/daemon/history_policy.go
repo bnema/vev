@@ -5,7 +5,7 @@ import (
 	"time"
 
 	vt "bnema.dev/vev-vt"
-	"github.com/bnema/vev/internal/domain"
+	"bnema.dev/vev/internal/domain"
 )
 
 func historyConfigFor(policy domain.ScrollbackConfig) vt.HistoryConfig {

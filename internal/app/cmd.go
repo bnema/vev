@@ -10,15 +10,15 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/bnema/vev/internal/adapters/clock"
-	"github.com/bnema/vev/internal/adapters/ipc"
-	"github.com/bnema/vev/internal/adapters/sessionwire"
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
-	clientusecase "github.com/bnema/vev/internal/usecase/client"
-	commandusecase "github.com/bnema/vev/internal/usecase/command"
-	"github.com/bnema/vev/internal/usecase/daemon"
+	"bnema.dev/vev/internal/adapters/clock"
+	"bnema.dev/vev/internal/adapters/ipc"
+	"bnema.dev/vev/internal/adapters/sessionwire"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/internal/protocol"
+	"bnema.dev/vev/internal/protocol/wire"
+	clientusecase "bnema.dev/vev/internal/usecase/client"
+	commandusecase "bnema.dev/vev/internal/usecase/command"
+	"bnema.dev/vev/internal/usecase/daemon"
 )
 
 type cmdInvocation struct {

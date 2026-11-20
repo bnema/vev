@@ -3,10 +3,10 @@ package daemonmux
 import (
 	"google.golang.org/protobuf/proto"
 
-	"github.com/bnema/vev/internal/adapters/clock"
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
+	"bnema.dev/vev/internal/adapters/clock"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/internal/protocol"
+	"bnema.dev/vev/internal/protocol/wire"
 )
 
 // Test-only convenience constructors and accessors (export_test.go pattern):

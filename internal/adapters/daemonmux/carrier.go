@@ -35,7 +35,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/bnema/vev/internal/protocol/wire"
+	"bnema.dev/vev/internal/protocol/wire"
 )
 
 var (

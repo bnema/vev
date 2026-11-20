@@ -2,8 +2,8 @@
 package daemon
 
 import (
-	scopy "github.com/bnema/vev/internal/usecase/copy"
-	"github.com/bnema/vev/internal/usecase/mouse"
+	scopy "bnema.dev/vev/internal/usecase/copy"
+	"bnema.dev/vev/internal/usecase/mouse"
 )
 
 // handleCopyMouse owns copy-mode mouse routing. A release is lifecycle input

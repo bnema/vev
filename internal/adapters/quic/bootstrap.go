@@ -17,7 +17,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bnema/vev/internal/protocol/wire"
+	"bnema.dev/vev/internal/protocol/wire"
 )
 
 // Bootstrap normative bounds: ephemeral listener/certificate,

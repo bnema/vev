@@ -4,15 +4,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/protocol"
-	scopy "github.com/bnema/vev/internal/usecase/copy"
-	"github.com/bnema/vev/internal/usecase/notices"
-	"github.com/bnema/vev/internal/usecase/palette"
-	"github.com/bnema/vev/internal/usecase/picker"
-	promptui "github.com/bnema/vev/internal/usecase/prompt"
-	"github.com/bnema/vev/internal/usecase/ui"
-	"github.com/bnema/vev/internal/usecase/visualsearch"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/protocol"
+	scopy "bnema.dev/vev/internal/usecase/copy"
+	"bnema.dev/vev/internal/usecase/notices"
+	"bnema.dev/vev/internal/usecase/palette"
+	"bnema.dev/vev/internal/usecase/picker"
+	promptui "bnema.dev/vev/internal/usecase/prompt"
+	"bnema.dev/vev/internal/usecase/ui"
+	"bnema.dev/vev/internal/usecase/visualsearch"
 )
 
 type overlayRuntime struct {

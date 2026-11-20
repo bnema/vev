@@ -1,8 +1,8 @@
 package daemon
 
 import (
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/protocol"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/protocol"
 )
 
 // selectTabForAttachment shows one exact tab of the attached session on this

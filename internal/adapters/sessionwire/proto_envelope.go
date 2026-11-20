@@ -9,8 +9,8 @@ package sessionwire
 // receive; serialized envelope ceilings are enforced by proto_limits.go.
 
 import (
-	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
+	"bnema.dev/vev/internal/protocol"
+	"bnema.dev/vev/internal/protocol/wire"
 )
 
 func encodeProtoClient(message protocol.ClientMessage) (*wire.ClientEnvelope, error) {

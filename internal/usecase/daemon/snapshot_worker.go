@@ -5,7 +5,7 @@ import (
 	"errors"
 	"sort"
 
-	"github.com/bnema/vev/internal/domain"
+	"bnema.dev/vev/internal/domain"
 )
 
 func (d *Daemon) reportSnapshotFailure(capture *snapshotCapture, phase string, cause error) {

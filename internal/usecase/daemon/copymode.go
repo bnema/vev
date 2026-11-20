@@ -6,14 +6,14 @@ import (
 	"time"
 
 	renderer "bnema.dev/vev-vt"
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
-	scopy "github.com/bnema/vev/internal/usecase/copy"
-	"github.com/bnema/vev/internal/usecase/keys"
-	"github.com/bnema/vev/internal/usecase/mouse"
-	themeui "github.com/bnema/vev/internal/usecase/theme"
-	"github.com/bnema/vev/internal/usecase/ui"
-	"github.com/bnema/vev/internal/usecase/visualsearch"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/ports"
+	scopy "bnema.dev/vev/internal/usecase/copy"
+	"bnema.dev/vev/internal/usecase/keys"
+	"bnema.dev/vev/internal/usecase/mouse"
+	themeui "bnema.dev/vev/internal/usecase/theme"
+	"bnema.dev/vev/internal/usecase/ui"
+	"bnema.dev/vev/internal/usecase/visualsearch"
 )
 
 var copySearchModal = ui.Modal{WidthPct: 100, MinWidth: 32, FixedHeight: 11, Title: " Search ", Anchor: domain.AnchorBottom, Margins: ui.Margins{Bottom: 1}}

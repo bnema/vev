@@ -8,8 +8,8 @@ import (
 	"time"
 
 	vt "bnema.dev/vev-vt"
-	"github.com/bnema/vev/internal/domain"
-	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"bnema.dev/vev/internal/domain"
+	portsmocks "bnema.dev/vev/internal/ports/mocks"
 	"github.com/stretchr/testify/require"
 )
 

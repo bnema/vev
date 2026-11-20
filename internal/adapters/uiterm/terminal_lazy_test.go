@@ -5,8 +5,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/ports"
 )
 
 // TestTerminalSnapshotReadsCommittedRevision pins the lazy conversion: a

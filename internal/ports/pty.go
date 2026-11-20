@@ -4,7 +4,7 @@ import (
 	"context"
 	"io"
 
-	"github.com/bnema/vev/internal/domain"
+	"bnema.dev/vev/internal/domain"
 )
 
 // PTY is a running pseudo-terminal-backed child process.

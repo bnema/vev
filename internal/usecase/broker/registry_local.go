@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/catalogue"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/internal/protocol"
+	"bnema.dev/vev/internal/protocol/catalogue"
 )
 
 // Broker-owned local observation.

@@ -3,7 +3,7 @@ package daemon
 import (
 	"testing"
 
-	"github.com/bnema/vev/internal/domain"
+	"bnema.dev/vev/internal/domain"
 )
 
 func TestFullViewportSize(t *testing.T) {

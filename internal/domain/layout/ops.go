@@ -5,7 +5,7 @@ import (
 	"math"
 	"sort"
 
-	"github.com/bnema/vev/internal/domain"
+	"bnema.dev/vev/internal/domain"
 )
 
 var (

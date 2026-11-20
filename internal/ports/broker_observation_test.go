@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/catalogue"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/protocol"
+	"bnema.dev/vev/internal/protocol/catalogue"
 	"github.com/stretchr/testify/require"
 )
 

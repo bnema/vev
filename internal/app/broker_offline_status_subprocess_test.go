@@ -17,9 +17,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/adapters/brokerconfig"
-	"github.com/bnema/vev/internal/adapters/brokeripc"
-	"github.com/bnema/vev/internal/adapters/lifecycle"
+	"bnema.dev/vev/internal/adapters/brokerconfig"
+	"bnema.dev/vev/internal/adapters/brokeripc"
+	"bnema.dev/vev/internal/adapters/lifecycle"
 )
 
 // Real-subprocess coverage for the hidden launcher and status entry points.

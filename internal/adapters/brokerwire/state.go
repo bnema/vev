@@ -24,7 +24,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/bnema/vev/internal/ports"
+	"bnema.dev/vev/internal/ports"
 )
 
 // Per-connection bounds.

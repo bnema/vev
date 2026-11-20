@@ -12,10 +12,10 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
-	portsmocks "github.com/bnema/vev/internal/ports/mocks"
-	"github.com/bnema/vev/internal/protocol"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/ports"
+	portsmocks "bnema.dev/vev/internal/ports/mocks"
+	"bnema.dev/vev/internal/protocol"
 )
 
 // previewWatchConn is one scripted daemon watch stream. The test pushes each

@@ -7,9 +7,9 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/domain"
-	portsmocks "github.com/bnema/vev/internal/ports/mocks"
-	recoveryusecase "github.com/bnema/vev/internal/usecase/recovery"
+	"bnema.dev/vev/internal/domain"
+	portsmocks "bnema.dev/vev/internal/ports/mocks"
+	recoveryusecase "bnema.dev/vev/internal/usecase/recovery"
 )
 
 // newSyncCountingCatalogue is a recovery catalogue mock whose Create commits

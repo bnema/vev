@@ -11,9 +11,9 @@ import (
 	"testing/synctest"
 	"time"
 
-	adapterclock "github.com/bnema/vev/internal/adapters/clock"
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/domain/layout"
+	adapterclock "bnema.dev/vev/internal/adapters/clock"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/domain/layout"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )

@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/bnema/vev/internal/adapters/config"
-	"github.com/bnema/vev/internal/adapters/webterm"
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/platform"
+	"bnema.dev/vev/internal/adapters/config"
+	"bnema.dev/vev/internal/adapters/webterm"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/platform"
 )
 
 type webOptions struct {

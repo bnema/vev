@@ -6,15 +6,15 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/bnema/vev/internal/adapters/clock"
-	"github.com/bnema/vev/internal/adapters/ipc"
-	"github.com/bnema/vev/internal/adapters/term"
-	"github.com/bnema/vev/internal/adapters/uidriver"
-	"github.com/bnema/vev/internal/adapters/uiterm"
-	"github.com/bnema/vev/internal/logging"
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/usecase/client"
+	"bnema.dev/vev/internal/adapters/clock"
+	"bnema.dev/vev/internal/adapters/ipc"
+	"bnema.dev/vev/internal/adapters/term"
+	"bnema.dev/vev/internal/adapters/uidriver"
+	"bnema.dev/vev/internal/adapters/uiterm"
+	"bnema.dev/vev/internal/logging"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/internal/protocol"
+	"bnema.dev/vev/internal/usecase/client"
 )
 
 // runAttach dials (auto-spawning the daemon if needed) and runs the client

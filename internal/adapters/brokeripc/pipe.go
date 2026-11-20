@@ -4,7 +4,7 @@ import (
 	"io"
 	"sync"
 
-	"github.com/bnema/vev/internal/adapters/brokerwire"
+	"bnema.dev/vev/internal/adapters/brokerwire"
 )
 
 // streamPipe is the private ordered, credit-controlled byte channel between one

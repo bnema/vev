@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bnema/vev/internal/protocol/wire"
+	"bnema.dev/vev/internal/protocol/wire"
 )
 
 // muxTestPath returns a short, owner-only parent directory and one mux.sock

@@ -15,12 +15,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/domain/terminalcap"
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/usecase/keys"
-	recoveryusecase "github.com/bnema/vev/internal/usecase/recovery"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/domain/terminalcap"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/internal/protocol"
+	"bnema.dev/vev/internal/usecase/keys"
+	recoveryusecase "bnema.dev/vev/internal/usecase/recovery"
 )
 
 // Scheduler debounce bounds. Idle updates use the minimum for low latency;

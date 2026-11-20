@@ -1,6 +1,6 @@
 package daemon
 
-import "github.com/bnema/vev/internal/ports"
+import "bnema.dev/vev/internal/ports"
 
 // attachmentCapability is the exact capability for one registered
 // Attachment Connection incarnation. It is invalid as soon as its Session

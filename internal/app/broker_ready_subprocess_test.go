@@ -24,8 +24,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/adapters/brokerconfig"
-	"github.com/bnema/vev/internal/adapters/brokeripc"
+	"bnema.dev/vev/internal/adapters/brokerconfig"
+	"bnema.dev/vev/internal/adapters/brokeripc"
 )
 
 // readySubprocessSandbox isolates real production XDG directories and records every

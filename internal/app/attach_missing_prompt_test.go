@@ -26,12 +26,12 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/adapters/term"
-	"github.com/bnema/vev/internal/ports"
-	portsmocks "github.com/bnema/vev/internal/ports/mocks"
-	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/usecase/client"
-	"github.com/bnema/vev/pkg/rawterm"
+	"bnema.dev/vev/internal/adapters/term"
+	"bnema.dev/vev/internal/ports"
+	portsmocks "bnema.dev/vev/internal/ports/mocks"
+	"bnema.dev/vev/internal/protocol"
+	"bnema.dev/vev/internal/usecase/client"
+	"bnema.dev/vev/pkg/rawterm"
 )
 
 // interactiveProbe injects the console decision, standing in for the

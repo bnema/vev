@@ -7,7 +7,7 @@ import (
 	renderer "bnema.dev/vev-vt"
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/protocol"
+	"bnema.dev/vev/internal/protocol"
 )
 
 // TestHeldCtrlShowsRecentSessionRanks pins that a reported Ctrl hold prefixes

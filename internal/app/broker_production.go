@@ -6,15 +6,15 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/bnema/vev/internal/adapters/brokerconfig"
-	"github.com/bnema/vev/internal/adapters/ipc"
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/platform"
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/catalogue"
-	"github.com/bnema/vev/internal/usecase/broker"
-	"github.com/bnema/vev/pkg/safedir"
+	"bnema.dev/vev/internal/adapters/brokerconfig"
+	"bnema.dev/vev/internal/adapters/ipc"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/platform"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/internal/protocol"
+	"bnema.dev/vev/internal/protocol/catalogue"
+	"bnema.dev/vev/internal/usecase/broker"
+	"bnema.dev/vev/pkg/safedir"
 )
 
 // productionBrokerLayout is the single production broker filesystem contract.

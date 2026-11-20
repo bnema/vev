@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/bnema/vev/internal/platform"
+	"bnema.dev/vev/internal/platform"
 )
 
 // Linux abstract sockets have no filesystem artifact. Peer credentials, not

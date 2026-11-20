@@ -31,9 +31,9 @@ builds:
         goarch: amd64
     ldflags:
       - -s -w
-      - -X github.com/bnema/vev/internal/app.version={{.Version}}
-      - -X github.com/bnema/vev/internal/app.commit={{.ShortCommit}}
-      - -X github.com/bnema/vev/internal/app.date={{.Date}}
+      - -X bnema.dev/vev/internal/app.version={{.Version}}
+      - -X bnema.dev/vev/internal/app.commit={{.ShortCommit}}
+      - -X bnema.dev/vev/internal/app.date={{.Date}}
 
 archives:
   - id: default

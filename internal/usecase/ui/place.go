@@ -1,6 +1,6 @@
 package ui
 
-import "github.com/bnema/vev/internal/domain"
+import "bnema.dev/vev/internal/domain"
 
 // Margins specifies the distance between an anchored rectangle and each base edge.
 type Margins struct {

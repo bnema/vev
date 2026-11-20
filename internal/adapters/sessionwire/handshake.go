@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bnema/vev/internal/protocol/wire"
+	"bnema.dev/vev/internal/protocol/wire"
 )
 
 // preambleRunner runs one directional preamble and returns the ceilings it

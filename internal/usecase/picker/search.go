@@ -5,7 +5,7 @@ import (
 	"unicode/utf8"
 
 	renderer "bnema.dev/vev-vt"
-	"github.com/bnema/vev/internal/usecase/fuzzy"
+	"bnema.dev/vev/internal/usecase/fuzzy"
 )
 
 const MaxSearchQueryRunes = 256

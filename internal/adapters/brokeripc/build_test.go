@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bnema/vev/internal/adapters/brokerwire"
-	"github.com/bnema/vev/internal/adapters/ipc"
-	"github.com/bnema/vev/internal/ports"
+	"bnema.dev/vev/internal/adapters/brokerwire"
+	"bnema.dev/vev/internal/adapters/ipc"
+	"bnema.dev/vev/internal/ports"
 	"github.com/stretchr/testify/require"
 )
 

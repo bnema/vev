@@ -7,8 +7,8 @@ import (
 	"time"
 
 	renderer "bnema.dev/vev-vt"
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/protocol"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/internal/protocol"
 )
 
 // remotePreviewRevalidate bounds how long a quiet watch trusts its last frame

@@ -8,10 +8,10 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/pkg/kv"
-	"github.com/bnema/vev/pkg/safedir"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/protocol"
+	"bnema.dev/vev/pkg/kv"
+	"bnema.dev/vev/pkg/safedir"
 )
 
 func TestCatalogue(t *testing.T) {

@@ -1,6 +1,6 @@
 package ui
 
-import "github.com/bnema/vev/internal/domain"
+import "bnema.dev/vev/internal/domain"
 
 const (
 	ResponsiveDrawerBreakpoint = 80

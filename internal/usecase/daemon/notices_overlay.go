@@ -5,12 +5,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
-	scopy "github.com/bnema/vev/internal/usecase/copy"
-	"github.com/bnema/vev/internal/usecase/keys"
-	"github.com/bnema/vev/internal/usecase/notices"
-	"github.com/bnema/vev/internal/usecase/ui"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/ports"
+	scopy "bnema.dev/vev/internal/usecase/copy"
+	"bnema.dev/vev/internal/usecase/keys"
+	"bnema.dev/vev/internal/usecase/notices"
+	"bnema.dev/vev/internal/usecase/ui"
 )
 
 var noticesModal = ui.Modal{WidthPct: 70, HeightPct: 70, MinWidth: 40, MinHeight: 8, Title: " Notifications ", Anchor: domain.AnchorCenter}

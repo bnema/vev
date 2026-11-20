@@ -7,9 +7,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	renderer "bnema.dev/vev-vt"
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/protocol"
-	scopy "github.com/bnema/vev/internal/usecase/copy"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/protocol"
+	scopy "bnema.dev/vev/internal/usecase/copy"
 )
 
 func TestCopyCacheFailedPublicationAndRetry(t *testing.T) {

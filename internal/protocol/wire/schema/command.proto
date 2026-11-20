@@ -4,7 +4,7 @@ syntax = "proto3";
 
 package vev.wire.v1;
 
-option go_package = "github.com/bnema/vev/internal/protocol/wire";
+option go_package = "bnema.dev/vev/internal/protocol/wire";
 
 // CommandRequest asks the daemon to run one control command.
 message CommandRequest {

@@ -4,10 +4,10 @@ import (
 	"testing"
 
 	renderer "bnema.dev/vev-vt"
-	"github.com/bnema/vev/internal/adapters/sessionwire"
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/protocol"
-	scopy "github.com/bnema/vev/internal/usecase/copy"
+	"bnema.dev/vev/internal/adapters/sessionwire"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/protocol"
+	scopy "bnema.dev/vev/internal/usecase/copy"
 	"github.com/stretchr/testify/require"
 )
 

@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/bnema/vev/internal/domain"
+	"bnema.dev/vev/internal/domain"
 
 	vt "bnema.dev/vev-vt"
 	renderer "bnema.dev/vev-vt/ansi"

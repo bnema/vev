@@ -3,7 +3,7 @@ package term
 import (
 	"os"
 
-	"github.com/bnema/vev/internal/domain"
+	"bnema.dev/vev/internal/domain"
 )
 
 // resizeLoop watches sig for signal notifications (SIGWINCH in

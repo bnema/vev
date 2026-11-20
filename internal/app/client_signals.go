@@ -6,7 +6,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/bnema/vev/internal/usecase/client"
+	"bnema.dev/vev/internal/usecase/client"
 )
 
 // clientSignalContext cancels an attached client on process signals. SIGHUP

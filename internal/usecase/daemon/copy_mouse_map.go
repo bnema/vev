@@ -1,9 +1,9 @@
 package daemon
 
 import (
-	"github.com/bnema/vev/internal/domain"
-	scopy "github.com/bnema/vev/internal/usecase/copy"
-	"github.com/bnema/vev/internal/usecase/mouse"
+	"bnema.dev/vev/internal/domain"
+	scopy "bnema.dev/vev/internal/usecase/copy"
+	"bnema.dev/vev/internal/usecase/mouse"
 )
 
 // clientTopBarRows is deliberately kept at the client/frame boundary. Layout

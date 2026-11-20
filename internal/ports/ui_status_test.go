@@ -3,7 +3,7 @@ package ports_test
 import (
 	"testing"
 
-	"github.com/bnema/vev/internal/ports"
+	"bnema.dev/vev/internal/ports"
 )
 
 // TestUIPresentationStatusClosedUnion pins the closed union of exactly three

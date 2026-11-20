@@ -23,8 +23,8 @@ import (
 	"math"
 
 	renderer "bnema.dev/vev-vt"
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/protocol/wire"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/protocol/wire"
 )
 
 // ErrOutOfRange is returned by every converter in this package when a wire

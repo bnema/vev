@@ -6,8 +6,8 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/ports"
 	"github.com/stretchr/testify/require"
 )
 

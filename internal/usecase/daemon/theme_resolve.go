@@ -1,8 +1,8 @@
 package daemon
 
 import (
-	"github.com/bnema/vev/internal/domain/terminalcap"
-	"github.com/bnema/vev/internal/usecase/theme"
+	"bnema.dev/vev/internal/domain/terminalcap"
+	"bnema.dev/vev/internal/usecase/theme"
 )
 
 func (d *Daemon) applyHostTheme(sess *session, ac *attachedClient, t theme.Theme, clearUnknownScheme bool) bool {

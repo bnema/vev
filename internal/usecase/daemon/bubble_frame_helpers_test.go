@@ -4,8 +4,8 @@ import (
 	"testing"
 	"testing/synctest"
 
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/protocol/wire"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/protocol/wire"
 )
 
 // requireFrame (the single shared frame helper) waits for quiescence, then

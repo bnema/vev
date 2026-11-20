@@ -13,7 +13,7 @@ import (
 	"testing"
 )
 
-const modulePath = "github.com/bnema/vev"
+const modulePath = "bnema.dev/vev"
 
 type packageLayer string
 

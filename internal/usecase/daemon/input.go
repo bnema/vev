@@ -6,12 +6,12 @@ import (
 	"errors"
 	"strconv"
 
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/domain/layout"
-	"github.com/bnema/vev/internal/usecase/command"
-	"github.com/bnema/vev/internal/usecase/keys"
-	"github.com/bnema/vev/internal/usecase/keys/kittykey"
-	"github.com/bnema/vev/internal/usecase/mouse"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/domain/layout"
+	"bnema.dev/vev/internal/usecase/command"
+	"bnema.dev/vev/internal/usecase/keys"
+	"bnema.dev/vev/internal/usecase/keys/kittykey"
+	"bnema.dev/vev/internal/usecase/mouse"
 )
 
 // handleSequencedInput applies input and schedules its echo acknowledgement.

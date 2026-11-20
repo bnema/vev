@@ -3,8 +3,8 @@ package replaytest
 import (
 	"errors"
 
-	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
+	"bnema.dev/vev/internal/protocol"
+	"bnema.dev/vev/internal/protocol/wire"
 )
 
 // committedRouteFromWire decodes the replay route without importing a

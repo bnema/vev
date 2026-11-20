@@ -7,11 +7,11 @@ import (
 	"os"
 	"time"
 
-	"github.com/bnema/vev/internal/adapters/brokeripc"
-	"github.com/bnema/vev/internal/adapters/ipc"
-	"github.com/bnema/vev/internal/adapters/lifecycle"
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/pkg/safedir"
+	"bnema.dev/vev/internal/adapters/brokeripc"
+	"bnema.dev/vev/internal/adapters/ipc"
+	"bnema.dev/vev/internal/adapters/lifecycle"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/pkg/safedir"
 )
 
 const productionBrokerStartupTimeout = 10 * time.Second

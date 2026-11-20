@@ -3,7 +3,7 @@ package daemonmux
 import (
 	"errors"
 
-	"github.com/bnema/vev/internal/ports"
+	"bnema.dev/vev/internal/ports"
 )
 
 // ErrInvalidBinding reports an invalid daemon authority. An authority must

@@ -13,11 +13,11 @@ import (
 
 	renderer "bnema.dev/vev-vt"
 	"bnema.dev/vev-vt/graphics"
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/domain/layout"
-	"github.com/bnema/vev/internal/protocol"
-	scopy "github.com/bnema/vev/internal/usecase/copy"
-	themeui "github.com/bnema/vev/internal/usecase/theme"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/domain/layout"
+	"bnema.dev/vev/internal/protocol"
+	scopy "bnema.dev/vev/internal/usecase/copy"
+	themeui "bnema.dev/vev/internal/usecase/theme"
 )
 
 // Graphics output is deliberately a small attachment-local backend. It emits

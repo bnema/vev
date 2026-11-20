@@ -6,8 +6,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/domain/terminalcap"
-	"github.com/bnema/vev/internal/protocol"
+	"bnema.dev/vev/internal/domain/terminalcap"
+	"bnema.dev/vev/internal/protocol"
 )
 
 var (

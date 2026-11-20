@@ -1,7 +1,7 @@
 package brokeripc
 
 import (
-	"github.com/bnema/vev/internal/adapters/ipc"
+	"bnema.dev/vev/internal/adapters/ipc"
 )
 
 // Test-only accessors (export_test.go pattern): these observe listener

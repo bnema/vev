@@ -2,8 +2,8 @@ package daemon
 
 import (
 	renderer "bnema.dev/vev-vt"
-	"github.com/bnema/vev/internal/domain"
-	themeui "github.com/bnema/vev/internal/usecase/theme"
+	"bnema.dev/vev/internal/domain"
+	themeui "bnema.dev/vev/internal/usecase/theme"
 )
 
 // applyOverlayBackdrop dims every cell already composed into the complete

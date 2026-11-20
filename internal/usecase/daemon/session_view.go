@@ -4,9 +4,9 @@ import (
 	"time"
 
 	renderer "bnema.dev/vev-vt"
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/usecase/agentactivity"
-	"github.com/bnema/vev/internal/usecase/ui"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/usecase/agentactivity"
+	"bnema.dev/vev/internal/usecase/ui"
 )
 
 // viewOptions controls optional (costly) fields captured by snapshotView.

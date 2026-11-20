@@ -8,7 +8,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/bnema/vev/internal/domain"
+	"bnema.dev/vev/internal/domain"
 )
 
 // errPurgeAdmissionClosed is returned to command-path creation/resume that

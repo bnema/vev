@@ -5,7 +5,7 @@ package colorprofile
 
 import (
 	ansi "bnema.dev/vev-vt/ansi"
-	"github.com/bnema/vev/internal/domain/terminalcap"
+	"bnema.dev/vev/internal/domain/terminalcap"
 )
 
 // Profile returns the renderer profile for c. A terminal without RGB support

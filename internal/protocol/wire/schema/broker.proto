@@ -14,7 +14,7 @@ package vev.wire.v1;
 import "common.proto";
 import "terminal.proto";
 
-option go_package = "github.com/bnema/vev/internal/protocol/wire";
+option go_package = "bnema.dev/vev/internal/protocol/wire";
 
 // BrokerScope identifies one broker process incarnation and one client
 // connection within it (ports.BrokerEpoch / ports.BrokerConnectionID).

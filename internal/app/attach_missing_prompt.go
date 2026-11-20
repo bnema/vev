@@ -7,12 +7,12 @@ import (
 	"os"
 	"sync"
 
-	"github.com/bnema/vev/internal/adapters/clock"
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/usecase/client"
-	"github.com/bnema/vev/internal/usecase/confirm"
-	"github.com/bnema/vev/pkg/rawterm"
+	"bnema.dev/vev/internal/adapters/clock"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/internal/protocol"
+	"bnema.dev/vev/internal/usecase/client"
+	"bnema.dev/vev/internal/usecase/confirm"
+	"bnema.dev/vev/pkg/rawterm"
 )
 
 // terminalIsInteractive reports whether the prompt can read its answer from a

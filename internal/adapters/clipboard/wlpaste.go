@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bnema/vev/internal/ports"
+	"bnema.dev/vev/internal/ports"
 )
 
 // mimePreference orders candidate image MIME types the same way pi (the

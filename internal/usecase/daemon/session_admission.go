@@ -6,8 +6,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/protocol"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/internal/protocol"
 )
 
 // admissionCwdMaxBytes bounds the client-supplied working directory a local

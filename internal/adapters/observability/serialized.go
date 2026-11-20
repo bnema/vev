@@ -3,7 +3,7 @@ package observability
 import (
 	"sync"
 
-	"github.com/bnema/vev/internal/ports"
+	"bnema.dev/vev/internal/ports"
 )
 
 // NewSerialized isolates producers from a potentially slow observer with one

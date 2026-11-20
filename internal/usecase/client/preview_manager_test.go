@@ -8,12 +8,12 @@ import (
 	renderer "bnema.dev/vev-vt"
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
-	portsmocks "github.com/bnema/vev/internal/ports/mocks"
-	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/catalogue"
-	pickerusecase "github.com/bnema/vev/internal/usecase/picker"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/ports"
+	portsmocks "bnema.dev/vev/internal/ports/mocks"
+	"bnema.dev/vev/internal/protocol"
+	"bnema.dev/vev/internal/protocol/catalogue"
+	pickerusecase "bnema.dev/vev/internal/usecase/picker"
 )
 
 func previewTestSession(name string, seed byte, tabs ...string) catalogue.RemoteCatalogSession {

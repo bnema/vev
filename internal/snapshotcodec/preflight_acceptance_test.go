@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	renderer "bnema.dev/vev-vt"
-	"github.com/bnema/vev/internal/domain/layout"
+	"bnema.dev/vev/internal/domain/layout"
 )
 
 func TestPreflightRejectsDanglingTreeAndFocusReferencesBeforeDecode(t *testing.T) {

@@ -8,11 +8,11 @@ import (
 
 	"github.com/stretchr/testify/mock"
 
-	"github.com/bnema/vev/internal/adapters/sessionwire"
-	"github.com/bnema/vev/internal/ports"
-	portsmocks "github.com/bnema/vev/internal/ports/mocks"
-	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
+	"bnema.dev/vev/internal/adapters/sessionwire"
+	"bnema.dev/vev/internal/ports"
+	portsmocks "bnema.dev/vev/internal/ports/mocks"
+	"bnema.dev/vev/internal/protocol"
+	"bnema.dev/vev/internal/protocol/wire"
 )
 
 // connLog is a plain recorder for one tracked server connection. It implements

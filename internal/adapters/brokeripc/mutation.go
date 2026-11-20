@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 
-	"github.com/bnema/vev/internal/adapters/brokerwire"
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	"bnema.dev/vev/internal/adapters/brokerwire"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/ports"
 )
 
 // Snapshot publication and mutating operations.

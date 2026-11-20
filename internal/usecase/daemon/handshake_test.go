@@ -8,9 +8,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/adapters/sessionwire"
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/protocol"
+	"bnema.dev/vev/internal/adapters/sessionwire"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/protocol"
 )
 
 func TestBoundedHandshakeCompletionCancellationDoesNotDoubleReceive(t *testing.T) {

@@ -4,8 +4,8 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/bnema/vev/internal/adapters/brokerwire"
-	"github.com/bnema/vev/internal/ports"
+	"bnema.dev/vev/internal/adapters/brokerwire"
+	"bnema.dev/vev/internal/ports"
 )
 
 func (s *serverSession) startPreview(m brokerwire.StartPreview) error {

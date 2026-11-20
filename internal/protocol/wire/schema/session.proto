@@ -5,7 +5,7 @@ package vev.wire.v1;
 
 import "common.proto";
 
-option go_package = "github.com/bnema/vev/internal/protocol/wire";
+option go_package = "bnema.dev/vev/internal/protocol/wire";
 
 // Hello opens a session attachment. version must stay field 1.
 message Hello {

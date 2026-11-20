@@ -8,10 +8,10 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/bnema/vev/internal/adapters/daemonmux"
-	"github.com/bnema/vev/internal/adapters/ipc"
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/usecase/broker"
+	"bnema.dev/vev/internal/adapters/daemonmux"
+	"bnema.dev/vev/internal/adapters/ipc"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/internal/usecase/broker"
 )
 
 // Broker-owned daemon start.

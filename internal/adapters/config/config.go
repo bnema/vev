@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/domain/terminalcap"
 	"github.com/bnema/kvconf"
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/domain/terminalcap"
 )
 
 var (

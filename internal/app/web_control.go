@@ -9,7 +9,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/bnema/vev/internal/adapters/webterm"
+	"bnema.dev/vev/internal/adapters/webterm"
 )
 
 type webAccess struct {

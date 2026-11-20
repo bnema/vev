@@ -1,8 +1,8 @@
 package brokeripc
 
 import (
-	"github.com/bnema/vev/internal/adapters/streamframe"
-	"github.com/bnema/vev/internal/protocol/wire"
+	"bnema.dev/vev/internal/adapters/streamframe"
+	"bnema.dev/vev/internal/protocol/wire"
 )
 
 // carriage adapts one bounded streamPipe to the wire.Transport contract the

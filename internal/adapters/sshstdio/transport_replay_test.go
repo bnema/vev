@@ -5,8 +5,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/bnema/vev/internal/protocol/wire"
-	"github.com/bnema/vev/internal/testutil/replaytest"
+	"bnema.dev/vev/internal/protocol/wire"
+	"bnema.dev/vev/internal/testutil/replaytest"
 )
 
 // real I/O: in-memory pipe transport whose synchronous Send borrows streamframe's pooled result channel, which cannot be used inside a synctest bubble.

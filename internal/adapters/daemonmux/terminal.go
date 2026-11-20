@@ -4,7 +4,7 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/bnema/vev/internal/domain"
+	"bnema.dev/vev/internal/domain"
 )
 
 // ErrTerminalFailure is the stable package sentinel published by Fail when it

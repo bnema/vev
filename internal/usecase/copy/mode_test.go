@@ -8,7 +8,7 @@ import (
 
 	vt "bnema.dev/vev-vt"
 	renderer "bnema.dev/vev-vt/ansi"
-	"github.com/bnema/vev/internal/domain"
+	"bnema.dev/vev/internal/domain"
 	"github.com/stretchr/testify/require"
 )
 

@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"bnema.dev/vev/internal/domain"
 	"github.com/bnema/kvconf"
-	"github.com/bnema/vev/internal/domain"
 	"github.com/stretchr/testify/require"
 )
 

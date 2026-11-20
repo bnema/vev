@@ -26,8 +26,8 @@ package brokerwire
 import (
 	"errors"
 
-	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
+	"bnema.dev/vev/internal/protocol"
+	"bnema.dev/vev/internal/protocol/wire"
 )
 
 // ErrPreambleRejected reports a broker preamble that fails validation:

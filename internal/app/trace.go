@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/bnema/vev/internal/adapters/observability"
-	"github.com/bnema/vev/internal/ports"
+	"bnema.dev/vev/internal/adapters/observability"
+	"bnema.dev/vev/internal/ports"
 )
 
 // newPerformanceTrace is the trace factory seam; tests replace it to observe

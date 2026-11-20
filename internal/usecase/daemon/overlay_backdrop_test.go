@@ -6,8 +6,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	renderer "bnema.dev/vev-vt"
-	"github.com/bnema/vev/internal/domain"
-	themeui "github.com/bnema/vev/internal/usecase/theme"
+	"bnema.dev/vev/internal/domain"
+	themeui "bnema.dev/vev/internal/usecase/theme"
 )
 
 func backdropTheme() themeui.Theme {

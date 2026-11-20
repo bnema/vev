@@ -28,10 +28,10 @@ import (
 	"io"
 	"sync"
 
-	"github.com/bnema/vev/internal/adapters/streamframe"
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/protocol/wire"
+	"bnema.dev/vev/internal/adapters/streamframe"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/internal/protocol/wire"
 )
 
 // Logical connection sentinels. They are typed so a caller can classify a

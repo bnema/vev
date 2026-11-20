@@ -7,7 +7,7 @@ package daemonmux
 import (
 	"context"
 
-	"github.com/bnema/vev/internal/protocol/wire"
+	"bnema.dev/vev/internal/protocol/wire"
 	mock "github.com/stretchr/testify/mock"
 )
 

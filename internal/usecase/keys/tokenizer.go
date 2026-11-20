@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"unicode/utf8"
 
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/usecase/keys/kittykey"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/internal/usecase/keys/kittykey"
 )
 
 // escKind classifies the input introduced by one ESC byte.

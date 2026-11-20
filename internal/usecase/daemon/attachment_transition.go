@@ -3,7 +3,7 @@ package daemon
 import (
 	"errors"
 
-	"github.com/bnema/vev/internal/domain"
+	"bnema.dev/vev/internal/domain"
 )
 
 var errAttachmentTransition = errors.New("attachment transition is no longer valid")

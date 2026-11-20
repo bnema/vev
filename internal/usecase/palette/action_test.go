@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bnema/vev/internal/usecase/command"
+	"bnema.dev/vev/internal/usecase/command"
 )
 
 func TestParseActionExactEffectiveToken(t *testing.T) {

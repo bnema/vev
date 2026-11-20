@@ -3,8 +3,8 @@ package daemon
 import (
 	"context"
 
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/domain/layout"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/domain/layout"
 )
 
 // moveTabTopology is the private whole-Tab topology Implementation consumed by

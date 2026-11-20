@@ -16,15 +16,15 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/domain/terminalcap"
-	"github.com/bnema/vev/internal/persist"
-	"github.com/bnema/vev/internal/ports"
-	portsmocks "github.com/bnema/vev/internal/ports/mocks"
-	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
-	"github.com/bnema/vev/internal/usecase/picker"
-	themeui "github.com/bnema/vev/internal/usecase/theme"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/domain/terminalcap"
+	"bnema.dev/vev/internal/persist"
+	"bnema.dev/vev/internal/ports"
+	portsmocks "bnema.dev/vev/internal/ports/mocks"
+	"bnema.dev/vev/internal/protocol"
+	"bnema.dev/vev/internal/protocol/wire"
+	"bnema.dev/vev/internal/usecase/picker"
+	themeui "bnema.dev/vev/internal/usecase/theme"
 )
 
 // --- test doubles -----------------------------------------------------------

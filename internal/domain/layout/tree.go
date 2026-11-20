@@ -1,6 +1,6 @@
 package layout
 
-import "github.com/bnema/vev/internal/domain"
+import "bnema.dev/vev/internal/domain"
 
 // PaneID is an opaque pane identifier owned by higher layers.
 type PaneID string

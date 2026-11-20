@@ -1,6 +1,6 @@
 package daemon
 
-import "github.com/bnema/vev/internal/protocol"
+import "bnema.dev/vev/internal/protocol"
 
 // ptrSessionAttachTarget builds the pointer form Resume.SessionTarget and
 // similar fields require from a value literal.

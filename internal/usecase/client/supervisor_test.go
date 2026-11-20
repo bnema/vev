@@ -12,13 +12,13 @@ import (
 	"testing/synctest"
 	"time"
 
-	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	portsmocks "bnema.dev/vev/internal/ports/mocks"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/domain/terminalcap"
-	"github.com/bnema/vev/internal/ports"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/domain/terminalcap"
+	"bnema.dev/vev/internal/ports"
 )
 
 // supervisorTestClock is a manually fired ports.Clock. NewTimer publishes each

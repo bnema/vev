@@ -17,8 +17,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bnema/vev/internal/adapters/quicnettest"
-	"github.com/bnema/vev/internal/ports"
+	"bnema.dev/vev/internal/adapters/quicnettest"
+	"bnema.dev/vev/internal/ports"
 )
 
 // BenchmarkRealQUICExchange measures the representative typed exchange for both

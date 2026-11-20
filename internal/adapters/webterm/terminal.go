@@ -9,9 +9,9 @@ import (
 
 	vt "bnema.dev/vev-vt"
 	renderer "bnema.dev/vev-vt/core"
-	"github.com/bnema/vev/internal/adapters/term"
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	"bnema.dev/vev/internal/adapters/term"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/ports"
 )
 
 const (

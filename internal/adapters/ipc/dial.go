@@ -6,7 +6,7 @@ import (
 	"net"
 	"path/filepath"
 
-	"github.com/bnema/vev/internal/protocol/wire"
+	"bnema.dev/vev/internal/protocol/wire"
 )
 
 // DialContext connects to the daemon's socket in dir (dir/daemon.sock) and

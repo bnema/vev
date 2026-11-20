@@ -7,7 +7,7 @@ import (
 	"os"
 	"sync"
 
-	"github.com/bnema/vev/internal/ports"
+	"bnema.dev/vev/internal/ports"
 )
 
 // NewJSONL opens path as the sole timestamp owner for one OS process. Marks

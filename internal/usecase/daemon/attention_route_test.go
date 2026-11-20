@@ -5,8 +5,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/protocol"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/protocol"
 )
 
 func attentionRouteEntry(key uint64, name string, marker byte, seq uint64) protocol.RecentRouteEntry {

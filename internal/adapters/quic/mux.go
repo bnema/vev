@@ -36,7 +36,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/bnema/vev/internal/protocol/wire"
+	"bnema.dev/vev/internal/protocol/wire"
 )
 
 // ErrMuxCarriage reports a QUIC setup that produced no raw bounded carriage, or

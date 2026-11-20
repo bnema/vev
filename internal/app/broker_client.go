@@ -10,17 +10,17 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bnema/vev/internal/adapters/clipboard"
-	"github.com/bnema/vev/internal/adapters/clock"
-	"github.com/bnema/vev/internal/adapters/term"
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/domain/terminalcap"
-	"github.com/bnema/vev/internal/platform"
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/catalogue"
-	"github.com/bnema/vev/internal/usecase/client"
-	"github.com/bnema/vev/internal/usecase/ui"
+	"bnema.dev/vev/internal/adapters/clipboard"
+	"bnema.dev/vev/internal/adapters/clock"
+	"bnema.dev/vev/internal/adapters/term"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/domain/terminalcap"
+	"bnema.dev/vev/internal/platform"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/internal/protocol"
+	"bnema.dev/vev/internal/protocol/catalogue"
+	"bnema.dev/vev/internal/usecase/client"
+	"bnema.dev/vev/internal/usecase/ui"
 )
 
 // Common broker client composition.

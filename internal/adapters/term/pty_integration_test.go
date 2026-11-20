@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bnema/vev/pkg/rawterm"
+	"bnema.dev/vev/pkg/rawterm"
 )
 
 // openPTYPair opens a real Linux PTY master/slave pair directly via

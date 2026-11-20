@@ -5,8 +5,8 @@ import (
 	"errors"
 	"os"
 
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/protocol"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/protocol"
 )
 
 // movePostcommitPlan is captured while the move's architecture and owner

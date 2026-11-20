@@ -7,7 +7,7 @@ package broker
 import (
 	"context"
 
-	"github.com/bnema/vev/internal/ports"
+	"bnema.dev/vev/internal/ports"
 	mock "github.com/stretchr/testify/mock"
 )
 

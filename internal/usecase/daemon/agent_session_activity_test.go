@@ -9,12 +9,12 @@ import (
 	"github.com/stretchr/testify/require"
 
 	renderer "bnema.dev/vev-vt"
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/domain/terminalcap"
-	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/usecase/agentactivity"
-	themeui "github.com/bnema/vev/internal/usecase/theme"
-	"github.com/bnema/vev/internal/usecase/ui"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/domain/terminalcap"
+	"bnema.dev/vev/internal/protocol"
+	"bnema.dev/vev/internal/usecase/agentactivity"
+	themeui "bnema.dev/vev/internal/usecase/theme"
+	"bnema.dev/vev/internal/usecase/ui"
 )
 
 // viewOtherSession makes ac's bottom bar list other's session entry.

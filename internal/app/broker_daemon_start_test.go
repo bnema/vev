@@ -13,11 +13,11 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/adapters/brokerconfig"
-	"github.com/bnema/vev/internal/adapters/daemonmux"
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/protocol/wire"
-	wiremocks "github.com/bnema/vev/internal/protocol/wire/mocks"
+	"bnema.dev/vev/internal/adapters/brokerconfig"
+	"bnema.dev/vev/internal/adapters/daemonmux"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/internal/protocol/wire"
+	wiremocks "bnema.dev/vev/internal/protocol/wire/mocks"
 )
 
 // Broker-owned daemon start coverage (Plan 001 P7, UI-driver slice 1).

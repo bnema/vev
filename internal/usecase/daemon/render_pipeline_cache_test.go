@@ -7,11 +7,11 @@ import (
 	"github.com/stretchr/testify/require"
 
 	renderer "bnema.dev/vev-vt"
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/domain/layout"
-	"github.com/bnema/vev/internal/protocol"
-	themeui "github.com/bnema/vev/internal/usecase/theme"
-	"github.com/bnema/vev/internal/usecase/ui"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/domain/layout"
+	"bnema.dev/vev/internal/protocol"
+	themeui "bnema.dev/vev/internal/usecase/theme"
+	"bnema.dev/vev/internal/usecase/ui"
 )
 
 func TestPipelineCachePublishesOnlyAfterEmission(t *testing.T) {

@@ -9,11 +9,11 @@ import (
 	"testing/synctest"
 	"time"
 
-	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	portsmocks "bnema.dev/vev/internal/ports/mocks"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/protocol"
+	"bnema.dev/vev/internal/protocol"
 )
 
 // gatedSessionStream blocks every write until release is closed, like a

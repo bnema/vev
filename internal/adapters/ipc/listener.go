@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/bnema/vev/internal/protocol/wire"
-	"github.com/bnema/vev/pkg/safedir"
+	"bnema.dev/vev/internal/protocol/wire"
+	"bnema.dev/vev/pkg/safedir"
 )
 
 // socketFileName is the fixed name of the daemon's listening socket within

@@ -3,7 +3,7 @@ package daemon
 import (
 	"reflect"
 
-	"github.com/bnema/vev/internal/domain"
+	"bnema.dev/vev/internal/domain"
 )
 
 // movePaneRequest identifies both lifecycles and both topology objects by

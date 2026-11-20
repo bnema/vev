@@ -7,8 +7,8 @@ package portsmocks
 import (
 	"context"
 
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/ports"
 	mock "github.com/stretchr/testify/mock"
 )
 

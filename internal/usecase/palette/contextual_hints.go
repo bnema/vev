@@ -3,7 +3,7 @@ package palette
 import (
 	"fmt"
 
-	"github.com/bnema/vev/internal/usecase/command"
+	"bnema.dev/vev/internal/usecase/command"
 )
 
 // RecentSessionHint is the immutable display data for one captured MRU rank.

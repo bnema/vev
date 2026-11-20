@@ -19,14 +19,14 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/adapters/brokerconfig"
-	"github.com/bnema/vev/internal/adapters/brokeripc"
-	"github.com/bnema/vev/internal/adapters/daemonmux"
-	"github.com/bnema/vev/internal/adapters/ipc"
-	"github.com/bnema/vev/internal/adapters/quic"
-	"github.com/bnema/vev/internal/adapters/sshstdio"
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/protocol"
+	"bnema.dev/vev/internal/adapters/brokerconfig"
+	"bnema.dev/vev/internal/adapters/brokeripc"
+	"bnema.dev/vev/internal/adapters/daemonmux"
+	"bnema.dev/vev/internal/adapters/ipc"
+	"bnema.dev/vev/internal/adapters/quic"
+	"bnema.dev/vev/internal/adapters/sshstdio"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/internal/protocol"
 )
 
 // Real-composition coverage for the P3.4 slice E remote mux helpers.

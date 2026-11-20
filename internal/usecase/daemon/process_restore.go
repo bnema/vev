@@ -5,7 +5,7 @@ import (
 	"strings"
 	"unicode"
 
-	snapcodec "github.com/bnema/vev/internal/snapshotcodec"
+	snapcodec "bnema.dev/vev/internal/snapshotcodec"
 )
 
 const (

@@ -6,9 +6,9 @@ import (
 	"unicode/utf8"
 
 	renderer "bnema.dev/vev-vt"
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/usecase/command"
-	"github.com/bnema/vev/internal/usecase/ui"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/usecase/command"
+	"bnema.dev/vev/internal/usecase/ui"
 )
 
 type RenderStyles struct {

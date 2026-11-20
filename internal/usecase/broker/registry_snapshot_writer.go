@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bnema/vev/internal/ports"
+	"bnema.dev/vev/internal/ports"
 )
 
 // snapshotWriter serializes durable snapshot writes off the registry lock.

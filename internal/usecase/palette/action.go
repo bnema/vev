@@ -4,7 +4,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/bnema/vev/internal/usecase/command"
+	"bnema.dev/vev/internal/usecase/command"
 )
 
 // Action is the exact command token and its unmodified, whitespace-delimited

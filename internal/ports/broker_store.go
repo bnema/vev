@@ -8,8 +8,8 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/protocol/catalogue"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/protocol/catalogue"
 )
 
 // Durable broker store sentinels. Adapters wrap these so a caller can classify

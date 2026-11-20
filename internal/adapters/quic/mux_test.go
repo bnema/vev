@@ -20,8 +20,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/protocol/wire"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/internal/protocol/wire"
 )
 
 // muxTestDeadline bounds every real loopback QUIC mux carriage wait.

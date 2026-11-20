@@ -13,14 +13,14 @@ import (
 	"github.com/stretchr/testify/require"
 
 	renderer "bnema.dev/vev-vt/ansi"
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/domain/layout"
-	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
-	"github.com/bnema/vev/internal/usecase/command"
-	"github.com/bnema/vev/internal/usecase/palette"
-	themeui "github.com/bnema/vev/internal/usecase/theme"
-	"github.com/bnema/vev/internal/usecase/ui"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/domain/layout"
+	"bnema.dev/vev/internal/protocol"
+	"bnema.dev/vev/internal/protocol/wire"
+	"bnema.dev/vev/internal/usecase/command"
+	"bnema.dev/vev/internal/usecase/palette"
+	themeui "bnema.dev/vev/internal/usecase/theme"
+	"bnema.dev/vev/internal/usecase/ui"
 )
 
 // stubClock returns timers whose channel never fires, so a scheduler under it

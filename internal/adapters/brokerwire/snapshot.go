@@ -52,8 +52,8 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/protocol/catalogue"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/internal/protocol/catalogue"
 )
 
 const (

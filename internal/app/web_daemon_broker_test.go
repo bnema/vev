@@ -19,11 +19,11 @@ import (
 	"github.com/coder/websocket"
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/adapters/brokeripc"
-	"github.com/bnema/vev/internal/adapters/webterm"
-	"github.com/bnema/vev/internal/ports"
-	portsmocks "github.com/bnema/vev/internal/ports/mocks"
-	"github.com/bnema/vev/internal/usecase/client"
+	"bnema.dev/vev/internal/adapters/brokeripc"
+	"bnema.dev/vev/internal/adapters/webterm"
+	"bnema.dev/vev/internal/ports"
+	portsmocks "bnema.dev/vev/internal/ports/mocks"
+	"bnema.dev/vev/internal/usecase/client"
 	"github.com/stretchr/testify/mock"
 )
 

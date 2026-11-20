@@ -6,12 +6,12 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/bnema/vev/internal/adapters/brokerwire"
-	"github.com/bnema/vev/internal/adapters/ipc"
-	"github.com/bnema/vev/internal/adapters/streamframe"
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/protocol/wire"
+	"bnema.dev/vev/internal/adapters/brokerwire"
+	"bnema.dev/vev/internal/adapters/ipc"
+	"bnema.dev/vev/internal/adapters/streamframe"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/internal/protocol/wire"
 )
 
 // Broker IPC client.

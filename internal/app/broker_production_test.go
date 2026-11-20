@@ -5,9 +5,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/bnema/vev/internal/adapters/brokerconfig"
-	"github.com/bnema/vev/internal/adapters/daemonmux"
-	"github.com/bnema/vev/internal/adapters/ipc"
+	"bnema.dev/vev/internal/adapters/brokerconfig"
+	"bnema.dev/vev/internal/adapters/daemonmux"
+	"bnema.dev/vev/internal/adapters/ipc"
 	"github.com/stretchr/testify/require"
 )
 

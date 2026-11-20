@@ -6,7 +6,7 @@ import (
 
 	"bnema.dev/vev-vt/protocol/terminalquery"
 
-	"github.com/bnema/vev/internal/ports"
+	"bnema.dev/vev/internal/ports"
 )
 
 // terminalCapabilityProbeTimeout bounds the outer-terminal capability probe.

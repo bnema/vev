@@ -11,8 +11,8 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/protocol"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/internal/protocol"
 )
 
 // Supervisor halves of picker parity (Plan 003 B1/B2): the in-place tab switch

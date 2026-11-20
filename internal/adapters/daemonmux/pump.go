@@ -67,8 +67,8 @@ import (
 	"log/slog"
 	"sync"
 
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/ports"
 )
 
 // FramedCarrier is the private physical carriage one Pump drives: one

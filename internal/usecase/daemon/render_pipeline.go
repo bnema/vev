@@ -5,16 +5,16 @@ import (
 	"slices"
 
 	renderer "bnema.dev/vev-vt"
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/domain/layout"
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/usecase/notices"
-	"github.com/bnema/vev/internal/usecase/palette"
-	"github.com/bnema/vev/internal/usecase/prompt"
-	themeui "github.com/bnema/vev/internal/usecase/theme"
-	"github.com/bnema/vev/internal/usecase/ui"
-	"github.com/bnema/vev/internal/usecase/visualsearch"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/domain/layout"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/internal/protocol"
+	"bnema.dev/vev/internal/usecase/notices"
+	"bnema.dev/vev/internal/usecase/palette"
+	"bnema.dev/vev/internal/usecase/prompt"
+	themeui "bnema.dev/vev/internal/usecase/theme"
+	"bnema.dev/vev/internal/usecase/ui"
+	"bnema.dev/vev/internal/usecase/visualsearch"
 )
 
 // composeCacheInput is an attachment-local value snapshot. composeFrame never

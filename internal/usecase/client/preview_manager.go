@@ -4,10 +4,10 @@ import (
 	"time"
 
 	renderer "bnema.dev/vev-vt"
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/protocol"
-	pickerusecase "github.com/bnema/vev/internal/usecase/picker"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/internal/protocol"
+	pickerusecase "bnema.dev/vev/internal/usecase/picker"
 )
 
 // pickerPreviewDebounce bounds how long the cursor may rest before the client

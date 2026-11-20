@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bnema/vev/internal/adapters/observability"
-	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"bnema.dev/vev/internal/adapters/observability"
+	portsmocks "bnema.dev/vev/internal/ports/mocks"
 	"github.com/stretchr/testify/mock"
 )
 

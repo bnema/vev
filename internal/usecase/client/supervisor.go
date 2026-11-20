@@ -12,11 +12,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/domain/terminalcap"
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/usecase/keys/kittykey"
-	"github.com/bnema/vev/internal/usecase/ui"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/domain/terminalcap"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/internal/usecase/keys/kittykey"
+	"bnema.dev/vev/internal/usecase/ui"
 )
 
 // Autonomous client supervisor.

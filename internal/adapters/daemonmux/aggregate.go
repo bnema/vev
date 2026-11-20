@@ -43,7 +43,7 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/bnema/vev/internal/ports"
+	"bnema.dev/vev/internal/ports"
 )
 
 // Aggregate-listener sentinels. They are typed so a caller can classify a

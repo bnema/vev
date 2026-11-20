@@ -8,8 +8,8 @@ import (
 	"io"
 	"sync"
 
-	clockadapter "github.com/bnema/vev/internal/adapters/clock"
-	"github.com/bnema/vev/internal/ports"
+	clockadapter "bnema.dev/vev/internal/adapters/clock"
+	"bnema.dev/vev/internal/ports"
 )
 
 const (

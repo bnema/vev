@@ -5,11 +5,11 @@ import (
 	"errors"
 	"time"
 
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/usecase/agentactivity"
-	"github.com/bnema/vev/internal/usecase/picker"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/internal/protocol"
+	"bnema.dev/vev/internal/usecase/agentactivity"
+	"bnema.dev/vev/internal/usecase/picker"
 )
 
 // noteAttention records attention for a tab. If the tab is currently visible,

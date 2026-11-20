@@ -7,8 +7,8 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/pkg/rawterm"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/pkg/rawterm"
 )
 
 func TestSetGeometryPreservesPixelDimensions(t *testing.T) {

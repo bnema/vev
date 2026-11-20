@@ -1,9 +1,9 @@
 package sessionwire
 
 import (
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/protocol"
+	"bnema.dev/vev/internal/protocol/wire"
 )
 
 func routeRefToWire(ref protocol.RouteRef) *wire.RouteRef {

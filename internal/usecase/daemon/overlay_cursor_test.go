@@ -5,8 +5,8 @@ import (
 	"testing/synctest"
 
 	vt "bnema.dev/vev-vt"
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/usecase/ui"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/usecase/ui"
 	"github.com/stretchr/testify/require"
 )
 

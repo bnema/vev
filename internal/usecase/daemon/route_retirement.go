@@ -5,7 +5,7 @@ import (
 	"maps"
 	"time"
 
-	"github.com/bnema/vev/internal/protocol"
+	"bnema.dev/vev/internal/protocol"
 )
 
 // retiredRoutes uses only authoritative observations: this daemon's own

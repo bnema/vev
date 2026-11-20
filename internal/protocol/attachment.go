@@ -3,7 +3,7 @@ package protocol
 import (
 	"errors"
 
-	"github.com/bnema/vev/internal/domain"
+	"bnema.dev/vev/internal/domain"
 )
 
 var ErrInvalidAttachment = errors.New("invalid attachment transition")

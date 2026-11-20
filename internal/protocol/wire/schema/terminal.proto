@@ -6,7 +6,7 @@ package vev.wire.v1;
 import "common.proto";
 import "session.proto";
 
-option go_package = "github.com/bnema/vev/internal/protocol/wire";
+option go_package = "bnema.dev/vev/internal/protocol/wire";
 
 // ViewContext is the committed boundary of one output state.
 message ViewContext {

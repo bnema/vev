@@ -14,8 +14,8 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/bnema/vev/internal/platform"
-	"github.com/bnema/vev/pkg/safedir"
+	"bnema.dev/vev/internal/platform"
+	"bnema.dev/vev/pkg/safedir"
 )
 
 // Darwin has no abstract Unix sockets, so the control interface binds a

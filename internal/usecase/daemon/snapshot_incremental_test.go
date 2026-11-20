@@ -10,8 +10,8 @@ import (
 
 	vt "bnema.dev/vev-vt"
 	renderer "bnema.dev/vev-vt/ansi"
-	"github.com/bnema/vev/internal/domain"
-	snapcodec "github.com/bnema/vev/internal/snapshotcodec"
+	"bnema.dev/vev/internal/domain"
+	snapcodec "bnema.dev/vev/internal/snapshotcodec"
 )
 
 func TestMarshalSnapshotTailSelectsCanonicalEncoder(t *testing.T) {

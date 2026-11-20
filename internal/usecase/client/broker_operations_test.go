@@ -9,13 +9,13 @@ import (
 	"testing/synctest"
 	"time"
 
-	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	portsmocks "bnema.dev/vev/internal/ports/mocks"
 
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/protocol"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/internal/protocol"
 )
 
 // Client control operations (Plan 001 P7, worker 3). Every case is

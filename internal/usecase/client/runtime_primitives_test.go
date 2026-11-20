@@ -4,9 +4,9 @@ import (
 	"testing"
 	"testing/synctest"
 
-	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	portsmocks "bnema.dev/vev/internal/ports/mocks"
 
-	"github.com/bnema/vev/internal/protocol"
+	"bnema.dev/vev/internal/protocol"
 	"github.com/stretchr/testify/require"
 )
 

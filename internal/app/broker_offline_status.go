@@ -14,12 +14,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bnema/vev/internal/adapters/brokerconfig"
-	"github.com/bnema/vev/internal/adapters/brokeripc"
-	"github.com/bnema/vev/internal/adapters/lifecycle"
-	"github.com/bnema/vev/internal/platform"
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/pkg/safedir"
+	"bnema.dev/vev/internal/adapters/brokerconfig"
+	"bnema.dev/vev/internal/adapters/brokeripc"
+	"bnema.dev/vev/internal/adapters/lifecycle"
+	"bnema.dev/vev/internal/platform"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/pkg/safedir"
 )
 
 // Detached connect-or-spawn and status.

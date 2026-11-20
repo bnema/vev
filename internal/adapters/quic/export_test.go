@@ -1,6 +1,6 @@
 package quic
 
-import "github.com/bnema/vev/internal/ports"
+import "bnema.dev/vev/internal/ports"
 
 // WithRuntimeObserver enables process-local adapter marks on the dialed
 // transport, for tests that assert on those marks. Production never needs

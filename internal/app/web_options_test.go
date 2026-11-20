@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bnema/vev/internal/adapters/webterm"
-	"github.com/bnema/vev/pkg/safedir"
+	"bnema.dev/vev/internal/adapters/webterm"
+	"bnema.dev/vev/pkg/safedir"
 	"github.com/stretchr/testify/require"
 )
 

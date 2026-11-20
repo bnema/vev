@@ -7,8 +7,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/domain"
-	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"bnema.dev/vev/internal/domain"
+	portsmocks "bnema.dev/vev/internal/ports/mocks"
 )
 
 func TestTimerLaneDetachRemovesCompleteToken(t *testing.T) {

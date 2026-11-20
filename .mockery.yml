@@ -22,13 +22,13 @@ require-template-schema-exists: true
 template: testify
 template-schema: '{{.Template}}.schema.json'
 packages:
-  github.com/bnema/vev/internal/ports:
+  bnema.dev/vev/internal/ports:
     config:
       all: true
       dir: internal/ports/mocks
       filename: '{{.InterfaceFile | base | trimSuffix ".go"}}_mock.go'
       pkgname: portsmocks
-  github.com/bnema/vev/internal/protocol/wire:
+  bnema.dev/vev/internal/protocol/wire:
     config:
       dir: internal/protocol/wire/mocks
       filename: transport_mock.go
@@ -41,7 +41,7 @@ packages:
       Dialer:
       Listener:
       BoundedTransport:
-  github.com/bnema/vev/internal/adapters/daemonmux:
+  bnema.dev/vev/internal/adapters/daemonmux:
     config:
       dir: internal/adapters/daemonmux
       filename: daemonmux_mock_test.go
@@ -49,14 +49,14 @@ packages:
     interfaces:
       RawFramedTransport:
       FramedCarrier:
-  github.com/bnema/vev/internal/app:
+  bnema.dev/vev/internal/app:
     config:
       dir: internal/app
       filename: lifecycle_ownership_mock_test.go
       pkgname: app
     interfaces:
       lifecycleOwnership:
-  github.com/bnema/vev/internal/usecase/broker:
+  bnema.dev/vev/internal/usecase/broker:
     config:
       dir: internal/usecase/broker
       filename: broker_seams_mock_test.go
@@ -65,14 +65,14 @@ packages:
       Runner:
       Closeable:
       LocalProbe:
-  github.com/bnema/vev/internal/usecase/keys:
+  bnema.dev/vev/internal/usecase/keys:
     config:
       dir: internal/usecase/keys
       filename: handler_mock_test.go
       pkgname: keys
     interfaces:
       Handler:
-  github.com/bnema/vev/cmd/vev-perf-harness:
+  bnema.dev/vev/cmd/vev-perf-harness:
     config:
       dir: cmd/vev-perf-harness
       filename: harness_mock_test.go
@@ -83,7 +83,7 @@ packages:
       clock:
       launchedProcess:
       launcher:
-  github.com/bnema/vev/internal/usecase/daemon:
+  bnema.dev/vev/internal/usecase/daemon:
     interfaces:
       daemonActionRunner:
         config:
@@ -95,7 +95,7 @@ packages:
           dir: internal/usecase/daemon
           filename: bar_script_executor_mock_test.go
           pkgname: daemon
-  github.com/bnema/vev/internal/usecase/client:
+  bnema.dev/vev/internal/usecase/client:
     interfaces:
       attachmentPredictionForeground:
         config:
@@ -122,7 +122,7 @@ packages:
           dir: internal/usecase/client
           filename: picker_kill_resolver_mock_test.go
           pkgname: client
-  github.com/bnema/vev/internal/usecase/command:
+  bnema.dev/vev/internal/usecase/command:
     interfaces:
       Context:
         config:

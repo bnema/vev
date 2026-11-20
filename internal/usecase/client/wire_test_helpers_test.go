@@ -1,8 +1,8 @@
 package client
 
 import (
-	"github.com/bnema/vev/internal/adapters/sessionwire"
-	"github.com/bnema/vev/internal/protocol"
+	"bnema.dev/vev/internal/adapters/sessionwire"
+	"bnema.dev/vev/internal/protocol"
 )
 
 func mustMarshalOutput(m protocol.Output) []byte {

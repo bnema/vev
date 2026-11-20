@@ -7,14 +7,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/domain/terminalcap"
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/catalogue"
-	"github.com/bnema/vev/internal/usecase/colorprofile"
-	pickerusecase "github.com/bnema/vev/internal/usecase/picker"
-	"github.com/bnema/vev/internal/usecase/ui"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/domain/terminalcap"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/internal/protocol"
+	"bnema.dev/vev/internal/protocol/catalogue"
+	"bnema.dev/vev/internal/usecase/colorprofile"
+	pickerusecase "bnema.dev/vev/internal/usecase/picker"
+	"bnema.dev/vev/internal/usecase/ui"
 )
 
 // Client-owned picker controller.

@@ -6,10 +6,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	renderer "bnema.dev/vev-vt"
-	"github.com/bnema/vev/internal/domain"
-	scopy "github.com/bnema/vev/internal/usecase/copy"
-	promptui "github.com/bnema/vev/internal/usecase/prompt"
-	"github.com/bnema/vev/internal/usecase/visualsearch"
+	"bnema.dev/vev/internal/domain"
+	scopy "bnema.dev/vev/internal/usecase/copy"
+	promptui "bnema.dev/vev/internal/usecase/prompt"
+	"bnema.dev/vev/internal/usecase/visualsearch"
 )
 
 func TestOverlayRuntimeActive(t *testing.T) {

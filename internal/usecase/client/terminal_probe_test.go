@@ -11,7 +11,7 @@ import (
 	"bnema.dev/vev-vt/protocol/terminalquery"
 	"github.com/stretchr/testify/require"
 
-	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	portsmocks "bnema.dev/vev/internal/ports/mocks"
 )
 
 func TestProbeTerminalCapabilities(t *testing.T) {

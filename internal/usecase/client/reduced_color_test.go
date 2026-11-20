@@ -8,9 +8,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	ansirenderer "bnema.dev/vev-vt/ansi"
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/usecase/picker"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/protocol"
+	"bnema.dev/vev/internal/usecase/picker"
 )
 
 func TestPickerStaysLegibleInReducedColor(t *testing.T) {

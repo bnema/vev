@@ -6,10 +6,10 @@ import (
 	"io"
 	"sync"
 
-	"github.com/bnema/vev/internal/adapters/brokerwire"
-	"github.com/bnema/vev/internal/adapters/sessionwire"
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/protocol/wire"
+	"bnema.dev/vev/internal/adapters/brokerwire"
+	"bnema.dev/vev/internal/adapters/sessionwire"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/internal/protocol/wire"
 )
 
 // Logical stream bridging.

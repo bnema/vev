@@ -4,11 +4,11 @@ import (
 	"sync"
 	"testing"
 
-	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	portsmocks "bnema.dev/vev/internal/ports/mocks"
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/ports"
+	"bnema.dev/vev/internal/ports"
 )
 
 // aggregateSink is the test's daemon-style consumer: it takes typed connections

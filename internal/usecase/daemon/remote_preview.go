@@ -4,8 +4,8 @@ import (
 	"errors"
 
 	renderer "bnema.dev/vev-vt"
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/protocol"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/protocol"
 )
 
 var errRemotePreviewNoSuchTarget = errors.New("daemon: remote preview target does not exist")

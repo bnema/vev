@@ -8,9 +8,9 @@ import (
 	"math"
 	"testing"
 
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/domain/layout"
-	"github.com/bnema/vev/internal/ports"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/domain/layout"
+	"bnema.dev/vev/internal/ports"
 )
 
 func TestManifestIncarnation(t *testing.T) {

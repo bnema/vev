@@ -14,7 +14,7 @@ package brokerwire
 // are bounded separately so hostile lengths never allocate.
 
 import (
-	"github.com/bnema/vev/internal/protocol/wire"
+	"bnema.dev/vev/internal/protocol/wire"
 )
 
 const (

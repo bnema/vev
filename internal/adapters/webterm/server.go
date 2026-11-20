@@ -17,7 +17,7 @@ import (
 	"bnema.dev/vev-vt/core"
 	htmlrenderer "bnema.dev/vev-vt/html"
 	"bnema.dev/vev-vt/html/browser"
-	"github.com/bnema/vev/internal/domain"
+	"bnema.dev/vev/internal/domain"
 	"github.com/coder/websocket"
 )
 

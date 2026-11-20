@@ -18,9 +18,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/adapters/ipc"
-	"github.com/bnema/vev/internal/adapters/lifecycle"
-	"github.com/bnema/vev/internal/platform"
+	"bnema.dev/vev/internal/adapters/ipc"
+	"bnema.dev/vev/internal/adapters/lifecycle"
+	"bnema.dev/vev/internal/platform"
 )
 
 // real I/O: real subprocesses.

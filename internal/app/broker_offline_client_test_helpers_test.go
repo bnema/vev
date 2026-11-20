@@ -6,11 +6,11 @@ import (
 	"io"
 	"log/slog"
 
-	"github.com/bnema/vev/internal/adapters/brokeripc"
-	"github.com/bnema/vev/internal/adapters/clock"
-	"github.com/bnema/vev/internal/adapters/uiterm"
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/usecase/client"
+	"bnema.dev/vev/internal/adapters/brokeripc"
+	"bnema.dev/vev/internal/adapters/clock"
+	"bnema.dev/vev/internal/adapters/uiterm"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/internal/usecase/client"
 )
 
 // runOfflineClient is the sandbox terminal harness over the shared broker

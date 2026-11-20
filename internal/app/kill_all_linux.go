@@ -16,10 +16,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bnema/vev/internal/adapters/brokeripc"
-	"github.com/bnema/vev/internal/adapters/ipc"
-	"github.com/bnema/vev/internal/adapters/lifecycle"
-	"github.com/bnema/vev/internal/platform"
+	"bnema.dev/vev/internal/adapters/brokeripc"
+	"bnema.dev/vev/internal/adapters/ipc"
+	"bnema.dev/vev/internal/adapters/lifecycle"
+	"bnema.dev/vev/internal/platform"
 )
 
 const (

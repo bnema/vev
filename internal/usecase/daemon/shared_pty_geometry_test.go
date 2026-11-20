@@ -3,8 +3,8 @@ package daemon
 import (
 	"testing"
 
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/protocol"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/protocol"
 	"github.com/stretchr/testify/require"
 )
 

@@ -3,7 +3,7 @@ package app
 import (
 	"testing"
 
-	"github.com/bnema/vev/internal/adapters/brokerconfig"
+	"bnema.dev/vev/internal/adapters/brokerconfig"
 	"github.com/stretchr/testify/require"
 )
 

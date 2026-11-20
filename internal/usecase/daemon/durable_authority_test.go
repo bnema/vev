@@ -6,9 +6,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/persist"
-	"github.com/bnema/vev/internal/ports"
-	recoveryusecase "github.com/bnema/vev/internal/usecase/recovery"
+	"bnema.dev/vev/internal/persist"
+	"bnema.dev/vev/internal/ports"
+	recoveryusecase "bnema.dev/vev/internal/usecase/recovery"
 )
 
 // WithStore is package-test composition glue. Production injects the same

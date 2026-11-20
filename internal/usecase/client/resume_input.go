@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"time"
 
-	"github.com/bnema/vev/internal/usecase/keys/kittykey"
+	"bnema.dev/vev/internal/usecase/keys/kittykey"
 )
 
 const resumeEscapeLimit = 256

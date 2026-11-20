@@ -21,13 +21,13 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/bnema/vev/internal/adapters/sessionwire"
-	"github.com/bnema/vev/internal/ports"
-	portsmocks "github.com/bnema/vev/internal/ports/mocks"
-	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
-	wiremocks "github.com/bnema/vev/internal/protocol/wire/mocks"
-	"github.com/bnema/vev/internal/usecase/daemon"
+	"bnema.dev/vev/internal/adapters/sessionwire"
+	"bnema.dev/vev/internal/ports"
+	portsmocks "bnema.dev/vev/internal/ports/mocks"
+	"bnema.dev/vev/internal/protocol"
+	"bnema.dev/vev/internal/protocol/wire"
+	wiremocks "bnema.dev/vev/internal/protocol/wire/mocks"
+	"bnema.dev/vev/internal/usecase/daemon"
 )
 
 // countCommandRequests reports how many CommandRequests the transport placed on

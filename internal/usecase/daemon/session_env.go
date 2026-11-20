@@ -5,7 +5,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/bnema/vev/internal/protocol"
+	"bnema.dev/vev/internal/protocol"
 )
 
 // Display variables describe one graphical session and move as a group: a

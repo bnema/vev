@@ -4,9 +4,9 @@ import (
 	"net"
 	"testing"
 
-	"github.com/bnema/vev/internal/adapters/ipc"
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/protocol"
+	"bnema.dev/vev/internal/adapters/ipc"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/protocol"
 )
 
 // Baseline typed-conversation benchmark frozen in P1.1: one Hello/Welcome

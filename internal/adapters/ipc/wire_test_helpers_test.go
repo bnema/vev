@@ -1,8 +1,8 @@
 package ipc
 
 import (
-	"github.com/bnema/vev/internal/adapters/sessionwire"
-	"github.com/bnema/vev/internal/protocol"
+	"bnema.dev/vev/internal/adapters/sessionwire"
+	"bnema.dev/vev/internal/protocol"
 )
 
 func mustEncodeClient(m protocol.ClientMessage) []byte {

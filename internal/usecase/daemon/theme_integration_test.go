@@ -6,10 +6,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	renderer "bnema.dev/vev-vt/ansi"
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/domain/terminalcap"
-	"github.com/bnema/vev/internal/protocol"
-	themeui "github.com/bnema/vev/internal/usecase/theme"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/domain/terminalcap"
+	"bnema.dev/vev/internal/protocol"
+	themeui "bnema.dev/vev/internal/usecase/theme"
 )
 
 func lifecycleTheme(foreground, background renderer.RGB, palette map[uint8]renderer.RGB) protocol.Theme {

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bnema/vev/internal/protocol/wire"
+	"bnema.dev/vev/internal/protocol/wire"
 )
 
 // real I/O: binds and dials real unix sockets in temp directories.

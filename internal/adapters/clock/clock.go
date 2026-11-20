@@ -7,7 +7,7 @@ package clock
 import (
 	"time"
 
-	"github.com/bnema/vev/internal/ports"
+	"bnema.dev/vev/internal/ports"
 )
 
 // realClock implements ports.Clock over the wall clock.

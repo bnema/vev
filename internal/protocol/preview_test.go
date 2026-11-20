@@ -7,7 +7,7 @@ import (
 	renderer "bnema.dev/vev-vt"
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/domain"
+	"bnema.dev/vev/internal/domain"
 )
 
 func previewTestRequest() RemotePreviewRequest {

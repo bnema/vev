@@ -4,7 +4,7 @@ import (
 	"strings"
 
 	vt "bnema.dev/vev-vt"
-	"github.com/bnema/vev/internal/domain"
+	"bnema.dev/vev/internal/domain"
 )
 
 // Spinner frame count bounds for a custom agents.spinner.

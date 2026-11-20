@@ -21,7 +21,7 @@ import "broker.proto";
 import "common.proto";
 import "envelope.proto";
 
-option go_package = "github.com/bnema/vev/internal/protocol/wire";
+option go_package = "bnema.dev/vev/internal/protocol/wire";
 
 // MuxStreamRef identifies one logical stream multiplexed over one physical
 // daemon connection: the mux-local physical_stream_id asserted by the

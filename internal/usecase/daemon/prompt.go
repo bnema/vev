@@ -4,9 +4,9 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/bnema/vev/internal/domain"
-	promptui "github.com/bnema/vev/internal/usecase/prompt"
-	"github.com/bnema/vev/internal/usecase/ui"
+	"bnema.dev/vev/internal/domain"
+	promptui "bnema.dev/vev/internal/usecase/prompt"
+	"bnema.dev/vev/internal/usecase/ui"
 )
 
 func promptModalFor(title string) ui.Modal {

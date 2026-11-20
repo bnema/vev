@@ -3,9 +3,9 @@ package daemon
 import (
 	"fmt"
 
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
-	snapcodec "github.com/bnema/vev/internal/snapshotcodec"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/ports"
+	snapcodec "bnema.dev/vev/internal/snapshotcodec"
 )
 
 func acceptancePublication(snapshot snapcodec.Session) (ports.SnapshotPublication, error) {

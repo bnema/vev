@@ -1,8 +1,8 @@
 package client
 
 import (
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/protocol"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/internal/protocol"
 )
 
 // navigationState is the supervisor's run-goroutine navigation bookkeeping:

@@ -39,7 +39,7 @@ Remote and hybrid need vev installed on the remote host. Use `vev host add --tra
 ```sh
 curl -fsSL https://git.bnema.dev/vev/raw/main/install.sh | sh
 # Arch Linux: yay -S vev-bin
-# or: go install github.com/bnema/vev@latest
+# or: go install bnema.dev/vev@latest
 ```
 
 Releases support Linux x86_64/arm64 and macOS Apple silicon.

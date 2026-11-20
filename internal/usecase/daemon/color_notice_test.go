@@ -5,7 +5,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/domain/terminalcap"
+	"bnema.dev/vev/internal/domain/terminalcap"
 )
 
 func TestColorDowngradeNotice(t *testing.T) {

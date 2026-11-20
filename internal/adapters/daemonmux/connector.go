@@ -40,9 +40,9 @@ import (
 	"os/exec"
 	"sync"
 
-	"github.com/bnema/vev/internal/adapters/sshstdio"
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	"bnema.dev/vev/internal/adapters/sshstdio"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/ports"
 )
 
 // ErrConnectorConfig reports an endpoint connector constructed without a dial

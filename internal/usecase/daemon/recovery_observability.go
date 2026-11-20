@@ -1,6 +1,6 @@
 package daemon
 
-import "github.com/bnema/vev/internal/domain"
+import "bnema.dev/vev/internal/domain"
 
 func (d *Daemon) logSessionRestoreComplete(record domain.CatalogueRecord, generation uint64, fallback bool) {
 	d.log.Info("session_restore_complete",

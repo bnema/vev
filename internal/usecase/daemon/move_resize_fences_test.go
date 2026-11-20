@@ -8,7 +8,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/domain/layout"
+	"bnema.dev/vev/internal/domain/layout"
 )
 
 // requireMutexLocked waits until another goroutine holds mu. A goroutine

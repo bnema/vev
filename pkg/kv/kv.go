@@ -9,7 +9,7 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/bnema/vev/pkg/safedir"
+	"bnema.dev/vev/pkg/safedir"
 )
 
 // Store is an in-memory key/value map persisted by whole-file atomic rewrite.

@@ -14,7 +14,7 @@ import "picker.proto";
 import "session.proto";
 import "terminal.proto";
 
-option go_package = "github.com/bnema/vev/internal/protocol/wire";
+option go_package = "bnema.dev/vev/internal/protocol/wire";
 
 // ProtocolEpoch identifies the current wire epoch. Bumped only for an
 // intentional clean break; ALPN and version checks bind to it. The numeric

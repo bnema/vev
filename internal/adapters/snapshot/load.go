@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
-	codec "github.com/bnema/vev/internal/snapshotcodec"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/ports"
+	codec "bnema.dev/vev/internal/snapshotcodec"
 )
 
 var ErrInvalidHEAD = errors.New("invalid snapshot HEAD")

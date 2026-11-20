@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bnema/vev/internal/protocol/wire"
-	"github.com/bnema/vev/internal/testutil/replaytest"
+	"bnema.dev/vev/internal/protocol/wire"
+	"bnema.dev/vev/internal/testutil/replaytest"
 	"github.com/stretchr/testify/require"
 )
 

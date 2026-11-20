@@ -1,8 +1,8 @@
 package daemon
 
 import (
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/protocol"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/internal/protocol"
 )
 
 // clientGone detaches ac if it is still the session's current client. The

@@ -1,9 +1,9 @@
 package daemon
 
 import (
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/protocol"
-	themeui "github.com/bnema/vev/internal/usecase/theme"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/protocol"
+	themeui "bnema.dev/vev/internal/usecase/theme"
 )
 
 // ptyReader runs one pane reader for tests that register it with sessWg.Add

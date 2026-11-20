@@ -9,8 +9,8 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/bnema/vev/internal/domain"
-	codec "github.com/bnema/vev/internal/snapshotcodec"
+	"bnema.dev/vev/internal/domain"
+	codec "bnema.dev/vev/internal/snapshotcodec"
 )
 
 // real I/O: reads and writes real files in temp directories.

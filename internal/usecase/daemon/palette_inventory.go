@@ -1,8 +1,8 @@
 package daemon
 
 import (
-	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/usecase/palette"
+	"bnema.dev/vev/internal/protocol"
+	"bnema.dev/vev/internal/usecase/palette"
 )
 
 // This file owns the serving-daemon side of navigation inventory: demand

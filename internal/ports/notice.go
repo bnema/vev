@@ -1,6 +1,6 @@
 package ports
 
-import "github.com/bnema/vev/internal/domain"
+import "bnema.dev/vev/internal/domain"
 
 // NoticeStore persists undeliverable notices across daemon restarts.
 type NoticeStore interface {

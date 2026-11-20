@@ -7,7 +7,7 @@ import (
 	"os/exec"
 	"time"
 
-	"github.com/bnema/vev/internal/ports"
+	"bnema.dev/vev/internal/ports"
 )
 
 const osaReadTimeout = time.Second

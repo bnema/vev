@@ -5,8 +5,8 @@ import (
 	"os"
 	"testing"
 
-	"github.com/bnema/vev/internal/adapters/webterm"
-	"github.com/bnema/vev/internal/platform"
+	"bnema.dev/vev/internal/adapters/webterm"
+	"bnema.dev/vev/internal/platform"
 	"github.com/stretchr/testify/require"
 )
 

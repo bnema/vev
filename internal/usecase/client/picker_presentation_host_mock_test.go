@@ -5,7 +5,7 @@
 package client
 
 import (
-	"github.com/bnema/vev/internal/domain"
+	"bnema.dev/vev/internal/domain"
 	mock "github.com/stretchr/testify/mock"
 )
 

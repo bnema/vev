@@ -5,11 +5,11 @@ import (
 	"bytes"
 
 	renderer "bnema.dev/vev-vt/ansi"
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/domain/layout"
-	"github.com/bnema/vev/internal/domain/terminalcap"
-	"github.com/bnema/vev/internal/ports"
-	themeui "github.com/bnema/vev/internal/usecase/theme"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/domain/layout"
+	"bnema.dev/vev/internal/domain/terminalcap"
+	"bnema.dev/vev/internal/ports"
+	themeui "bnema.dev/vev/internal/usecase/theme"
 )
 
 // completedSynchronizedUpdate reports a full DEC 2026 batch contained in one

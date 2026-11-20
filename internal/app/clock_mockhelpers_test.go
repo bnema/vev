@@ -9,10 +9,10 @@ import (
 
 	"github.com/stretchr/testify/mock"
 
-	"github.com/bnema/vev/internal/adapters/clock"
-	"github.com/bnema/vev/internal/ports"
-	portsmocks "github.com/bnema/vev/internal/ports/mocks"
-	"github.com/bnema/vev/internal/usecase/daemon"
+	"bnema.dev/vev/internal/adapters/clock"
+	"bnema.dev/vev/internal/ports"
+	portsmocks "bnema.dev/vev/internal/ports/mocks"
+	"bnema.dev/vev/internal/usecase/daemon"
 )
 
 // sandboxClockState is the shared state behind one newSandboxClockMock: time

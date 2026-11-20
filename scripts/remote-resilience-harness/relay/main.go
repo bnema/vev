@@ -19,7 +19,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bnema/vev/internal/adapters/quicnettest"
+	"bnema.dev/vev/internal/adapters/quicnettest"
 )
 
 type command struct {

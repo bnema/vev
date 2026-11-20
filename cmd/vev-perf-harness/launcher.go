@@ -18,8 +18,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bnema/vev/pkg/rawterm"
-	"github.com/bnema/vev/pkg/safedir"
+	"bnema.dev/vev/pkg/rawterm"
+	"bnema.dev/vev/pkg/safedir"
 )
 
 type launchedProcess interface {

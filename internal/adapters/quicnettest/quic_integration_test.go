@@ -17,13 +17,13 @@ import (
 	"testing"
 	"time"
 
-	quicadapter "github.com/bnema/vev/internal/adapters/quic"
-	"github.com/bnema/vev/internal/adapters/quicnettest"
-	"github.com/bnema/vev/internal/adapters/sessionwire"
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
+	quicadapter "bnema.dev/vev/internal/adapters/quic"
+	"bnema.dev/vev/internal/adapters/quicnettest"
+	"bnema.dev/vev/internal/adapters/sessionwire"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/internal/protocol"
+	"bnema.dev/vev/internal/protocol/wire"
 )
 
 // These tests run the real internal/adapters/quic transport through the proxy

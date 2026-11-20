@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bnema/vev/internal/adapters/ipc"
-	"github.com/bnema/vev/internal/platform"
+	"bnema.dev/vev/internal/adapters/ipc"
+	"bnema.dev/vev/internal/platform"
 	"github.com/stretchr/testify/require"
 )
 

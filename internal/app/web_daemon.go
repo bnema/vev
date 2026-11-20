@@ -14,10 +14,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bnema/vev/internal/adapters/clock"
-	"github.com/bnema/vev/internal/adapters/webterm"
-	"github.com/bnema/vev/internal/logging"
-	"github.com/bnema/vev/internal/ports"
+	"bnema.dev/vev/internal/adapters/clock"
+	"bnema.dev/vev/internal/adapters/webterm"
+	"bnema.dev/vev/internal/logging"
+	"bnema.dev/vev/internal/ports"
 )
 
 const webStartupTimeout = 10 * time.Second

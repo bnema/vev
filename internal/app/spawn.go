@@ -13,12 +13,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bnema/vev/internal/adapters/daemonmux"
-	"github.com/bnema/vev/internal/adapters/ipc"
-	"github.com/bnema/vev/internal/adapters/lifecycle"
-	"github.com/bnema/vev/internal/platform"
-	"github.com/bnema/vev/internal/protocol/wire"
-	"github.com/bnema/vev/pkg/safedir"
+	"bnema.dev/vev/internal/adapters/daemonmux"
+	"bnema.dev/vev/internal/adapters/ipc"
+	"bnema.dev/vev/internal/adapters/lifecycle"
+	"bnema.dev/vev/internal/platform"
+	"bnema.dev/vev/internal/protocol/wire"
+	"bnema.dev/vev/pkg/safedir"
 )
 
 // ErrDaemonUnreachable is returned when the daemon socket never becomes

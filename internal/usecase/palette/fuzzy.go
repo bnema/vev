@@ -4,7 +4,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/bnema/vev/internal/usecase/fuzzy"
+	"bnema.dev/vev/internal/usecase/fuzzy"
 )
 
 // Match is a fuzzy-matched immutable palette result.

@@ -9,11 +9,11 @@ import (
 	vt "bnema.dev/vev-vt"
 	renderer "bnema.dev/vev-vt/ansi"
 	"bnema.dev/vev-vt/graphics"
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/domain/layout"
-	"github.com/bnema/vev/internal/domain/terminalcap"
-	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/domain/layout"
+	"bnema.dev/vev/internal/domain/terminalcap"
+	"bnema.dev/vev/internal/protocol"
+	"bnema.dev/vev/internal/protocol/wire"
 	"github.com/stretchr/testify/require"
 )
 

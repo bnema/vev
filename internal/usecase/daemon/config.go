@@ -9,11 +9,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/domain/terminalcap"
-	"github.com/bnema/vev/internal/usecase/command"
-	"github.com/bnema/vev/internal/usecase/keys"
-	"github.com/bnema/vev/internal/usecase/theme"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/domain/terminalcap"
+	"bnema.dev/vev/internal/usecase/command"
+	"bnema.dev/vev/internal/usecase/keys"
+	"bnema.dev/vev/internal/usecase/theme"
 )
 
 var commandCodePattern = regexp.MustCompile(`^[A-Z0-9]{2,3}$`)

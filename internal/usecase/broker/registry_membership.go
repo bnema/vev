@@ -7,8 +7,8 @@ import (
 	"slices"
 	"sort"
 
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/ports"
 )
 
 // AddHost adds or pins endpoint under policy. Duplicate same-policy additions

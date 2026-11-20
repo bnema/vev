@@ -8,7 +8,7 @@ syntax = "proto3";
 
 package vev.wire.v1;
 
-option go_package = "github.com/bnema/vev/internal/protocol/wire";
+option go_package = "bnema.dev/vev/internal/protocol/wire";
 
 // LifecycleID is the opaque 16-byte identity of one session lifecycle
 // (domain.SessionLifecycleID / domain.IncarnationID).

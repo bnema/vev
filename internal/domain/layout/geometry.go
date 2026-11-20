@@ -4,7 +4,7 @@ import (
 	"math"
 	"sort"
 
-	"github.com/bnema/vev/internal/domain"
+	"bnema.dev/vev/internal/domain"
 )
 
 // Solve returns deterministic pane placements for root inside area.

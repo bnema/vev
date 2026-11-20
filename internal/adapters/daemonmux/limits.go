@@ -21,7 +21,7 @@ package daemonmux
 import (
 	"errors"
 
-	"github.com/bnema/vev/internal/protocol/wire"
+	"bnema.dev/vev/internal/protocol/wire"
 )
 
 const (

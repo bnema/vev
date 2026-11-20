@@ -8,12 +8,12 @@ import (
 
 	vt "bnema.dev/vev-vt"
 	renderer "bnema.dev/vev-vt/ansi"
-	"github.com/bnema/vev/internal/adapters/ipc"
-	"github.com/bnema/vev/internal/adapters/sessionwire"
-	"github.com/bnema/vev/internal/adapters/sshstdio"
-	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
-	"github.com/bnema/vev/internal/testutil/replaytest"
+	"bnema.dev/vev/internal/adapters/ipc"
+	"bnema.dev/vev/internal/adapters/sessionwire"
+	"bnema.dev/vev/internal/adapters/sshstdio"
+	"bnema.dev/vev/internal/protocol"
+	"bnema.dev/vev/internal/protocol/wire"
+	"bnema.dev/vev/internal/testutil/replaytest"
 	"github.com/stretchr/testify/require"
 )
 

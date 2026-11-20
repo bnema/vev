@@ -6,9 +6,9 @@ import (
 	"errors"
 	"log/slog"
 
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/usecase/keys/kittykey"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/internal/protocol"
+	"bnema.dev/vev/internal/usecase/keys/kittykey"
 )
 
 // ctrlV is the byte a Ctrl+V keypress sends on the wire.

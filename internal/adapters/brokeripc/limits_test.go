@@ -16,12 +16,12 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/adapters/brokerwire"
-	"github.com/bnema/vev/internal/adapters/streamframe"
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/protocol/catalogue"
-	wiremocks "github.com/bnema/vev/internal/protocol/wire/mocks"
+	"bnema.dev/vev/internal/adapters/brokerwire"
+	"bnema.dev/vev/internal/adapters/streamframe"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/internal/protocol/catalogue"
+	wiremocks "bnema.dev/vev/internal/protocol/wire/mocks"
 )
 
 // TestSnapshotPartsLayoutRoundTrips proves the emitter produces exactly the

@@ -1,8 +1,8 @@
 package picker
 
 import (
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/usecase/ui"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/usecase/ui"
 )
 
 // This file owns the picker's presentation geometry. The serving daemon and the

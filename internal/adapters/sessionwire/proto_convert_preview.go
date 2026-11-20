@@ -14,9 +14,9 @@ import (
 	"errors"
 	"time"
 
-	"github.com/bnema/vev/internal/adapters/protoconv"
-	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
+	"bnema.dev/vev/internal/adapters/protoconv"
+	"bnema.dev/vev/internal/protocol"
+	"bnema.dev/vev/internal/protocol/wire"
 )
 
 // remotePreviewWatchToWire carries the watch interval as whole milliseconds.

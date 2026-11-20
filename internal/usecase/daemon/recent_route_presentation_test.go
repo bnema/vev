@@ -3,9 +3,9 @@ package daemon
 import (
 	"testing"
 
-	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/usecase/command"
-	"github.com/bnema/vev/internal/usecase/palette"
+	"bnema.dev/vev/internal/protocol"
+	"bnema.dev/vev/internal/usecase/command"
+	"bnema.dev/vev/internal/usecase/palette"
 	"github.com/stretchr/testify/require"
 )
 

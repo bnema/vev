@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	ansi "bnema.dev/vev-vt/ansi"
-	"github.com/bnema/vev/internal/domain/terminalcap"
+	"bnema.dev/vev/internal/domain/terminalcap"
 	"github.com/stretchr/testify/require"
 )
 

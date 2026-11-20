@@ -3,8 +3,8 @@ package sessionwire
 import (
 	"io"
 
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/protocol/wire"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/internal/protocol/wire"
 )
 
 // BrokerCodec translates a raw broker envelope stream into the typed session

@@ -3,7 +3,7 @@ package sshstdio
 import (
 	"strings"
 
-	"github.com/bnema/vev/internal/domain"
+	"bnema.dev/vev/internal/domain"
 )
 
 // ClassifyStderr maps captured ssh client stderr to a typed remote failure

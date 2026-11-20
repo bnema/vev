@@ -1,6 +1,6 @@
 package daemon
 
-import "github.com/bnema/vev/internal/protocol"
+import "bnema.dev/vev/internal/protocol"
 
 // Held modifiers.
 //

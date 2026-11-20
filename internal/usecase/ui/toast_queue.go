@@ -3,7 +3,7 @@ package ui
 import (
 	"time"
 
-	"github.com/bnema/vev/internal/domain"
+	"bnema.dev/vev/internal/domain"
 )
 
 // ToastQueueOptions bound one ToastQueue. Zero values select the defaults.

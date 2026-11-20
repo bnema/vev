@@ -15,11 +15,11 @@ package daemonmux
 // directly, so the two conversations stay independently evolvable.
 
 import (
-	"github.com/bnema/vev/internal/adapters/protoconv"
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
+	"bnema.dev/vev/internal/adapters/protoconv"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/internal/protocol"
+	"bnema.dev/vev/internal/protocol/wire"
 )
 
 // muxEnum8 maps shared narrowing failures to the local range sentinel.

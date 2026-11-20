@@ -1,6 +1,6 @@
 package layout
 
-import "github.com/bnema/vev/internal/domain"
+import "bnema.dev/vev/internal/domain"
 
 // Divider is the geometry of a single gap between two sibling panes in a Split
 // node. Dir mirrors the owning Split's Dir: Horizontal produces a

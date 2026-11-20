@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/bnema/vev/internal/domain"
+	"bnema.dev/vev/internal/domain"
 )
 
 // moveTopology is the private policy Interface consumed by moveTransaction.

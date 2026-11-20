@@ -4,10 +4,10 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/bnema/vev/internal/adapters/brokerconfig"
-	"github.com/bnema/vev/internal/adapters/daemonmux"
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/usecase/broker"
+	"bnema.dev/vev/internal/adapters/brokerconfig"
+	"bnema.dev/vev/internal/adapters/daemonmux"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/internal/usecase/broker"
 )
 
 // newLocalRouteProbe fences one broker-owned local binding into a probe over a

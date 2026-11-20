@@ -10,13 +10,13 @@ import (
 
 	renderer "bnema.dev/vev-vt"
 	ansirenderer "bnema.dev/vev-vt/ansi"
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/domain/layout"
-	"github.com/bnema/vev/internal/domain/terminalcap"
-	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/usecase/colorprofile"
-	themeui "github.com/bnema/vev/internal/usecase/theme"
-	"github.com/bnema/vev/internal/usecase/ui"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/domain/layout"
+	"bnema.dev/vev/internal/domain/terminalcap"
+	"bnema.dev/vev/internal/protocol"
+	"bnema.dev/vev/internal/usecase/colorprofile"
+	themeui "bnema.dev/vev/internal/usecase/theme"
+	"bnema.dev/vev/internal/usecase/ui"
 )
 
 var sgrSequence = regexp.MustCompile("\x1b\\[([0-9;:]*)m")

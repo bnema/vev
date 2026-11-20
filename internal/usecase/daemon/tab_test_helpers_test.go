@@ -3,8 +3,8 @@ package daemon
 import (
 	"context"
 
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/ports"
 )
 
 // newTestTabWithContext builds one tab wired to a caller-owned context, so a

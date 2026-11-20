@@ -11,7 +11,7 @@ import (
 
 	vt "bnema.dev/vev-vt"
 	renderer "bnema.dev/vev-vt/ansi"
-	"github.com/bnema/vev/internal/domain/layout"
+	"bnema.dev/vev/internal/domain/layout"
 )
 
 func TestPayloadReaderGetBytes(t *testing.T) {

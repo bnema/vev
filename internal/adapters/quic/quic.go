@@ -19,9 +19,9 @@ import (
 
 	quicgo "github.com/quic-go/quic-go"
 
-	"github.com/bnema/vev/internal/adapters/streamframe"
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/protocol/wire"
+	"bnema.dev/vev/internal/adapters/streamframe"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/internal/protocol/wire"
 )
 
 // alpn binds the QUIC handshake to the protocol epoch: only matched peers

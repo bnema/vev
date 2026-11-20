@@ -13,8 +13,8 @@ import (
 
 	quicgo "github.com/quic-go/quic-go"
 
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/protocol/wire"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/internal/protocol/wire"
 )
 
 // Dialer establishes one QUIC connection and opens its single bidirectional

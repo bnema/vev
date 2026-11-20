@@ -9,8 +9,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/usecase/agentactivity"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/usecase/agentactivity"
 )
 
 // startClaudeTurn identifies an idle claude in background tab 1, lets the

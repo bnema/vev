@@ -9,10 +9,10 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/protocol"
-	snapcodec "github.com/bnema/vev/internal/snapshotcodec"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/internal/protocol"
+	snapcodec "bnema.dev/vev/internal/snapshotcodec"
 )
 
 const catalogueRestoreConcurrency = 8

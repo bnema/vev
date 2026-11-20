@@ -3,7 +3,7 @@ package protocol
 import (
 	"math"
 
-	"github.com/bnema/vev/internal/domain"
+	"bnema.dev/vev/internal/domain"
 )
 
 // MaxWireScreenCells bounds every terminal size carried by the final wire

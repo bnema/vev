@@ -2,9 +2,9 @@ package daemon
 
 import (
 	renderer "bnema.dev/vev-vt"
-	"github.com/bnema/vev/internal/domain"
-	themeui "github.com/bnema/vev/internal/usecase/theme"
-	"github.com/bnema/vev/internal/usecase/ui"
+	"bnema.dev/vev/internal/domain"
+	themeui "bnema.dev/vev/internal/usecase/theme"
+	"bnema.dev/vev/internal/usecase/ui"
 )
 
 func composeModalClientFrame(base renderer.Frame, modal ui.Modal, styles themeui.Styles, renderInner func(domain.Size) renderer.Frame) (renderer.Frame, []renderer.Damage) {

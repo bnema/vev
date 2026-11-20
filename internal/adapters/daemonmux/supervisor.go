@@ -37,9 +37,9 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/bnema/vev/internal/adapters/clock"
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/protocol"
+	"bnema.dev/vev/internal/adapters/clock"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/internal/protocol"
 )
 
 // Server supervisor sentinels. They are typed so a caller can classify a

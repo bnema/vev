@@ -3,9 +3,9 @@ package daemon
 import (
 	"errors"
 
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/domain/layout"
-	"github.com/bnema/vev/internal/protocol"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/domain/layout"
+	"bnema.dev/vev/internal/protocol"
 )
 
 // moveRejectionReason is the daemon API category for a rejected move. It keeps

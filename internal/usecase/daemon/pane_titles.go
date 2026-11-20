@@ -4,7 +4,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bnema/vev/internal/domain/layout"
+	"bnema.dev/vev/internal/domain/layout"
 )
 
 const paneTitleCacheTTL = time.Second

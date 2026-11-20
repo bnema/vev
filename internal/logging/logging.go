@@ -9,7 +9,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/bnema/vev/pkg/safedir"
+	"bnema.dev/vev/pkg/safedir"
 )
 
 type Component string

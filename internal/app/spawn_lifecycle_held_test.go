@@ -8,8 +8,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/adapters/lifecycle"
-	"github.com/bnema/vev/pkg/safedir"
+	"bnema.dev/vev/internal/adapters/lifecycle"
+	"bnema.dev/vev/pkg/safedir"
 )
 
 // real I/O: real flock lifecycle locks.

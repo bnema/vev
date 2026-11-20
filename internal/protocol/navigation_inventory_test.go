@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bnema/vev/internal/domain"
+	"bnema.dev/vev/internal/domain"
 )
 
 func TestValidateNavigationInventoryRequest(t *testing.T) {

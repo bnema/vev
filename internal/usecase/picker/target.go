@@ -1,6 +1,6 @@
 package picker
 
-import "github.com/bnema/vev/internal/domain"
+import "bnema.dev/vev/internal/domain"
 
 // Target is the resolved navigation destination behind one opaque picker key.
 // It stays source-private: only the owning daemon resolves keys to targets and

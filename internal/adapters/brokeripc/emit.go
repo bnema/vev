@@ -3,9 +3,9 @@ package brokeripc
 import (
 	"errors"
 
-	"github.com/bnema/vev/internal/adapters/brokerwire"
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/protocol/catalogue"
+	"bnema.dev/vev/internal/adapters/brokerwire"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/internal/protocol/catalogue"
 )
 
 // Snapshot publication.

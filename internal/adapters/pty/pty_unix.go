@@ -17,10 +17,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/platform"
-	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/pkg/rawterm"
+	"bnema.dev/vev/internal/domain"
+	"bnema.dev/vev/internal/platform"
+	"bnema.dev/vev/internal/ports"
+	"bnema.dev/vev/pkg/rawterm"
 )
 
 // killGracePeriod is how long Close waits for a signalled child to exit before

@@ -3,7 +3,7 @@ package domain
 import (
 	"time"
 
-	"github.com/bnema/vev/internal/domain/terminalcap"
+	"bnema.dev/vev/internal/domain/terminalcap"
 )
 
 // MinBarInterval is the minimum supported bar refresh interval.

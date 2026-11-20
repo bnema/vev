@@ -3,7 +3,7 @@ package protocol
 import (
 	"unicode/utf8"
 
-	"github.com/bnema/vev/internal/domain"
+	"bnema.dev/vev/internal/domain"
 )
 
 // Navigation inventory bounds. These are export limits for UI listings, not

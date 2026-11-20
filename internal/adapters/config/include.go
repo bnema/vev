@@ -13,8 +13,8 @@ import (
 	"strings"
 	"sync"
 
+	"bnema.dev/vev/internal/domain"
 	"github.com/bnema/kvconf"
-	"github.com/bnema/vev/internal/domain"
 )
 
 const maxIncludes = 16

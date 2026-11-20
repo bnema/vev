@@ -8,7 +8,7 @@ import (
 
 	vt "bnema.dev/vev-vt"
 
-	"github.com/bnema/vev/internal/domain"
+	"bnema.dev/vev/internal/domain"
 )
 
 func TestParseAgentsSpinner(t *testing.T) {

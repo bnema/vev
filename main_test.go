@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/bnema/vev/internal/app"
+	"bnema.dev/vev/internal/app"
 )
 
 func TestCLIError(t *testing.T) {

@@ -1,7 +1,7 @@
 package daemon
 
 import (
-	"github.com/bnema/vev/internal/domain"
+	"bnema.dev/vev/internal/domain"
 )
 
 // sessionHasKittyGraphics reports whether a session currently contains any

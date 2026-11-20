@@ -4,7 +4,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/bnema/vev/internal/ports"
+	"bnema.dev/vev/internal/ports"
 	"github.com/stretchr/testify/require"
 )
 

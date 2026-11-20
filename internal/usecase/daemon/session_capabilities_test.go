@@ -4,9 +4,9 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/bnema/vev/internal/protocol"
+	"bnema.dev/vev/internal/protocol"
 
-	"github.com/bnema/vev/internal/domain"
+	"bnema.dev/vev/internal/domain"
 )
 
 func TestCapabilitiesZeroValueIsFullyCapable(t *testing.T) {

@@ -9,9 +9,9 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/domain"
-	portsmocks "github.com/bnema/vev/internal/ports/mocks"
-	"github.com/bnema/vev/pkg/safedir"
+	"bnema.dev/vev/internal/domain"
+	portsmocks "bnema.dev/vev/internal/ports/mocks"
+	"bnema.dev/vev/pkg/safedir"
 )
 
 func privateDir(t *testing.T) string { t.Helper(); return filepath.Join(t.TempDir(), "vev") }

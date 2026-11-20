@@ -50,7 +50,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/bnema/vev/internal/protocol/wire"
+	"bnema.dev/vev/internal/protocol/wire"
 )
 
 const (

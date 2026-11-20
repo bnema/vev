@@ -8,7 +8,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/usecase/agentactivity"
+	"bnema.dev/vev/internal/usecase/agentactivity"
 )
 
 // openClientPickerForTest marks ac's picker as client-owned and open, as an

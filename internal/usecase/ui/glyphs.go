@@ -1,6 +1,6 @@
 package ui
 
-import "github.com/bnema/vev/internal/domain"
+import "bnema.dev/vev/internal/domain"
 
 // AttentionGlyph is the Nerd Font bell (nf-fa-bell) drawn beside tab/session
 // labels with a pending attention event.

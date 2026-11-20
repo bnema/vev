@@ -11,8 +11,8 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/ports"
-	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"bnema.dev/vev/internal/ports"
+	portsmocks "bnema.dev/vev/internal/ports/mocks"
 )
 
 type routerClockState struct{ timers []*routerTimerState }
@@ -632,7 +632,7 @@ func TestRouterCancelsPendingESCWaiterWhenNextReadConsumesESC(t *testing.T) {
 func retainESCWaiters() int {
 	buf := make([]byte, 1<<20)
 	n := runtime.Stack(buf, true)
-	return strings.Count(string(buf[:n]), "github.com/bnema/vev/internal/usecase/keys.(*Router).retainESC.func1")
+	return strings.Count(string(buf[:n]), "bnema.dev/vev/internal/usecase/keys.(*Router).retainESC.func1")
 }
 
 func TestRouterFlushesLoneESCAfterTimer(t *testing.T) {

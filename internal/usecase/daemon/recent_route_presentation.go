@@ -1,6 +1,6 @@
 package daemon
 
-import "github.com/bnema/vev/internal/domain"
+import "bnema.dev/vev/internal/domain"
 
 // recentRouteKind identifies the origin represented by a presentation value.
 // It is intentionally daemon-local in this layer; ports route kinds are
