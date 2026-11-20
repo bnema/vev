@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Emit Kitty graphics like zut does (a=T,f=100,C=1 with only c= or r=)."""
+"""Emit Kitty graphics like agent TUIs do (a=T,f=100,C=1 with only c= or r=)."""
 import base64, io, os, sys
 from PIL import Image, ImageDraw
 
