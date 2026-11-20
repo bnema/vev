@@ -537,14 +537,6 @@ func graphicsSnapshotRecordsForSourceShifted(snapshot *graphics.Snapshot, source
 	return assets, placements
 }
 
-func addGraphicsOutputPlacement(dst map[string]graphicsOutputPlacement, generation uint64, assetKeys map[string]string, placementID, assetID string, source, destination graphics.PixelRect, cells graphics.CellRect, layer int64) {
-	addGraphicsOutputPlacementForSource(dst, "", 0, generation, assetKeys, placementID, assetID, source, destination, cells, layer)
-}
-
-func addGraphicsOutputPlacementForSource(dst map[string]graphicsOutputPlacement, source string, order int, generation uint64, assetKeys map[string]string, placementID, assetID string, sourceRect, destination graphics.PixelRect, cells graphics.CellRect, layer int64) {
-	addGraphicsOutputPlacementForSourceOrdered(dst, source, 0, order, generation, assetKeys, placementID, assetID, sourceRect, destination, cells, layer, graphicsCellAxes{})
-}
-
 func addGraphicsOutputPlacementForSourceOrdered(dst map[string]graphicsOutputPlacement, source string, paneOrder, order int, generation uint64, assetKeys map[string]string, placementID, assetID string, sourceRect, destination graphics.PixelRect, cells graphics.CellRect, layer int64, axes graphicsCellAxes) {
 	assetKey := assetKeys[assetID]
 	if assetKey == "" {
@@ -553,13 +545,21 @@ func addGraphicsOutputPlacementForSourceOrdered(dst map[string]graphicsOutputPla
 	key := graphicsPlacementKeyPartsForSourceOrdered(source, paneOrder, order, generation, placementID, assetKey, sourceRect, destination, cells, layer)
 	if axes != (graphicsCellAxes{}) {
 		// A changed axis set changes the relayed record, so it must re-place.
-		key += fmt.Sprintf(":c%t:r%t", axes.columns, axes.rows)
+		key += graphicsCellAxesKeySuffix(axes)
 	}
 	dst[key] = graphicsOutputPlacement{asset: assetKey, source: sourceRect, dest: destination, cells: cells, layer: layer, axes: axes}
 }
 
-func graphicsAssetKey(generation uint64, asset graphics.AssetView) string {
-	return graphicsAssetKeyForSource("", generation, asset)
+// graphicsCellAxesKeySuffix names a non-zero axis set without formatting.
+func graphicsCellAxesKeySuffix(axes graphicsCellAxes) string {
+	switch {
+	case axes.columns && axes.rows:
+		return ":ctrue:rtrue"
+	case axes.columns:
+		return ":ctrue:rfalse"
+	default:
+		return ":cfalse:rtrue"
+	}
 }
 
 func graphicsAssetKeyForSource(source string, generation uint64, asset graphics.AssetView) string {
@@ -568,18 +568,6 @@ func graphicsAssetKeyForSource(source string, generation uint64, asset graphics.
 		return fmt.Sprintf("g%d:%s:%d:%d:%x", generation, asset.ID().String(), asset.Width(), asset.Height(), digest)
 	}
 	return fmt.Sprintf("s:%s:g%d:%s:%d:%d:%x", source, generation, asset.ID().String(), asset.Width(), asset.Height(), digest)
-}
-
-func graphicsPlacementKey(generation uint64, placement graphics.PlacementView, assetKey string) string {
-	return graphicsPlacementKeyParts(generation, placement.ID().String(), assetKey, placement.Source(), placement.Destination(), placement.Cells(), placement.Layer())
-}
-
-func graphicsPlacementKeyParts(generation uint64, placementID, assetKey string, source, dest graphics.PixelRect, cells graphics.CellRect, layer int64) string {
-	return graphicsPlacementKeyPartsForSource("", 0, generation, placementID, assetKey, source, dest, cells, layer)
-}
-
-func graphicsPlacementKeyPartsForSource(source string, order int, generation uint64, placementID, assetKey string, sourceRect, dest graphics.PixelRect, cells graphics.CellRect, layer int64) string {
-	return graphicsPlacementKeyPartsForSourceOrdered(source, 0, order, generation, placementID, assetKey, sourceRect, dest, cells, layer)
 }
 
 func graphicsPlacementKeyPartsForSourceOrdered(source string, paneOrder, order int, generation uint64, placementID, assetKey string, sourceRect, dest graphics.PixelRect, cells graphics.CellRect, layer int64) string {
@@ -743,10 +731,6 @@ func uploadRecord(id uint64, asset graphics.AssetView) []byte {
 	return out
 }
 
-func placementRecord(assetID uint64, placement graphicsOutputPlacement) []byte {
-	return placementRecordWithTransform(assetID, placement, graphicsOutputTransform{})
-}
-
 func placementRecordWithTransform(assetID uint64, placement graphicsOutputPlacement, transform graphicsOutputTransform) []byte {
 	column, row, offsetX, offsetY, cells := transformedGraphicsPlacement(placement, transform)
 	header := "a=p,i=" + strconv.FormatUint(assetID, 10) + ",p=" + strconv.FormatUint(placement.id, 10)
@@ -839,10 +823,6 @@ func (s *graphicsOutputState) cleanup() {
 	s.pendingPlaces = make(map[uint64]struct{})
 	s.transform = graphicsOutputTransform{}
 	s.transformSet = false
-}
-
-func graphicsOutputViewport(content domain.Rect, geometry domain.Geometry) (graphics.Viewport, bool) {
-	return graphicsOutputViewportRect(domain.Rect{Width: content.Width, Height: content.Height}, geometry)
 }
 
 func graphicsOutputViewportRect(content domain.Rect, geometry domain.Geometry) (graphics.Viewport, bool) {
