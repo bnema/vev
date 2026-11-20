@@ -1,5 +1,5 @@
-bnema.dev/vev-vt v0.8.0 h1:oR2+/usCoDOPU5UmEQTduW8dK2lmgSEEDzCkiJIRDVE=
-bnema.dev/vev-vt v0.8.0/go.mod h1:a9xnau1VanTbXsr1CoBacJ+HwoLqVh7sgdQUbIfwlYU=
+bnema.dev/vev-vt v0.9.0 h1:t2S6VuDZbjFKGMGnotEw+sD+Xz4ii3Px6xa7EBsL3Mg=
+bnema.dev/vev-vt v0.9.0/go.mod h1:93TGgfdoWAIi0PRNuM6S9Lmz0Og0i1J/IR9qYEtHmHQ=
 buf.build/gen/go/bufbuild/bufplugin/protocolbuffers/go v1.36.12-20261002170247-538130002972.2 h1:nNNsSGs3l9F8q4NfHaIa8RdGfucw957dlFuNf9Z3H/w=
 buf.build/gen/go/bufbuild/bufplugin/protocolbuffers/go v1.36.12-20261002170247-538130002972.2/go.mod h1:Owcuj2phVyvThVYCD74iSV8ki0dAXw/uxkdcdZScdCc=
 buf.build/gen/go/bufbuild/protodescriptor/protocolbuffers/go v1.36.12-20261012172039-ff528c23443f.2 h1:V79UG2jSfa0l9sH7leKvETpJZZriK6t+WGm4P17l/Hw=
