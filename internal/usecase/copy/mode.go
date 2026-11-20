@@ -11,6 +11,7 @@ import (
 
 	vt "bnema.dev/vev-vt"
 	renderer "bnema.dev/vev-vt/ansi"
+	"bnema.dev/vev-vt/graphics"
 )
 
 const OSC52MaxPayloadBytes = 75_000
@@ -23,6 +24,7 @@ type Snapshot struct {
 	screen        renderer.Frame
 	screenBounds  []vt.LineBound
 	screenRowIDs  []vt.RowID
+	graphics      *graphics.Snapshot
 	Width, Height int
 }
 
@@ -39,8 +41,14 @@ func NewSnapshotFromScreen(historySource *vt.History, screen *vt.Screen) Snapsho
 	if screen == nil {
 		return NewSnapshot(historySource, renderer.Frame{}, nil, nil)
 	}
-	return newSnapshot(historySource, screen, screen.LineBounds(), screen.RowIDs())
+	snapshot := newSnapshot(historySource, screen, screen.LineBounds(), screen.RowIDs())
+	snapshot.graphics = screen.GraphicsSnapshot()
+	return snapshot
 }
+
+// Graphics returns the immutable graphics scene frozen with the screen, or nil
+// when the snapshot was not captured from a screen.
+func (s Snapshot) Graphics() *graphics.Snapshot { return s.graphics }
 
 func newSnapshot(historySource *vt.History, screen vt.CellSource, bounds []vt.LineBound, screenRowIDs []vt.RowID) Snapshot {
 	owned := renderer.NewFrame(screen.Columns(), screen.Rows())

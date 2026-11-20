@@ -16,6 +16,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/domain/layout"
 	"github.com/bnema/vev/internal/protocol"
+	scopy "github.com/bnema/vev/internal/usecase/copy"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 )
 
@@ -429,6 +430,13 @@ func graphicsSnapshotRecordsForSource(snapshot *graphics.Snapshot, source string
 }
 
 func graphicsSnapshotRecordsForSourceOrdered(snapshot *graphics.Snapshot, source string, paneOrder int, viewports ...graphics.Viewport) (map[string]graphics.AssetView, map[string]graphicsOutputPlacement) {
+	return graphicsSnapshotRecordsForSourceShifted(snapshot, source, paneOrder, 0, viewports...)
+}
+
+// graphicsSnapshotRecordsForSourceShifted adds destShiftY pixels to every
+// visible fragment destination before keying it. Copy mode uses it to move a
+// frozen scene by the scrolled row count.
+func graphicsSnapshotRecordsForSourceShifted(snapshot *graphics.Snapshot, source string, paneOrder int, destShiftY int64, viewports ...graphics.Viewport) (map[string]graphics.AssetView, map[string]graphicsOutputPlacement) {
 	assets := make(map[string]graphics.AssetView)
 	placements := make(map[string]graphicsOutputPlacement)
 	if snapshot == nil {
@@ -470,14 +478,18 @@ func graphicsSnapshotRecordsForSourceOrdered(snapshot *graphics.Snapshot, source
 				if !ok {
 					continue
 				}
-				if placement.Cells().Valid() && !placement.Cells().Empty() {
+				if viewport.Cells.Valid() && !viewport.Cells.Empty() && placement.Cells().Valid() && !placement.Cells().Empty() {
+					// Cell-bearing viewports clip cell-bearing placements in cell
+					// space. A pixel-only viewport keeps the pixel fragment.
 					fragment, ok = cellFragments[fragment.PlacementID.String()]
 					if !ok {
 						continue
 					}
 				}
 				order := placementOrders[fragment.PlacementID.String()]
-				addGraphicsOutputPlacementForSourceOrdered(placements, source, paneOrder, order, generation, assetKeys, fragment.PlacementID.String(), fragment.AssetID.String(), fragment.Source, fragment.Destination, fragment.Cells, placement.Layer())
+				destination := fragment.Destination
+				destination.Y += destShiftY
+				addGraphicsOutputPlacementForSourceOrdered(placements, source, paneOrder, order, generation, assetKeys, fragment.PlacementID.String(), fragment.AssetID.String(), fragment.Source, destination, fragment.Cells, placement.Layer())
 			}
 			continue
 		}
@@ -490,7 +502,9 @@ func graphicsSnapshotRecordsForSourceOrdered(snapshot *graphics.Snapshot, source
 				continue
 			}
 			order := placementOrders[fragment.PlacementID.String()]
-			addGraphicsOutputPlacementForSourceOrdered(placements, source, paneOrder, order, generation, assetKeys, fragment.PlacementID.String(), fragment.AssetID.String(), fragment.Source, fragment.Destination, fragment.Cells, placement.Layer())
+			destination := fragment.Destination
+			destination.Y += destShiftY
+			addGraphicsOutputPlacementForSourceOrdered(placements, source, paneOrder, order, generation, assetKeys, fragment.PlacementID.String(), fragment.AssetID.String(), fragment.Source, destination, fragment.Cells, placement.Layer())
 		}
 	}
 	// A viewport is an attachment-local visibility boundary. Do not upload
@@ -988,14 +1002,18 @@ func composedGraphicsRecords(state *capturedRenderState) (map[string]graphics.As
 	// fragments are temporarily removed. Modal overlays suppress the complete
 	// scene; compact notices and floating panes contribute exact coverage
 	// rectangles without mutating their source panes.
-	if state.overlays.active() {
+	if state.overlays.suppressesGraphics() {
 		return assets, placements
 	}
+	copyFloating, copyTiled, copyActive := graphicsCopyTarget(state)
 	coverage := graphicsOpaqueCoverage(state)
 	outerContent, hasOuterContent := graphicsOuterContentRect(state)
 
 	for index, pane := range state.panes {
-		if pane.graphics == nil || pane.placement.Collapsed || pane.placement.Content.Width <= 0 || pane.placement.Content.Height <= 0 {
+		// The copy target projects its frozen scene, which can outlive a live
+		// scene whose placements were all deleted during copy mode.
+		copyTarget := copyActive && !copyFloating && pane.id == copyTiled
+		if (pane.graphics == nil && !copyTarget) || pane.placement.Collapsed || pane.placement.Content.Width <= 0 || pane.placement.Content.Height <= 0 {
 			continue
 		}
 		var viewports []graphics.Viewport
@@ -1009,11 +1027,17 @@ func composedGraphicsRecords(state *capturedRenderState) (map[string]graphics.As
 		}
 		transform := graphicsOutputTransform{originX: pane.placement.Content.X, originY: pane.placement.Content.Y + 1, sourceGeometry: pane.graphicsGeometry}
 		source := graphicsSourceKey(state, pane.id, pane.stableID, false)
-		paneAssets, panePlacements := graphicsSnapshotRecordsForSourceOrdered(pane.graphics, source, index, viewports...)
+		var paneAssets map[string]graphics.AssetView
+		var panePlacements map[string]graphicsOutputPlacement
+		if copyTarget {
+			paneAssets, panePlacements = copyModeGraphicsRecords(state.overlays.copyMode, pane.graphicsGeometry, source, index, viewports)
+		} else {
+			paneAssets, panePlacements = graphicsSnapshotRecordsForSourceOrdered(pane.graphics, source, index, viewports...)
+		}
 		mergeGraphicsRecords(assets, placements, paneAssets, panePlacements, transform)
 	}
 
-	if state.floating.visible && state.floating.pane.graphics != nil && state.floating.geometry.Inner.Width > 0 && state.floating.geometry.Inner.Height > 0 {
+	if state.floating.visible && (state.floating.pane.graphics != nil || (copyActive && copyFloating)) && state.floating.geometry.Inner.Width > 0 && state.floating.geometry.Inner.Height > 0 {
 		inner := state.floating.geometry.Inner
 		var viewports []graphics.Viewport
 		if hasOuterContent {
@@ -1024,11 +1048,71 @@ func composedGraphicsRecords(state *capturedRenderState) (map[string]graphics.As
 		if len(viewports) != 0 {
 			transform := graphicsOutputTransform{originX: inner.X, originY: inner.Y + 1, sourceGeometry: state.floating.pane.graphicsGeometry}
 			source := graphicsSourceKey(state, state.floating.pane.id, state.floating.pane.stableID, true)
-			paneAssets, panePlacements := graphicsSnapshotRecordsForSourceOrdered(state.floating.pane.graphics, source, len(state.panes), viewports...)
+			var paneAssets map[string]graphics.AssetView
+			var panePlacements map[string]graphicsOutputPlacement
+			if copyActive && copyFloating {
+				paneAssets, panePlacements = copyModeGraphicsRecords(state.overlays.copyMode, state.floating.pane.graphicsGeometry, source, len(state.panes), viewports)
+			} else {
+				paneAssets, panePlacements = graphicsSnapshotRecordsForSourceOrdered(state.floating.pane.graphics, source, len(state.panes), viewports...)
+			}
 			mergeGraphicsRecords(assets, placements, paneAssets, panePlacements, transform)
 		}
 	}
 	return assets, placements
+}
+
+// graphicsCopyTarget resolves the copy-mode pane with the same rule as
+// capturedCopyTarget: a visible floating pane wins when it matches, otherwise
+// the named (or focused) tiled pane.
+func graphicsCopyTarget(state *capturedRenderState) (floating bool, tiled layout.PaneID, active bool) {
+	o := state.overlays
+	if !o.copyActive {
+		return false, "", false
+	}
+	if state.floating.visible && state.floating.geometry.Inner.Width > 0 && (o.copyPaneID == "" || o.copyPaneID == state.floating.pane.id) {
+		return true, "", true
+	}
+	id := o.copyPaneID
+	if id == "" {
+		id = state.layout.focus
+	}
+	return false, id, true
+}
+
+// copyModeGraphicsRecords projects the graphics scene frozen with the copy
+// document. The copy view shows live-screen row r at r+shift, where shift is
+// the history length minus the viewport top. Clipping happens in pixel space
+// only, because placement cell rectangles carry no position.
+func copyModeGraphicsRecords(mode *scopy.Mode, geometry domain.Geometry, source string, paneOrder int, viewports []graphics.Viewport) (map[string]graphics.AssetView, map[string]graphicsOutputPlacement) {
+	empty := func() (map[string]graphics.AssetView, map[string]graphicsOutputPlacement) {
+		return map[string]graphics.AssetView{}, map[string]graphicsOutputPlacement{}
+	}
+	if mode == nil || mode.Document() == nil {
+		return empty()
+	}
+	doc := mode.Document()
+	snapshot := doc.Graphics()
+	if snapshot == nil || !geometry.PixelsKnown() || geometry.Cols <= 0 || geometry.Rows <= 0 {
+		return empty()
+	}
+	cellHeight := int64(geometry.PixelHeight / geometry.Rows)
+	if cellHeight <= 0 || geometry.PixelWidth/geometry.Cols <= 0 {
+		return empty()
+	}
+	shift := int64(doc.Len()-doc.Height()-mode.ViewportTop) * cellHeight
+	shifted := make([]graphics.Viewport, 0, len(viewports))
+	for _, viewport := range viewports {
+		if !viewport.Pixels.Valid() || viewport.Pixels.Empty() {
+			continue
+		}
+		pixels := viewport.Pixels
+		pixels.Y -= shift
+		shifted = append(shifted, graphics.Viewport{Pixels: pixels})
+	}
+	if len(shifted) == 0 {
+		return empty()
+	}
+	return graphicsSnapshotRecordsForSourceShifted(snapshot, source, paneOrder, shift, shifted...)
 }
 
 func graphicsSourceKey(state *capturedRenderState, paneID layout.PaneID, stableID domain.PaneStableID, floating bool) string {

@@ -19,6 +19,7 @@ import (
 	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
+	scopy "github.com/bnema/vev/internal/usecase/copy"
 )
 
 func attachmentOutputWithGraphics(state *graphicsOutputState) *attachmentOutput {
@@ -944,12 +945,12 @@ func TestGraphicsOutputOverlayDismissalHidesAndRestoresImmutableSnapshots(t *tes
 	require.NoError(t, err)
 	first.commit()
 
-	state.overlays.copyActive = true
+	state.overlays.paletteActive = true
 	hidden, err := graphicsOutputData(state, ac, true)
 	require.NoError(t, err)
 	require.Contains(t, string(hidden.data), "a=d,d=p,p=")
 	hidden.commit()
-	state.overlays.copyActive = false
+	state.overlays.paletteActive = false
 	restored, err := graphicsOutputData(state, ac, false)
 	require.NoError(t, err)
 	require.Contains(t, string(restored.data), "a=t,i=")
@@ -1013,4 +1014,201 @@ func TestGraphicsOutputViewportProjectionDropsUnplacedAssets(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, prepared.state.assets, 1, "viewport projection must not upload an unplaced retained image")
 	require.Len(t, prepared.state.placements, 1)
+}
+
+// copyGraphicsTestScreen returns a 4x4 screen with 10x20 pixel cells holding
+// one 2x2-cell image placed on rows 2..3, then scrolled up by scrolls rows.
+func copyGraphicsTestScreen(t *testing.T, scrolls int) *vt.Screen {
+	t.Helper()
+	screen := vt.NewScreenWithHistory(4, 4, vt.HistoryConfig{MaxRows: 64, MaxBytes: 1 << 20, ChunkRows: 4})
+	screen.SetGeometry(vt.Geometry{Cols: 4, Rows: 4, PixelWidth: 40, PixelHeight: 80})
+	screen.Write([]byte("\x1b[3;1H\x1b_Ga=T,f=24,s=1,v=1,c=2,r=2,C=1;AAAA\x1b\\\x1b[4;1H" + strings.Repeat("\n", scrolls)))
+	require.Equal(t, scrolls, screen.History().Len())
+	return screen
+}
+
+func copyGraphicsTestState(screen *vt.Screen, mode *scopy.Mode) *capturedRenderState {
+	state := graphicsPaneTestState("tab-a", capturedPaneRenderState{
+		id:               "pane",
+		graphics:         screen.GraphicsSnapshot(),
+		graphicsGeometry: domain.Geometry{Size: domain.Size{Cols: 4, Rows: 4}, PixelWidth: 40, PixelHeight: 80},
+		placement:        layout.Placement{ID: "pane", Content: domain.Rect{Width: 4, Height: 4}},
+	})
+	state.layout.focus = "pane"
+	if mode != nil {
+		state.overlays.copyActive = true
+		state.overlays.copyMode = mode
+	}
+	return state
+}
+
+func copyGraphicsTestMode(screen *vt.Screen, viewportTop int) *scopy.Mode {
+	mode := scopy.NewMode(scopy.NewDocument(scopy.NewSnapshotFromScreen(screen.History(), screen), ""))
+	mode.ViewportTop = viewportTop
+	return mode
+}
+
+func copyGraphicsDestinations(state *capturedRenderState) []graphics.PixelRect {
+	_, placements := composedGraphicsRecords(state)
+	destinations := make([]graphics.PixelRect, 0, len(placements))
+	for _, placement := range placements {
+		destinations = append(destinations, placement.dest)
+	}
+	return destinations
+}
+
+func TestGraphicsOutputCopyModeProjectsFrozenScene(t *testing.T) {
+	tests := []struct {
+		name        string
+		scrolls     int
+		viewportTop int
+		outerRows   int
+		mutate      func(*vt.Screen)
+		floating    bool
+		want        []graphics.PixelRect
+	}{
+		{
+			name:        "live placements deleted after entry keep frozen image",
+			scrolls:     2,
+			viewportTop: 2,
+			mutate:      func(screen *vt.Screen) { screen.Write([]byte("\x1b_Ga=d,d=A\x1b\\")) },
+			want:        []graphics.PixelRect{{X: 0, Y: 0, Width: 20, Height: 40}},
+		},
+		{
+			name:        "floating copy target projects frozen scene",
+			scrolls:     2,
+			viewportTop: 1,
+			floating:    true,
+			want:        []graphics.PixelRect{{X: 0, Y: 20, Width: 20, Height: 40}},
+		},
+		{
+			name:        "bottom matches live placement",
+			scrolls:     2,
+			viewportTop: 2,
+			want:        []graphics.PixelRect{{X: 0, Y: 0, Width: 20, Height: 40}},
+		},
+		{
+			name:        "scrolled up moves image down and clips at pane bottom",
+			scrolls:     2,
+			viewportTop: 1,
+			outerRows:   2,
+			want:        []graphics.PixelRect{{X: 0, Y: 20, Width: 20, Height: 20}},
+		},
+		{
+			name:        "image fully in scrollback is hidden at bottom",
+			scrolls:     4,
+			viewportTop: 4,
+			want:        []graphics.PixelRect{},
+		},
+		{
+			name:        "image fully in scrollback shows when scrolled to",
+			scrolls:     4,
+			viewportTop: 1,
+			want:        []graphics.PixelRect{{X: 0, Y: 20, Width: 20, Height: 40}},
+		},
+		{
+			name:        "placements added or moved after entry stay hidden",
+			scrolls:     2,
+			viewportTop: 2,
+			mutate: func(screen *vt.Screen) {
+				screen.Write([]byte("\x1b[1;3H\x1b_Ga=T,f=24,s=1,v=1,c=1,r=1,C=1;AAAA\x1b\\\x1b[4;1H\n"))
+			},
+			want: []graphics.PixelRect{{X: 0, Y: 0, Width: 20, Height: 40}},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			screen := copyGraphicsTestScreen(t, test.scrolls)
+			mode := copyGraphicsTestMode(screen, test.viewportTop)
+			if test.mutate != nil {
+				test.mutate(screen)
+			}
+			state := copyGraphicsTestState(screen, mode)
+			if test.outerRows != 0 {
+				state.layout.area = domain.Rect{Width: 4, Height: test.outerRows}
+			}
+			if test.floating {
+				floatingPane := state.panes[0]
+				floatingPane.id = "float"
+				state.panes = nil
+				state.overlays.copyPaneID = "float"
+				state.floating = capturedFloatingRenderState{
+					visible:  true,
+					pane:     floatingPane,
+					geometry: floatingGeometry{Bounds: domain.Rect{Width: 6, Height: 6}, Inner: domain.Rect{X: 1, Y: 1, Width: 4, Height: 4}},
+				}
+			}
+			require.ElementsMatch(t, test.want, copyGraphicsDestinations(state))
+		})
+	}
+}
+
+func TestGraphicsOutputCopyModeAtBottomMatchesLiveProjection(t *testing.T) {
+	screen := copyGraphicsTestScreen(t, 2)
+	live := copyGraphicsTestState(screen, nil)
+	copied := copyGraphicsTestState(screen, copyGraphicsTestMode(screen, 2))
+	_, livePlacements := composedGraphicsRecords(live)
+	_, copyPlacements := composedGraphicsRecords(copied)
+	require.Len(t, livePlacements, 1)
+	require.Equal(t, livePlacements, copyPlacements, "keys and records must match the live projection")
+
+	scrolled := copyGraphicsTestState(screen, copyGraphicsTestMode(screen, 1))
+	scrolled.layout.area = domain.Rect{Width: 4, Height: 2}
+	prepared, err := graphicsOutputData(scrolled, graphicsPaneTestClient(), true)
+	require.NoError(t, err)
+	require.Contains(t, string(prepared.data), ",c=2,r=1", "clipped copy placement must shrink its cell box")
+}
+
+func TestGraphicsOutputCopyModeSuppression(t *testing.T) {
+	tests := []struct {
+		name   string
+		mode   func(*vt.Screen) *scopy.Mode
+		modify func(*capturedRenderState)
+	}{
+		{name: "palette", mode: func(s *vt.Screen) *scopy.Mode { return copyGraphicsTestMode(s, 2) }, modify: func(st *capturedRenderState) { st.overlays.paletteActive = true }},
+		{name: "prompt", mode: func(s *vt.Screen) *scopy.Mode { return copyGraphicsTestMode(s, 2) }, modify: func(st *capturedRenderState) { st.overlays.promptActive = true }},
+		{name: "no frozen graphics", mode: func(*vt.Screen) *scopy.Mode {
+			return scopy.NewMode(scopy.NewDocument(scopy.NewSnapshotFromRows(nil, 4, 4), ""))
+		}},
+		{name: "unknown pixels", mode: func(s *vt.Screen) *scopy.Mode { return copyGraphicsTestMode(s, 2) }, modify: func(st *capturedRenderState) {
+			st.panes[0].graphicsGeometry = domain.Geometry{Size: domain.Size{Cols: 4, Rows: 4}}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			screen := copyGraphicsTestScreen(t, 2)
+			state := copyGraphicsTestState(screen, test.mode(screen))
+			if test.modify != nil {
+				test.modify(state)
+			}
+			require.Empty(t, copyGraphicsDestinations(state))
+		})
+	}
+}
+
+func TestGraphicsOutputPixelOnlyViewportKeepsCellPlacements(t *testing.T) {
+	tests := []struct {
+		name     string
+		viewport graphics.Viewport
+		want     graphics.PixelRect
+		cells    graphics.CellRect
+	}{
+		{name: "full", viewport: graphics.Viewport{Pixels: graphics.PixelRect{Width: 40, Height: 80}}, want: graphics.PixelRect{Y: 20, Width: 20, Height: 40}, cells: graphics.CellRect{Width: 2, Height: 2}},
+		{name: "clipped", viewport: graphics.Viewport{Pixels: graphics.PixelRect{Width: 40, Height: 40}}, want: graphics.PixelRect{Y: 20, Width: 20, Height: 20}, cells: graphics.CellRect{Width: 2, Height: 1}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			scene := graphics.NewScene(graphics.Limits{})
+			asset, err := scene.AddAsset(graphics.AssetBlob{Encoded: []byte("cells"), Width: 2, Height: 4})
+			require.NoError(t, err)
+			_, err = scene.Place(graphics.PlacementSpec{Asset: asset, Destination: graphics.PixelRect{Y: 20, Width: 20, Height: 40}, Cells: graphics.CellRect{Width: 2, Height: 2}})
+			require.NoError(t, err)
+			_, placements := graphicsSnapshotRecordsForSourceOrdered(scene.Snapshot(), "pane", 0, test.viewport)
+			require.Len(t, placements, 1)
+			for _, placement := range placements {
+				require.Equal(t, test.want, placement.dest)
+				require.Equal(t, test.cells, placement.cells, "cells must follow the pixel-only clip")
+			}
+		})
+	}
 }
