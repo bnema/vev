@@ -46,11 +46,23 @@ type graphicsOutputPlacement struct {
 	dest   graphics.PixelRect
 	cells  graphics.CellRect
 	layer  int64
+	// axes records which cell axes (c=, r=) the application sent. The zero
+	// value relays both derived axes.
+	axes graphicsCellAxes
 	// transform is set for composed multi-pane placements. Keeping it on the
 	// placement (rather than on graphicsOutputState) lets panes with distinct
 	// pixel geometries share one attachment-local output state.
 	transform    graphicsOutputTransform
 	transformSet bool
+}
+
+// graphicsCellAxes records which Kitty cell axes a placement set explicitly.
+type graphicsCellAxes struct {
+	columns, rows bool
+}
+
+func placementCellAxes(placement graphics.PlacementView) graphicsCellAxes {
+	return graphicsCellAxes{columns: placement.ExplicitColumns(), rows: placement.ExplicitRows()}
 }
 
 type graphicsOutputState struct {
@@ -453,7 +465,7 @@ func graphicsSnapshotRecordsForSourceShifted(snapshot *graphics.Snapshot, source
 	placementViews := snapshot.Placements()
 	if len(viewports) == 0 {
 		for order, placement := range placementViews {
-			addGraphicsOutputPlacementForSourceOrdered(placements, source, paneOrder, order, generation, assetKeys, placement.ID().String(), placement.AssetID().String(), placement.Source(), placement.Destination(), placement.Cells(), placement.Layer())
+			addGraphicsOutputPlacementForSourceOrdered(placements, source, paneOrder, order, generation, assetKeys, placement.ID().String(), placement.AssetID().String(), placement.Source(), placement.Destination(), placement.Cells(), placement.Layer(), placementCellAxes(placement))
 		}
 		return assets, placements
 	}
@@ -489,7 +501,7 @@ func graphicsSnapshotRecordsForSourceShifted(snapshot *graphics.Snapshot, source
 				order := placementOrders[fragment.PlacementID.String()]
 				destination := fragment.Destination
 				destination.Y += destShiftY
-				addGraphicsOutputPlacementForSourceOrdered(placements, source, paneOrder, order, generation, assetKeys, fragment.PlacementID.String(), fragment.AssetID.String(), fragment.Source, destination, fragment.Cells, placement.Layer())
+				addGraphicsOutputPlacementForSourceOrdered(placements, source, paneOrder, order, generation, assetKeys, fragment.PlacementID.String(), fragment.AssetID.String(), fragment.Source, destination, fragment.Cells, placement.Layer(), placementCellAxes(placement))
 			}
 			continue
 		}
@@ -504,7 +516,7 @@ func graphicsSnapshotRecordsForSourceShifted(snapshot *graphics.Snapshot, source
 			order := placementOrders[fragment.PlacementID.String()]
 			destination := fragment.Destination
 			destination.Y += destShiftY
-			addGraphicsOutputPlacementForSourceOrdered(placements, source, paneOrder, order, generation, assetKeys, fragment.PlacementID.String(), fragment.AssetID.String(), fragment.Source, destination, fragment.Cells, placement.Layer())
+			addGraphicsOutputPlacementForSourceOrdered(placements, source, paneOrder, order, generation, assetKeys, fragment.PlacementID.String(), fragment.AssetID.String(), fragment.Source, destination, fragment.Cells, placement.Layer(), placementCellAxes(placement))
 		}
 	}
 	// A viewport is an attachment-local visibility boundary. Do not upload
@@ -530,16 +542,20 @@ func addGraphicsOutputPlacement(dst map[string]graphicsOutputPlacement, generati
 }
 
 func addGraphicsOutputPlacementForSource(dst map[string]graphicsOutputPlacement, source string, order int, generation uint64, assetKeys map[string]string, placementID, assetID string, sourceRect, destination graphics.PixelRect, cells graphics.CellRect, layer int64) {
-	addGraphicsOutputPlacementForSourceOrdered(dst, source, 0, order, generation, assetKeys, placementID, assetID, sourceRect, destination, cells, layer)
+	addGraphicsOutputPlacementForSourceOrdered(dst, source, 0, order, generation, assetKeys, placementID, assetID, sourceRect, destination, cells, layer, graphicsCellAxes{})
 }
 
-func addGraphicsOutputPlacementForSourceOrdered(dst map[string]graphicsOutputPlacement, source string, paneOrder, order int, generation uint64, assetKeys map[string]string, placementID, assetID string, sourceRect, destination graphics.PixelRect, cells graphics.CellRect, layer int64) {
+func addGraphicsOutputPlacementForSourceOrdered(dst map[string]graphicsOutputPlacement, source string, paneOrder, order int, generation uint64, assetKeys map[string]string, placementID, assetID string, sourceRect, destination graphics.PixelRect, cells graphics.CellRect, layer int64, axes graphicsCellAxes) {
 	assetKey := assetKeys[assetID]
 	if assetKey == "" {
 		return
 	}
 	key := graphicsPlacementKeyPartsForSourceOrdered(source, paneOrder, order, generation, placementID, assetKey, sourceRect, destination, cells, layer)
-	dst[key] = graphicsOutputPlacement{asset: assetKey, source: sourceRect, dest: destination, cells: cells, layer: layer}
+	if axes != (graphicsCellAxes{}) {
+		// A changed axis set changes the relayed record, so it must re-place.
+		key += fmt.Sprintf(":c%t:r%t", axes.columns, axes.rows)
+	}
+	dst[key] = graphicsOutputPlacement{asset: assetKey, source: sourceRect, dest: destination, cells: cells, layer: layer, axes: axes}
 }
 
 func graphicsAssetKey(generation uint64, asset graphics.AssetView) string {
@@ -748,7 +764,19 @@ func placementRecordWithTransform(assetID uint64, placement graphicsOutputPlacem
 		header += ",Y=" + strconv.FormatInt(offsetY, 10)
 	}
 	if cells.Valid() && !cells.Empty() {
-		header += ",c=" + strconv.FormatInt(cells.Width, 10) + ",r=" + strconv.FormatInt(cells.Height, 10)
+		// Relay only the axes the application set: the outer terminal then
+		// derives the other axis from the source crop and keeps the aspect.
+		// Without recorded axes, relay both derived axes.
+		axes := placement.axes
+		if axes == (graphicsCellAxes{}) {
+			axes = graphicsCellAxes{columns: true, rows: true}
+		}
+		if axes.columns {
+			header += ",c=" + strconv.FormatInt(cells.Width, 10)
+		}
+		if axes.rows {
+			header += ",r=" + strconv.FormatInt(cells.Height, 10)
+		}
 		if cells.X != 0 {
 			header += ",H=" + strconv.FormatInt(cells.X, 10)
 		}

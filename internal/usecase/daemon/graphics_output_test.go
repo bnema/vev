@@ -1213,3 +1213,46 @@ func TestGraphicsOutputPixelOnlyViewportKeepsCellPlacements(t *testing.T) {
 		})
 	}
 }
+
+func TestGraphicsOutputRelaysOnlyExplicitCellAxes(t *testing.T) {
+	full := graphics.Viewport{Pixels: graphics.PixelRect{Width: 40, Height: 80}}
+	tests := []struct {
+		name          string
+		columns, rows bool
+		viewport      graphics.Viewport
+		want          []string
+		absent        []string
+	}{
+		{name: "columns only", columns: true, viewport: full, want: []string{",w=4,h=4,c=2,"}, absent: []string{",r="}},
+		{name: "rows only", rows: true, viewport: full, want: []string{",w=4,h=4,r=2,"}, absent: []string{",c="}},
+		{name: "both", columns: true, rows: true, viewport: full, want: []string{",c=2,r=2,"}},
+		{name: "clipped columns only", columns: true, viewport: graphics.Viewport{Pixels: graphics.PixelRect{Width: 40, Height: 20}}, want: []string{",w=4,h=2,c=2,"}, absent: []string{",r="}},
+		{name: "neither keeps both", viewport: full, want: []string{",c=2,r=2,"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			scene := graphics.NewScene(graphics.Limits{})
+			asset, err := scene.AddAsset(graphics.AssetBlob{Encoded: []byte("axes"), Width: 4, Height: 4})
+			require.NoError(t, err)
+			_, err = scene.Place(graphics.PlacementSpec{
+				Asset:           asset,
+				Destination:     graphics.PixelRect{Width: 20, Height: 40},
+				Cells:           graphics.CellRect{Width: 2, Height: 2},
+				ExplicitColumns: test.columns,
+				ExplicitRows:    test.rows,
+			})
+			require.NoError(t, err)
+			_, placements := graphicsSnapshotRecords(scene.Snapshot(), test.viewport)
+			require.Len(t, placements, 1)
+			for _, placement := range placements {
+				text := string(placementRecordWithTransform(1, placement, graphicsOutputTransform{}))
+				for _, want := range test.want {
+					require.Contains(t, text, want)
+				}
+				for _, absent := range test.absent {
+					require.NotContains(t, text, absent)
+				}
+			}
+		})
+	}
+}
