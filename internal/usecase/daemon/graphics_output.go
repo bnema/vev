@@ -1092,7 +1092,9 @@ func copyModeGraphicsRecords(mode *scopy.Mode, geometry domain.Geometry, source 
 	}
 	doc := mode.Document()
 	snapshot := doc.Graphics()
-	if snapshot == nil || !geometry.PixelsKnown() || geometry.Cols <= 0 || geometry.Rows <= 0 {
+	// Unknown pixels give a zero cell size below, and cell-only viewports
+	// are skipped, so the copy path never clips in made-up pixel space.
+	if snapshot == nil || geometry.Cols <= 0 || geometry.Rows <= 0 {
 		return empty()
 	}
 	cellHeight := int64(geometry.PixelHeight / geometry.Rows)

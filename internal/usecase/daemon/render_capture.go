@@ -155,9 +155,9 @@ func (o capturedOverlayRenderState) active() bool {
 }
 
 // suppressesGraphics reports whether a modal overlay hides the whole Kitty
-// scene. Copy mode is not modal for graphics: it projects its frozen scene.
+// scene. Copy mode itself projects its frozen scene; its search prompt is modal.
 func (o capturedOverlayRenderState) suppressesGraphics() bool {
-	return o.paletteActive || o.promptActive || o.noticesOverlayActive
+	return o.copySearchActive || o.paletteActive || o.promptActive || o.noticesOverlayActive
 }
 
 type capturedCursorInputs struct {

@@ -1167,6 +1167,7 @@ func TestGraphicsOutputCopyModeSuppression(t *testing.T) {
 	}{
 		{name: "palette", mode: func(s *vt.Screen) *scopy.Mode { return copyGraphicsTestMode(s, 2) }, modify: func(st *capturedRenderState) { st.overlays.paletteActive = true }},
 		{name: "prompt", mode: func(s *vt.Screen) *scopy.Mode { return copyGraphicsTestMode(s, 2) }, modify: func(st *capturedRenderState) { st.overlays.promptActive = true }},
+		{name: "copy search", mode: func(s *vt.Screen) *scopy.Mode { return copyGraphicsTestMode(s, 2) }, modify: func(st *capturedRenderState) { st.overlays.copySearchActive = true }},
 		{name: "no frozen graphics", mode: func(*vt.Screen) *scopy.Mode {
 			return scopy.NewMode(scopy.NewDocument(scopy.NewSnapshotFromRows(nil, 4, 4), ""))
 		}},
