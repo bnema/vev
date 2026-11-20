@@ -432,26 +432,39 @@ func composeCapturedCopyMode(state capturedRenderState, frame renderer.Frame, da
 	return composeCopyClientFrame(o.copyMode, target, frame, state.styles)
 }
 
-func capturedCopyTarget(state capturedRenderState, content domain.Rect) domain.Rect {
+// resolveCopyTarget is the single copy-mode pane rule: a visible floating
+// pane with a non-empty inner area wins when copy mode names it or no pane;
+// otherwise the named (or focused) tiled pane, when present and not collapsed.
+// tiled is an index into state.panes and is only meaningful when ok && !floating.
+func resolveCopyTarget(state *capturedRenderState) (floating bool, tiled int, ok bool) {
 	o := state.overlays
-	target := domain.Rect{}
-	if state.floating.visible && (o.copyPaneID == "" || o.copyPaneID == state.floating.pane.id) {
-		target = state.floating.geometry.translate(content.X, content.Y).Inner
+	if state.floating.visible && state.floating.geometry.Inner.Width > 0 && (o.copyPaneID == "" || o.copyPaneID == state.floating.pane.id) {
+		return true, -1, true
 	}
-	if target.Width == 0 {
-		id := o.copyPaneID
-		if id == "" {
-			id = state.layout.focus
-		}
-		for _, p := range state.panes {
-			if p.id == id && !p.placement.Collapsed {
-				target = p.placement.Content
-				target.Y += content.Y
-				break
-			}
+	id := o.copyPaneID
+	if id == "" {
+		id = state.layout.focus
+	}
+	for i, p := range state.panes {
+		if p.id == id && !p.placement.Collapsed {
+			return false, i, true
 		}
 	}
-	return target
+	return false, -1, false
+}
+
+func capturedCopyTarget(state capturedRenderState, content domain.Rect) domain.Rect {
+	floating, tiled, ok := resolveCopyTarget(&state)
+	switch {
+	case !ok:
+		return domain.Rect{}
+	case floating:
+		return state.floating.geometry.translate(content.X, content.Y).Inner
+	default:
+		target := state.panes[tiled].placement.Content
+		target.Y += content.Y
+		return target
+	}
 }
 
 func composeCapturedOverlays(state capturedRenderState, frame renderer.Frame, damage []renderer.Damage) (renderer.Frame, []renderer.Damage) {

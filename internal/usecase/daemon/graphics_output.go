@@ -1089,22 +1089,20 @@ func composedGraphicsRecords(state *capturedRenderState) (map[string]graphics.As
 	return assets, placements
 }
 
-// graphicsCopyTarget resolves the copy-mode pane with the same rule as
-// capturedCopyTarget: a visible floating pane wins when it matches, otherwise
-// the named (or focused) tiled pane.
+// graphicsCopyTarget applies resolveCopyTarget, the rule capturedCopyTarget
+// also uses, when copy mode is active.
 func graphicsCopyTarget(state *capturedRenderState) (floating bool, tiled layout.PaneID, active bool) {
-	o := state.overlays
-	if !o.copyActive {
+	if !state.overlays.copyActive {
 		return false, "", false
 	}
-	if state.floating.visible && state.floating.geometry.Inner.Width > 0 && (o.copyPaneID == "" || o.copyPaneID == state.floating.pane.id) {
+	floating, index, ok := resolveCopyTarget(state)
+	if !ok {
+		return false, "", false
+	}
+	if floating {
 		return true, "", true
 	}
-	id := o.copyPaneID
-	if id == "" {
-		id = state.layout.focus
-	}
-	return false, id, true
+	return false, state.panes[index].id, true
 }
 
 // copyModeGraphicsRecords projects the graphics scene frozen with the copy
