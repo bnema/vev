@@ -182,14 +182,20 @@ func (d *Daemon) publishAttachmentInfo(sess *session, ac *attachedClient, messag
 
 // publishMarkArrival consumes the identity transition recorded by view publication.
 // Session -> viewMu matches navigation's lock order; toast publication runs unlocked.
-func (d *Daemon) publishMarkArrival(sess *session, ac *attachedClient, tb *tab) {
+func (d *Daemon) publishMarkArrival(sess *session, ac *attachedClient, tb *tab) bool {
 	if sess == nil || ac == nil || tb == nil {
-		return
+		return false
+	}
+	ac.viewMu.Lock()
+	pending := ac.markArrivalPending
+	ac.viewMu.Unlock()
+	if !pending {
+		return false
 	}
 	sess.mu.Lock()
 	if !slices.Contains(sess.tabs, tb) {
 		sess.mu.Unlock()
-		return
+		return false
 	}
 	ac.viewMu.Lock()
 	arrived := ac.markArrivalPending && ac.view.tabID == domain.TabStableID(tb.stableID) && ac.currentAttachmentSession() == sess
@@ -204,5 +210,7 @@ func (d *Daemon) publishMarkArrival(sess *session, ac *attachedClient, tb *tab) 
 	sess.mu.Unlock()
 	if note != "" {
 		d.publishAttachmentInfo(sess, ac, string(d.glyphsFor(ac).Mark)+" "+note)
+		return true
 	}
+	return false
 }

@@ -98,3 +98,26 @@ func TestUnmarkedEditNoticeIsAttachmentOnly(t *testing.T) {
 		require.Empty(t, d.notices.history(), fmt.Sprint(d.notices.history()))
 	})
 }
+
+func TestRejectedPaintRetainsMarkArrival(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, ac, _, releases := newManualTabSession(t, 1)
+		defer releases[0]()
+		stopOverlayTimersAtCleanup(t, ac)
+		sess.tabs[0].marked = true
+		sess.tabs[0].markNote = "retry"
+		sess.mu.Lock()
+		delete(sess.attachments, ac)
+		sess.mu.Unlock()
+		require.Equal(t, paintRejected, d.paint(sess, ac, true, nil))
+		ac.viewMu.Lock()
+		pending := ac.markArrivalPending
+		ac.viewMu.Unlock()
+		require.True(t, pending)
+		require.True(t, sess.registerAttachment(ac))
+		require.Equal(t, paintEmitted, d.paint(sess, ac, true, nil))
+		toasts, _ := visibleToasts(ac)
+		require.Len(t, toasts, 1)
+		require.Contains(t, toasts[0].Message, "retry")
+	})
+}

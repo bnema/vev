@@ -351,7 +351,6 @@ func (d *Daemon) paintWithActivationEffect(entry *session, ac *attachedClient, r
 		}
 	}
 
-	d.publishMarkArrival(entry, ac, tb)
 	ac.sendMu.Lock()
 	result, afterUnlock := d.paintLocked(entry, ac, tb, reset, lease, paintEffect, &marks)
 	ac.sendMu.Unlock()
@@ -421,6 +420,11 @@ func (d *Daemon) paintLocked(entry *session, ac *attachedClient, tb *tab, reset 
 		}
 		overlays.Unlock()
 		marks.flush()
+		if published && followUp.prepareErr == nil && followUp.sendErr == nil {
+			if d.publishMarkArrival(entry, ac, tb) {
+				d.repaintForNotice(ac)
+			}
+		}
 		ac.afterFrame.runReady()
 		if repaintAttachedClients {
 			d.repaintAllAttachedClients()
