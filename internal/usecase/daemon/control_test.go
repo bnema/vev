@@ -1711,3 +1711,37 @@ func TestDispatchActionLifecycle(t *testing.T) {
 		})
 	}
 }
+
+func TestListSessionsReportsMarks(t *testing.T) {
+	for _, ephemeral := range []bool{false, true} {
+		for _, marked := range []bool{false, true} {
+			t.Run(fmt.Sprintf("ephemeral=%t/marked=%t", ephemeral, marked), func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					d := newTestDaemon(t, nil, newStubClock(t))
+					sess := addControlSession(t, d, "work", "t_work", "p_work")
+					sess.mu.Lock()
+					sess.ephemeral = ephemeral
+					// A bell before a marked tab must not short-circuit aggregation.
+					sess.tabs[0].attention = true
+					sess.tabs = append(sess.tabs, &tab{marked: marked})
+					sess.mu.Unlock()
+					text := sendCommand(t, d, protocol.CommandRequest{Slug: "list-sessions"})
+					require.Equal(t, protocol.CommandSucceeded, text.Outcome)
+					state := "named"
+					if ephemeral {
+						state = "ephemeral"
+					}
+					if marked {
+						state += " marked"
+					}
+					require.Equal(t, "NAME\tSTATE\tTABS\tATTACHED\tACTIVE\nwork\t"+state+"\t2\tfalse\ttrue\n", text.Output)
+					output := sendCommand(t, d, protocol.CommandRequest{Slug: "list-sessions", JSON: true})
+					require.Equal(t, protocol.CommandSucceeded, output.Outcome)
+					var rows []map[string]any
+					require.NoError(t, json.Unmarshal([]byte(output.Output), &rows))
+					require.Equal(t, []map[string]any{{"name": "work", "ephemeral": ephemeral, "tabs": float64(2), "attached": false, "active": true, "marked": marked}}, rows)
+				})
+			})
+		}
+	}
+}

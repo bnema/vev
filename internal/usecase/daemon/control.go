@@ -744,6 +744,7 @@ func (e controlExec) SessionRecovery(action string) (string, error) {
 func (e controlExec) ListSessions(asJSON bool) (string, error) {
 	type row struct {
 		Name      string `json:"name"`
+		Marked    bool   `json:"marked"`
 		Ephemeral bool   `json:"ephemeral"`
 		Tabs      int    `json:"tabs"`
 		Attached  bool   `json:"attached"`
@@ -764,7 +765,7 @@ func (e controlExec) ListSessions(asJSON bool) (string, error) {
 	}
 	rows := make([]row, 0, len(snaps))
 	for i, snap := range snaps {
-		rows = append(rows, row{Name: snap.name, Ephemeral: snap.ephemeral, Tabs: snap.tabCount, Attached: snap.attached, Active: i == activeIdx})
+		rows = append(rows, row{Name: snap.name, Marked: snap.marked, Ephemeral: snap.ephemeral, Tabs: snap.tabCount, Attached: snap.attached, Active: i == activeIdx})
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
 	if asJSON {
@@ -776,6 +777,9 @@ func (e controlExec) ListSessions(asJSON bool) (string, error) {
 		state := "named"
 		if row.Ephemeral {
 			state = "ephemeral"
+		}
+		if row.Marked {
+			state += " marked"
 		}
 		fmt.Fprintf(&out, "%s\t%s\t%d\t%t\t%t\n", row.Name, state, row.Tabs, row.Attached, row.Active)
 	}
