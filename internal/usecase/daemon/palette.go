@@ -707,11 +707,12 @@ func (d *Daemon) executePaletteCommand(ac *attachedClient, entry *session, effec
 	}
 	// Mark navigation owns its mutation boundary, like jump-recent-session.
 	// Holding dispatchMu here would re-enter it on a same-session selection.
-	if cmd.Slug != "jump-mark" {
+	dispatchUnlocked := cmd.Slug == "jump-mark"
+	if !dispatchUnlocked {
 		entry.dispatchMu.Lock()
 	}
 	err := cmd.Run(paletteExec{d: d, sess: entry, ac: ac, effect: effect, redrawClosedPalette: true}, args)
-	if cmd.Slug != "jump-mark" {
+	if !dispatchUnlocked {
 		entry.dispatchMu.Unlock()
 	}
 	if attachmentHandoff {
