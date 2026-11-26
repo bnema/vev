@@ -71,16 +71,17 @@ func TestRouterRawActionPreservesExactConsumedBytes(t *testing.T) {
 
 func TestDefaultBindingsParityRoutesBuiltInBindings(t *testing.T) {
 	cases := []struct {
-		name string
-		in   []byte
-		want Action
+		name  string
+		in    []byte
+		want  Action
+		kitty bool
 	}{
 		{name: "palette", in: []byte{ESC, ' '}, want: ActionOpenPalette},
 		{name: "floating pane", in: []byte{ESC, 'f'}, want: ActionToggleFloatingPane},
 		{name: "toggle mark", in: []byte{ESC, 'm'}, want: ActionToggleMark},
 		{name: "jump mark legacy", in: []byte{ESC, 'M'}, want: ActionJumpMark},
-		{name: "toggle mark kitty", in: []byte("\x1b[109;3u"), want: ActionToggleMark},
-		{name: "jump mark kitty shift", in: []byte("\x1b[109;4u"), want: ActionJumpMark},
+		{name: "toggle mark kitty", kitty: true, in: []byte("\x1b[109;3u"), want: ActionToggleMark},
+		{name: "jump mark kitty shift", kitty: true, in: []byte("\x1b[109;4u"), want: ActionJumpMark},
 		{name: "jump attention", in: []byte{ESC, 'a'}, want: ActionJumpAttention},
 		{name: "focus left", in: []byte{ESC, 'h'}, want: ActionFocusPaneLeft},
 		{name: "focus down", in: []byte{ESC, 'j'}, want: ActionFocusPaneDown},
@@ -102,7 +103,7 @@ func TestDefaultBindingsParityRoutesBuiltInBindings(t *testing.T) {
 				clk := &routerClockState{}
 				h := &handlerCalls{}
 				router := testRouter(t, clk, h, &bindings)
-				router.SetKittyKeyboard(true)
+				router.SetKittyKeyboard(tc.kitty)
 				router.Route(tc.in)
 				require.Equal(t, []Action{tc.want}, h.actions)
 				require.Empty(t, h.forwards)
