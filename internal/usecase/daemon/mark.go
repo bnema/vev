@@ -80,7 +80,12 @@ func (e paletteExec) ToggleMark() error {
 	return nil
 }
 
-func (e paletteExec) JumpMark() error { return nil }
+func (e paletteExec) JumpMark() error {
+	if e.effect != nil {
+		e.effect.bindActionEnd(e.d, "jump-mark")
+	}
+	return e.d.jumpMark(e.sess, e.ac, e.effect)
+}
 
 func (e paletteExec) EditMarkNote() error {
 	tb := e.markTab()

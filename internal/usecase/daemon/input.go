@@ -508,7 +508,12 @@ func (h daemonKeyHandler) Action(action keys.Action, _ []byte) {
 			h.d.reportError(sess, err)
 		}
 	case keys.ActionJumpMark:
-		_ = (paletteExec{d: h.d, sess: sess, ac: h.ac}).JumpMark()
+		if effect != nil {
+			effect.bindActionEnd(h.d, "jump-mark")
+		}
+		if err := h.d.jumpMark(sess, h.ac, effect); err != nil {
+			h.d.reportError(sess, err)
+		}
 	case keys.ActionJumpAttention:
 		if effect == nil {
 			if err := h.d.jumpAttention(sess, h.ac); err != nil {
