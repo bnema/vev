@@ -30,6 +30,7 @@ type recentRoutePresentation struct {
 // recentRouteDisplay is a formatted, render-ready copy of a presentation. The
 // source value is never mutated while duplicate names are qualified.
 type recentRouteDisplay struct {
+	marked    bool
 	name      string
 	kind      recentRouteKind
 	ephemeral bool

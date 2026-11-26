@@ -79,9 +79,11 @@ const defaultSuspendedSafetyExpiry = 24 * time.Hour
 var defaultSize = domain.Size{Cols: 80, Rows: 24}
 
 type Daemon struct {
-	mu       sync.Mutex
-	sessions map[domain.SessionID]*session
-	inactive map[string]inactiveSession
+	// sessionMarks publishes local mark aggregates for lock-free bar composition.
+	sessionMarks sync.Map // domain.SessionLifecycleID -> bool
+	mu           sync.Mutex
+	sessions     map[domain.SessionID]*session
+	inactive     map[string]inactiveSession
 	// creating reserves names while durable creation I/O runs without mu.
 	creating map[string]struct{}
 	nextID   uint64
@@ -1037,6 +1039,7 @@ func (d *Daemon) unregisterSessionLocked(entry *session) bool {
 		return false
 	}
 	delete(d.sessions, core.id)
+	d.sessionMarks.Delete(core.incarnation)
 	return true
 }
 

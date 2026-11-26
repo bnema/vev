@@ -150,7 +150,7 @@ func drawStatusBarState(row []renderer.Cell, state barState, styles themeui.Styl
 	x := 0
 	rightText := composeBottomRightText(state.bottomRight, state.statusFeedback)
 	writeStatusText(row, &x, " "+state.status.session+" ", styles.SurfaceActive)
-	cell := sessionCellPaint{frame: state.attentionFrame, tick: state.animTick, spinner: state.spinner, glyphs: state.glyphs, done: styles.AgentDone, reduced: styles.Reduced}
+	cell := sessionCellPaint{frame: state.attentionFrame, tick: state.animTick, spinner: state.spinner, glyphs: state.glyphs, done: styles.AgentDone, accent: styles.Accent, reduced: styles.Reduced}
 	if state.rankedRecent != nil {
 		for _, sess := range fitRankedRecent(state.rankedRecent, len(row), x, rightText) {
 			style := styles.SurfaceInactive // contextual ranks deliberately do not fade.
@@ -164,7 +164,7 @@ func drawStatusBarState(row []renderer.Cell, state barState, styles themeui.Styl
 		for i, sess := range fittedMRU {
 			style := styles.MRUStyle(i, len(fittedMRU))
 			if state.showRanks && i < maxMRUSessions {
-				drawRankedStatusSessionEntry(row, &x, rankedRecent{rank: i + 1, name: sess.name, attention: sess.attention, activity: sess.activity}, style, cell)
+				drawRankedStatusSessionEntry(row, &x, rankedRecent{rank: i + 1, name: sess.name, attention: sess.attention, marked: sess.marked, activity: sess.activity}, style, cell)
 				continue
 			}
 			drawStatusSessionEntry(row, &x, sess, style, cell)
@@ -174,6 +174,7 @@ func drawStatusBarState(row []renderer.Cell, state barState, styles themeui.Styl
 }
 
 type rankedRecent struct {
+	marked    bool
 	rank      int
 	name      string
 	kind      recentRouteKind
@@ -193,6 +194,7 @@ type sessionCellPaint struct {
 	glyphs  ui.GlyphSet
 	// done is the agent Done color (themeui.Styles.AgentDone).
 	done    renderer.Style
+	accent  renderer.Style
 	reduced bool
 }
 
@@ -223,12 +225,14 @@ func drawRankedStatusSessionEntry(row []renderer.Cell, x *int, sess rankedRecent
 	writeStatusText(row, x, " "+strconv.Itoa(sess.rank)+":", prefixStyle)
 	writeStatusText(row, x, sess.name, style)
 	writeSessionCell(row, x, entryCell(sess.attention, sess.activity), style, cell)
+	writeSessionMark(row, x, sess.marked, style, cell)
 	writeStatusText(row, x, " ", style)
 }
 
 func drawStatusSessionEntry(row []renderer.Cell, x *int, entry recentRouteDisplay, style renderer.Style, cell sessionCellPaint) {
 	writeStatusText(row, x, " "+entry.name, style)
 	writeSessionCell(row, x, entryCell(entry.attention, entry.activity), style, cell)
+	writeSessionMark(row, x, entry.marked, style, cell)
 	writeStatusText(row, x, " ", style)
 }
 
@@ -239,6 +243,13 @@ func writeSessionCell(row []renderer.Cell, x *int, activity statusActivity, styl
 	}
 	writeStatusText(row, x, " ", style)
 	writeActivityCell(row, x, activity, cell.frame, cell.tick, cell.spinner, cell.glyphs, style, cell.done, cell.reduced)
+}
+
+func writeSessionMark(row []renderer.Cell, x *int, marked bool, style renderer.Style, cell sessionCellPaint) {
+	if marked {
+		writeStatusText(row, x, " ", style)
+		writeStatusCell(row, x, cell.glyphs.OrNerd().Mark, themeui.PulseDone(style, cell.accent, 1))
+	}
 }
 
 func composeBottomRightText(scriptText, statusFeedback string) string {
@@ -438,6 +449,7 @@ func rankedRecentForHints(hints *palette.ContextualHints, formatted []recentRout
 			kind:      display.kind,
 			ephemeral: display.ephemeral,
 			attention: display.attention,
+			marked:    display.marked,
 			activity:  display.activity,
 			selected:  hint.Rank == hints.SelectedRank,
 		})
@@ -478,6 +490,7 @@ func (d *Daemon) barStateForAttachmentPaletteHintsFor(cur *session, ac *attached
 	d.fillBarAnimation(&state, ac)
 	formatted := formatHistoryRoutes(routeSnapshot)
 	resolveSessionActivity(formatted, d.agentSessionLookup(), len(state.spinner) > 0)
+	d.resolveSessionMarks(formatted)
 	ranked := rankedRecentForHints(hints, formatted)
 	if cur != nil {
 		includeTerminalTitle := true
@@ -639,6 +652,9 @@ func fitTabLabels(tabs []statusTab, rowLen int, rightText string, spinner bool) 
 
 func recentRouteDisplayWidth(entry recentRouteDisplay) int {
 	width := 2 + statusTextWidth(entry.name)
+	if entry.marked {
+		width += 2
+	}
 	if entryCell(entry.attention, entry.activity) != activityNone {
 		// Every activity glyph of every glyph set is one cell.
 		width += 2
@@ -672,6 +688,7 @@ func fitRankedRecent(entries []rankedRecent, rowLen, leftUsed int, feedback stri
 			kind:      entry.kind,
 			ephemeral: entry.ephemeral,
 			attention: entry.attention,
+			marked:    entry.marked,
 			activity:  entry.activity,
 		}) + rankPrefixWidth(entry.rank)
 	})

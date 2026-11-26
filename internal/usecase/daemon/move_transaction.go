@@ -307,6 +307,8 @@ func (t *moveTransaction) publishLocked() error {
 	if err != nil {
 		return err
 	}
+	d.publishSessionMarkLocked(t.source)
+	d.publishSessionMarkLocked(t.destination)
 	t.publication = publication
 	if follow != nil {
 		follow.releaseCoordinators = lockAttachmentCoordinators(t.source, follow.sourceCoordinator, t.destination, follow.targetCoordinator)

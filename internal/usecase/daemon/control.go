@@ -528,6 +528,7 @@ func (d *Daemon) dispatchAction(x daemonActionDispatch) (bool, error) {
 
 func finishDaemonActionForClient(d *Daemon, request daemonActionRequest, ac *attachedClient, producer string) {
 	if d != nil && request.kind == daemonActionToggleMark && request.target.session != nil {
+		d.repaintSessionMarkViewers(request.target.session)
 		for _, attachment := range request.target.session.snapshotAttachments() {
 			d.invalidateRender(request.target.session, attachment, true, producer)
 		}

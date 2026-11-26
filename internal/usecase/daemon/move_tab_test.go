@@ -29,6 +29,12 @@ func TestMoveTabPreservesWholeTabAndActivatesLogicalNeighbor(t *testing.T) {
 				moved := source.tabs[0]
 				moved.stableID = "moved-tab"
 				moved.name = "preserved-name"
+				moved.marked = true
+				moved.markNote = "keep me"
+				moved.markedAt = time.Unix(123, 0)
+				source.mu.Lock()
+				d.publishSessionMarkLocked(source)
+				source.mu.Unlock()
 				remaining := source.tabs[1]
 				remaining.stableID = "remaining-tab"
 				selectTestAttachmentTab(source, 0)
@@ -73,6 +79,14 @@ func TestMoveTabPreservesWholeTabAndActivatesLogicalNeighbor(t *testing.T) {
 				require.Same(t, beforeDestinationActive, destination.tabs[testAttachmentTabIndex(destination)], "moved tab stays in the background")
 				require.Equal(t, destinationTab.size, moved.size, "destination geometry becomes authoritative")
 				require.Equal(t, "preserved-name", moved.name)
+				require.True(t, moved.marked)
+				require.Equal(t, "keep me", moved.markNote)
+				require.Equal(t, time.Unix(123, 0), moved.markedAt)
+				_, sourceMarked := d.sessionMarks.Load(source.incarnation)
+				require.False(t, sourceMarked)
+				destinationMarked, ok := d.sessionMarks.Load(destination.incarnation)
+				require.True(t, ok)
+				require.Equal(t, true, destinationMarked)
 				require.Same(t, oldTree, moved.tree)
 				require.Equal(t, oldPanes, moved.panes)
 				require.Same(t, movedPTY, tiled.pty)

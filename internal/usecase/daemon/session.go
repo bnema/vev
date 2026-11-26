@@ -771,6 +771,7 @@ func (d *Daemon) createTabForAttachment(sess *session, ac *attachedClient, _ dom
 	// Publish ownership before appending the tab to the visible session.
 	publishPaneOwner(p, sess, tb, 0)
 	sess.tabs = append(sess.tabs, tb)
+	d.publishSessionMarkLocked(sess)
 	tabIndex := len(sess.tabs) - 1
 	if !sess.ephemeral {
 		d.markCatalogueDirty(sess.persistRecordLocked(max(d.nowUnixNano(), sess.createdAt, int64(1))).MetadataUpdate())
@@ -1091,6 +1092,10 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 	sess.name = name
 	sess.createdAt = createdAt
 	sess.incarnation = record.IncarnationID
+	if priorIncarnation != sess.incarnation {
+		d.sessionMarks.Delete(priorIncarnation)
+	}
+	d.publishSessionMarkLocked(sess)
 	sess.ephemeral = false
 	sess.snapEligible.Store(name != "")
 	sess.mu.Unlock()
@@ -1107,6 +1112,7 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 		d.agents.requestReindex()
 	}
 	d.publishRenamedSessionRouteIdentity(sess)
+	d.repaintSessionMarkViewers(sess)
 	return nil
 }
 
@@ -1253,6 +1259,7 @@ func (d *Daemon) closeTabLockedWithEffect(sess *session, tb *tab, repaint bool, 
 	ringing := tb.attention
 	sess.prepareAttachmentViewsForRemovedTabLocked(tb, idx)
 	sess.tabs = append(sess.tabs[:idx], sess.tabs[idx+1:]...)
+	d.publishSessionMarkLocked(sess)
 	attachments := sess.snapshotAttachmentsLocked()
 	name := sess.name
 	if !sess.ephemeral {
@@ -1261,6 +1268,7 @@ func (d *Daemon) closeTabLockedWithEffect(sess *session, tb *tab, repaint bool, 
 	sess.invalidateViewsLocked()
 	sess.mu.Unlock()
 	d.mu.Unlock()
+	d.repaintSessionMarkViewers(sess)
 	d.log.Info("tab closed", "session", name)
 	markSnapshotDirty(sess)
 
@@ -2069,6 +2077,7 @@ func (d *Daemon) killSessionWithSnapshotDeadlineAndCondition(sess *session, reas
 		// route histories may still reference it.
 		d.reconcileAllRouteHistories()
 	}
+	d.repaintSessionMarkViewers(sess)
 	if ringing {
 		d.repaintAllAttachedClients()
 	}
