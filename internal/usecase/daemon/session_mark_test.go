@@ -69,13 +69,26 @@ func TestToggleMarkRepaintsRouteViewer(t *testing.T) {
 		defer releases[0]()
 		other, sends := addAgentTestSession(t, d, "other")
 		viewer := testAttachment(other)
-		viewer.setRouteSnapshot(protocol.RecentRouteSnapshot{Generation: 1, Entries: []protocol.RecentRouteEntry{{Target: protocol.ExactSessionTarget{LifecycleID: sess.incarnation}}}})
+		viewer.setRouteSnapshot(protocol.RecentRouteSnapshot{Generation: 1, Entries: []protocol.RecentRouteEntry{{Key: 1, Generation: 1, Name: sess.name, Visited: true, Target: protocol.ExactSessionTarget{LifecycleID: sess.incarnation, SessionName: sess.name}}}})
 		rc := d.attachCoordinator(other, nil, viewer, true)
 		rc.opts.clock = nil
 		(daemonKeyHandler{d: d, ac: ac}).Action(keys.ActionToggleMark, nil)
 		d.handlePromptInput(ac, []byte("\r"))
 		rc.fireCurrent(false)
-		require.NotEmpty(t, mustOutputData(t, sends))
+		screen := renderer.NewScreen(viewer.geometrySnapshot().Size.Cols, viewer.geometrySnapshot().Size.Rows)
+		apply := func() {
+			for _, frame := range drainAllFrames(sends) {
+				if envelopeMessageName(t, frame.Payload) == "Output" {
+					screen.Write(unmarshalTestOutput(t, frame.Payload).Data)
+				}
+			}
+		}
+		apply()
+		require.Contains(t, screenLineText(screen, screen.Rows()-1), string(ui.NerdGlyphs().Mark))
+		(daemonKeyHandler{d: d, ac: ac}).Action(keys.ActionToggleMark, nil)
+		rc.fireCurrent(false)
+		apply()
+		require.NotContains(t, screenLineText(screen, screen.Rows()-1), string(ui.NerdGlyphs().Mark))
 	})
 }
 
