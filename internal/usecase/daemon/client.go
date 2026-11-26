@@ -155,8 +155,10 @@ type attachedClient struct {
 	// view is attachment-local navigation state. It is never inferred from a
 	// session-wide active tab, so multiple attachments can observe different
 	// tabs and panes without changing shared session ownership.
-	viewMu                     sync.Mutex
-	view                       attachmentView
+	viewMu sync.Mutex
+	view   attachmentView
+	// markArrivalPending is guarded by viewMu; publication records arrivals, paint consumes them.
+	markArrivalPending         bool
 	sess                       Guarded[*session]
 	mouseScan                  mouse.Scanner
 	themeMu                    sync.Mutex
@@ -286,7 +288,15 @@ func (ac *attachedClient) currentAttachmentSession() *session {
 	return ac.currentSession()
 }
 
-func (ac *attachedClient) setSession(sess *session) { ac.sess.Set(sess) }
+func (ac *attachedClient) setSession(sess *session) {
+	previous := ac.sess.Get()
+	ac.sess.Set(sess)
+	if previous != sess || sess == nil {
+		ac.viewMu.Lock()
+		ac.markArrivalPending = sess != nil
+		ac.viewMu.Unlock()
+	}
+}
 
 // pruneCaptureFrames releases snapshots for panes that have left their owner.
 // Callers must not hold daemon, session, tab, or pane locks.

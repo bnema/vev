@@ -64,9 +64,10 @@ func TestEditMarkNote(t *testing.T) {
 				require.NoError(t, (paletteExec{d: d, sess: sess, ac: ac}).EditMarkNote())
 				if !tt.marked {
 					require.Nil(t, ac.overlays.prompt)
-					history := d.notices.history()
-					require.NotEmpty(t, history)
-					require.Equal(t, "Tab is not marked", history[0].Message)
+					toasts, _ := visibleToasts(ac)
+					require.NotEmpty(t, toasts)
+					require.Equal(t, "Tab is not marked", toasts[0].Message)
+					require.Empty(t, d.notices.history())
 					return
 				}
 				require.Equal(t, "old", ac.overlays.prompt.Value())

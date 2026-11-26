@@ -91,7 +91,8 @@ func (e paletteExec) EditMarkNote() error {
 	marked, note := tb.marked, tb.markNote
 	e.sess.mu.Unlock()
 	if !marked {
-		e.d.notify(e.sess, domain.NoticeInfo, domain.NoticeUser, "Tab is not marked", nil)
+		e.d.publishAttachmentInfo(e.sess, e.ac, "Tab is not marked")
+		e.d.repaintForNotice(e.ac)
 		return nil
 	}
 	e.d.enterPrompt(e.sess, e.ac, " Edit mark note ", note, func(note string) error {
@@ -154,4 +155,33 @@ func (d *Daemon) repaintSessionMarkViewers(sess *session) {
 		}
 	}
 	d.requestRouteViewerRepaint(map[domain.SessionLifecycleID]struct{}{lifecycle: {}}, sess)
+}
+
+// publishAttachmentInfo delivers an ephemeral attachment-only reminder, without history.
+// Call without architecture locks; rendering is left to the caller.
+func (d *Daemon) publishAttachmentInfo(sess *session, ac *attachedClient, message string) {
+	d.publishToast(ac, domain.Notification{Code: domain.NoticeUser, Severity: domain.NoticeInfo, Message: message, Time: d.daemonNow(), Count: 1, SessionID: sess.id})
+}
+
+// publishMarkArrival consumes the identity transition recorded by view publication.
+// Session -> viewMu matches navigation's lock order; toast publication runs unlocked.
+func (d *Daemon) publishMarkArrival(sess *session, ac *attachedClient, tb *tab) {
+	if sess == nil || ac == nil || tb == nil {
+		return
+	}
+	sess.mu.Lock()
+	ac.viewMu.Lock()
+	arrived := ac.markArrivalPending && ac.view.tabID == domain.TabStableID(tb.stableID) && ac.currentAttachmentSession() == sess
+	if arrived {
+		ac.markArrivalPending = false
+	}
+	note := ""
+	if arrived && tb.marked {
+		note = tb.markNote
+	}
+	ac.viewMu.Unlock()
+	sess.mu.Unlock()
+	if note != "" {
+		d.publishAttachmentInfo(sess, ac, string(d.glyphsFor(ac).Mark)+" "+note)
+	}
 }

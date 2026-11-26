@@ -46,6 +46,9 @@ func (ac *attachedClient) publishViewLocked(view attachmentView) {
 			ac.output.stateMu.Unlock()
 		}
 	}
+	if ac.view.tabID != view.tabID {
+		ac.markArrivalPending = true
+	}
 	ac.view = view
 }
 

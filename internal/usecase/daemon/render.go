@@ -351,6 +351,7 @@ func (d *Daemon) paintWithActivationEffect(entry *session, ac *attachedClient, r
 		}
 	}
 
+	d.publishMarkArrival(entry, ac, tb)
 	ac.sendMu.Lock()
 	result, afterUnlock := d.paintLocked(entry, ac, tb, reset, lease, paintEffect, &marks)
 	ac.sendMu.Unlock()
