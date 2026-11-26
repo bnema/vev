@@ -307,6 +307,7 @@ const (
 	daemonActionRenameSession
 	daemonActionRenameTab
 	daemonActionToggleMark
+	daemonActionSaveMarkNote
 	daemonActionResizePane
 	daemonActionEqualizePanes
 	daemonActionConsumeOrExpelPane
@@ -408,7 +409,9 @@ func (a daemonActions) Run(request daemonActionRequest) error {
 	case daemonActionRenameSession:
 		return a.d.renameSession(target.session, request.name)
 	case daemonActionToggleMark:
-		return a.d.toggleMark(target.session, target.tab)
+		return a.d.toggleMarkWithNote(target.session, target.tab, request.name)
+	case daemonActionSaveMarkNote:
+		return a.d.saveMarkNote(target.session, target.tab, request.name)
 	case daemonActionRenameTab:
 		return a.d.renameTab(target.session, target.tab, request.name)
 	case daemonActionResizePane:
@@ -527,7 +530,7 @@ func (d *Daemon) dispatchAction(x daemonActionDispatch) (bool, error) {
 }
 
 func finishDaemonActionForClient(d *Daemon, request daemonActionRequest, ac *attachedClient, producer string) {
-	if d != nil && request.kind == daemonActionToggleMark && request.target.session != nil {
+	if d != nil && (request.kind == daemonActionToggleMark || request.kind == daemonActionSaveMarkNote) && request.target.session != nil {
 		d.repaintSessionMarkViewers(request.target.session)
 		for _, attachment := range request.target.session.snapshotAttachments() {
 			d.invalidateRender(request.target.session, attachment, true, producer)

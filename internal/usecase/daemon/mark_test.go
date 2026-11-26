@@ -39,6 +39,7 @@ func TestToggleMarkActiveTab(t *testing.T) {
 				d.clock = clk
 				h := daemonKeyHandler{d: d, ac: ac}
 				h.Action(keys.ActionToggleMark, nil)
+				d.handlePromptInput(ac, []byte("\r"))
 				sess.mu.Lock()
 				require.True(t, sess.tabs[1].marked)
 				require.Equal(t, now, sess.tabs[1].markedAt)
@@ -76,10 +77,18 @@ func TestToggleMarkRepaintsEveryAttachment(t *testing.T) {
 				firstRevision := first.viewSnapshot().revision
 				secondRevision := second.viewSnapshot().revision
 				(daemonKeyHandler{d: d, ac: first}).Action(keys.ActionToggleMark, nil)
+				if !marked {
+					d.handlePromptInput(first, []byte("\r"))
+				}
 				require.Greater(t, first.viewSnapshot().revision, firstRevision)
 				require.Greater(t, second.viewSnapshot().revision, secondRevision)
 				for _, sends := range []chan wire.Envelope{firstSends, secondSends} {
 					data := mustOutputData(t, sends)
+					for _, frame := range drainAllFrames(sends) {
+						if envelopeMessageName(t, frame.Payload) == "Output" {
+							data = append(data, unmarshalTestOutput(t, frame.Payload).Data...)
+						}
+					}
 					if marked {
 						require.NotContains(t, string(data), string(ui.NerdGlyphs().Mark))
 					} else {

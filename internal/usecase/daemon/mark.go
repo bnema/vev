@@ -3,12 +3,15 @@ package daemon
 import (
 	"errors"
 	"slices"
+	"strings"
 	"time"
 
 	"bnema.dev/vev/internal/domain"
 )
 
-func (d *Daemon) toggleMark(sess *session, tb *tab) error {
+func (d *Daemon) toggleMark(sess *session, tb *tab) error { return d.toggleMarkWithNote(sess, tb, "") }
+
+func (d *Daemon) toggleMarkWithNote(sess *session, tb *tab, note string) error {
 	if tb == nil {
 		return errors.New("tab required")
 	}
@@ -25,6 +28,7 @@ func (d *Daemon) toggleMark(sess *session, tb *tab) error {
 	tb.marked = !tb.marked
 	if tb.marked {
 		tb.markedAt = d.daemonNow()
+		tb.markNote = sanitizeMarkNote(note)
 	} else {
 		tb.markNote = ""
 		tb.markedAt = time.Time{}
@@ -34,13 +38,87 @@ func (d *Daemon) toggleMark(sess *session, tb *tab) error {
 	return nil
 }
 
+func sanitizeMarkNote(note string) string {
+	note = strings.TrimSpace(stripANSIAndControls(strings.ToValidUTF8(note, "")))
+	runes := []rune(note)
+	if len(runes) > 120 {
+		note = string(runes[:120])
+	}
+	return note
+}
+
+func (e paletteExec) markTab() *tab {
+	if e.ac == nil {
+		return nil
+	}
+	return e.sess.tabForAttachment(e.ac)
+}
+
 func (e paletteExec) ToggleMark() error {
-	return e.runAction(daemonActionRequest{kind: daemonActionToggleMark})
+	tb := e.markTab()
+	if tb == nil {
+		return nil
+	}
+	e.sess.mu.Lock()
+	marked := tb.marked
+	e.sess.mu.Unlock()
+	target := daemonActionTarget{session: e.sess, tab: tb, attachment: e.ac}
+	if marked {
+		return e.runAction(daemonActionRequest{kind: daemonActionToggleMark, target: target})
+	}
+	e.d.enterPrompt(e.sess, e.ac, " Mark note (optional) ", "", func(note string) error {
+		return e.sess.runMutation(func() error {
+			e.sess.mu.Lock()
+			marked := tb.marked
+			e.sess.mu.Unlock()
+			if marked {
+				return nil
+			}
+			return e.runAction(daemonActionRequest{kind: daemonActionToggleMark, target: target, name: note})
+		})
+	})
+	return nil
 }
 
 func (e paletteExec) JumpMark() error { return nil }
 
-func (e paletteExec) EditMarkNote() error { return nil }
+func (e paletteExec) EditMarkNote() error {
+	tb := e.markTab()
+	if tb == nil {
+		return nil
+	}
+	e.sess.mu.Lock()
+	marked, note := tb.marked, tb.markNote
+	e.sess.mu.Unlock()
+	if !marked {
+		e.d.notify(e.sess, domain.NoticeInfo, domain.NoticeUser, "Tab is not marked", nil)
+		return nil
+	}
+	e.d.enterPrompt(e.sess, e.ac, " Edit mark note ", note, func(note string) error {
+		return e.sess.runMutation(func() error {
+			return e.runAction(daemonActionRequest{kind: daemonActionSaveMarkNote, target: daemonActionTarget{session: e.sess, tab: tb, attachment: e.ac}, name: note})
+		})
+	})
+	return nil
+}
+
+func (d *Daemon) saveMarkNote(sess *session, tb *tab, note string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.sessions[sess.id] != sess {
+		return errors.New("daemon: session closed")
+	}
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	if !slices.Contains(sess.tabs, tb) {
+		return errors.New("tab not found")
+	}
+	if tb.marked {
+		tb.markNote = sanitizeMarkNote(note)
+		sess.invalidateViewsLocked()
+	}
+	return nil
+}
 
 // resolveSessionMarks projects only live local state; route snapshots remain unchanged.
 func (d *Daemon) resolveSessionMarks(entries []recentRouteDisplay) {

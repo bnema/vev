@@ -73,6 +73,7 @@ func TestToggleMarkRepaintsRouteViewer(t *testing.T) {
 		rc := d.attachCoordinator(other, nil, viewer, true)
 		rc.opts.clock = nil
 		(daemonKeyHandler{d: d, ac: ac}).Action(keys.ActionToggleMark, nil)
+		d.handlePromptInput(ac, []byte("\r"))
 		rc.fireCurrent(false)
 		require.NotEmpty(t, mustOutputData(t, sends))
 	})
