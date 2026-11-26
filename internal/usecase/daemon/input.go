@@ -504,7 +504,9 @@ func (h daemonKeyHandler) Action(action keys.Action, _ []byte) {
 		interaction := h.d.enterPalette(sess, h.ac)
 		h.d.sendPaletteInventoryDemand(h.ac, effect, true, interaction)
 	case keys.ActionToggleMark:
-		if err := (paletteExec{d: h.d, sess: sess, ac: h.ac, effect: effect, actions: h.actions}).ToggleMark(); err != nil {
+		if err := sess.runMutation(func() error {
+			return (paletteExec{d: h.d, sess: sess, ac: h.ac, effect: effect, actions: h.actions}).ToggleMark()
+		}); err != nil {
 			h.d.reportError(sess, err)
 		}
 	case keys.ActionJumpMark:

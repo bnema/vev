@@ -60,6 +60,10 @@ func (e paletteExec) ToggleMark() error {
 		return nil
 	}
 	e.sess.mu.Lock()
+	if !slices.Contains(e.sess.tabs, tb) {
+		e.sess.mu.Unlock()
+		return errMoveStaleTarget
+	}
 	marked := tb.marked
 	e.sess.mu.Unlock()
 	target := daemonActionTarget{session: e.sess, tab: tb, attachment: e.ac}
@@ -69,6 +73,10 @@ func (e paletteExec) ToggleMark() error {
 	e.d.enterPrompt(e.sess, e.ac, " Mark note (optional) ", "", func(note string) error {
 		return e.sess.runMutation(func() error {
 			e.sess.mu.Lock()
+			if !slices.Contains(e.sess.tabs, tb) {
+				e.sess.mu.Unlock()
+				return errMoveStaleTarget
+			}
 			marked := tb.marked
 			e.sess.mu.Unlock()
 			if marked {
@@ -93,6 +101,10 @@ func (e paletteExec) EditMarkNote() error {
 		return nil
 	}
 	e.sess.mu.Lock()
+	if !slices.Contains(e.sess.tabs, tb) {
+		e.sess.mu.Unlock()
+		return errMoveStaleTarget
+	}
 	marked, note := tb.marked, tb.markNote
 	e.sess.mu.Unlock()
 	if !marked {
@@ -175,6 +187,10 @@ func (d *Daemon) publishMarkArrival(sess *session, ac *attachedClient, tb *tab) 
 		return
 	}
 	sess.mu.Lock()
+	if !slices.Contains(sess.tabs, tb) {
+		sess.mu.Unlock()
+		return
+	}
 	ac.viewMu.Lock()
 	arrived := ac.markArrivalPending && ac.view.tabID == domain.TabStableID(tb.stableID) && ac.currentAttachmentSession() == sess
 	if arrived {
