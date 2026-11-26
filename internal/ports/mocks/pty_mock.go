@@ -441,30 +441,30 @@ func (_e *MockPTYFactory_Expecter) Open(ctx any, cmd any, args any, env any, dir
 }
 
 func (_c *MockPTYFactory_Open_Call) Run(run func(ctx context.Context, cmd string, args []string, env []string, dir string, geometry domain.Geometry)) *MockPTYFactory_Open_Call {
-	_c.Call.Run(func(args mock.Arguments) {
+	_c.Call.Run(func(args1 mock.Arguments) {
 		var arg0 context.Context
-		if args[0] != nil {
-			arg0 = args[0].(context.Context)
+		if args1[0] != nil {
+			arg0 = args1[0].(context.Context)
 		}
 		var arg1 string
-		if args[1] != nil {
-			arg1 = args[1].(string)
+		if args1[1] != nil {
+			arg1 = args1[1].(string)
 		}
 		var arg2 []string
-		if args[2] != nil {
-			arg2 = args[2].([]string)
+		if args1[2] != nil {
+			arg2 = args1[2].([]string)
 		}
 		var arg3 []string
-		if args[3] != nil {
-			arg3 = args[3].([]string)
+		if args1[3] != nil {
+			arg3 = args1[3].([]string)
 		}
 		var arg4 string
-		if args[4] != nil {
-			arg4 = args[4].(string)
+		if args1[4] != nil {
+			arg4 = args1[4].(string)
 		}
 		var arg5 domain.Geometry
-		if args[5] != nil {
-			arg5 = args[5].(domain.Geometry)
+		if args1[5] != nil {
+			arg5 = args1[5].(domain.Geometry)
 		}
 		run(
 			arg0,
