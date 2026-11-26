@@ -15,6 +15,8 @@ func DefaultBindings() *Bindings {
 	altRunes := map[rune]Action{
 		' ': ActionOpenPalette,
 		'a': ActionJumpAttention,
+		'm': ActionToggleMark,
+		'M': ActionJumpMark,
 		'f': ActionToggleFloatingPane,
 		'h': ActionFocusPaneLeft,
 		'j': ActionFocusPaneDown,

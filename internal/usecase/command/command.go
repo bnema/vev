@@ -71,6 +71,9 @@ type Context interface {
 	EnterVisualMode() error
 	RenameSession() error
 	RenameSessionTo(name string) error
+	ToggleMark() error
+	JumpMark() error
+	EditMarkNote() error
 	RenameTab() error
 	RenameTabTo(name string) error
 	OpenSessionPicker() error

@@ -168,6 +168,11 @@ type tab struct {
 	// whether the tab still draws what the paint drew.
 	paneVisibilitySeq uint64
 
+	// Mark fields are guarded by the owning session.mu.
+	marked   bool
+	markNote string
+	markedAt time.Time
+
 	// attention fields are guarded by the owning session.mu.
 	attention             bool
 	attentionAt           time.Time

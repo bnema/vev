@@ -491,6 +491,50 @@ func (_c *MockContext_Detach_Call) RunAndReturn(run func() error) *MockContext_D
 	return _c
 }
 
+// EditMarkNote provides a mock function for the type MockContext
+func (_mock *MockContext) EditMarkNote() error {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for EditMarkNote")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func() error); ok {
+		r0 = returnFunc()
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockContext_EditMarkNote_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'EditMarkNote'
+type MockContext_EditMarkNote_Call struct {
+	*mock.Call
+}
+
+// EditMarkNote is a helper method to define mock.On call
+func (_e *MockContext_Expecter) EditMarkNote() *MockContext_EditMarkNote_Call {
+	return &MockContext_EditMarkNote_Call{Call: _e.mock.On("EditMarkNote")}
+}
+
+func (_c *MockContext_EditMarkNote_Call) Run(run func()) *MockContext_EditMarkNote_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockContext_EditMarkNote_Call) Return(err error) *MockContext_EditMarkNote_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockContext_EditMarkNote_Call) RunAndReturn(run func() error) *MockContext_EditMarkNote_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // EnterResizeMode provides a mock function for the type MockContext
 func (_mock *MockContext) EnterResizeMode() error {
 	ret := _mock.Called()
@@ -883,6 +927,50 @@ func (_c *MockContext_GrowPaneWidth_Call) Return(err error) *MockContext_GrowPan
 }
 
 func (_c *MockContext_GrowPaneWidth_Call) RunAndReturn(run func() error) *MockContext_GrowPaneWidth_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// JumpMark provides a mock function for the type MockContext
+func (_mock *MockContext) JumpMark() error {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for JumpMark")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func() error); ok {
+		r0 = returnFunc()
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockContext_JumpMark_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'JumpMark'
+type MockContext_JumpMark_Call struct {
+	*mock.Call
+}
+
+// JumpMark is a helper method to define mock.On call
+func (_e *MockContext_Expecter) JumpMark() *MockContext_JumpMark_Call {
+	return &MockContext_JumpMark_Call{Call: _e.mock.On("JumpMark")}
+}
+
+func (_c *MockContext_JumpMark_Call) Run(run func()) *MockContext_JumpMark_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockContext_JumpMark_Call) Return(err error) *MockContext_JumpMark_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockContext_JumpMark_Call) RunAndReturn(run func() error) *MockContext_JumpMark_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -1740,6 +1828,50 @@ func (_c *MockContext_ToggleFloatingPane_Call) Return(err error) *MockContext_To
 }
 
 func (_c *MockContext_ToggleFloatingPane_Call) RunAndReturn(run func() error) *MockContext_ToggleFloatingPane_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// ToggleMark provides a mock function for the type MockContext
+func (_mock *MockContext) ToggleMark() error {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for ToggleMark")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func() error); ok {
+		r0 = returnFunc()
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockContext_ToggleMark_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ToggleMark'
+type MockContext_ToggleMark_Call struct {
+	*mock.Call
+}
+
+// ToggleMark is a helper method to define mock.On call
+func (_e *MockContext_Expecter) ToggleMark() *MockContext_ToggleMark_Call {
+	return &MockContext_ToggleMark_Call{Call: _e.mock.On("ToggleMark")}
+}
+
+func (_c *MockContext_ToggleMark_Call) Run(run func()) *MockContext_ToggleMark_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockContext_ToggleMark_Call) Return(err error) *MockContext_ToggleMark_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockContext_ToggleMark_Call) RunAndReturn(run func() error) *MockContext_ToggleMark_Call {
 	_c.Call.Return(run)
 	return _c
 }

@@ -306,6 +306,7 @@ const (
 	daemonActionPreviousTab
 	daemonActionRenameSession
 	daemonActionRenameTab
+	daemonActionToggleMark
 	daemonActionResizePane
 	daemonActionEqualizePanes
 	daemonActionConsumeOrExpelPane
@@ -406,6 +407,8 @@ func (a daemonActions) Run(request daemonActionRequest) error {
 		return a.switchRelative(target.session, target.attachment, -1)
 	case daemonActionRenameSession:
 		return a.d.renameSession(target.session, request.name)
+	case daemonActionToggleMark:
+		return a.d.toggleMark(target.session, target.tab)
 	case daemonActionRenameTab:
 		return a.d.renameTab(target.session, target.tab, request.name)
 	case daemonActionResizePane:

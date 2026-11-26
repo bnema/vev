@@ -503,6 +503,10 @@ func (h daemonKeyHandler) Action(action keys.Action, _ []byte) {
 	case keys.ActionOpenPalette:
 		interaction := h.d.enterPalette(sess, h.ac)
 		h.d.sendPaletteInventoryDemand(h.ac, effect, true, interaction)
+	case keys.ActionToggleMark:
+		runAction(daemonActionRequest{kind: daemonActionToggleMark})
+	case keys.ActionJumpMark:
+		_ = (paletteExec{d: h.d, sess: sess, ac: h.ac}).JumpMark()
 	case keys.ActionJumpAttention:
 		if effect == nil {
 			if err := h.d.jumpAttention(sess, h.ac); err != nil {

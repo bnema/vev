@@ -52,6 +52,8 @@ var actionNames = map[Action]string{
 	ActionOpenPalette:             "open-palette",
 	ActionToggleFloatingPane:      "toggle-floating-pane",
 	ActionJumpAttention:           "jump-attention",
+	ActionToggleMark:              "toggle-mark",
+	ActionJumpMark:                "jump-mark",
 	ActionFocusPaneLeft:           "focus-pane-left",
 	ActionFocusPaneRight:          "focus-pane-right",
 	ActionFocusPaneUp:             "focus-pane-up",

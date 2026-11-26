@@ -11,7 +11,7 @@ import (
 
 func TestRegistryCodesAndSlugsAreUniqueInOrder(t *testing.T) {
 	commands := PaletteRegistry()
-	wantCodes := []string{"CNT", "CNS", "CES", "CLT", "SPR", "SPL", "SPU", "SPD", "MPL", "MPR", "STP", "TFS", "TFP", "CFP", "MFP", "MAT", "FPL", "FPR", "FPU", "FPD", "RSZ", "GPW", "SPW", "GPH", "SPH", "EQP", "NXT", "PVT", "BCK", "JRS", "SSP", "NTC", "YLN", "VIS", "RNS", "RNT", "DET"}
+	wantCodes := []string{"CNT", "CNS", "CES", "CLT", "SPR", "SPL", "SPU", "SPD", "MPL", "MPR", "STP", "TFS", "TFP", "CFP", "MFP", "MAT", "FPL", "FPR", "FPU", "FPD", "RSZ", "GPW", "SPW", "GPH", "SPH", "EQP", "NXT", "PVT", "BCK", "JRS", "SSP", "NTC", "YLN", "VIS", "RNS", "RNT", "MRK", "JMK", "EMN", "DET"}
 
 	if len(commands) != len(wantCodes) {
 		t.Fatalf("Registry() returned %d commands, want %d", len(commands), len(wantCodes))
@@ -393,6 +393,9 @@ func TestCommandRunCallsMatchingContextMethod(t *testing.T) {
 		{code: "VIS", expect: func(ctx *MockContext) { ctx.EXPECT().EnterVisualMode().Return(nil).Once() }},
 		{code: "RNS", expect: func(ctx *MockContext) { ctx.EXPECT().RenameSession().Return(nil).Once() }},
 		{code: "RNT", expect: func(ctx *MockContext) { ctx.EXPECT().RenameTab().Return(nil).Once() }},
+		{code: "MRK", expect: func(ctx *MockContext) { ctx.EXPECT().ToggleMark().Return(nil).Once() }},
+		{code: "JMK", expect: func(ctx *MockContext) { ctx.EXPECT().JumpMark().Return(nil).Once() }},
+		{code: "EMN", expect: func(ctx *MockContext) { ctx.EXPECT().EditMarkNote().Return(nil).Once() }},
 		{code: "DET", expect: func(ctx *MockContext) { ctx.EXPECT().Detach().Return(nil).Once() }},
 	}
 

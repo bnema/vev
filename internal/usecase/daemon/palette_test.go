@@ -1022,13 +1022,13 @@ func TestPaletteRecentCommandsNewestFirstThenRegistryOrder(t *testing.T) {
 	for i, cmd := range commands {
 		codes[i] = cmd.Code
 	}
-	require.Equal(t, []string{"SSP", "NXT", "CNT", "CNS", "CES", "CLT", "SPR", "SPL", "SPU", "SPD", "MPL", "MPR", "STP", "TFS", "TFP", "CFP", "MFP", "MAT", "FPL", "FPR", "FPU", "FPD", "RSZ", "GPW", "SPW", "GPH", "SPH", "EQP", "PVT", "BCK", "JRS", "NTC", "YLN", "VIS", "RNS", "RNT", "DET"}, codes)
+	require.Equal(t, []string{"SSP", "NXT", "CNT", "CNS", "CES", "CLT", "SPR", "SPL", "SPU", "SPD", "MPL", "MPR", "STP", "TFS", "TFP", "CFP", "MFP", "MAT", "FPL", "FPR", "FPU", "FPD", "RSZ", "GPW", "SPW", "GPH", "SPH", "EQP", "PVT", "BCK", "JRS", "NTC", "YLN", "VIS", "RNS", "RNT", "MRK", "JMK", "EMN", "DET"}, codes)
 }
 
 func TestPaletteRecencyCanBeUpdatedConcurrently(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		d := &Daemon{}
-		codes := []string{"CNT", "CNS", "CES", "CLT", "SPR", "SPL", "SPU", "SPD", "STP", "TFS", "TFP", "CFP", "MFP", "MAT", "FPL", "FPR", "FPU", "FPD", "RSZ", "GPW", "SPW", "GPH", "SPH", "EQP", "NXT", "PVT", "BCK", "SSP", "VIS", "RNS", "RNT", "DET"}
+		codes := []string{"CNT", "CNS", "CES", "CLT", "SPR", "SPL", "SPU", "SPD", "STP", "TFS", "TFP", "CFP", "MFP", "MAT", "FPL", "FPR", "FPU", "FPD", "RSZ", "GPW", "SPW", "GPH", "SPH", "EQP", "NXT", "PVT", "BCK", "SSP", "VIS", "RNS", "RNT", "MRK", "JMK", "EMN", "DET"}
 
 		var wg sync.WaitGroup
 		for range 50 {

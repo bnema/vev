@@ -34,6 +34,8 @@ const (
 	ActionSwitchTab8
 	ActionSwitchTab9
 	ActionJumpAttention
+	ActionToggleMark
+	ActionJumpMark
 	ActionFocusPaneLeft
 	ActionFocusPaneRight
 	ActionFocusPaneUp
