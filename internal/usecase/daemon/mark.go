@@ -9,8 +9,6 @@ import (
 	"bnema.dev/vev/internal/domain"
 )
 
-func (d *Daemon) toggleMark(sess *session, tb *tab) error { return d.toggleMarkWithNote(sess, tb, "") }
-
 func (d *Daemon) toggleMarkWithNote(sess *session, tb *tab, note string) error {
 	if tb == nil {
 		return errors.New("tab required")
