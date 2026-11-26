@@ -20,6 +20,7 @@ func firstMovePane(panes []*pane) *pane {
 }
 
 type movePostcommitPlan struct {
+	markRefresh       bool
 	followResult      attachmentTransitionResult
 	afterFollow       func(*attachmentEffect)
 	source            *session
@@ -84,9 +85,8 @@ func (p movePostcommitPlan) execute(d *Daemon) {
 	}
 	p.unlockDispatch()
 	p.reservation.Release()
-	d.repaintSessionMarkViewers(p.source)
-	if p.destination != p.source {
-		d.repaintSessionMarkViewers(p.destination)
+	if p.markRefresh {
+		d.repaintSessionMarkViewers(p.source, p.destination)
 	}
 	// The agent activity scheduler republishes moved panes on their new tab.
 	d.noteAgentPanesMoved(panes)

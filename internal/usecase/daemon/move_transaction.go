@@ -63,6 +63,7 @@ type moveTransaction struct {
 
 	followResult attachmentTransitionResult
 
+	markRefresh bool
 	publication moveTopologyPublication
 	publishErr  error
 
@@ -303,12 +304,17 @@ func (t *moveTransaction) publishLocked() error {
 		// and the frozen gate keep membership/lease authority pinned meanwhile.
 		follow.unlockCoordinators()
 	}
+	sourceMarked, _ := d.sessionMarks.Load(t.source.incarnation)
+	destinationMarked, _ := d.sessionMarks.Load(t.destination.incarnation)
 	publication, err := t.topology.publishLocked(d, t.source, t.destination)
 	if err != nil {
 		return err
 	}
 	d.publishSessionMarkLocked(t.source)
 	d.publishSessionMarkLocked(t.destination)
+	newSourceMarked, _ := d.sessionMarks.Load(t.source.incarnation)
+	newDestinationMarked, _ := d.sessionMarks.Load(t.destination.incarnation)
+	t.markRefresh = sourceMarked != newSourceMarked || destinationMarked != newDestinationMarked || (publication.sourceTab != nil && publication.sourceTab.marked)
 	t.publication = publication
 	if follow != nil {
 		follow.releaseCoordinators = lockAttachmentCoordinators(t.source, follow.sourceCoordinator, t.destination, follow.targetCoordinator)
@@ -346,6 +352,7 @@ func (t *moveTransaction) postcommitPlan(unlockDispatch func(), reservation *mov
 	return movePostcommitPlan{
 		followResult:             t.followResult,
 		afterFollow:              t.request.afterFollow,
+		markRefresh:              t.markRefresh,
 		source:                   t.source,
 		destination:              t.destination,
 		sourceName:               t.sourceName,
