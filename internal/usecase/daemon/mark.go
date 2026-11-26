@@ -160,19 +160,27 @@ func (d *Daemon) publishSessionMarkLocked(sess *session) {
 
 // repaintSessionMarkViewers runs after releasing architecture locks.
 func (d *Daemon) repaintSessionMarkViewers(sessions ...*session) {
+	d.refreshMarkProjections()
+	d.repaintSessionMarkBars(sessions...)
+}
+
+func (d *Daemon) repaintSessionMarkBars(sessions ...*session) {
 	lifecycles := make(map[domain.SessionLifecycleID]struct{}, len(sessions))
 	for _, sess := range sessions {
 		sess.mu.Lock()
 		lifecycles[sess.incarnation] = struct{}{}
 		sess.mu.Unlock()
 	}
+	d.requestRouteViewerRepaint(lifecycles, nil)
+}
+
+func (d *Daemon) refreshMarkProjections() {
 	d.refreshClientPickers()
 	for _, current := range d.sessionsSnapshot() {
 		for _, ac := range current.snapshotAttachments() {
 			d.refreshPalette(ac)
 		}
 	}
-	d.requestRouteViewerRepaint(lifecycles, nil)
 }
 
 // publishAttachmentInfo delivers an ephemeral attachment-only reminder, without history.

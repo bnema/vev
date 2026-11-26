@@ -85,8 +85,9 @@ func (p movePostcommitPlan) execute(d *Daemon) {
 	}
 	p.unlockDispatch()
 	p.reservation.Release()
+	d.refreshMarkProjections()
 	if p.markRefresh {
-		d.repaintSessionMarkViewers(p.source, p.destination)
+		d.repaintSessionMarkBars(p.source, p.destination)
 	}
 	// The agent activity scheduler republishes moved panes on their new tab.
 	d.noteAgentPanesMoved(panes)
