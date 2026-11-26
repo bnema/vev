@@ -565,6 +565,7 @@ func commitDamageReceipts(receipts []damageReceipt) {
 // attachment's sendMu is released: notices, repaints, and send-error cleanup
 // may re-enter rendering or take session locks, so they never run under it.
 type frameFollowUp struct {
+	emitted      bool // output committed, including a successful no-byte emission
 	prepareErr   error
 	sendErr      error
 	sendTr       ports.ServerConnection
@@ -735,7 +736,7 @@ func (d *Daemon) publishFrameLocked(entry *session, ac *attachedClient, state *c
 			}
 		}
 	}
-	return frameFollowUp{sendErr: sendErr, sendTr: sendTr, warnGraphics: suppressedGraphics}, true
+	return frameFollowUp{emitted: prepared.sent(), sendErr: sendErr, sendTr: sendTr, warnGraphics: suppressedGraphics}, true
 }
 
 // settleFrame runs a publication's follow-up with sendMu released and no

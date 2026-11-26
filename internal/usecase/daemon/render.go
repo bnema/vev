@@ -420,7 +420,7 @@ func (d *Daemon) paintLocked(entry *session, ac *attachedClient, tb *tab, reset 
 		}
 		overlays.Unlock()
 		marks.flush()
-		if published && followUp.prepareErr == nil && followUp.sendErr == nil {
+		if published && followUp.emitted {
 			if d.publishMarkArrival(entry, ac, tb) {
 				d.repaintForNotice(ac)
 			}

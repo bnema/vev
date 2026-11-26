@@ -121,3 +121,30 @@ func TestRejectedPaintRetainsMarkArrival(t *testing.T) {
 		require.Contains(t, toasts[0].Message, "retry")
 	})
 }
+
+func TestStaleViewFrameRetainsMarkArrival(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		d, sess, ac, _, releases := newManualTabSession(t, 1)
+		defer releases[0]()
+		stopOverlayTimersAtCleanup(t, ac)
+		sess.tabs[0].marked = true
+		sess.tabs[0].markNote = "retry after resize"
+		ac.renderStages.compose = func() {
+			ac.renderStages.compose = nil
+			view := ac.viewSnapshot()
+			view.revision++
+			ac.publishView(view)
+		}
+		require.Equal(t, paintEmitted, d.paint(sess, ac, true, nil))
+		ac.viewMu.Lock()
+		pending := ac.markArrivalPending
+		ac.viewMu.Unlock()
+		require.True(t, pending)
+		toasts, _ := visibleToasts(ac)
+		require.Empty(t, toasts)
+		require.Equal(t, paintEmitted, d.paint(sess, ac, true, nil))
+		toasts, _ = visibleToasts(ac)
+		require.Len(t, toasts, 1)
+		require.Contains(t, toasts[0].Message, "retry after resize")
+	})
+}
