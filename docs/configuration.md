@@ -140,7 +140,7 @@ code.yank-last-notification = YLN
 ## Scrollback
 
 | Key | Range | Default | Zero means |
-|---|---|---|---|---|
+|---|---|---|---|
 | `scrollback.megabytes` | 0–4096 MB | 50 | no history |
 | `scrollback.lines` | 0–1,000,000 | 10,000 | no line limit, bytes only |
 
@@ -195,7 +195,7 @@ Alt+M jumps to the oldest marked tab, then cycles across this daemon's sessions,
 `ui.glyphs` selects the glyphs of the attention bell, the Done bell-check, the mark, and the default spinner in the bars and pickers. Every glyph is one cell wide.
 
 | Value | Bell | Done | Mark | Spinner |
-|---|---|---|---|
+|---|---|---|---|---|
 | `nerd` | Nerd Font bell | Nerd Font bell-check `nf-md-bell_check` (U+F11E5) | Nerd Font flag `nf-md-flag` (U+F023B) | `circle` |
 | `unicode` | `•` | `✓` | `⚑` | `◐ ◓ ◑ ◒` |
 | `ascii` | `!` | `*` | `#` | `\| / - \` |
