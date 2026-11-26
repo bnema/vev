@@ -136,8 +136,7 @@ func drawTopBarActivity(row []renderer.Cell, status statusSnapshot, frame int, t
 		}
 		if w.marked {
 			writeStatusText(row, &x, " ", baseStyle)
-			markStyle := styles.Accent
-			markStyle.Bold = true
+			markStyle := themeui.PulseDone(baseStyle, styles.Accent, 1)
 			writeStatusCell(row, &x, glyphs.OrNerd().Mark, markStyle)
 		}
 		writeStatusText(row, &x, label.text[label.nameLen:], titleStyle)

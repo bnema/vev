@@ -15,6 +15,7 @@ import (
 	renderer "bnema.dev/vev-vt/ansi"
 	"bnema.dev/vev/internal/domain"
 	"bnema.dev/vev/internal/domain/layout"
+	"bnema.dev/vev/internal/domain/terminalcap"
 	"bnema.dev/vev/internal/protocol"
 	"bnema.dev/vev/internal/protocol/wire"
 	"bnema.dev/vev/internal/usecase/command"
@@ -1576,44 +1577,68 @@ func TestStatusCoalescesCreateSwitchAndResize(t *testing.T) {
 }
 
 func TestDrawTopBarMark(t *testing.T) {
-	for _, glyphs := range []ui.GlyphSet{ui.NerdGlyphs(), ui.UnicodeGlyphs(), ui.ASCIIGlyphs()} {
-		for _, tt := range []struct {
-			name     string
-			marked   bool
-			activity statusActivity
-		}{
-			{"unmarked", false, activityNone}, {"marked", true, activityNone},
-			{"working", true, activityWorking}, {"done", true, activityDone}, {"bell", true, activityBell},
-		} {
-			t.Run(fmt.Sprintf("%d/%s", glyphs.Mode, tt.name), func(t *testing.T) {
-				tabs := []statusTab{{name: "tab", marked: tt.marked, activity: tt.activity}}
-				row := make([]renderer.Cell, 30)
-				styles := themeui.NewStyles(themeui.Theme{})
-				drawTopBarActivity(row, statusSnapshot{tabs: tabs}, pulseFrameCount/2, 0, glyphs.Spinner, glyphs, "", styles)
-				text := rowText(row)
-				if !tt.marked {
-					require.NotContains(t, text, string(glyphs.Mark))
-					return
-				}
-				require.Contains(t, text, string(glyphs.Mark))
-				activity := rune(0)
-				switch tt.activity {
-				case activityWorking:
-					activity = glyphs.Spinner[0]
-				case activityDone:
-					activity = glyphs.Done
-				case activityBell:
-					activity = glyphs.Attention
-				}
-				if activity != 0 {
-					require.Contains(t, text, string(activity)+" "+string(glyphs.Mark))
-				}
-				for _, cell := range row {
-					if cell.Rune == glyphs.Mark {
-						require.True(t, cell.Style.Bold)
+	for _, mode := range []terminalcap.ColorMode{terminalcap.TrueColor, terminalcap.ANSI16, terminalcap.Monochrome} {
+		for _, transparent := range []bool{false, true} {
+			for _, active := range []bool{false, true} {
+				for _, glyphs := range []ui.GlyphSet{ui.NerdGlyphs(), ui.UnicodeGlyphs(), ui.ASCIIGlyphs()} {
+					for _, tt := range []struct {
+						name     string
+						marked   bool
+						activity statusActivity
+					}{
+						{"unmarked", false, activityNone}, {"marked", true, activityNone},
+						{"working", true, activityWorking}, {"done", true, activityDone}, {"bell", true, activityBell},
+					} {
+						t.Run(fmt.Sprintf("%d/transparent=%t/active=%t/%d/%s", mode, transparent, active, glyphs.Mode, tt.name), func(t *testing.T) {
+							tabs := []statusTab{{name: "tab", active: active, marked: tt.marked, activity: tt.activity}}
+							row := make([]renderer.Cell, 30)
+							d := newTestDaemon(t, nil, newStubClock(t))
+							cfg := domain.Defaults()
+							cfg.Bar.Transparent = transparent
+							d.ApplyConfig(cfg)
+							styles := d.resolveAppliedTheme(themeui.BuiltinDark, terminalcap.ColorCapabilities{Mode: mode}).Resolved.Styles
+							base := styles.SurfaceInactive
+							if active {
+								base = styles.SurfaceActive
+							}
+							drawTopBarActivity(row, statusSnapshot{tabs: tabs}, pulseFrameCount/2, 0, glyphs.Spinner, glyphs, "", styles)
+							text := rowText(row)
+							if !tt.marked {
+								require.NotContains(t, text, string(glyphs.Mark))
+								return
+							}
+							require.Contains(t, text, string(glyphs.Mark))
+							activity := rune(0)
+							switch tt.activity {
+							case activityWorking:
+								activity = glyphs.Spinner[0]
+							case activityDone:
+								activity = glyphs.Done
+							case activityBell:
+								activity = glyphs.Attention
+							}
+							if activity != 0 {
+								require.Contains(t, text, string(activity)+" "+string(glyphs.Mark))
+							}
+							for _, cell := range row {
+								if cell.Rune == glyphs.Mark {
+									require.True(t, cell.Style.Bold)
+									require.Equal(t, base.HasBackgroundRGB, cell.Style.HasBackgroundRGB)
+									require.Equal(t, base.BackgroundRGB, cell.Style.BackgroundRGB)
+									require.Equal(t, base.Background, cell.Style.Background)
+									require.Equal(t, styles.Accent.HasForegroundRGB, cell.Style.HasForegroundRGB)
+									if styles.Accent.HasForegroundRGB {
+										require.Equal(t, styles.Accent.ForegroundRGB, cell.Style.ForegroundRGB)
+									} else if styles.Accent.Foreground >= 0 {
+										require.Equal(t, styles.Accent.Foreground, cell.Style.Foreground)
+									}
+								}
+							}
+						})
 					}
 				}
-			})
+
+			}
 		}
 	}
 }
