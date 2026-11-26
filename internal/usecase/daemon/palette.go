@@ -38,7 +38,7 @@ func (d *Daemon) enterPalette(sess *session, ac *attachedClient) uint64 {
 	// consults its own session history for recent-route commands.
 	routeSnapshot := ac.routeSnapshotCopy()
 	commands := d.paletteCommands()
-	results := d.paletteResults(sess, commands, routeSnapshot)
+	results := d.paletteResultsWithMark(sess, commands, routeSnapshot, d.glyphsFor(ac).Mark)
 	model := palette.New(results)
 	ac.overlays.paletteMu.Lock()
 	ac.overlays.paletteGeneration++
@@ -165,6 +165,10 @@ func paletteRouteRepresentsDaemonSession(entry protocol.RecentRouteEntry, daemon
 // from the client routes, and committing one navigates through
 // the client.
 func (d *Daemon) paletteResults(current *session, commands []command.Command, routeSnapshot protocol.RecentRouteSnapshot) []palette.Result {
+	return d.paletteResultsWithMark(current, commands, routeSnapshot, ui.NerdGlyphs().Mark)
+}
+
+func (d *Daemon) paletteResultsWithMark(current *session, commands []command.Command, routeSnapshot protocol.RecentRouteSnapshot, mark rune) []palette.Result {
 	inv := d.captureSessionInventory(viewOptions{}, false)
 	stopped := inv.resumableStopped()
 	represented := make(map[paletteSessionIdentity]struct{}, len(inv.live)+len(inv.stopped)+len(routeSnapshot.Entries))
@@ -203,7 +207,11 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command, ro
 			continue
 		}
 		target := protocol.ExactSessionTarget{LifecycleID: snap.incarnation, SessionName: snap.name}
-		active = append(active, palette.NewActiveSessionResultWithDisplayOrigin(target, time.Unix(0, snap.createdAt), daemonDisplayOrigin))
+		result := palette.NewActiveSessionResultWithDisplayOrigin(target, time.Unix(0, snap.createdAt), daemonDisplayOrigin)
+		if snap.marked {
+			result = result.WithSessionMark(mark)
+		}
+		active = append(active, result)
 	}
 	sort.Slice(active, func(i, j int) bool {
 		left, _ := active[i].SessionName()
@@ -264,7 +272,7 @@ func (d *Daemon) refreshPalette(ac *attachedClient) {
 		return
 	}
 
-	results := d.paletteResults(sess, d.paletteCommands(), routeSnapshot)
+	results := d.paletteResultsWithMark(sess, d.paletteCommands(), routeSnapshot, d.glyphsFor(ac).Mark)
 	results = appendImportedResults(results, ac)
 	rt.paletteMu.Lock()
 	defer rt.paletteMu.Unlock()

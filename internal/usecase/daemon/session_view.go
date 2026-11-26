@@ -21,6 +21,7 @@ type tabView struct {
 	id           domain.TabStableID
 	name         string
 	focusedTitle string
+	marked       bool
 	attention    bool
 	attentionAt  time.Time
 }
@@ -39,6 +40,7 @@ type sessionView struct {
 	mruAt        uint64
 	attached     bool
 	tabCount     int
+	marked       bool
 	hasAttention bool
 	tabs         []tabView
 }
@@ -94,16 +96,16 @@ func (s *session) snapshotView(opts viewOptions) sessionView {
 	for i, tb := range s.tabs {
 		if tb.attention {
 			view.hasAttention = true
-			if !opts.tabDetails {
-				break
-			}
+
 		}
+		view.marked = view.marked || tb.marked
 		if !opts.tabDetails {
 			continue
 		}
 		entry := tabView{
 			id:          domain.TabStableID(tb.stableID),
 			name:        tabDisplayName(tb, i),
+			marked:      tb.marked,
 			attention:   tb.attention,
 			attentionAt: tb.attentionAt,
 		}
@@ -134,9 +136,13 @@ func (view sessionView) pickerView(marks pickerMarks, indicator agentactivity.In
 	}
 	attention := false
 	for _, tb := range view.tabs {
+		name := tb.name
+		if tb.marked {
+			name = attentionSuffix(name, marks.mark)
+		}
 		out.Tabs = append(out.Tabs, pickerTabEntry{
 			TabID:     tb.id,
-			Name:      tb.name,
+			Name:      name,
 			Detail:    tabTitleDetail(tb.name, tb.focusedTitle),
 			Attention: tb.attention,
 		})
@@ -147,6 +153,9 @@ func (view sessionView) pickerView(marks pickerMarks, indicator agentactivity.In
 	if mark := marks.forSession(attention, indicator); mark != 0 {
 		out.Name = attentionSuffix(out.Name, mark)
 	}
+	if view.marked {
+		out.Name = attentionSuffix(out.Name, marks.mark)
+	}
 	return out
 }
 
@@ -154,12 +163,12 @@ func (view sessionView) pickerView(marks pickerMarks, indicator agentactivity.In
 // client draws picker rows as static text, so Working shows the spinner's
 // first frame instead of animating.
 type pickerMarks struct {
-	bell, working, done rune
+	bell, working, done, mark rune
 }
 
 func newPickerMarks(glyphs ui.GlyphSet, spinner []rune) pickerMarks {
 	glyphs = glyphs.OrNerd()
-	marks := pickerMarks{bell: glyphs.Attention, done: glyphs.Done}
+	marks := pickerMarks{bell: glyphs.Attention, done: glyphs.Done, mark: glyphs.Mark}
 	if len(spinner) > 0 && renderer.RuneWidth(spinner[0]) == 1 {
 		marks.working = spinner[0]
 	}

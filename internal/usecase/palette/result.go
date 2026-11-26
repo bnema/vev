@@ -376,3 +376,11 @@ func CommandResults(commands []command.Command) []Result {
 	}
 	return results
 }
+
+// WithSessionMark adds a display-only glyph without changing selection identity.
+func (r Result) WithSessionMark(mark rune) Result {
+	if r.kind == ResultKindActiveSession && mark != 0 {
+		r.session.display += " " + string(mark)
+	}
+	return r
+}

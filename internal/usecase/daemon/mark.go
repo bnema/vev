@@ -69,5 +69,11 @@ func (d *Daemon) repaintSessionMarkViewers(sess *session) {
 	sess.mu.Lock()
 	lifecycle := sess.incarnation
 	sess.mu.Unlock()
+	d.refreshClientPickers()
+	for _, current := range d.sessionsSnapshot() {
+		for _, ac := range current.snapshotAttachments() {
+			d.refreshPalette(ac)
+		}
+	}
 	d.requestRouteViewerRepaint(map[domain.SessionLifecycleID]struct{}{lifecycle: {}}, sess)
 }
