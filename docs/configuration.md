@@ -44,7 +44,7 @@ agents.activity = on
 # Leave it out to use the ui.glyphs spinner.
 # agents.spinner = circle
 
-# Status glyphs (bell, bell-check, spinner): auto, nerd, unicode, or ascii.
+# Status glyphs (bell, bell-check, mark, spinner): auto, nerd, unicode, or ascii.
 ui.glyphs = auto
 
 # Remove a numbered (ephemeral) session when its last client exits.
@@ -65,6 +65,8 @@ open-palette = alt+space
 toggle-floating-pane = alt+f
 # Jump to the oldest bell, else to the oldest finished agent you have not seen.
 jump-attention = alt+a
+toggle-mark = alt+m
+jump-mark = alt+M
 focus-pane-left = alt+h
 focus-pane-right = alt+l
 focus-pane-up = alt+k
@@ -127,6 +129,9 @@ code.visual-mode = VIS
 code.toggle-floating-pane = TFP
 code.rename-session = RNS
 code.rename-tab = RNT
+code.toggle-mark = MRK
+code.jump-mark = JMK
+code.edit-mark-note = EMN
 code.detach = DET
 code.notifications = NTC
 code.yank-last-notification = YLN
@@ -135,7 +140,7 @@ code.yank-last-notification = YLN
 ## Scrollback
 
 | Key | Range | Default | Zero means |
-|---|---|---|---|
+|---|---|---|---|---|
 | `scrollback.megabytes` | 0–4096 MB | 50 | no history |
 | `scrollback.lines` | 0–1,000,000 | 10,000 | no line limit, bytes only |
 
@@ -177,15 +182,23 @@ With `agents.activity = on` (default), vev detects agent CLIs running in a pane 
 
 Custom frames take 2–32 frames, each one character exactly one cell wide, for example `agents.spinner = ◐ ◓ ◑ ◒`. Without `agents.spinner`, or with an invalid value (which logs a warning), the spinner follows `ui.glyphs`. A set `agents.spinner` always wins. Frames advance every 120 ms.
 
+## Tab marks
+
+Alt+m marks the current tab and asks for an optional note: Enter saves, Escape cancels. Alt+m on a marked tab removes the mark. Use `EMN` in the palette to edit or clear its note.
+
+The mark has its own cell beside activity on the tab and the session's recent entry in the bottom bar, and appears in pickers and the palette. `vev ls` adds `marked` to STATE and a `"marked"` boolean to JSON. Arriving on a marked tab shows its non-empty note once, only to that attachment.
+
+Alt+M jumps to the oldest marked tab, then cycles across this daemon's sessions, independently of `jump-attention`. Marks are kept in memory only and are lost when the daemon restarts. Remote session entries do not show marks.
+
 ## Status glyphs
 
-`ui.glyphs` selects the glyphs of the attention bell, the Done bell-check, and the default spinner in the bars and pickers. Every glyph is one cell wide.
+`ui.glyphs` selects the glyphs of the attention bell, the Done bell-check, the mark, and the default spinner in the bars and pickers. Every glyph is one cell wide.
 
-| Value | Bell | Done | Spinner |
+| Value | Bell | Done | Mark | Spinner |
 |---|---|---|---|
-| `nerd` | Nerd Font bell | Nerd Font bell-check `nf-md-bell_check` (U+F11E5) | `circle` |
-| `unicode` | `•` | `✓` | `◐ ◓ ◑ ◒` |
-| `ascii` | `!` | `*` | `\| / - \` |
+| `nerd` | Nerd Font bell | Nerd Font bell-check `nf-md-bell_check` (U+F11E5) | Nerd Font flag `nf-md-flag` (U+F023B) | `circle` |
+| `unicode` | `•` | `✓` | `⚑` | `◐ ◓ ◑ ◒` |
+| `ascii` | `!` | `*` | `#` | `\| / - \` |
 
 - `auto` (default) uses `ascii` on the Linux console and other limited terminals (`TERM` of `linux`, `ansi`, `cons25`, `dumb`, `vt` followed by a digit such as `vt100`, or a monochrome name) and `nerd` everywhere else.
 - Each client resolves its own set from its `TERM`, so a console client and a desktop client attached to the same session each see glyphs their terminal can draw.

@@ -72,6 +72,8 @@ vev --web-daemon                 start the browser terminal
 | Ctrl+1 … 9 | switch to a recent session ([kitty keyboard terminals](docs/terminal.md#kitty-keyboard)) |
 | Alt+h/j/k/l or Alt+Arrow | focus pane |
 | Alt+a | jump to a bell or a finished agent |
+| Alt+m | mark/unmark tab, with an optional note |
+| Alt+M | cycle marked tabs |
 
 Type a code or fuzzy-search the palette. Common default codes:
 
