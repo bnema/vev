@@ -1574,3 +1574,63 @@ func TestStatusCoalescesCreateSwitchAndResize(t *testing.T) {
 		d.waitNotifies()
 	})
 }
+
+func TestDrawTopBarMark(t *testing.T) {
+	for _, glyphs := range []ui.GlyphSet{ui.NerdGlyphs(), ui.UnicodeGlyphs(), ui.ASCIIGlyphs()} {
+		for _, tt := range []struct {
+			name     string
+			marked   bool
+			activity statusActivity
+		}{
+			{"unmarked", false, activityNone}, {"marked", true, activityNone},
+			{"working", true, activityWorking}, {"done", true, activityDone}, {"bell", true, activityBell},
+		} {
+			t.Run(fmt.Sprintf("%d/%s", glyphs.Mode, tt.name), func(t *testing.T) {
+				tabs := []statusTab{{name: "tab", marked: tt.marked, activity: tt.activity}}
+				row := make([]renderer.Cell, 30)
+				styles := themeui.NewStyles(themeui.Theme{})
+				drawTopBarActivity(row, statusSnapshot{tabs: tabs}, pulseFrameCount/2, 0, glyphs.Spinner, glyphs, "", styles)
+				text := rowText(row)
+				if !tt.marked {
+					require.NotContains(t, text, string(glyphs.Mark))
+					return
+				}
+				require.Contains(t, text, string(glyphs.Mark))
+				activity := rune(0)
+				switch tt.activity {
+				case activityWorking:
+					activity = glyphs.Spinner[0]
+				case activityDone:
+					activity = glyphs.Done
+				case activityBell:
+					activity = glyphs.Attention
+				}
+				if activity != 0 {
+					require.Contains(t, text, string(activity)+" "+string(glyphs.Mark))
+				}
+				for _, cell := range row {
+					if cell.Rune == glyphs.Mark {
+						require.True(t, cell.Style.Bold)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestFitMarkedTabLabels(t *testing.T) {
+	for _, activity := range []statusActivity{activityNone, activityWorking, activityDone} {
+		t.Run(fmt.Sprint(activity), func(t *testing.T) {
+			tabs := []statusTab{{name: "long tab name", marked: true, activity: activity}, {name: "another long tab", marked: true}}
+			labels := fitTabLabels(tabs, 24, "ok", true)
+			width := 0
+			for i, label := range labels {
+				width += 4 + statusTextWidth(label.text)
+				if tabs[i].cellActivity(true) != activityNone {
+					width += 2
+				}
+			}
+			require.LessOrEqual(t, width, 20)
+		})
+	}
+}

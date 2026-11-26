@@ -17,6 +17,7 @@ type GlyphSet struct {
 	Mode      domain.GlyphMode
 	Attention rune
 	Done      rune
+	Mark      rune
 	Spinner   []rune
 }
 
@@ -28,17 +29,17 @@ var (
 
 // NerdGlyphs draws Nerd Font glyphs and the "circle" slice spinner.
 func NerdGlyphs() GlyphSet {
-	return GlyphSet{Mode: domain.GlyphsNerd, Attention: AttentionGlyph, Done: DoneGlyph, Spinner: nerdSpinner}
+	return GlyphSet{Mode: domain.GlyphsNerd, Attention: AttentionGlyph, Done: DoneGlyph, Mark: '\U000F023B', Spinner: nerdSpinner}
 }
 
 // UnicodeGlyphs needs neither a Nerd Font nor braille.
 func UnicodeGlyphs() GlyphSet {
-	return GlyphSet{Mode: domain.GlyphsUnicode, Attention: '•', Done: '✓', Spinner: unicodeSpinner}
+	return GlyphSet{Mode: domain.GlyphsUnicode, Attention: '•', Done: '✓', Mark: '⚑', Spinner: unicodeSpinner}
 }
 
 // ASCIIGlyphs is safe on the Linux console.
 func ASCIIGlyphs() GlyphSet {
-	return GlyphSet{Mode: domain.GlyphsASCII, Attention: '!', Done: '*', Spinner: asciiSpinner}
+	return GlyphSet{Mode: domain.GlyphsASCII, Attention: '!', Done: '*', Mark: '#', Spinner: asciiSpinner}
 }
 
 // ResolveGlyphs selects the set for mode. Auto uses ASCII when console

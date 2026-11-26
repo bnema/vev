@@ -134,6 +134,12 @@ func drawTopBarActivity(row []renderer.Cell, status statusSnapshot, frame int, t
 			writeStatusText(row, &x, " ", baseStyle)
 			writeActivityCell(row, &x, activity, frame, tick, spinner, glyphs, baseStyle, styles.AgentDone, styles.Reduced)
 		}
+		if w.marked {
+			writeStatusText(row, &x, " ", baseStyle)
+			markStyle := styles.Accent
+			markStyle.Bold = true
+			writeStatusCell(row, &x, glyphs.OrNerd().Mark, markStyle)
+		}
 		writeStatusText(row, &x, label.text[label.nameLen:], titleStyle)
 		writeStatusText(row, &x, " ", baseStyle)
 	}
@@ -308,6 +314,7 @@ type statusTab struct {
 	name      string // tab display name (degradation target)
 	paneTitle string // formatPaneTitle output of the focused pane
 	active    bool
+	marked    bool
 	attention bool
 	// activity is the cell selected by tabActivity; attention alone (as
 	// built by tests and session-entry callers) still draws the bell.
@@ -388,7 +395,7 @@ func (s *session) statusSegmentsWithAgents(ac *attachedClient, includeTerminalTi
 			}
 		}
 		activity := tabActivityWith(attention, indicator, working, active, doneSeen)
-		snap.tabs[i] = statusTab{name: name, paneTitle: tb.focusedPaneTitle(includeTerminalTitle), active: active, attention: attention, activity: activity}
+		snap.tabs[i] = statusTab{name: name, paneTitle: tb.focusedPaneTitle(includeTerminalTitle), active: active, attention: attention, marked: tb.marked, activity: activity}
 	}
 	return snap
 }
@@ -580,6 +587,9 @@ func fitTabLabels(tabs []statusTab, rowLen int, rightText string, spinner bool) 
 			// Every activity glyph is one cell: the bell, the check, and
 			// spinner frames of every glyph set or validated by the config
 			// parser.
+			o += 2
+		}
+		if t.marked {
 			o += 2
 		}
 		overhead[i] = o

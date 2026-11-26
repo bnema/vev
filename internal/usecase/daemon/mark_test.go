@@ -1,9 +1,13 @@
 package daemon
 
 import (
+	"fmt"
 	"testing"
 	"testing/synctest"
 	"time"
+
+	"bnema.dev/vev/internal/protocol/wire"
+	"bnema.dev/vev/internal/usecase/ui"
 
 	portsmocks "bnema.dev/vev/internal/ports/mocks"
 	"bnema.dev/vev/internal/usecase/keys"
@@ -48,6 +52,40 @@ func TestToggleMarkActiveTab(t *testing.T) {
 				require.True(t, sess.tabs[1].markedAt.IsZero())
 				require.Empty(t, sess.tabs[1].markNote)
 				sess.mu.Unlock()
+			})
+		})
+	}
+}
+
+func TestToggleMarkRepaintsEveryAttachment(t *testing.T) {
+	for _, marked := range []bool{false, true} {
+		t.Run(fmt.Sprint(marked), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				d, sess, first, firstSends, releases := newManualTabSession(t, 1)
+				defer releases[0]()
+				transport, secondSends := newCapturingTransport(t)
+				second := &attachedClient{tr: transport, output: newOutputStateStream()}
+				second.output.attachment = second
+				second.initOverlays()
+				second.setGeometry(first.geometrySnapshot())
+				second.setSession(sess)
+				require.True(t, sess.registerAttachment(second))
+				sess.mu.Lock()
+				sess.tabs[0].marked = marked
+				sess.mu.Unlock()
+				firstRevision := first.viewSnapshot().revision
+				secondRevision := second.viewSnapshot().revision
+				(daemonKeyHandler{d: d, ac: first}).Action(keys.ActionToggleMark, nil)
+				require.Greater(t, first.viewSnapshot().revision, firstRevision)
+				require.Greater(t, second.viewSnapshot().revision, secondRevision)
+				for _, sends := range []chan wire.Envelope{firstSends, secondSends} {
+					data := mustOutputData(t, sends)
+					if marked {
+						require.NotContains(t, string(data), string(ui.NerdGlyphs().Mark))
+					} else {
+						require.Contains(t, string(data), string(ui.NerdGlyphs().Mark))
+					}
+				}
 			})
 		})
 	}

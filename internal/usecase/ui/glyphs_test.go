@@ -54,7 +54,7 @@ func TestGlyphSetDoneGlyph(t *testing.T) {
 
 func TestGlyphSetsAreOneCell(t *testing.T) {
 	for _, set := range []GlyphSet{NerdGlyphs(), UnicodeGlyphs(), ASCIIGlyphs()} {
-		runes := append([]rune{set.Attention, set.Done}, set.Spinner...)
+		runes := append([]rune{set.Attention, set.Done, set.Mark}, set.Spinner...)
 		for _, r := range runes {
 			if vt.RuneWidth(r) != 1 {
 				t.Errorf("set %d: %q is %d cells", set.Mode, r, vt.RuneWidth(r))
@@ -64,7 +64,7 @@ func TestGlyphSetsAreOneCell(t *testing.T) {
 	if got := (GlyphSet{}).OrNerd().Mode; got != domain.GlyphsNerd {
 		t.Errorf("zero set resolves to %d, want nerd", got)
 	}
-	for _, r := range string(ASCIIGlyphs().Attention) + string(ASCIIGlyphs().Done) + string(ASCIIGlyphs().Spinner) {
+	for _, r := range string(ASCIIGlyphs().Attention) + string(ASCIIGlyphs().Done) + string(ASCIIGlyphs().Mark) + string(ASCIIGlyphs().Spinner) {
 		if r > 0x7e {
 			t.Errorf("ascii set holds %q", r)
 		}
@@ -85,6 +85,27 @@ func TestGlyphSetDefaultSpinners(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if string(tt.set.Spinner) != string(tt.want) {
 				t.Fatalf("spinner = %q, want %q", string(tt.set.Spinner), string(tt.want))
+			}
+		})
+	}
+}
+
+func TestGlyphSetMarkGlyph(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		set  GlyphSet
+		want rune
+	}{
+		{"nerd", NerdGlyphs(), '\U000F023B'},
+		{"unicode", UnicodeGlyphs(), '⚑'},
+		{"ascii", ASCIIGlyphs(), '#'},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.set.Mark != tt.want {
+				t.Fatalf("Mark = %q, want %q", tt.set.Mark, tt.want)
+			}
+			if w := vt.RuneWidth(tt.set.Mark); w != 1 {
+				t.Fatalf("Mark width = %d, want 1", w)
 			}
 		})
 	}

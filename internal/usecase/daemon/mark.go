@@ -27,6 +27,7 @@ func (d *Daemon) toggleMark(sess *session, tb *tab) error {
 		tb.markNote = ""
 		tb.markedAt = time.Time{}
 	}
+	sess.invalidateViewsLocked()
 	return nil
 }
 
